@@ -46,15 +46,18 @@ body {
   top: 0;
   left: 0;
   width: 100%;
+  height: 100%;                 /* = viewport height; pages overflow it and we translate */
   will-change: transform;
   /* transform set by JS; transition toggled on/off during drag */
 }
 
-/* One full-screen page = mini-game container + the gutter below it. */
+/* One full-screen page = mini-game container + the gutter below it. Height is
+   pure CSS (100% of the viewport via .feed), so it never depends on JS measure
+   timing — exactly one page stays on screen even as the mobile URL bar animates. */
 .page {
   position: relative;
   width: 100%;
-  /* height set inline by JS (= viewport height) so paging snaps exactly. */
+  height: 100%;
   display: flex;
   flex-direction: column;
 }
@@ -175,15 +178,24 @@ body {
 }
 .preloader--hidden { opacity: 0; pointer-events: none; }
 
-.preloader__spinner {
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  border: 4px solid rgba(255,255,255,0.16);
-  border-top-color: rgba(255,255,255,0.9);
-  animation: spin 0.8s linear infinite;
-}
 .preloader__title { font-size: 15px; font-weight: 700; letter-spacing: 0.3px; }
+
+/* Rectangular fill bar — fills as the initial batch becomes ready. */
+.preloader__bar {
+  width: 62%;
+  max-width: 260px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.14);
+  overflow: hidden;
+}
+.preloader__fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5ee6a8, #3a9bff);
+  transition: width 0.3s ease-out;
+}
 .preloader__progress {
   font-size: 13px;
   opacity: 0.7;

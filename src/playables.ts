@@ -18,7 +18,6 @@ export interface Playable {
 export const PLAYABLES: Playable[] = [
   { id: 'pins-v1' },
   { id: 'marble-sort' },
-  { id: 'merge-mini-v1' },
   { id: 'merge-timepress-v1' },
   { id: 'merge-timepress-v2' },
   { id: 'merge-timepress-no-orders-v1' },

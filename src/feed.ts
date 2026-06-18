@@ -6,21 +6,33 @@ import { PLAYABLES, playableUrl, type Playable } from './playables';
  * Gesture separation (phase 1): paging is wired ONLY to the bottom gutter, so
  * in-game gestures (inside the playable's <iframe>) never page the feed.
  *
- * Lazy loading (phase 2): mini-games are heavy (3–5 MB, live physics/WebGL), so
- * we keep only a sliding window of <iframe>s mounted — always RESERVE_AHEAD
- * loaded ahead of the current page (the "reserve"), a few behind for instant
- * back-swipe, and nothing beyond that. A preloader screen covers the initial
- * batch so the first swipes are seamless.
+ * Loading model (phase 2):
+ *  - A small LIVE window of neighbours (prev / current / next) is instantiated
+ *    and fully rendered, so sliding either way is instant — no loader after the
+ *    slide.
+ *  - Only the CURRENT game runs; neighbours are PAUSED (ready but frozen) via
+ *    the playable's own visibility lifecycle (we flip the iframe document's
+ *    `hidden` + dispatch `visibilitychange`; works because the bundles are
+ *    same-origin on Render / via the dev middleware). The next game is RESUMED
+ *    only after the slide settles, and the previous one is paused — so we never
+ *    run several games at once ("no slideshow").
+ *  - Beyond the live window, RESERVE_AHEAD bundles are PREFETCHED (bytes only)
+ *    into the HTTP cache so promoting them to live is instant.
+ *  - A fill-bar preloader covers the initial batch.
+ *
+ * Page sizing is pure CSS (% off the viewport), so it never depends on JS
+ * measure timing — exactly one page stays on screen.
  */
 
 const DISTANCE_SNAP_FRAC = 0.18;   // drag past 18% of a page → commit to the next
 const VELOCITY_SNAP = 0.45;        // px/ms flick that commits regardless of distance
 const EDGE_RESISTANCE = 0.32;      // rubber-band factor past the first/last page
 
-// Lazy-load window.
-const RESERVE_AHEAD = 5;           // always keep this many games loaded AHEAD of current
-const KEEP_BEHIND = 1;             // and this many behind (instant back-swipe). Don't load beyond.
-const INITIAL_BATCH = 5;           // preloader waits for the first N to finish loading
+const LIVE_AHEAD = 1;              // instantiate this many ahead (ready & rendered, paused)
+const LIVE_BEHIND = 1;            // and this many behind (instant back-swipe)
+const RESERVE_AHEAD = 5;           // prefetch this many bundles ahead (bytes only)
+const PREFETCH_BEHIND = 1;
+const INITIAL_BATCH = 5;           // preloader fills until the first N are ready
 const PRELOADER_TIMEOUT_MS = 15000;
 
 export class Feed {
@@ -31,19 +43,18 @@ export class Feed {
   private pageH = 0;
   private index = 0;
 
-  // Per-index DOM + mount state.
-  private slots: HTMLElement[] = [];          // where each iframe mounts
-  private games: HTMLElement[] = [];          // the .game container (toggles loading state)
-  private frames: (HTMLIFrameElement | null)[] = [];
+  private slots: HTMLElement[] = [];
+  private games: HTMLElement[] = [];
+  private frames = new Map<number, HTMLIFrameElement>();
 
-  // Preloader state.
-  private preloaderEl: HTMLElement | null = null;
-  private preloaderProgressEl: HTMLElement | null = null;
-  private initialTarget = 0;
-  private initialLoaded = new Set<number>();
+  private prefetched = new Set<number>();
+  private ready = new Set<number>();
   private preloaderDone = false;
+  private preloaderFillEl: HTMLElement | null = null;
+  private preloaderProgressEl: HTMLElement | null = null;
+  private preloaderEl: HTMLElement | null = null;
+  private initialTarget = 0;
 
-  // Drag state.
   private dragging = false;
   private startY = 0;
   private baseOffset = 0;
@@ -60,7 +71,16 @@ export class Feed {
     this.measure();
     this.applyOffset(this.offsetForIndex(this.index), false);
     this.mountPreloader();
-    this.mountWindow();
+
+    // Resume the arrived game / pause the rest only AFTER the slide settles.
+    this.feedEl.addEventListener('transitionend', (e) => {
+      if (e.propertyName !== 'transform' || this.dragging) return;
+      this.applyActiveStates();
+    });
+
+    this.updateLive();          // instantiate the initial live window
+    this.prefetchReserve();     // warm the reserve in the background
+    this.applyActiveStates();   // current runs, neighbours pause (once loaded)
     window.addEventListener('resize', this.onResize);
   }
 
@@ -71,8 +91,6 @@ export class Feed {
       const page = document.createElement('div');
       page.className = 'page';
 
-      // Game container — the playable mounts here. Does NOT fill the page; the
-      // gutter below stays free as the paging handle.
       const game = document.createElement('div');
       game.className = 'game game--loading';
 
@@ -95,7 +113,6 @@ export class Feed {
 
       this.games[i] = game;
       this.slots[i] = slot;
-      this.frames[i] = null;
     });
     this.feedEl.appendChild(frag);
   }
@@ -111,10 +128,10 @@ export class Feed {
     return gutter;
   }
 
-  // ── Lazy-load window ──────────────────────────────────────────────────────
-  private mountWindow() {
-    const lo = Math.max(0, this.index - KEEP_BEHIND);
-    const hi = Math.min(this.playables.length - 1, this.index + RESERVE_AHEAD);
+  // ── Live window (instantiate neighbours, tear down the far ones) ───────────
+  private updateLive() {
+    const lo = Math.max(0, this.index - LIVE_BEHIND);
+    const hi = Math.min(this.playables.length - 1, this.index + LIVE_AHEAD);
     for (let i = 0; i < this.playables.length; i++) {
       if (i >= lo && i <= hi) this.mount(i);
       else this.unmount(i);
@@ -122,50 +139,89 @@ export class Feed {
   }
 
   private mount(i: number) {
-    if (this.frames[i]) return;
+    if (this.frames.has(i)) return;
     const frame = document.createElement('iframe');
     frame.className = 'game__frame';
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('title', this.playables[i].id);
     frame.addEventListener('load', () => {
       this.games[i].classList.remove('game--loading');
-      this.onFrameLoad(i);
+      this.setFramePaused(i, i !== this.index);   // neighbours start paused
+      this.markReady(i);
     });
     frame.src = playableUrl(this.playables[i].id);
     this.slots[i].appendChild(frame);
-    this.frames[i] = frame;
+    this.frames.set(i, frame);
   }
 
   private unmount(i: number) {
-    const frame = this.frames[i];
+    const frame = this.frames.get(i);
     if (!frame) return;
     frame.remove();                       // destroying the element frees its browsing context
-    this.frames[i] = null;
+    this.frames.delete(i);
     this.games[i].classList.add('game--loading');
   }
 
-  // ── Preloader ─────────────────────────────────────────────────────────────
+  // Pause/resume a playable by flipping its document visibility — the same
+  // signal the playable's lifecycle already honors (document.hidden +
+  // visibilitychange). Best-effort: only works while the bundle is same-origin
+  // (Render / dev middleware); cross-origin (?base=other host) throws and we
+  // simply leave it running.
+  private setFramePaused(i: number, paused: boolean) {
+    const frame = this.frames.get(i);
+    if (!frame) return;
+    try {
+      const win = frame.contentWindow as (Window & typeof globalThis) | null;
+      const doc = win?.document;
+      if (!win || !doc) return;
+      Object.defineProperty(doc, 'hidden', { configurable: true, get: () => paused });
+      Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (paused ? 'hidden' : 'visible') });
+      doc.dispatchEvent(new win.Event('visibilitychange'));
+    } catch {
+      /* cross-origin or not ready — leave as-is */
+    }
+  }
+
+  // Run the current game, pause every other live one.
+  private applyActiveStates() {
+    this.frames.forEach((_f, i) => this.setFramePaused(i, i !== this.index));
+  }
+
+  // ── Prefetch reserve (bytes only) ──────────────────────────────────────────
+  private prefetchReserve() {
+    const from = Math.max(0, this.index - PREFETCH_BEHIND);
+    const to = Math.min(this.playables.length - 1, this.index + RESERVE_AHEAD);
+    for (let j = from; j <= to; j++) {
+      if (this.frames.has(j) || this.prefetched.has(j)) continue;
+      this.prefetched.add(j);
+      fetch(playableUrl(this.playables[j].id), { mode: 'no-cors' })
+        .then(() => this.markReady(j))
+        .catch(() => this.markReady(j));
+    }
+  }
+
+  // ── Preloader (rectangular fill bar) ───────────────────────────────────────
   private mountPreloader() {
     const el = document.createElement('div');
     el.className = 'preloader';
     el.innerHTML =
-      '<div class="preloader__spinner"></div>' +
       '<div class="preloader__title">Loading mini-games…</div>' +
+      '<div class="preloader__bar"><div class="preloader__fill"></div></div>' +
       '<div class="preloader__progress">0 / ' + this.initialTarget + '</div>';
     this.viewport.appendChild(el);
     this.preloaderEl = el;
+    this.preloaderFillEl = el.querySelector('.preloader__fill');
     this.preloaderProgressEl = el.querySelector('.preloader__progress');
-    // Safety net: never trap the user behind the preloader if a bundle stalls.
     window.setTimeout(() => this.finishPreloader(), PRELOADER_TIMEOUT_MS);
   }
 
-  private onFrameLoad(i: number) {
+  private markReady(i: number) {
     if (this.preloaderDone || i >= this.initialTarget) return;
-    this.initialLoaded.add(i);
-    if (this.preloaderProgressEl) {
-      this.preloaderProgressEl.textContent = `${this.initialLoaded.size} / ${this.initialTarget}`;
-    }
-    if (this.initialLoaded.size >= this.initialTarget) this.finishPreloader();
+    this.ready.add(i);
+    const frac = this.ready.size / this.initialTarget;
+    if (this.preloaderFillEl) this.preloaderFillEl.style.width = `${Math.round(frac * 100)}%`;
+    if (this.preloaderProgressEl) this.preloaderProgressEl.textContent = `${this.ready.size} / ${this.initialTarget}`;
+    if (this.ready.size >= this.initialTarget) this.finishPreloader();
   }
 
   private finishPreloader() {
@@ -231,7 +287,13 @@ export class Feed {
     this.index = clamped;
     this.setTransition(animate);
     this.applyOffset(this.offsetForIndex(this.index), animate);
-    if (changed) this.mountWindow();        // top up the reserve ahead, drop the far tail
+    if (changed) {
+      this.updateLive();          // bring the new neighbour live, drop the far tail
+      this.prefetchReserve();     // keep the reserve topped up
+    }
+    // Resume/pause happens on the transition end (= after the slide). If there's
+    // no animation (resize), apply immediately.
+    if (!animate) this.applyActiveStates();
   }
 
   private offsetForIndex(i: number) { return -i * this.pageH; }
@@ -256,9 +318,6 @@ export class Feed {
   // ── Layout ────────────────────────────────────────────────────────────────
   private measure() {
     this.pageH = this.viewport.clientHeight;
-    this.viewport.style.setProperty('--ph', `${this.pageH}px`);
-    const pages = this.feedEl.querySelectorAll<HTMLElement>('.page');
-    pages.forEach((p) => { p.style.height = `${this.pageH}px`; });
   }
 
   private onResize = () => {
@@ -267,7 +326,6 @@ export class Feed {
   };
 }
 
-// Convenience for main.ts.
 export function createFeed(viewport: HTMLElement, feedEl: HTMLElement) {
   return new Feed(viewport, feedEl, PLAYABLES);
 }
