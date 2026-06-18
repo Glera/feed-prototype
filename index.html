@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- viewport-fit=cover + dvh units so the feed fills the screen under
+       notches / home indicators on real phones. user-scalable=no so a
+       two-finger pinch never fights the swipe paging. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no, maximum-scale=1.0" />
+  <title>Mini-Game Feed — Prototype</title>
+</head>
+<body>
+  <!-- The phone "screen". On desktop it's letterboxed to a phone aspect so
+       the swipe feel matches a device; on mobile it fills the viewport. -->
+  <div id="viewport" class="viewport">
+    <div id="feed" class="feed"></div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

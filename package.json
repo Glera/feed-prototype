@@ -1,0 +1,17 @@
+{
+  "name": "feed-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Instagram/TikTok-style vertical feed of playable mini-games. Phase 1: seamless swipe paging with a dedicated bottom gutter handle that separates in-game gestures from feed-navigation gestures.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0",
+    "vite-plugin-singlefile": "^2.0.0"
+  }
+}
