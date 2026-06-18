@@ -22,12 +22,9 @@ export const PLAYABLES: Playable[] = [
   { id: 'merge-timepress-v2' },
   { id: 'merge-timepress-no-orders-v1' },
   { id: 'merge-timepress-no-orders-v2' },
-  { id: 'merge-timepress-no-orders-v3' },
   { id: 'merge-second-board-v1' },
-  { id: 'merge-second-board-v1_1' },
   { id: 'merge-second-board-v2' },
   { id: 'merge-locked-v1' },
-  { id: 'merge-locked-v2' },
 ];
 
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
