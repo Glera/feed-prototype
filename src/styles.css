@@ -69,52 +69,56 @@ body {
   margin: 8px 8px 0;
   border-radius: 20px;
   overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: #14141c;          /* shown behind the iframe while (un)loading */
   isolation: isolate;
+}
+
+/* The playable <iframe> mounts here and fills the container. Its own gestures
+   stay inside it; only the gutter (sibling, below) pages the feed. */
+.game__slot { position: absolute; inset: 0; }
+.game__frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: transparent;
 }
 
 .game__label {
   position: absolute;
-  top: 16px;
-  left: 18px;
-  font-size: 13px;
+  top: 12px;
+  left: 14px;
+  z-index: 2;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.5px;
-  opacity: 0.85;
-  text-shadow: 0 1px 4px rgba(0,0,0,0.5);
-}
-
-.game__hint {
-  position: absolute;
-  bottom: 14px;
-  left: 0;
-  right: 0;
-  text-align: center;
-  font-size: 12px;
-  opacity: 0.55;
+  letter-spacing: 0.3px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(0,0,0,0.45);
+  color: rgba(255,255,255,0.9);
   pointer-events: none;
 }
 
-/* The interactive "in-game" puck — drag it to prove that gestures inside the
-   game area move the game and never page the feed. */
-.game__puck {
+/* Per-slot loading spinner — visible only while the game is unloaded. */
+.game__spinner {
   position: absolute;
-  width: 72px;
-  height: 72px;
+  top: 50%;
+  left: 50%;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.92);
-  box-shadow: 0 6px 20px rgba(0,0,0,0.35), inset 0 -4px 10px rgba(0,0,0,0.12);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 26px;
-  touch-action: none;
-  cursor: grab;
-  will-change: transform;
+  border: 3px solid rgba(255,255,255,0.18);
+  border-top-color: rgba(255,255,255,0.85);
+  animation: spin 0.8s linear infinite;
+  opacity: 0;
+  transition: opacity 0.2s;
 }
-.game__puck:active { cursor: grabbing; }
+.game--loading .game__spinner { opacity: 1; }
+.game:not(.game--loading) .game__frame { animation: fadein 0.25s ease-out; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
 
 /* ── Gutter: the paging handle that glues page N to page N+1 ────────────────*/
 .gutter {
@@ -152,3 +156,36 @@ body {
   gap: 6px;
 }
 .gutter__chev { font-size: 13px; opacity: 0.8; }
+
+/* ── Initial preloader ──────────────────────────────────────────────────────
+   Full-screen cover while the first batch of mini-games loads, so the opening
+   swipes are seamless. Fades out once the batch is ready (or on a safety timeout). */
+.preloader {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: radial-gradient(120% 90% at 50% 35%, #1a1a26, #0a0a0f);
+  opacity: 1;
+  transition: opacity 0.35s ease-out;
+}
+.preloader--hidden { opacity: 0; pointer-events: none; }
+
+.preloader__spinner {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 4px solid rgba(255,255,255,0.16);
+  border-top-color: rgba(255,255,255,0.9);
+  animation: spin 0.8s linear infinite;
+}
+.preloader__title { font-size: 15px; font-weight: 700; letter-spacing: 0.3px; }
+.preloader__progress {
+  font-size: 13px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}

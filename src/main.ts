@@ -1,8 +1,7 @@
 import './styles.css';
-import { Feed } from './feed';
-import { MECHANICS } from './mechanics';
+import { createFeed } from './feed';
 
 const viewport = document.getElementById('viewport')!;
 const feedEl = document.getElementById('feed')!;
 
-new Feed(viewport, feedEl, MECHANICS);
+createFeed(viewport, feedEl);
