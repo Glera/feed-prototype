@@ -43,23 +43,26 @@ body {
 
 .feed {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;                 /* = viewport height; pages overflow it and we translate */
-  will-change: transform;
-  /* transform set by JS; transition toggled on/off during drag */
+  inset: 0;
+  height: 100%;
 }
 
-/* One full-screen page = mini-game container + the gutter below it. Height is
-   pure CSS (100% of the viewport via .feed), so it never depends on JS measure
-   timing — exactly one page stays on screen even as the mobile URL bar animates. */
+/* One full-screen page = mini-game container + the gutter below it. Pages are
+   absolutely stacked at the same origin and positioned individually by a JS
+   transform (translateY = ring offset × page height) — that's what makes the
+   feed an INFINITE loop: a page far from the current one wraps to the other
+   side off-screen, so after the last game comes the first again (and vice
+   versa). Height is pure CSS (100% of the viewport) so sizing never depends on
+   JS measure timing. */
 .page {
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   display: flex;
   flex-direction: column;
+  will-change: transform;
 }
 
 /* ── Mini-game container ───────────────────────────────────────────────────

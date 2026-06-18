@@ -1,35 +1,33 @@
 import { PLAYABLES, playableUrl, type Playable } from './playables';
 
 /**
- * Vertical feed pager (Instagram-Reels / TikTok style) over real playables.
+ * Infinite vertical feed pager (Instagram-Reels / TikTok style) over real playables.
+ *
+ * INFINITE LOOP: pages are absolutely stacked and positioned individually on a
+ * ring. Each page's offset from the current position is wrapped into
+ * (-N/2, N/2], so a page that scrolls far enough off one edge reappears on the
+ * other — after the last game comes the first again (and swiping back from the
+ * first lands on the last). The wrap always happens off-screen, so it's seamless.
  *
  * Gesture separation (phase 1): paging is wired ONLY to the bottom gutter, so
  * in-game gestures (inside the playable's <iframe>) never page the feed.
  *
  * Loading model (phase 2):
  *  - A small LIVE window of neighbours (prev / current / next) is instantiated
- *    and fully rendered, so sliding either way is instant — no loader after the
- *    slide.
- *  - Only the CURRENT game runs; neighbours are PAUSED (ready but frozen) via
- *    the playable's own visibility lifecycle (we flip the iframe document's
- *    `hidden` + dispatch `visibilitychange`; works because the bundles are
- *    same-origin on Render / via the dev middleware). The next game is RESUMED
- *    only after the slide settles, and the previous one is paused — so we never
- *    run several games at once ("no slideshow").
- *  - Beyond the live window, RESERVE_AHEAD bundles are PREFETCHED (bytes only)
- *    into the HTTP cache so promoting them to live is instant.
+ *    and rendered, so sliding either way shows no loader.
+ *  - Only the CURRENT game RUNS; neighbours are PAUSED (ready but frozen) via
+ *    the playable's own visibility lifecycle (flip the iframe document's
+ *    `hidden` + dispatch `visibilitychange`; works same-origin). The next game
+ *    RESUMES only after the slide settles; the previous one pauses.
+ *  - Beyond the live window, RESERVE_AHEAD bundles are PREFETCHED (bytes only).
  *  - A fill-bar preloader covers the initial batch.
- *
- * Page sizing is pure CSS (% off the viewport), so it never depends on JS
- * measure timing — exactly one page stays on screen.
  */
 
 const DISTANCE_SNAP_FRAC = 0.18;   // drag past 18% of a page → commit to the next
 const VELOCITY_SNAP = 0.45;        // px/ms flick that commits regardless of distance
-const EDGE_RESISTANCE = 0.32;      // rubber-band factor past the first/last page
 
 const LIVE_AHEAD = 1;              // instantiate this many ahead (ready & rendered, paused)
-const LIVE_BEHIND = 1;            // and this many behind (instant back-swipe)
+const LIVE_BEHIND = 1;             // and this many behind (instant back-swipe)
 const RESERVE_AHEAD = 5;           // prefetch this many bundles ahead (bytes only)
 const PREFETCH_BEHIND = 1;
 const INITIAL_BATCH = 5;           // preloader fills until the first N are ready
@@ -39,9 +37,12 @@ export class Feed {
   private viewport: HTMLElement;
   private feedEl: HTMLElement;
   private playables: Playable[];
+  private N: number;
 
   private pageH = 0;
-  private index = 0;
+  private pos = 0;                  // continuous ring position (settles to an integer)
+  private pageEls: HTMLElement[] = [];
+  private pageDelta: number[] = [];
 
   private slots: HTMLElement[] = [];
   private games: HTMLElement[] = [];
@@ -57,7 +58,7 @@ export class Feed {
 
   private dragging = false;
   private startY = 0;
-  private baseOffset = 0;
+  private basePos = 0;
   private lastY = 0;
   private lastT = 0;
   private velocity = 0;
@@ -66,22 +67,30 @@ export class Feed {
     this.viewport = viewport;
     this.feedEl = feedEl;
     this.playables = playables;
-    this.initialTarget = Math.min(INITIAL_BATCH, playables.length);
+    this.N = playables.length;
+    this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     this.measure();
-    this.applyOffset(this.offsetForIndex(this.index), false);
+    this.render(false);
     this.mountPreloader();
 
-    // Resume the arrived game / pause the rest only AFTER the slide settles.
+    // After a slide settles: normalise the ring position, resume the arrived
+    // game and pause the rest. transitionend bubbles up from the pages.
     this.feedEl.addEventListener('transitionend', (e) => {
       if (e.propertyName !== 'transform' || this.dragging) return;
+      this.pos = this.realIndex();      // keep pos bounded; same visual (delta mod N)
+      this.render(false);
       this.applyActiveStates();
     });
 
-    this.updateLive();          // instantiate the initial live window
-    this.prefetchReserve();     // warm the reserve in the background
-    this.applyActiveStates();   // current runs, neighbours pause (once loaded)
+    this.updateLive();
+    this.prefetchReserve();
+    this.applyActiveStates();
     window.addEventListener('resize', this.onResize);
+  }
+
+  private realIndex(): number {
+    return ((Math.round(this.pos) % this.N) + this.N) % this.N;
   }
 
   // ── Build DOM ──────────────────────────────────────────────────────────
@@ -111,6 +120,7 @@ export class Feed {
       page.appendChild(this.makeGutter(i));
       frag.appendChild(page);
 
+      this.pageEls[i] = page;
       this.games[i] = game;
       this.slots[i] = slot;
     });
@@ -128,12 +138,37 @@ export class Feed {
     return gutter;
   }
 
+  // ── Ring rendering ─────────────────────────────────────────────────────────
+  // Position every page relative to `pos`, wrapping the offset into (-N/2, N/2]
+  // so far pages cross to the other side off-screen (the infinite loop). A page
+  // that wraps this frame gets no transition so it never visibly streaks across.
+  private render(animate: boolean) {
+    const N = this.N;
+    for (let i = 0; i < N; i++) {
+      let delta = ((i - this.pos) % N + N) % N;   // [0, N)
+      if (delta > N / 2) delta -= N;              // (-N/2, N/2]
+      const prev = this.pageDelta[i];
+      const wrapped = prev !== undefined && Math.abs(delta - prev) > N / 2;
+      const pg = this.pageEls[i];
+      pg.style.transition = animate && !wrapped ? 'transform 0.36s var(--ease-snap)' : 'none';
+      pg.style.transform = `translate3d(0, ${delta * this.pageH}px, 0)`;
+      this.pageDelta[i] = delta;
+    }
+  }
+
   // ── Live window (instantiate neighbours, tear down the far ones) ───────────
+  private liveSet(): Set<number> {
+    const s = new Set<number>();
+    for (let d = -LIVE_BEHIND; d <= LIVE_AHEAD; d++) {
+      s.add(((this.realIndex() + d) % this.N + this.N) % this.N);
+    }
+    return s;
+  }
+
   private updateLive() {
-    const lo = Math.max(0, this.index - LIVE_BEHIND);
-    const hi = Math.min(this.playables.length - 1, this.index + LIVE_AHEAD);
-    for (let i = 0; i < this.playables.length; i++) {
-      if (i >= lo && i <= hi) this.mount(i);
+    const live = this.liveSet();
+    for (let i = 0; i < this.N; i++) {
+      if (live.has(i)) this.mount(i);
       else this.unmount(i);
     }
   }
@@ -146,7 +181,7 @@ export class Feed {
     frame.setAttribute('title', this.playables[i].id);
     frame.addEventListener('load', () => {
       this.games[i].classList.remove('game--loading');
-      this.setFramePaused(i, i !== this.index);   // neighbours start paused
+      this.setFramePaused(i, i !== this.realIndex());
       this.markReady(i);
     });
     frame.src = playableUrl(this.playables[i].id);
@@ -157,16 +192,14 @@ export class Feed {
   private unmount(i: number) {
     const frame = this.frames.get(i);
     if (!frame) return;
-    frame.remove();                       // destroying the element frees its browsing context
+    frame.remove();
     this.frames.delete(i);
     this.games[i].classList.add('game--loading');
   }
 
   // Pause/resume a playable by flipping its document visibility — the same
-  // signal the playable's lifecycle already honors (document.hidden +
-  // visibilitychange). Best-effort: only works while the bundle is same-origin
-  // (Render / dev middleware); cross-origin (?base=other host) throws and we
-  // simply leave it running.
+  // signal the playable's lifecycle honors. Best-effort: works same-origin
+  // (Render / dev middleware); cross-origin throws and we leave it running.
   private setFramePaused(i: number, paused: boolean) {
     const frame = this.frames.get(i);
     if (!frame) return;
@@ -182,16 +215,16 @@ export class Feed {
     }
   }
 
-  // Run the current game, pause every other live one.
   private applyActiveStates() {
-    this.frames.forEach((_f, i) => this.setFramePaused(i, i !== this.index));
+    const active = this.realIndex();
+    this.frames.forEach((_f, i) => this.setFramePaused(i, i !== active));
   }
 
   // ── Prefetch reserve (bytes only) ──────────────────────────────────────────
   private prefetchReserve() {
-    const from = Math.max(0, this.index - PREFETCH_BEHIND);
-    const to = Math.min(this.playables.length - 1, this.index + RESERVE_AHEAD);
-    for (let j = from; j <= to; j++) {
+    const base = this.realIndex();
+    for (let d = -PREFETCH_BEHIND; d <= RESERVE_AHEAD; d++) {
+      const j = ((base + d) % this.N + this.N) % this.N;
       if (this.frames.has(j) || this.prefetched.has(j)) continue;
       this.prefetched.add(j);
       fetch(playableUrl(this.playables[j].id), { mode: 'no-cors' })
@@ -247,19 +280,19 @@ export class Feed {
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
     this.velocity = 0;
-    this.baseOffset = this.offsetForIndex(this.index);
-    this.setTransition(false);
+    this.basePos = Math.round(this.pos);
     gutter.setPointerCapture(e.pointerId);
   }
 
   private onMove(e: PointerEvent) {
-    if (!this.dragging) return;
+    if (!this.dragging || this.pageH === 0) return;
     const dy = e.clientY - this.startY;
     const dt = e.timeStamp - this.lastT;
     if (dt > 0) this.velocity = (e.clientY - this.lastY) / dt;
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
-    this.applyOffset(this.withResistance(this.baseOffset + dy), false);
+    this.pos = this.basePos - dy / this.pageH;   // drag up → pos increases → next
+    this.render(false);
   }
 
   private onUp(e: PointerEvent, gutter: HTMLElement) {
@@ -268,51 +301,27 @@ export class Feed {
     try { gutter.releasePointerCapture(e.pointerId); } catch { /* noop */ }
 
     const dy = e.clientY - this.startY;
-    let target = this.index;
+    let step = 0;
     const fastUp = this.velocity <= -VELOCITY_SNAP;
     const fastDown = this.velocity >= VELOCITY_SNAP;
     const farUp = dy <= -this.pageH * DISTANCE_SNAP_FRAC;
     const farDown = dy >= this.pageH * DISTANCE_SNAP_FRAC;
+    if (fastUp || farUp) step = 1;
+    else if (fastDown || farDown) step = -1;
 
-    if (fastUp || farUp) target = this.index + 1;
-    else if (fastDown || farDown) target = this.index - 1;
-
-    this.goTo(target, true);
+    this.goTo(this.basePos + step);
   }
 
   // ── Paging ───────────────────────────────────────────────────────────────
-  goTo(target: number, animate: boolean) {
-    const clamped = Math.max(0, Math.min(this.playables.length - 1, target));
-    const changed = clamped !== this.index;
-    this.index = clamped;
-    this.setTransition(animate);
-    this.applyOffset(this.offsetForIndex(this.index), animate);
+  goTo(targetPos: number) {
+    const changed = targetPos !== this.pos;
+    this.pos = targetPos;
+    this.render(true);
     if (changed) {
-      this.updateLive();          // bring the new neighbour live, drop the far tail
-      this.prefetchReserve();     // keep the reserve topped up
+      this.updateLive();        // bring the new neighbour live, drop the far tail
+      this.prefetchReserve();   // keep the reserve topped up
     }
-    // Resume/pause happens on the transition end (= after the slide). If there's
-    // no animation (resize), apply immediately.
-    if (!animate) this.applyActiveStates();
-  }
-
-  private offsetForIndex(i: number) { return -i * this.pageH; }
-
-  private withResistance(raw: number) {
-    const max = 0;
-    const min = -(this.playables.length - 1) * this.pageH;
-    if (raw > max) return max + (raw - max) * EDGE_RESISTANCE;
-    if (raw < min) return min + (raw - min) * EDGE_RESISTANCE;
-    return raw;
-  }
-
-  private applyOffset(y: number, animate: boolean) {
-    this.setTransition(animate);
-    this.feedEl.style.transform = `translate3d(0, ${y}px, 0)`;
-  }
-
-  private setTransition(on: boolean) {
-    this.feedEl.style.transition = on ? 'transform 0.36s var(--ease-snap)' : 'none';
+    // resume/pause happens on the transitionend (= after the slide)
   }
 
   // ── Layout ────────────────────────────────────────────────────────────────
@@ -322,7 +331,7 @@ export class Feed {
 
   private onResize = () => {
     this.measure();
-    this.applyOffset(this.offsetForIndex(this.index), false);
+    this.render(false);
   };
 }
 
