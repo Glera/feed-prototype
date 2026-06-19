@@ -72,6 +72,7 @@ export class Feed {
   private failedThisCycle = new Set<number>();
   private hudEl: HTMLElement | null = null;
   private storiesEl: HTMLElement | null = null;
+  private storiesMomentumFrame: number | null = null;
   private levelBadgeEl: HTMLElement | null = null;
   private levelEl: HTMLElement | null = null;
   private levelProgressEl: HTMLElement | null = null;
@@ -260,7 +261,12 @@ export class Feed {
     let startX = 0;
     let startY = 0;
     let startScrollLeft = 0;
+    let lastScrollLeft = 0;
+    let lastMoveT = 0;
+    let scrollVelocity = 0;
     const dragIntentPx = 6;
+    const minFlingVelocity = 0.06; // px/ms
+    const maxFlingVelocity = 1.2;
 
     const updateMask = () => {
       const maxScroll = scroller.scrollWidth - scroller.clientWidth;
@@ -268,13 +274,40 @@ export class Feed {
       this.hudEl?.classList.toggle('hud--stories-can-right', scroller.scrollLeft < maxScroll - 1);
     };
 
+    const startMomentum = (initialVelocity: number) => {
+      this.stopStoriesMomentum();
+      let velocity = Math.max(-maxFlingVelocity, Math.min(maxFlingVelocity, initialVelocity));
+      let previousT = performance.now();
+
+      const step = (now: number) => {
+        const dt = Math.min(32, now - previousT);
+        previousT = now;
+        const maxScroll = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+        const before = scroller.scrollLeft;
+        scroller.scrollLeft = Math.max(0, Math.min(maxScroll, before + velocity * dt));
+        updateMask();
+
+        const hitEdge = scroller.scrollLeft === before && ((before <= 0 && velocity < 0) || (before >= maxScroll && velocity > 0));
+        velocity *= Math.pow(0.88, dt / 16.67);
+        if (hitEdge || Math.abs(velocity) < 0.022) {
+          this.storiesMomentumFrame = null;
+          return;
+        }
+        this.storiesMomentumFrame = requestAnimationFrame(step);
+      };
+
+      this.storiesMomentumFrame = requestAnimationFrame(step);
+    };
+
     const endDrag = (e: PointerEvent) => {
       if (!tracking && !dragging) return;
       const wasTap = tracking && !dragging;   // pressed without horizontal drag = a tap
+      const shouldFling = dragging && e.type === 'pointerup' && Math.abs(scrollVelocity) >= minFlingVelocity;
       tracking = false;
       dragging = false;
       scroller.classList.remove('stories--dragging');
       try { scroller.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+      if (shouldFling) startMomentum(scrollVelocity);
       if (!wasTap) return;
       const t = e.target as HTMLElement | null;
       if (t?.closest?.('.hud__level-plus')) { this.openEditor(); return; }
@@ -284,11 +317,15 @@ export class Feed {
 
     scroller.addEventListener('pointerdown', (e) => {
       if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      this.stopStoriesMomentum();
       tracking = true;
       dragging = false;
       startX = e.clientX;
       startY = e.clientY;
       startScrollLeft = scroller.scrollLeft;
+      lastScrollLeft = startScrollLeft;
+      lastMoveT = e.timeStamp;
+      scrollVelocity = 0;
     });
 
     scroller.addEventListener('pointermove', (e) => {
@@ -307,6 +344,12 @@ export class Feed {
       }
       e.preventDefault();
       scroller.scrollLeft = startScrollLeft - dx;
+      const dt = e.timeStamp - lastMoveT;
+      if (dt > 0) {
+        scrollVelocity = (scroller.scrollLeft - lastScrollLeft) / dt;
+        lastScrollLeft = scroller.scrollLeft;
+        lastMoveT = e.timeStamp;
+      }
     });
 
     scroller.addEventListener('scroll', updateMask, { passive: true });
@@ -319,9 +362,16 @@ export class Feed {
 
   private resetStoriesToMyLevel() {
     if (!this.storiesEl) return;
+    this.stopStoriesMomentum();
     this.storiesEl.scrollLeft = 0;
     this.hudEl?.classList.remove('hud--stories-can-left');
     this.hudEl?.classList.toggle('hud--stories-can-right', this.storiesEl.scrollWidth > this.storiesEl.clientWidth + 1);
+  }
+
+  private stopStoriesMomentum() {
+    if (this.storiesMomentumFrame === null) return;
+    cancelAnimationFrame(this.storiesMomentumFrame);
+    this.storiesMomentumFrame = null;
   }
 
   // ── Ring rendering ─────────────────────────────────────────────────────────
@@ -498,7 +548,6 @@ export class Feed {
     const ov = document.createElement('div');
     ov.className = 'story-view';
     ov.innerHTML =
-      '<div class="story-view__bar"><span></span></div>' +
       '<div class="story-view__header">' +
         `<div class="story__avatar story__avatar--${f.tone} story-view__avatar"><span>${f.initial}</span></div>` +
         `<div class="story-view__meta"><div class="story-view__name">${f.name}</div>` +

@@ -717,15 +717,7 @@ body {
   flex-direction: column;
   background: #07090f;
 }
-.story-view__bar {
-  height: 3px;
-  margin: calc(env(safe-area-inset-top) + 8px) 12px 0;
-  border-radius: 2px;
-  background: rgba(255,255,255,0.25);
-  overflow: hidden;
-}
-.story-view__bar > span { display: block; height: 100%; width: 40%; background: #fff; border-radius: 2px; }
-.story-view__header { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
+.story-view__header { display: flex; align-items: center; gap: 10px; padding: calc(env(safe-area-inset-top) + 12px) 12px 10px; }
 .story-view__avatar { width: 40px; height: 40px; flex: 0 0 40px; }
 .story-view__avatar span { width: 32px; height: 32px; font-size: 14px; }
 .story-view__meta { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
