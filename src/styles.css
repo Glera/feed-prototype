@@ -166,7 +166,7 @@ body {
   right: 0;
   z-index: 1200;
   height: var(--top-zone-h);
-  padding: var(--top-zone-pad-top) 10px 1px;
+  padding: var(--top-zone-pad-top) 0 1px;
   background:
     linear-gradient(180deg, rgba(18, 20, 28, 0.98), rgba(9, 10, 15, 0.94));
   border-bottom: 1px solid rgba(255,255,255,0.08);
@@ -212,6 +212,8 @@ body {
   gap: 7px;
   overflow-x: auto;
   overflow-y: hidden;
+  padding: 0 10px;
+  scroll-padding-inline: 10px;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -741,9 +743,31 @@ body {
 .story-view__reply::placeholder { color: rgba(255,255,255,0.55); }
 .story-view__heart {
   flex: 0 0 auto; width: 44px; height: 44px; border: 0; background: transparent;
-  color: #fff; font-size: 28px; line-height: 1; cursor: pointer;
+  display: grid; place-items: center; padding: 0; cursor: pointer;
 }
-.story-view__heart--liked { color: #ff3b5c; }
+.story-view__heart-icon {
+  width: 32px; height: 30px;          /* plumper/wider than the old glyph */
+  fill: none; stroke: #fff; stroke-width: 2.1; stroke-linejoin: round;
+}
+.story-view__heart--liked .story-view__heart-icon { fill: #ff3b5c; stroke: #ff3b5c; }
+
+/* Quick emoji reactions — revealed over the mechanic when the reply field is
+   focused; the mechanic is paused meanwhile (see Feed.pauseStoryFrame). */
+.story-view__emojis {
+  display: flex; justify-content: space-between; align-items: center; gap: 4px;
+  max-height: 0; opacity: 0; overflow: hidden; padding: 0 18px;
+  transition: max-height 0.2s ease, opacity 0.18s ease, padding 0.2s ease;
+}
+.story-view--reacting .story-view__emojis { max-height: 62px; opacity: 1; padding: 8px 18px; }
+.story-view__emoji {
+  border: 0; background: none; padding: 2px; font-size: 30px; line-height: 1;
+  cursor: pointer; transition: transform 0.1s ease;
+}
+.story-view__emoji:active { transform: scale(1.35); }
+.story-view__fly {
+  position: absolute; bottom: 86px; z-index: 6;
+  font-size: 32px; pointer-events: none; will-change: transform, opacity;
+}
 
 /* ── Mechanic editor (placeholder) ──────────────────────────────────────────*/
 .editor {

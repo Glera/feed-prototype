@@ -98,6 +98,7 @@ export class Feed {
   private viewedFriends = new Set<number>();   // in-memory only (no persistence yet)
   private overlayOpen = false;                 // story-view OR editor overlay is up
   private overlayEl: HTMLElement | null = null;
+  private storyFrame: HTMLIFrameElement | null = null;  // the open story's mechanic iframe
 
   private prefetched = new Set<number>();
   private ready = new Set<number>();
@@ -555,9 +556,17 @@ export class Feed {
         '<button class="story-view__close" type="button" aria-label="Close">✕</button>' +
       '</div>' +
       '<div class="story-view__stage"></div>' +
+      '<div class="story-view__emojis">' +
+        ['😂', '😮', '😍', '😢', '👏', '🔥', '🎉', '❤️']
+          .map((em) => `<button class="story-view__emoji" type="button">${em}</button>`).join('') +
+      '</div>' +
       '<div class="story-view__footer">' +
         `<input class="story-view__reply" type="text" placeholder="Reply to ${f.name}…" />` +
-        '<button class="story-view__heart" type="button" aria-label="Like">♡</button>' +
+        '<button class="story-view__heart" type="button" aria-label="Like">' +
+          '<svg class="story-view__heart-icon" viewBox="0 0 24 24" aria-hidden="true">' +
+          '<path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>' +
+          '</svg>' +
+        '</button>' +
       '</div>';
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
@@ -568,26 +577,70 @@ export class Feed {
     frame.setAttribute('allow', 'autoplay');
     frame.src = playableUrl(mechanic, { hostPaused: false });
     ov.querySelector('.story-view__stage')!.appendChild(frame);
+    this.storyFrame = frame;
 
     ov.querySelector('.story-view__close')!.addEventListener('click', () => this.closeOverlay());
 
     const heart = ov.querySelector('.story-view__heart') as HTMLElement;
     heart.addEventListener('click', () => {
       const liked = heart.classList.toggle('story-view__heart--liked');
-      heart.textContent = liked ? '♥' : '♡';
       if (liked && heart.animate) {
         heart.animate(
-          [{ transform: 'scale(1)' }, { transform: 'scale(1.45)' }, { transform: 'scale(1)' }],
+          [{ transform: 'scale(1)' }, { transform: 'scale(1.4)' }, { transform: 'scale(1)' }],
           { duration: 300, easing: 'cubic-bezier(0.2, 0.9, 0.3, 1.4)' },
         );
       }
     });
+
     const reply = ov.querySelector('.story-view__reply') as HTMLInputElement;
     reply.addEventListener('keydown', (e) => {
       if ((e as KeyboardEvent).key === 'Enter' && reply.value.trim()) { reply.value = ''; reply.blur(); }
     });
+    // IG-style: focusing the reply field reveals quick emoji reactions over the
+    // mechanic and PAUSES it while the player types / picks a reaction.
+    reply.addEventListener('focus', () => { ov.classList.add('story-view--reacting'); this.pauseStoryFrame(true); });
+    reply.addEventListener('blur', () => { ov.classList.remove('story-view--reacting'); this.pauseStoryFrame(false); });
+    ov.querySelectorAll('.story-view__emoji').forEach((btn) => {
+      btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();                       // keep focus until we dismiss ourselves
+        this.flyEmoji(ov, (btn as HTMLElement).textContent || '👍');
+        reply.blur();                             // dismiss → resumes the mechanic
+      });
+    });
 
     if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+  }
+
+  // Pause/resume the story's own mechanic iframe (separate from the feed frames).
+  private pauseStoryFrame(paused: boolean) {
+    const frame = this.storyFrame;
+    if (!frame) return;
+    try {
+      const win = frame.contentWindow as (Window & typeof globalThis) | null;
+      const doc = win?.document;
+      if (!win || !doc) return;
+      const api = (win as any).__playable;
+      if (typeof api?.setHostPaused === 'function') api.setHostPaused(paused);
+      Object.defineProperty(doc, 'hidden', { configurable: true, get: () => paused });
+      Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (paused ? 'hidden' : 'visible') });
+      doc.dispatchEvent(new win.Event('visibilitychange'));
+    } catch { /* cross-origin — leave as-is */ }
+  }
+
+  private flyEmoji(parent: HTMLElement, emoji: string) {
+    const el = document.createElement('div');
+    el.className = 'story-view__fly';
+    el.textContent = emoji;
+    el.style.left = `${28 + Math.random() * 44}%`;
+    parent.appendChild(el);
+    if (!el.animate) { window.setTimeout(() => el.remove(), 1100); return; }
+    const rise = 150 + Math.random() * 90;
+    const a = el.animate([
+      { transform: 'translate(-50%, 0) scale(0.6)', opacity: 0 },
+      { transform: 'translate(-50%, -26px) scale(1.25)', opacity: 1, offset: 0.2 },
+      { transform: `translate(-50%, -${rise}px) scale(1)`, opacity: 0 },
+    ], { duration: 1100, easing: 'cubic-bezier(0.2, 0.6, 0.3, 1)', fill: 'forwards' });
+    a.addEventListener('finish', () => el.remove(), { once: true });
   }
 
   private markFriendViewed(idx: number) {
@@ -632,6 +685,7 @@ export class Feed {
     this.overlayOpen = false;
     const ov = this.overlayEl;
     this.overlayEl = null;
+    this.storyFrame = null;
     if (ov && ov.animate) {
       const a = ov.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, fill: 'forwards' });
       a.addEventListener('finish', () => ov.remove(), { once: true });
