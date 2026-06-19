@@ -612,7 +612,15 @@ body {
   color: rgba(255,255,255,0.28);
   font-size: 104px;
   line-height: 1;
-  transform: translateY(-2px);
+  transform-origin: 50% 60%;
+  /* Gentle left-right sway for dynamism behind the level number. */
+  animation: levelup-star-sway 2.8s ease-in-out infinite;
+}
+
+@keyframes levelup-star-sway {
+  0%   { transform: translateY(-2px) rotate(-10deg); }
+  50%  { transform: translateY(-2px) rotate(10deg); }
+  100% { transform: translateY(-2px) rotate(-10deg); }
 }
 
 .levelup__num {

@@ -79,6 +79,7 @@ export class Feed {
   private levelProgressEl: HTMLElement | null = null;
   private heldLevelUpOverlay: HTMLElement | null = null;
   private heldLevelUpIndex: number | null = null;
+  private confettiTimer: number | null = null;
 
   // Friend stories (top rail). Tapping one opens a full-screen story showing a
   // playable mechanic; the background feed game is paused while it's open.
@@ -1216,6 +1217,7 @@ export class Feed {
   }
 
   private releaseHeldLevelUp(animate: boolean = true) {
+    this.stopConfetti();
     const overlay = this.heldLevelUpOverlay;
     const index = this.heldLevelUpIndex;
     this.heldLevelUpOverlay = null;
@@ -1233,27 +1235,42 @@ export class Feed {
 
   private spawnConfetti(parent: HTMLElement) {
     const colors = ['#ffd85a', '#45d68c', '#37a6ff', '#ff4f8b', '#ff9f45', '#b07bff', '#5ee6a8'];
-    const rect = this.viewport.getBoundingClientRect();
-    const count = 48;
-    for (let n = 0; n < count; n++) {
-      const c = document.createElement('div');
-      c.className = 'confetti';
-      const w = 6 + Math.random() * 6, h = 9 + Math.random() * 9;
-      c.style.cssText =
-        `left:${Math.random() * rect.width}px;top:-24px;width:${w}px;height:${h}px;` +
-        `background:${colors[n % colors.length]};border-radius:${Math.random() < 0.4 ? '50%' : '2px'};`;
-      parent.appendChild(c);
-      if (!c.animate) { window.setTimeout(() => c.remove(), 1900); continue; }
-      const driftX = (Math.random() - 0.5) * 140;
-      const fall = rect.height + 80;
-      const rot = Math.random() * 900 - 450;
-      const a = c.animate([
-        { transform: 'translate(0, 0) rotate(0deg)', opacity: 1 },
-        { transform: `translate(${driftX}px, ${fall}px) rotate(${rot}deg)`, opacity: 1, offset: 0.82 },
-        { transform: `translate(${driftX}px, ${fall + 40}px) rotate(${rot}deg)`, opacity: 0 },
-      ], { duration: 1500 + Math.random() * 800, delay: Math.random() * 380, easing: 'cubic-bezier(0.3, 0.2, 0.5, 1)', fill: 'forwards' });
-      a.addEventListener('finish', () => c.remove(), { once: true });
-    }
+    const emitWave = (count: number) => {
+      const rect = this.viewport.getBoundingClientRect();
+      for (let n = 0; n < count; n++) {
+        const c = document.createElement('div');
+        c.className = 'confetti';
+        const w = 6 + Math.random() * 6, h = 9 + Math.random() * 9;
+        c.style.cssText =
+          `left:${Math.random() * rect.width}px;top:-24px;width:${w}px;height:${h}px;` +
+          `background:${colors[(n + Math.floor(Math.random() * colors.length)) % colors.length]};` +
+          `border-radius:${Math.random() < 0.4 ? '50%' : '2px'};`;
+        parent.appendChild(c);
+        const dur = 2400 + Math.random() * 1000;   // longer, lazier fall
+        if (!c.animate) { window.setTimeout(() => c.remove(), dur); continue; }
+        const driftX = (Math.random() - 0.5) * 150;
+        const fall = rect.height + 80;
+        const rot = Math.random() * 900 - 450;
+        const a = c.animate([
+          { transform: 'translate(0, 0) rotate(0deg)', opacity: 1 },
+          { transform: `translate(${driftX}px, ${fall}px) rotate(${rot}deg)`, opacity: 1, offset: 0.85 },
+          { transform: `translate(${driftX}px, ${fall + 40}px) rotate(${rot}deg)`, opacity: 0 },
+        ], { duration: dur, delay: Math.random() * 260, easing: 'cubic-bezier(0.3, 0.2, 0.5, 1)', fill: 'forwards' });
+        a.addEventListener('finish', () => c.remove(), { once: true });
+      }
+    };
+
+    emitWave(40);                                   // opening burst
+    // Keep raining in light waves until the overlay is dismissed (= the swipe).
+    if (this.confettiTimer) window.clearInterval(this.confettiTimer);
+    this.confettiTimer = window.setInterval(() => {
+      if (!parent.isConnected) { this.stopConfetti(); return; }
+      emitWave(12);
+    }, 600);
+  }
+
+  private stopConfetti() {
+    if (this.confettiTimer) { window.clearInterval(this.confettiTimer); this.confettiTimer = null; }
   }
 
   private scheduleAutoAdvanceAfterStar(i: number, delayMs: number) {
