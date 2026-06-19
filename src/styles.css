@@ -277,6 +277,9 @@ body {
 .story__avatar--mint span { background: linear-gradient(145deg, #45d68c, #a8f06b); }
 .story__avatar--sun span { background: linear-gradient(145deg, #ffd85a, #ff8b3d); color: #53330f; }
 .story__avatar--violet span { background: linear-gradient(145deg, #8d6bff, #f06bd8); }
+.story__avatar--viewed {
+  background: rgba(255,255,255,0.18);
+}
 
 .story__name {
   width: 100%;
@@ -393,6 +396,76 @@ body {
 
 .hud__level--bump { animation: hud-bump 0.26s ease-out; }
 .hud--level-up .hud__level { animation: hud-level-up 0.42s ease-out; }
+
+.friend-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2400;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 6, 10, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+.friend-overlay__panel {
+  position: relative;
+  width: min(100%, 310px);
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 26px 22px 24px;
+  border-radius: 22px;
+  background:
+    radial-gradient(90% 70% at 50% 0%, rgba(255,216,90,0.14), transparent 72%),
+    rgba(15, 18, 27, 0.96);
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 22px 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.12);
+}
+
+.friend-overlay__close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(255,255,255,0.12);
+  font: 900 20px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+.friend-overlay__avatar {
+  width: 72px;
+  height: 72px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #53330f;
+  background: radial-gradient(circle at 32% 24%, #fff6bc, #ffd85a 48%, #ff9f45);
+  font-size: 30px;
+  font-weight: 950;
+  box-shadow: inset 0 2px 0 rgba(255,255,255,0.5), 0 12px 28px rgba(255,177,50,0.25);
+}
+
+.friend-overlay__name {
+  font-size: 24px;
+  line-height: 1.05;
+  font-weight: 950;
+}
+
+.friend-overlay__meta,
+.friend-overlay__detail {
+  color: rgba(255,255,255,0.72);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.friend-overlay__detail {
+  margin-top: 4px;
+  color: rgba(255,255,255,0.9);
+}
 
 @keyframes hud-bump {
   0% { transform: scale(1); }

@@ -14,9 +14,8 @@ import { PLAYABLES, playableUrl, type Playable } from './playables';
  *
  * Loading model:
  *  - Only the CURRENT game is mounted while the feed is idle.
- *  - During a drag/settle we temporarily mount the outgoing and incoming games;
- *    non-current games enter the playable host-paused state and do not run
- *    requestAnimationFrame until resumed.
+ *  - Drag/settle never waits for the incoming game's iframe. The next page can
+ *    show its mini-loader while the iframe mounts after the slide lands.
  *  - Ahead bundles are PREFETCHED (bytes only), so the next mount is warm
  *    without spending CPU/GPU on hidden gameplay.
  *  - A fill-bar preloader covers the initial batch.
@@ -61,6 +60,7 @@ export class Feed {
   private completedRunIds = new Set<string>();
   private liveHold = new Set<number>();
   private settlingTargetIndex: number | null = null;
+  private resetCycleAfterSettle = false;
   private frameLoaded = new Set<number>();
   private frameReady = new Set<number>();
   private frameRevealed = new Set<number>();
@@ -75,6 +75,28 @@ export class Feed {
   private levelBadgeEl: HTMLElement | null = null;
   private levelEl: HTMLElement | null = null;
   private levelProgressEl: HTMLElement | null = null;
+
+  // Friend stories (top rail). Tapping one opens a full-screen story showing a
+  // playable mechanic; the background feed game is paused while it's open.
+  private readonly friends: { name: string; initial: string; tone: string; hours: number }[] = [
+    { name: 'Ava',  initial: 'A', tone: 'sky',    hours: 2 },
+    { name: 'Mila', initial: 'M', tone: 'rose',   hours: 1 },
+    { name: 'Leo',  initial: 'L', tone: 'mint',   hours: 5 },
+    { name: 'Nika', initial: 'N', tone: 'sun',    hours: 3 },
+    { name: 'Tim',  initial: 'T', tone: 'violet', hours: 8 },
+    { name: 'Zoe',  initial: 'Z', tone: 'sky',    hours: 1 },
+    { name: 'Max',  initial: 'M', tone: 'rose',   hours: 12 },
+    { name: 'Eva',  initial: 'E', tone: 'mint',   hours: 4 },
+    { name: 'Sam',  initial: 'S', tone: 'sun',    hours: 6 },
+    { name: 'Kai',  initial: 'K', tone: 'violet', hours: 2 },
+    { name: 'Mia',  initial: 'M', tone: 'sky',    hours: 9 },
+    { name: 'Dan',  initial: 'D', tone: 'rose',   hours: 3 },
+    { name: 'Liza', initial: 'L', tone: 'mint',   hours: 7 },
+    { name: 'Ben',  initial: 'B', tone: 'sun',    hours: 1 },
+  ];
+  private viewedFriends = new Set<number>();   // in-memory only (no persistence yet)
+  private overlayOpen = false;                 // story-view OR editor overlay is up
+  private overlayEl: HTMLElement | null = null;
 
   private prefetched = new Set<number>();
   private ready = new Set<number>();
@@ -117,8 +139,14 @@ export class Feed {
       this.pos = this.realIndex();      // keep pos bounded; same visual (delta mod N)
       this.liveHold.clear();
       this.render(false);
+      if (this.resetCycleAfterSettle) {
+        this.resetCycleAfterSettle = false;
+        this.resetCycle();
+      }
       this.updateLive();
       this.applyActiveStates();
+      this.prefetchReserve();
+      this.pumpPrefetchQueue();
     });
 
     this.updateLive();
@@ -192,22 +220,7 @@ export class Feed {
 
   private mountHud() {
     const hud = document.createElement('div');
-    const friendStories = [
-      ['Ava', 'A', 'sky'],
-      ['Mila', 'M', 'rose'],
-      ['Leo', 'L', 'mint'],
-      ['Nika', 'N', 'sun'],
-      ['Tim', 'T', 'violet'],
-      ['Zoe', 'Z', 'sky'],
-      ['Max', 'M', 'rose'],
-      ['Eva', 'E', 'mint'],
-      ['Sam', 'S', 'sun'],
-      ['Kai', 'K', 'violet'],
-      ['Mia', 'M', 'sky'],
-      ['Dan', 'D', 'rose'],
-      ['Liza', 'L', 'mint'],
-      ['Ben', 'B', 'sun'],
-    ].map(([name, initial, tone]) => this.friendStoryMarkup(name, initial, tone)).join('');
+    const friendStories = this.friends.map((f, idx) => this.friendStoryMarkup(f, idx)).join('');
     hud.className = 'hud';
     hud.innerHTML =
       '<div class="stories" aria-label="Friends">' +
@@ -231,11 +244,12 @@ export class Feed {
     if (stories) this.attachStoryScroller(stories);
   }
 
-  private friendStoryMarkup(name: string, initial: string, tone: string): string {
+  private friendStoryMarkup(f: { name: string; initial: string; tone: string }, idx: number): string {
+    const viewed = this.viewedFriends.has(idx) ? ' story__avatar--viewed' : '';
     return (
-      `<div class="story">` +
-        `<div class="story__avatar story__avatar--${tone}"><span>${initial}</span></div>` +
-        `<div class="story__name">${name}</div>` +
+      `<div class="story" data-friend="${idx}">` +
+        `<div class="story__avatar story__avatar--${f.tone}${viewed}"><span>${f.initial}</span></div>` +
+        `<div class="story__name">${f.name}</div>` +
       `</div>`
     );
   }
@@ -256,10 +270,16 @@ export class Feed {
 
     const endDrag = (e: PointerEvent) => {
       if (!tracking && !dragging) return;
+      const wasTap = tracking && !dragging;   // pressed without horizontal drag = a tap
       tracking = false;
       dragging = false;
       scroller.classList.remove('stories--dragging');
       try { scroller.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+      if (!wasTap) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.('.hud__level-plus')) { this.openEditor(); return; }
+      const storyEl = t?.closest?.('.story[data-friend]') as HTMLElement | null;
+      if (storyEl) this.openStory(Number(storyEl.dataset.friend));
     };
 
     scroller.addEventListener('pointerdown', (e) => {
@@ -302,6 +322,77 @@ export class Feed {
     this.storiesEl.scrollLeft = 0;
     this.hudEl?.classList.remove('hud--stories-can-left');
     this.hudEl?.classList.toggle('hud--stories-can-right', this.storiesEl.scrollWidth > this.storiesEl.clientWidth + 1);
+  }
+
+  private openStory(index: number) {
+    const friend = this.friends[index];
+    if (!friend) return;
+    this.viewedFriends.add(index);
+    const avatar = this.storiesEl?.querySelector<HTMLElement>(`.story[data-friend="${index}"] .story__avatar`);
+    avatar?.classList.add('story__avatar--viewed');
+    const playable = this.playables[(this.realIndex() + index + 1) % this.N];
+    this.openOverlay(friend.name, `${friend.hours}h ago`, playable?.id ?? 'mini-game');
+  }
+
+  private openEditor() {
+    this.openOverlay('Your level', 'Profile', 'Level progress');
+  }
+
+  private openOverlay(title: string, meta: string, detail: string) {
+    this.closeOverlay();
+    const overlay = document.createElement('div');
+    overlay.className = 'friend-overlay';
+
+    const panel = document.createElement('div');
+    panel.className = 'friend-overlay__panel';
+    overlay.appendChild(panel);
+
+    const close = document.createElement('button');
+    close.className = 'friend-overlay__close';
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close');
+    close.textContent = '×';
+    panel.appendChild(close);
+
+    const avatar = document.createElement('div');
+    avatar.className = 'friend-overlay__avatar';
+    avatar.textContent = title.slice(0, 1).toUpperCase();
+    panel.appendChild(avatar);
+
+    const name = document.createElement('div');
+    name.className = 'friend-overlay__name';
+    name.textContent = title;
+    panel.appendChild(name);
+
+    const stamp = document.createElement('div');
+    stamp.className = 'friend-overlay__meta';
+    stamp.textContent = meta;
+    panel.appendChild(stamp);
+
+    const body = document.createElement('div');
+    body.className = 'friend-overlay__detail';
+    body.textContent = detail;
+    panel.appendChild(body);
+
+    overlay.addEventListener('pointerdown', (e) => {
+      if (e.target === overlay || (e.target as HTMLElement | null)?.closest('.friend-overlay__close')) {
+        e.preventDefault();
+        this.closeOverlay();
+      }
+    });
+
+    this.viewport.appendChild(overlay);
+    this.overlayEl = overlay;
+    this.overlayOpen = true;
+    this.applyActiveStates();
+  }
+
+  private closeOverlay() {
+    if (!this.overlayEl) return;
+    this.overlayEl.remove();
+    this.overlayEl = null;
+    this.overlayOpen = false;
+    this.applyActiveStates();
   }
 
   // ── Ring rendering ─────────────────────────────────────────────────────────
@@ -457,8 +548,119 @@ export class Feed {
   }
 
   private shouldPauseFrame(i: number): boolean {
+    if (this.overlayOpen) return true;   // a story / editor is up — freeze the whole feed
     if (this.settlingTargetIndex === i) return true;
     return i !== this.realIndex() || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i);
+  }
+
+  // ── Friend story (Instagram-style) ─────────────────────────────────────────
+  private openStory(idx: number) {
+    if (this.overlayOpen) return;
+    const f = this.friends[idx];
+    if (!f) return;
+    this.markFriendViewed(idx);
+
+    // Any available swipe mechanic — picked per-friend so it's stable per session.
+    const mechanic = this.playables[idx % this.N].id;
+
+    this.overlayOpen = true;
+    this.applyActiveStates();   // pause the background feed game (one mechanic at a time)
+
+    const ov = document.createElement('div');
+    ov.className = 'story-view';
+    ov.innerHTML =
+      '<div class="story-view__bar"><span></span></div>' +
+      '<div class="story-view__header">' +
+        `<div class="story__avatar story__avatar--${f.tone} story-view__avatar"><span>${f.initial}</span></div>` +
+        `<div class="story-view__meta"><div class="story-view__name">${f.name}</div>` +
+        `<div class="story-view__time">${f.hours}h ago</div></div>` +
+        '<button class="story-view__close" type="button" aria-label="Close">✕</button>' +
+      '</div>' +
+      '<div class="story-view__stage"></div>' +
+      '<div class="story-view__footer">' +
+        `<input class="story-view__reply" type="text" placeholder="Reply to ${f.name}…" />` +
+        '<button class="story-view__heart" type="button" aria-label="Like">♡</button>' +
+      '</div>';
+    this.viewport.appendChild(ov);
+    this.overlayEl = ov;
+
+    const frame = document.createElement('iframe');
+    frame.className = 'story-view__frame';
+    frame.setAttribute('scrolling', 'no');
+    frame.setAttribute('allow', 'autoplay');
+    frame.src = playableUrl(mechanic, { hostPaused: false });
+    ov.querySelector('.story-view__stage')!.appendChild(frame);
+
+    ov.querySelector('.story-view__close')!.addEventListener('click', () => this.closeOverlay());
+
+    const heart = ov.querySelector('.story-view__heart') as HTMLElement;
+    heart.addEventListener('click', () => {
+      const liked = heart.classList.toggle('story-view__heart--liked');
+      heart.textContent = liked ? '♥' : '♡';
+      if (liked && heart.animate) {
+        heart.animate(
+          [{ transform: 'scale(1)' }, { transform: 'scale(1.45)' }, { transform: 'scale(1)' }],
+          { duration: 300, easing: 'cubic-bezier(0.2, 0.9, 0.3, 1.4)' },
+        );
+      }
+    });
+    const reply = ov.querySelector('.story-view__reply') as HTMLInputElement;
+    reply.addEventListener('keydown', (e) => {
+      if ((e as KeyboardEvent).key === 'Enter' && reply.value.trim()) { reply.value = ''; reply.blur(); }
+    });
+
+    if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+  }
+
+  private markFriendViewed(idx: number) {
+    this.viewedFriends.add(idx);
+    const avatar = this.storiesEl?.querySelector(`.story[data-friend="${idx}"] .story__avatar`);
+    avatar?.classList.add('story__avatar--viewed');
+  }
+
+  // ── Mechanic editor (placeholder) ──────────────────────────────────────────
+  // Stub for the future editor where players assemble a customised mechanic
+  // from templates / examples. Opened from the "+" on the player's own avatar.
+  private openEditor() {
+    if (this.overlayOpen) return;
+    this.overlayOpen = true;
+    this.applyActiveStates();
+
+    const templates = ['Merge', 'Sort', 'Pin Pull', 'Time Press', 'Blank'];
+    const ov = document.createElement('div');
+    ov.className = 'editor';
+    ov.innerHTML =
+      '<div class="editor__header">' +
+        '<div class="editor__title">Mechanic Editor</div>' +
+        '<button class="editor__close" type="button" aria-label="Close">✕</button>' +
+      '</div>' +
+      '<div class="editor__body">' +
+        '<div class="editor__hero">🛠️</div>' +
+        '<div class="editor__lead">Build your own mechanic</div>' +
+        '<div class="editor__sub">Coming soon — start from a template or remix an example, then tune the rules and ship it to your feed.</div>' +
+        '<div class="editor__templates">' +
+          templates.map((t) => `<div class="editor__tpl"><div class="editor__tpl-art"></div><div class="editor__tpl-name">${t}</div></div>`).join('') +
+        '</div>' +
+        '<button class="editor__cta" type="button" disabled>Start building</button>' +
+      '</div>';
+    this.viewport.appendChild(ov);
+    this.overlayEl = ov;
+    ov.querySelector('.editor__close')!.addEventListener('click', () => this.closeOverlay());
+    if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+  }
+
+  private closeOverlay() {
+    if (!this.overlayOpen) return;
+    this.overlayOpen = false;
+    const ov = this.overlayEl;
+    this.overlayEl = null;
+    if (ov && ov.animate) {
+      const a = ov.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, fill: 'forwards' });
+      a.addEventListener('finish', () => ov.remove(), { once: true });
+    } else if (ov) {
+      ov.remove();
+    }
+    this.applyActiveStates();   // resume the background feed game
   }
 
   private callPlayableHostGesture(i: number): boolean {
@@ -499,7 +701,7 @@ export class Feed {
   }
 
   private pumpPrefetchQueue() {
-    if (this.prefetching) return;
+    if (this.prefetching || this.isGestureBusy()) return;
     const i = this.prefetchQueue.shift();
     if (i === undefined) return;
     this.prefetchQueued.delete(i);
@@ -510,6 +712,12 @@ export class Feed {
 
     this.prefetching = true;
     this.scheduleIdlePrefetch(() => {
+      if (this.isGestureBusy()) {
+        this.prefetching = false;
+        this.requeuePrefetchFront(i);
+        this.pumpPrefetchQueue();
+        return;
+      }
       fetch(playableUrl(this.playables[i].id, { hostPaused: true }), { mode: 'no-cors' })
         .then(() => this.markReady(i))
         .catch(() => this.markReady(i))
@@ -518,6 +726,16 @@ export class Feed {
           this.pumpPrefetchQueue();
         });
     });
+  }
+
+  private requeuePrefetchFront(i: number) {
+    if (this.frames.has(i) || this.prefetchQueued.has(i)) return;
+    this.prefetchQueued.add(i);
+    this.prefetchQueue.unshift(i);
+  }
+
+  private isGestureBusy(): boolean {
+    return this.dragging || this.settlingTargetIndex !== null;
   }
 
   private scheduleIdlePrefetch(fn: () => void) {
@@ -576,8 +794,6 @@ export class Feed {
     const current = this.realIndex();
     const next = (current + 1) % this.N;
     this.liveHold = new Set([current, next]);
-    this.updateLive();
-    this.applyActiveStates();
 
     this.dragging = true;
     this.startY = e.clientY;
@@ -585,6 +801,7 @@ export class Feed {
     this.lastT = e.timeStamp;
     this.velocity = 0;
     this.basePos = Math.round(this.pos);
+    this.render(false);
     this.unlockAudioForCurrentAndNext(current);
     gutter.setPointerCapture(e.pointerId);
   }
@@ -1095,9 +1312,7 @@ export class Feed {
     if (changed) {
       this.liveHold = new Set([fromIndex, targetIndex]);
       this.settlingTargetIndex = targetIndex;
-      if (this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycle();
-      this.updateLive();        // mount the incoming game while it is still host-paused
-      this.applyActiveStates();
+      if (this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycleAfterSettle = true;
     }
     this.pos = targetPos;
     this.render(true);
@@ -1108,6 +1323,7 @@ export class Feed {
       this.liveHold.clear();
       this.updateLive();
       this.applyActiveStates();
+      this.pumpPrefetchQueue();
     }
     // resume/pause happens on the transitionend (= after the slide)
   }
