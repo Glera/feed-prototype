@@ -27,16 +27,14 @@ const VELOCITY_SNAP = 0.45;        // px/ms flick that commits regardless of dis
 
 const LIVE_AHEAD = 0;              // idle feed mounts current only; ahead is bytes-prefetched
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
-const RESERVE_AHEAD = 5;           // prefetch this many bundles ahead (bytes only)
-const PREFETCH_BEHIND = 1;
-const INITIAL_BATCH = 5;           // preloader fills until the first N are ready
+const RESERVE_AHEAD = 2;           // prefetch this many bundles ahead (bytes only)
+const INITIAL_BATCH = 2;           // preloader fills until the first N are ready
 const PRELOADER_TIMEOUT_MS = 15000;
-const ANALYTICS_POLL_MS = 350;     // fallback for older non-SWIPE exports
-const STAR_REWARD_MS = 1480;
-const STAR_IMPACT_MS = 770;
+const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
+const FRAME_READY_FALLBACK_MS = 900;
+const FRAME_REVEAL_DELAY_MS = 90;
 const LEVEL_PROGRESS_MS = 340;
 const AUTO_ADVANCE_AFTER_REWARD_MS = 120;
-const LEVEL_RESET_MS = 420;
 const STARS_PER_LEVEL = 5;
 
 type PlayableOutcome = 'won' | 'lost';
@@ -62,6 +60,12 @@ export class Feed {
   private runSeq = 0;
   private completedRunIds = new Set<string>();
   private liveHold = new Set<number>();
+  private settlingTargetIndex: number | null = null;
+  private frameLoaded = new Set<number>();
+  private frameReady = new Set<number>();
+  private frameRevealed = new Set<number>();
+  private frameFallbackTimers = new Map<number, number>();
+  private frameRevealTimers = new Map<number, number>();
 
   private totalStars = 0;
   private earnedThisCycle = new Set<number>();
@@ -71,10 +75,12 @@ export class Feed {
   private levelBadgeEl: HTMLElement | null = null;
   private levelEl: HTMLElement | null = null;
   private levelProgressEl: HTMLElement | null = null;
-  private levelResetTimer: number | null = null;
 
   private prefetched = new Set<number>();
   private ready = new Set<number>();
+  private prefetchQueue: number[] = [];
+  private prefetchQueued = new Set<number>();
+  private prefetching = false;
   private preloaderDone = false;
   private preloaderFillEl: HTMLElement | null = null;
   private preloaderProgressEl: HTMLElement | null = null;
@@ -107,6 +113,7 @@ export class Feed {
     // game and pause the rest. transitionend bubbles up from the pages.
     this.feedEl.addEventListener('transitionend', (e) => {
       if (e.propertyName !== 'transform' || this.dragging) return;
+      this.settlingTargetIndex = null;
       this.pos = this.realIndex();      // keep pos bounded; same visual (delta mod N)
       this.liveHold.clear();
       this.render(false);
@@ -234,35 +241,52 @@ export class Feed {
   }
 
   private attachStoryScroller(scroller: HTMLElement) {
+    let tracking = false;
     let dragging = false;
     let startX = 0;
+    let startY = 0;
     let startScrollLeft = 0;
+    const dragIntentPx = 6;
 
     const updateMask = () => {
       const maxScroll = scroller.scrollWidth - scroller.clientWidth;
-      scroller.classList.toggle('stories--can-left', scroller.scrollLeft > 1);
-      scroller.classList.toggle('stories--can-right', scroller.scrollLeft < maxScroll - 1);
+      this.hudEl?.classList.toggle('hud--stories-can-left', scroller.scrollLeft > 1);
+      this.hudEl?.classList.toggle('hud--stories-can-right', scroller.scrollLeft < maxScroll - 1);
     };
 
     const endDrag = (e: PointerEvent) => {
-      if (!dragging) return;
+      if (!tracking && !dragging) return;
+      tracking = false;
       dragging = false;
       scroller.classList.remove('stories--dragging');
       try { scroller.releasePointerCapture(e.pointerId); } catch { /* noop */ }
     };
 
     scroller.addEventListener('pointerdown', (e) => {
-      dragging = true;
+      if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      tracking = true;
+      dragging = false;
       startX = e.clientX;
+      startY = e.clientY;
       startScrollLeft = scroller.scrollLeft;
-      scroller.classList.add('stories--dragging');
-      scroller.setPointerCapture(e.pointerId);
     });
 
     scroller.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
+      if (!tracking) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!dragging) {
+        if (Math.abs(dx) < dragIntentPx && Math.abs(dy) < dragIntentPx) return;
+        if (Math.abs(dx) <= Math.abs(dy)) {
+          tracking = false;
+          return;
+        }
+        dragging = true;
+        scroller.classList.add('stories--dragging');
+        scroller.setPointerCapture(e.pointerId);
+      }
       e.preventDefault();
-      scroller.scrollLeft = startScrollLeft - (e.clientX - startX);
+      scroller.scrollLeft = startScrollLeft - dx;
     });
 
     scroller.addEventListener('scroll', updateMask, { passive: true });
@@ -276,8 +300,8 @@ export class Feed {
   private resetStoriesToMyLevel() {
     if (!this.storiesEl) return;
     this.storiesEl.scrollLeft = 0;
-    this.storiesEl.classList.remove('stories--can-left');
-    this.storiesEl.classList.toggle('stories--can-right', this.storiesEl.scrollWidth > this.storiesEl.clientWidth + 1);
+    this.hudEl?.classList.remove('hud--stories-can-left');
+    this.hudEl?.classList.toggle('hud--stories-can-right', this.storiesEl.scrollWidth > this.storiesEl.clientWidth + 1);
   }
 
   // ── Ring rendering ─────────────────────────────────────────────────────────
@@ -292,9 +316,12 @@ export class Feed {
       const prev = this.pageDelta[i];
       const wrapped = prev !== undefined && Math.abs(delta - prev) > N / 2;
       const pg = this.pageEls[i];
+      const near = this.liveHold.has(i) || (delta > -0.05 && delta <= 1.55);
       pg.style.transition = animate && !wrapped ? 'transform 0.36s var(--ease-snap)' : 'none';
       pg.style.transform = `translate3d(0, ${delta * this.pageH}px, 0)`;
       pg.style.zIndex = String(1000 - Math.round(Math.abs(delta) * 10));
+      pg.style.visibility = near ? 'visible' : 'hidden';
+      pg.classList.toggle('page--near', near);
       this.pageDelta[i] = delta;
     }
   }
@@ -319,6 +346,9 @@ export class Feed {
 
   private mount(i: number) {
     if (this.frames.has(i)) return;
+    this.resetFrameReadiness(i);
+    this.games[i].classList.add('game--loading');
+    this.games[i].classList.remove('game--ready');
     const frame = document.createElement('iframe');
     frame.className = 'game__frame';
     frame.dataset.runId = String(++this.runSeq);
@@ -326,13 +356,15 @@ export class Feed {
     frame.setAttribute('title', this.playables[i].id);
     frame.setAttribute('allow', 'autoplay');
     frame.addEventListener('load', () => {
-      this.games[i].classList.remove('game--loading');
+      if (this.frames.get(i) !== frame) return;
+      this.frameLoaded.add(i);
       this.setFramePaused(i, this.shouldPauseFrame(i));
-      this.markReady(i);
+      this.queueFrameReadyFallback(i, frame);
+      this.tryRevealFrame(i);
     });
+    this.frames.set(i, frame);
     frame.src = playableUrl(this.playables[i].id, { hostPaused: this.shouldPauseFrame(i) });
     this.slots[i].appendChild(frame);
-    this.frames.set(i, frame);
   }
 
   private unmount(i: number) {
@@ -342,7 +374,59 @@ export class Feed {
     if (runId) this.completedRunIds.delete(runId);
     frame.remove();
     this.frames.delete(i);
+    this.resetFrameReadiness(i);
     this.games[i].classList.add('game--loading');
+    this.games[i].classList.remove('game--ready');
+  }
+
+  private resetFrameReadiness(i: number) {
+    this.frameLoaded.delete(i);
+    this.frameReady.delete(i);
+    this.frameRevealed.delete(i);
+    const fallbackTimer = this.frameFallbackTimers.get(i);
+    if (fallbackTimer) window.clearTimeout(fallbackTimer);
+    this.frameFallbackTimers.delete(i);
+    const revealTimer = this.frameRevealTimers.get(i);
+    if (revealTimer) window.clearTimeout(revealTimer);
+    this.frameRevealTimers.delete(i);
+  }
+
+  private queueFrameReadyFallback(i: number, frame: HTMLIFrameElement) {
+    const previous = this.frameFallbackTimers.get(i);
+    if (previous) window.clearTimeout(previous);
+    if (this.frameReady.has(i)) return;
+    const timer = window.setTimeout(() => {
+      this.frameFallbackTimers.delete(i);
+      if (this.frames.get(i) !== frame) return;
+      this.frameReady.add(i);
+      this.tryRevealFrame(i);
+    }, FRAME_READY_FALLBACK_MS);
+    this.frameFallbackTimers.set(i, timer);
+  }
+
+  private handlePlayableReady(i: number) {
+    this.frameReady.add(i);
+    const fallbackTimer = this.frameFallbackTimers.get(i);
+    if (fallbackTimer) window.clearTimeout(fallbackTimer);
+    this.frameFallbackTimers.delete(i);
+    this.tryRevealFrame(i);
+  }
+
+  private tryRevealFrame(i: number) {
+    const frame = this.frames.get(i);
+    if (!frame || this.frameRevealed.has(i) || this.frameRevealTimers.has(i)) return;
+    if (!this.frameLoaded.has(i) || !this.frameReady.has(i) || this.shouldPauseFrame(i)) return;
+
+    const timer = window.setTimeout(() => {
+      this.frameRevealTimers.delete(i);
+      if (this.frames.get(i) !== frame) return;
+      if (!this.frameLoaded.has(i) || !this.frameReady.has(i) || this.shouldPauseFrame(i)) return;
+      this.frameRevealed.add(i);
+      this.games[i].classList.remove('game--loading');
+      this.games[i].classList.add('game--ready');
+      this.markReady(i);
+    }, FRAME_REVEAL_DELAY_MS);
+    this.frameRevealTimers.set(i, timer);
   }
 
   // Pause/resume a playable by flipping its document visibility — the same
@@ -366,10 +450,14 @@ export class Feed {
   }
 
   private applyActiveStates() {
-    this.frames.forEach((_f, i) => this.setFramePaused(i, this.shouldPauseFrame(i)));
+    this.frames.forEach((_f, i) => {
+      this.setFramePaused(i, this.shouldPauseFrame(i));
+      this.tryRevealFrame(i);
+    });
   }
 
   private shouldPauseFrame(i: number): boolean {
+    if (this.settlingTargetIndex === i) return true;
     return i !== this.realIndex() || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i);
   }
 
@@ -396,14 +484,51 @@ export class Feed {
   // ── Prefetch reserve (bytes only) ──────────────────────────────────────────
   private prefetchReserve() {
     const base = this.realIndex();
-    for (let d = -PREFETCH_BEHIND; d <= RESERVE_AHEAD; d++) {
+    for (let d = 1; d <= RESERVE_AHEAD; d++) {
       const j = ((base + d) % this.N + this.N) % this.N;
-      if (this.frames.has(j) || this.prefetched.has(j)) continue;
-      this.prefetched.add(j);
-      fetch(playableUrl(this.playables[j].id), { mode: 'no-cors' })
-        .then(() => this.markReady(j))
-        .catch(() => this.markReady(j));
+      this.enqueuePrefetch(j);
     }
+  }
+
+  private enqueuePrefetch(i: number) {
+    if (this.frames.has(i) || this.prefetched.has(i) || this.prefetchQueued.has(i)) return;
+    this.prefetched.add(i);
+    this.prefetchQueued.add(i);
+    this.prefetchQueue.push(i);
+    this.pumpPrefetchQueue();
+  }
+
+  private pumpPrefetchQueue() {
+    if (this.prefetching) return;
+    const i = this.prefetchQueue.shift();
+    if (i === undefined) return;
+    this.prefetchQueued.delete(i);
+    if (this.frames.has(i)) {
+      this.pumpPrefetchQueue();
+      return;
+    }
+
+    this.prefetching = true;
+    this.scheduleIdlePrefetch(() => {
+      fetch(playableUrl(this.playables[i].id, { hostPaused: true }), { mode: 'no-cors' })
+        .then(() => this.markReady(i))
+        .catch(() => this.markReady(i))
+        .finally(() => {
+          this.prefetching = false;
+          this.pumpPrefetchQueue();
+        });
+    });
+  }
+
+  private scheduleIdlePrefetch(fn: () => void) {
+    const requestIdleCallback = (window as any).requestIdleCallback as
+      | undefined
+      | ((callback: () => void, options?: { timeout: number }) => number);
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(fn, { timeout: 800 });
+      return;
+    }
+    window.setTimeout(fn, 120);
   }
 
   // ── Preloader (rectangular fill bar) ───────────────────────────────────────
@@ -494,6 +619,10 @@ export class Feed {
   private onWindowMessage = (e: MessageEvent) => {
     const i = this.frameIndexForSource(e.source);
     if (i < 0) return;
+    if (this.isPlayableReadyMessage(e.data)) {
+      this.handlePlayableReady(i);
+      return;
+    }
     if (this.isHostGestureMessage(e.data)) {
       if (!this.hostGestureDeliveredSynchronously(e.data)) {
         this.unlockAudioForCurrentAndNext(i);
@@ -558,12 +687,20 @@ export class Feed {
     return d.source === 'playable' && d.type === 'host_gesture';
   }
 
+  private isPlayableReadyMessage(data: unknown): boolean {
+    if (!data || typeof data !== 'object') return false;
+    const d = data as Record<string, unknown>;
+    const type = String(d.type ?? '').toLowerCase();
+    return d.source === 'playable' && (type === 'ready' || type === 'loaded');
+  }
+
   private hostGestureDeliveredSynchronously(data: unknown): boolean {
     if (!data || typeof data !== 'object') return false;
     return (data as Record<string, unknown>).deliveredSynchronously === true;
   }
 
   private pollPlayableAnalytics = () => {
+    if (document.hidden) return;
     const i = this.realIndex();
     const frame = this.frames.get(i);
     const runId = frame?.dataset.runId;
@@ -735,37 +872,82 @@ export class Feed {
     window.setTimeout(() => this.hudEl?.classList.remove('hud--level-up'), 420);
   }
 
-  private resetLevelProgressAfterLevelUp() {
-    if (this.levelResetTimer !== null) window.clearTimeout(this.levelResetTimer);
-    this.levelResetTimer = window.setTimeout(() => {
-      this.updateHud(false);
-      this.pulseLevelUp();
-      this.levelResetTimer = null;
-    }, LEVEL_RESET_MS);
+  private finishStarReward(i: number) {
+    const prev = this.totalStars;
+    const prevLevel = Math.floor(prev / this.starsPerLevel) + 1;
+    this.totalStars = prev + 1;
+    const nextLevel = Math.floor(this.totalStars / this.starsPerLevel) + 1;
+
+    if (nextLevel > prevLevel) {
+      // Fill the ring, then play the congratulatory level-up screen (confetti)
+      // BEFORE auto-advancing to the next mechanic.
+      this.setLevelProgress(1, true);
+      this.playLevelUp(nextLevel, () => {
+        this.updateHud(false);                 // ring resets to the new level (0 progress)
+        this.pulseLevelUp();
+        this.scheduleAutoAdvanceAfterStar(i, AUTO_ADVANCE_AFTER_REWARD_MS);
+      });
+    } else {
+      this.updateHud(true);
+      this.scheduleAutoAdvanceAfterStar(i, LEVEL_PROGRESS_MS + AUTO_ADVANCE_AFTER_REWARD_MS);
+    }
   }
 
-  private addStarToHud(): number {
-    const previous = this.totalStars;
-    const next = previous + 1;
-    const previousLevel = Math.floor(previous / this.starsPerLevel) + 1;
-    const nextLevel = Math.floor(next / this.starsPerLevel) + 1;
-    this.totalStars = next;
+  // Congratulatory level-up screen: a popped badge + confetti rain, held briefly
+  // then faded out. `onDone` fires after the fade (drives the auto-advance).
+  private playLevelUp(level: number, onDone: () => void) {
+    const overlay = document.createElement('div');
+    overlay.className = 'levelup';
+    overlay.innerHTML =
+      '<div class="levelup__card">' +
+        '<div class="levelup__kicker">LEVEL UP</div>' +
+        '<div class="levelup__badge"><span class="levelup__star">★</span><span class="levelup__num">' + level + '</span></div>' +
+        '<div class="levelup__title">Level ' + level + '</div>' +
+      '</div>';
+    this.viewport.appendChild(overlay);
+    this.spawnConfetti(overlay);
 
-    this.bumpLevelBadge();
-
-    if (nextLevel > previousLevel) {
-      this.setLevelProgress(1, true);
-      this.resetLevelProgressAfterLevelUp();
-      return LEVEL_RESET_MS + AUTO_ADVANCE_AFTER_REWARD_MS;
+    const card = overlay.querySelector('.levelup__card') as HTMLElement | null;
+    if (overlay.animate) overlay.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+    if (card && card.animate) {
+      card.animate([
+        { transform: 'scale(0.4)', opacity: 0 },
+        { transform: 'scale(1.14)', opacity: 1, offset: 0.55 },
+        { transform: 'scale(1)', opacity: 1 },
+      ], { duration: 460, easing: 'cubic-bezier(0.2, 0.9, 0.3, 1.4)', fill: 'forwards' });
     }
 
-    this.updateHud(true);
-    return LEVEL_PROGRESS_MS + AUTO_ADVANCE_AFTER_REWARD_MS;
+    const HOLD = 1600;
+    window.setTimeout(() => {
+      if (!overlay.animate) { overlay.remove(); onDone(); return; }
+      const out = overlay.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 280, fill: 'forwards' });
+      out.addEventListener('finish', () => { overlay.remove(); onDone(); }, { once: true });
+    }, HOLD);
   }
 
-  private finishStarReward(i: number) {
-    const autoAdvanceDelay = this.addStarToHud();
-    this.scheduleAutoAdvanceAfterStar(i, autoAdvanceDelay);
+  private spawnConfetti(parent: HTMLElement) {
+    const colors = ['#ffd85a', '#45d68c', '#37a6ff', '#ff4f8b', '#ff9f45', '#b07bff', '#5ee6a8'];
+    const rect = this.viewport.getBoundingClientRect();
+    const count = 48;
+    for (let n = 0; n < count; n++) {
+      const c = document.createElement('div');
+      c.className = 'confetti';
+      const w = 6 + Math.random() * 6, h = 9 + Math.random() * 9;
+      c.style.cssText =
+        `left:${Math.random() * rect.width}px;top:-24px;width:${w}px;height:${h}px;` +
+        `background:${colors[n % colors.length]};border-radius:${Math.random() < 0.4 ? '50%' : '2px'};`;
+      parent.appendChild(c);
+      if (!c.animate) { window.setTimeout(() => c.remove(), 1900); continue; }
+      const driftX = (Math.random() - 0.5) * 140;
+      const fall = rect.height + 80;
+      const rot = Math.random() * 900 - 450;
+      const a = c.animate([
+        { transform: 'translate(0, 0) rotate(0deg)', opacity: 1 },
+        { transform: `translate(${driftX}px, ${fall}px) rotate(${rot}deg)`, opacity: 1, offset: 0.82 },
+        { transform: `translate(${driftX}px, ${fall + 40}px) rotate(${rot}deg)`, opacity: 0 },
+      ], { duration: 1500 + Math.random() * 800, delay: Math.random() * 380, easing: 'cubic-bezier(0.3, 0.2, 0.5, 1)', fill: 'forwards' });
+      a.addEventListener('finish', () => c.remove(), { once: true });
+    }
   }
 
   private scheduleAutoAdvanceAfterStar(i: number, delayMs: number) {
@@ -775,12 +957,15 @@ export class Feed {
     }, delayMs);
   }
 
-  private burstStarParticles(x: number, y: number) {
-    const colors = ['#ffd85a', '#fff1a8', '#45d68c', '#ffb13d'];
-    const vectors = [
-      [-62, -18], [-48, -42], [-22, -58], [10, -62],
-      [38, -46], [62, -20], [-30, 8], [34, 10],
-    ];
+  // Playable-style radial burst (ported from merge spawnBurst): particles fly
+  // out at random angles, arc DOWN with gravity, and fade — plus a soft impact
+  // flash. `land` biases up/outward (bounced off the floor) and arcs harder;
+  // `collect` is a tight full-radial pop at the level badge.
+  private burstStarParticles(x: number, y: number, kind: 'land' | 'collect' = 'collect') {
+    const colors = ['#ffd85a', '#fff1a8', '#ffb13d', '#ffffff', '#ffe27a'];
+    const count = kind === 'collect' ? 12 : 16;
+    const spread = kind === 'collect' ? 54 : 82;
+    const grav = kind === 'collect' ? 34 : 112;
 
     const impact = document.createElement('div');
     impact.className = 'star-impact';
@@ -788,87 +973,117 @@ export class Feed {
     impact.style.top = `${y}px`;
     this.viewport.appendChild(impact);
     if (impact.animate) {
-      const animation = impact.animate([
-        { transform: 'translate(-50%, -50%) scale(0.35, 0.22)', opacity: 0.74 },
-        { transform: 'translate(-50%, -50%) scale(1.12, 0.72)', opacity: 0.32, offset: 0.42 },
-        { transform: 'translate(-50%, -50%) scale(1.55, 0.86)', opacity: 0 },
-      ], {
-        duration: 430,
-        easing: 'cubic-bezier(0.14, 0.74, 0.3, 1)',
-        fill: 'forwards',
-      });
-      animation.addEventListener('finish', () => impact.remove(), { once: true });
+      const a = impact.animate([
+        { transform: 'translate(-50%, -50%) scale(0.4, 0.3)', opacity: 0.8 },
+        { transform: 'translate(-50%, -50%) scale(1.55, 1.0)', opacity: 0 },
+      ], { duration: 360, easing: 'cubic-bezier(0.14, 0.74, 0.3, 1)', fill: 'forwards' });
+      a.addEventListener('finish', () => impact.remove(), { once: true });
     } else {
-      window.setTimeout(() => impact.remove(), 430);
+      window.setTimeout(() => impact.remove(), 360);
     }
 
-    vectors.forEach(([dx, dy], index) => {
-      const particle = document.createElement('div');
-      particle.className = 'star-particle';
-      particle.style.left = `${x}px`;
-      particle.style.top = `${y}px`;
-      particle.style.background = colors[index % colors.length];
-      this.viewport.appendChild(particle);
+    for (let n = 0; n < count; n++) {
+      const angle = kind === 'land'
+        ? -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.15
+        : Math.random() * Math.PI * 2;
+      const dist = spread * (0.45 + Math.random() * 0.55);
+      const dx = Math.cos(angle) * dist;
+      const dy = Math.sin(angle) * dist;
+      const size = (kind === 'collect' ? 7 : 9) * (0.6 + Math.random() * 0.6);
 
-      if (!particle.animate) {
-        window.setTimeout(() => particle.remove(), 520);
-        return;
-      }
+      const p = document.createElement('div');
+      p.className = 'star-particle';
+      p.style.left = `${x}px`;
+      p.style.top = `${y}px`;
+      p.style.width = `${size}px`;
+      p.style.height = `${size}px`;
+      p.style.background = colors[n % colors.length];
+      this.viewport.appendChild(p);
 
-      const animation = particle.animate([
-        { transform: 'translate(-50%, -50%) scale(0.35)', opacity: 1 },
-        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(1)`, opacity: 0.92, offset: 0.38 },
-        { transform: `translate(calc(-50% + ${dx * 1.16}px), calc(-50% + ${dy * 1.08}px)) scale(0)`, opacity: 0 },
-      ], {
-        duration: 560,
-        easing: 'cubic-bezier(0.14, 0.74, 0.3, 1)',
-        fill: 'forwards',
-      });
-      animation.addEventListener('finish', () => particle.remove(), { once: true });
-    });
+      const dur = 460 + Math.random() * 320;
+      if (!p.animate) { window.setTimeout(() => p.remove(), dur); continue; }
+      const a = p.animate([
+        { transform: 'translate(-50%, -50%) scale(0.4)', opacity: 1, offset: 0 },
+        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(1)`, opacity: 1, offset: 0.4 },
+        { transform: `translate(calc(-50% + ${dx * 1.15}px), calc(-50% + ${dy + grav}px)) scale(0.1)`, opacity: 0, offset: 1 },
+      ], { duration: dur, easing: 'cubic-bezier(0.18, 0.7, 0.3, 1)', fill: 'forwards' });
+      a.addEventListener('finish', () => p.remove(), { once: true });
+    }
   }
 
+  // Star reward, playable-style (ported feel from the merge piggy drop+squash):
+  //  1. falls from above the screen with gravity (cubic ease-in → accelerates)
+  //  2. lands at centre and squashes elastically (sin pulse), little rebound
+  //  3. flies into the level badge ACCELERATING (ease-in), shrinking
+  // Particle splash on the landing impact and again on collect at the badge.
+  // Driven by rAF for precise squash control (transform-origin 50%/76% pins the
+  // bottom during the squash).
   private playStarFlight(i: number) {
     const star = document.createElement('div');
     star.className = 'star-flight';
     star.textContent = '★';
     this.viewport.appendChild(star);
 
-    const viewportRect = this.viewport.getBoundingClientRect();
-    const targetRect = this.levelBadgeEl?.getBoundingClientRect();
-    const size = 92;
-    const startX = viewportRect.width / 2 - size / 2;
-    const startY = viewportRect.height / 2 - size / 2;
-    const targetX = targetRect ? targetRect.left - viewportRect.left + targetRect.width / 2 - size / 2 : 12;
-    const targetY = targetRect ? targetRect.top - viewportRect.top + targetRect.height / 2 - size / 2 : 18;
-    const impactX = startX + size / 2;
-    const impactY = startY + size * 0.82;
+    const vp = this.viewport.getBoundingClientRect();
+    const badge = this.levelBadgeEl?.getBoundingClientRect();
+    const sz = 92;
+    const cx = vp.width / 2;
+    const groundY = vp.height * 0.44;           // landing point
+    const startY = -sz * 0.7;                   // above the screen
+    const bx = badge ? badge.left - vp.left + badge.width / 2 : 40;
+    const by = badge ? badge.top - vp.top + badge.height / 2 : 40;
 
-    if (!star.animate) {
+    if (!star.animate || typeof requestAnimationFrame !== 'function') {
       star.remove();
       this.finishStarReward(i);
       return;
     }
 
-    window.setTimeout(() => this.burstStarParticles(impactX, impactY), STAR_IMPACT_MS);
-    const animation = star.animate([
-      { transform: `translate3d(${startX}px, ${startY}px, 0) rotate(-12deg) scale(0.18)`, opacity: 0, offset: 0 },
-      { transform: `translate3d(${startX}px, ${startY}px, 0) rotate(0deg) scale(1.28)`, opacity: 1, offset: 0.10 },
-      { transform: `translate3d(${startX}px, ${startY}px, 0) rotate(0deg) scale(0.98)`, opacity: 1, offset: 0.20 },
-      { transform: `translate3d(${startX}px, ${startY - 78}px, 0) rotate(-7deg) scale(1.04)`, opacity: 1, offset: 0.38 },
-      { transform: `translate3d(${startX}px, ${startY + 10}px, 0) rotate(5deg) scale(1.32, 0.68)`, opacity: 1, offset: 0.52 },
-      { transform: `translate3d(${startX}px, ${startY - 4}px, 0) rotate(0deg) scale(0.88, 1.18)`, opacity: 1, offset: 0.60 },
-      { transform: `translate3d(${startX}px, ${startY - 34}px, 0) rotate(-5deg) scale(1.06)`, opacity: 1, offset: 0.70 },
-      { transform: `translate3d(${targetX}px, ${targetY}px, 0) rotate(26deg) scale(0.38)`, opacity: 0.92, offset: 1 },
-    ], {
-      duration: STAR_REWARD_MS,
-      easing: 'cubic-bezier(0.2, 0.78, 0.22, 1)',
-      fill: 'forwards',
-    });
-    animation.addEventListener('finish', () => {
-      star.remove();
-      this.finishStarReward(i);
-    }, { once: true });
+    const DROP = 360, SQUASH = 150, REBOUND = 160, HOLD = 70, FLY = 470;
+    const TOTAL = DROP + SQUASH + REBOUND + HOLD + FLY;
+    const t0 = performance.now();
+    let landed = false, done = false;
+
+    const frame = (now: number) => {
+      if (done) return;
+      const e = now - t0;
+      let x = cx, y = groundY, sx = 1, sy = 1, op = 1;
+
+      if (e < DROP) {
+        const t = e / DROP; const eased = t * t * t;          // accelerate down
+        y = startY + (groundY - startY) * eased;
+        op = Math.min(1, t * 3);
+      } else if (e < DROP + SQUASH) {
+        const t = (e - DROP) / SQUASH; const sq = Math.sin(t * Math.PI);
+        sx = 1 + sq * 0.32; sy = 1 - sq * 0.3;                // squash (bottom pinned by origin)
+        if (!landed) { landed = true; this.burstStarParticles(cx, groundY + sz * 0.32, 'land'); }
+      } else if (e < DROP + SQUASH + REBOUND) {
+        const t = (e - DROP - SQUASH) / REBOUND; const up = Math.sin(t * Math.PI);
+        y = groundY - sz * 0.3 * up;                          // little elastic hop
+        sx = 1 - up * 0.08; sy = 1 + up * 0.08;
+      } else if (e < DROP + SQUASH + REBOUND + HOLD) {
+        y = groundY;
+      } else {
+        const t = Math.min(1, (e - DROP - SQUASH - REBOUND - HOLD) / FLY);
+        const eased = t * t;                                  // accelerate toward the badge
+        x = cx + (bx - cx) * eased; y = groundY + (by - groundY) * eased;
+        sx = sy = 1 - 0.64 * eased; op = 1 - 0.22 * t;
+      }
+
+      star.style.opacity = String(op);
+      star.style.transform = `translate3d(${x - sz / 2}px, ${y - sz / 2}px, 0) scale(${sx}, ${sy})`;
+
+      if (e >= TOTAL) {
+        done = true;
+        star.remove();
+        this.burstStarParticles(bx, by, 'collect');
+        this.bumpLevelBadge();
+        this.finishStarReward(i);
+      } else {
+        requestAnimationFrame(frame);
+      }
+    };
+    requestAnimationFrame(frame);
   }
 
   // ── Paging ───────────────────────────────────────────────────────────────
@@ -877,14 +1092,19 @@ export class Feed {
     const fromIndex = this.indexForPos(fromPos);
     const targetIndex = this.indexForPos(targetPos);
     const changed = targetPos !== this.pos;
-    if (changed) this.liveHold = new Set([fromIndex, targetIndex]);
+    if (changed) {
+      this.liveHold = new Set([fromIndex, targetIndex]);
+      this.settlingTargetIndex = targetIndex;
+      if (this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycle();
+      this.updateLive();        // mount the incoming game while it is still host-paused
+      this.applyActiveStates();
+    }
     this.pos = targetPos;
-    if (changed && this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycle();
     this.render(true);
     if (changed) {
-      this.updateLive();        // bring the new neighbour live, drop the far tail
       this.prefetchReserve();   // keep the reserve topped up
     } else {
+      this.settlingTargetIndex = null;
       this.liveHold.clear();
       this.updateLive();
       this.applyActiveStates();

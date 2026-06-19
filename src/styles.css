@@ -6,7 +6,7 @@
   --gutter-h: var(--chrome-zone-h);
   --gutter-gap: 0px;
   --top-zone-h: calc(var(--chrome-zone-h) + env(safe-area-inset-top));
-  --top-zone-pad-top: max(8px, env(safe-area-inset-top));
+  --top-zone-pad-top: max(11px, calc(env(safe-area-inset-top) + 3px));
   --story-size: 54px;
   --ease-snap: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
@@ -43,9 +43,9 @@ body {
   max-width: 480px;
   overflow: hidden;
   background: #000;
-  /* `touch-action: none` so the browser never claims the vertical drag for
-     native scrolling — we own all paging via pointer events. */
-  touch-action: none;
+  /* Keep the game surface free for the iframe. Paging gestures are constrained
+     to the bottom gutter, and the top rail owns only its horizontal drag. */
+  touch-action: auto;
 }
 @media (min-width: 540px) {
   /* Desktop: a centered phone frame with rounded corners. */
@@ -58,6 +58,7 @@ body {
   height: auto;
   overflow: hidden;
   background: #000;
+  contain: layout paint;
 }
 
 /* One full-screen page = mini-game container + the gutter below it. Pages are
@@ -77,6 +78,9 @@ body {
   flex-direction: column;
   overflow: hidden;
   background: #000;
+  contain: layout paint;
+}
+.page--near {
   will-change: transform;
 }
 
@@ -90,19 +94,48 @@ body {
   margin: 0 8px;
   border-radius: 20px;
   overflow: hidden;
-  background: #14141c;          /* shown behind the iframe while (un)loading */
+  background:
+    radial-gradient(90% 70% at 50% 42%, rgba(53, 61, 82, 0.2), transparent 72%),
+    #07090f;                    /* shown behind the iframe while (un)loading */
   isolation: isolate;
+  contain: layout paint;
 }
+
+.game::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background:
+    radial-gradient(86% 66% at 50% 40%, rgba(255,255,255,0.055), transparent 70%),
+    linear-gradient(180deg, rgba(11, 14, 22, 0.96), rgba(5, 7, 12, 0.98));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease-out;
+}
+
+.game--loading::before { opacity: 1; }
 
 /* The playable <iframe> mounts here and fills the container. Its own gestures
    stay inside it; only the gutter (sibling, below) pages the feed. */
-.game__slot { position: absolute; inset: 0; }
+.game__slot {
+  position: absolute;
+  inset: 0;
+  background: #07090f;
+}
 .game__frame {
   width: 100%;
   height: 100%;
   border: 0;
   display: block;
-  background: transparent;
+  background: #07090f;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease-out;
+}
+.game--ready .game__frame {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .game__label {
@@ -133,7 +166,7 @@ body {
   right: 0;
   z-index: 1200;
   height: var(--top-zone-h);
-  padding: var(--top-zone-pad-top) 10px 4px;
+  padding: var(--top-zone-pad-top) 10px 1px;
   background:
     linear-gradient(180deg, rgba(18, 20, 28, 0.98), rgba(9, 10, 15, 0.94));
   border-bottom: 1px solid rgba(255,255,255,0.08);
@@ -141,7 +174,37 @@ body {
   pointer-events: none;
 }
 
+.hud::before,
+.hud::after {
+  content: '';
+  position: absolute;
+  top: var(--top-zone-pad-top);
+  bottom: 1px;
+  z-index: 2;
+  width: 30px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease-out;
+}
+
+.hud::before {
+  left: 0;
+  background: linear-gradient(90deg, rgba(18,20,28,0.98), rgba(18,20,28,0));
+}
+
+.hud::after {
+  right: 0;
+  background: linear-gradient(270deg, rgba(9,10,15,0.94), rgba(9,10,15,0));
+}
+
+.hud--stories-can-left::before,
+.hud--stories-can-right::after {
+  opacity: 1;
+}
+
 .stories {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   display: flex;
@@ -160,18 +223,6 @@ body {
 }
 .stories::-webkit-scrollbar { display: none; }
 .stories--dragging { cursor: grabbing; }
-.stories--can-right {
-  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
-  mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
-}
-.stories--can-left {
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 100%);
-  mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 100%);
-}
-.stories--can-left.stories--can-right {
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
-  mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
-}
 
 .stories::after {
   content: '';
@@ -360,18 +411,22 @@ body {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 34px;
-  height: 34px;
-  margin: -17px 0 0 -17px;
+  z-index: 4;
+  width: 42px;
+  height: 42px;
+  margin: -21px 0 0 -21px;
   border-radius: 50%;
-  border: 3px solid rgba(255,255,255,0.18);
-  border-top-color: rgba(255,255,255,0.85);
-  animation: spin 0.8s linear infinite;
+  border: 3px solid rgba(255,255,255,0.14);
+  border-top-color: rgba(255,216,90,0.96);
+  border-right-color: rgba(94,230,168,0.86);
+  box-shadow: 0 0 24px rgba(255,216,90,0.12);
+  animation: spin 0.74s linear infinite;
   opacity: 0;
   transition: opacity 0.2s;
+  pointer-events: none;
 }
 .game--loading .game__spinner { opacity: 1; }
-.game:not(.game--loading) .game__frame { animation: fadein 0.25s ease-out; }
+.game--ready .game__frame { animation: fadein 0.18s ease-out; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
@@ -486,6 +541,87 @@ body {
   will-change: transform, opacity;
 }
 
+.levelup {
+  position: absolute;
+  inset: 0;
+  z-index: 2300;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: radial-gradient(70% 55% at 50% 42%, rgba(255,216,90,0.2), rgba(4,6,10,0.82) 68%);
+  pointer-events: none;
+}
+
+.levelup__card {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  color: #fff;
+  text-align: center;
+  filter: drop-shadow(0 18px 34px rgba(0,0,0,0.45));
+  will-change: transform, opacity;
+}
+
+.levelup__kicker {
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 1.2px;
+  color: #fff1a8;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+
+.levelup__badge {
+  position: relative;
+  width: 116px;
+  height: 116px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 24%, #fff6bc, #ffd85a 42%, #ff9f45 100%);
+  color: #6c3d0d;
+  box-shadow:
+    inset 0 3px 0 rgba(255,255,255,0.56),
+    inset 0 -12px 20px rgba(128,67,8,0.25),
+    0 18px 42px rgba(255,177,50,0.32);
+}
+
+.levelup__star {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255,255,255,0.28);
+  font-size: 104px;
+  line-height: 1;
+  transform: translateY(-2px);
+}
+
+.levelup__num {
+  position: relative;
+  z-index: 1;
+  font-size: 44px;
+  line-height: 1;
+  font-weight: 950;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 2px 0 rgba(255,255,255,0.35);
+}
+
+.levelup__title {
+  font-size: 23px;
+  line-height: 1;
+  font-weight: 950;
+  text-shadow: 0 3px 12px rgba(0,0,0,0.48);
+}
+
+.confetti {
+  position: absolute;
+  z-index: 0;
+  box-shadow: 0 3px 8px rgba(0,0,0,0.12);
+  will-change: transform, opacity;
+}
+
 /* ── Gutter: the paging handle that glues page N to page N+1 ────────────────*/
 .gutter {
   position: relative;
@@ -506,6 +642,7 @@ body {
   box-shadow: 0 -10px 22px rgba(0,0,0,0.22);
   user-select: none;
   -webkit-user-select: none;
+  contain: layout paint;
 }
 .gutter:active { cursor: grabbing; }
 
@@ -567,3 +704,42 @@ body {
   opacity: 0.7;
   font-variant-numeric: tabular-nums;
 }
+
+/* ── Level-up celebration ───────────────────────────────────────────────────*/
+.levelup {
+  position: absolute;
+  inset: 0;
+  z-index: 2400;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: radial-gradient(120% 80% at 50% 42%, rgba(30,34,52,0.6), rgba(6,8,14,0.82));
+  pointer-events: none;
+}
+.levelup__card {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 22px 32px 24px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(32,36,52,0.94), rgba(14,16,24,0.94));
+  border: 1px solid rgba(255,255,255,0.14);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.14);
+  will-change: transform, opacity;
+}
+.levelup__kicker {
+  font-size: 13px; font-weight: 800; letter-spacing: 3px;
+  color: #ffd85a; text-shadow: 0 2px 10px rgba(255,190,48,0.5);
+}
+.levelup__badge { position: relative; width: 100px; height: 100px; display: grid; place-items: center; }
+.levelup__star {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: 100px; line-height: 1; color: #ffd85a;
+  text-shadow: 0 4px 0 #9a5b15, 0 0 28px rgba(255,221,89,0.62);
+}
+.levelup__num {
+  position: relative; z-index: 1; font-size: 36px; font-weight: 900; color: #53330f;
+  margin-top: 6px; text-shadow: 0 1px 0 rgba(255,255,255,0.4);
+}
+.levelup__title { font-size: 22px; font-weight: 900; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+.confetti { position: absolute; z-index: 2410; will-change: transform, opacity; pointer-events: none; }
