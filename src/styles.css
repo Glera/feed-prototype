@@ -397,76 +397,6 @@ body {
 .hud__level--bump { animation: hud-bump 0.26s ease-out; }
 .hud--level-up .hud__level { animation: hud-level-up 0.42s ease-out; }
 
-.friend-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 2400;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(4, 6, 10, 0.72);
-  backdrop-filter: blur(10px);
-}
-
-.friend-overlay__panel {
-  position: relative;
-  width: min(100%, 310px);
-  display: grid;
-  justify-items: center;
-  gap: 8px;
-  padding: 26px 22px 24px;
-  border-radius: 22px;
-  background:
-    radial-gradient(90% 70% at 50% 0%, rgba(255,216,90,0.14), transparent 72%),
-    rgba(15, 18, 27, 0.96);
-  border: 1px solid rgba(255,255,255,0.12);
-  box-shadow: 0 22px 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.12);
-}
-
-.friend-overlay__close {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 32px;
-  height: 32px;
-  border: 0;
-  border-radius: 50%;
-  color: #fff;
-  background: rgba(255,255,255,0.12);
-  font: 900 20px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-}
-
-.friend-overlay__avatar {
-  width: 72px;
-  height: 72px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  color: #53330f;
-  background: radial-gradient(circle at 32% 24%, #fff6bc, #ffd85a 48%, #ff9f45);
-  font-size: 30px;
-  font-weight: 950;
-  box-shadow: inset 0 2px 0 rgba(255,255,255,0.5), 0 12px 28px rgba(255,177,50,0.25);
-}
-
-.friend-overlay__name {
-  font-size: 24px;
-  line-height: 1.05;
-  font-weight: 950;
-}
-
-.friend-overlay__meta,
-.friend-overlay__detail {
-  color: rgba(255,255,255,0.72);
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.friend-overlay__detail {
-  margin-top: 4px;
-  color: rgba(255,255,255,0.9);
-}
-
 @keyframes hud-bump {
   0% { transform: scale(1); }
   45% { transform: scale(1.14); }
@@ -776,4 +706,79 @@ body {
   font-size: 13px;
   opacity: 0.7;
   font-variant-numeric: tabular-nums;
+}
+
+/* ── Friend story view (Instagram-style) ────────────────────────────────────*/
+.story-view {
+  position: absolute;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  flex-direction: column;
+  background: #07090f;
+}
+.story-view__bar {
+  height: 3px;
+  margin: calc(env(safe-area-inset-top) + 8px) 12px 0;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.25);
+  overflow: hidden;
+}
+.story-view__bar > span { display: block; height: 100%; width: 40%; background: #fff; border-radius: 2px; }
+.story-view__header { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
+.story-view__avatar { width: 40px; height: 40px; flex: 0 0 40px; }
+.story-view__avatar span { width: 32px; height: 32px; font-size: 14px; }
+.story-view__meta { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.story-view__name { font-size: 14px; font-weight: 800; color: #fff; }
+.story-view__time { font-size: 12px; color: rgba(255,255,255,0.6); }
+.story-view__close {
+  flex: 0 0 auto; width: 34px; height: 34px; border: 0; border-radius: 50%;
+  background: rgba(255,255,255,0.12); color: #fff; font-size: 16px; line-height: 1; cursor: pointer;
+}
+.story-view__stage {
+  position: relative; flex: 1 1 auto; min-height: 0;
+  margin: 2px 8px 0; border-radius: 18px; overflow: hidden; background: #07090f;
+}
+.story-view__frame { width: 100%; height: 100%; border: 0; display: block; background: #07090f; }
+.story-view__footer { display: flex; align-items: center; gap: 10px; padding: 12px 14px calc(env(safe-area-inset-bottom) + 14px); }
+.story-view__reply {
+  flex: 1 1 auto; min-width: 0; height: 44px; padding: 0 16px;
+  border-radius: 999px; border: 1.5px solid rgba(255,255,255,0.5);
+  background: transparent; color: #fff; font-size: 14px; outline: none;
+}
+.story-view__reply::placeholder { color: rgba(255,255,255,0.55); }
+.story-view__heart {
+  flex: 0 0 auto; width: 44px; height: 44px; border: 0; background: transparent;
+  color: #fff; font-size: 28px; line-height: 1; cursor: pointer;
+}
+.story-view__heart--liked { color: #ff3b5c; }
+
+/* ── Mechanic editor (placeholder) ──────────────────────────────────────────*/
+.editor {
+  position: absolute;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  flex-direction: column;
+  background: radial-gradient(120% 80% at 50% 18%, #1b2030, #0a0c12);
+}
+.editor__header { display: flex; align-items: center; padding: calc(env(safe-area-inset-top) + 12px) 14px 10px; }
+.editor__title { flex: 1; font-size: 17px; font-weight: 800; color: #fff; }
+.editor__close { width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(255,255,255,0.12); color: #fff; font-size: 16px; cursor: pointer; }
+.editor__body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px 22px 40px; text-align: center; }
+.editor__hero { font-size: 52px; }
+.editor__lead { font-size: 20px; font-weight: 900; color: #fff; }
+.editor__sub { font-size: 13px; line-height: 1.4; color: rgba(255,255,255,0.62); max-width: 300px; }
+.editor__templates { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 6px; }
+.editor__tpl { width: 76px; display: grid; gap: 6px; justify-items: center; opacity: 0.85; }
+.editor__tpl-art {
+  width: 70px; height: 70px; border-radius: 14px;
+  background: linear-gradient(160deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05));
+  border: 1px dashed rgba(255,255,255,0.3);
+}
+.editor__tpl-name { font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.8); }
+.editor__cta {
+  margin-top: 14px; height: 46px; padding: 0 26px; border: 0; border-radius: 999px;
+  background: linear-gradient(180deg, #45d68c, #2fae6e); color: #06120c; font-weight: 800; font-size: 15px;
+  opacity: 0.5;
 }
