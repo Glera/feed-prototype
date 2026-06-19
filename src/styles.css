@@ -91,14 +91,15 @@ body {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  margin: 0 8px;
-  border-radius: 20px;
+  margin: 0;
+  border-radius: 0;
   overflow: hidden;
   background:
     radial-gradient(90% 70% at 50% 42%, rgba(53, 61, 82, 0.2), transparent 72%),
     #07090f;                    /* shown behind the iframe while (un)loading */
   isolation: isolate;
   contain: layout paint;
+  touch-action: manipulation;
 }
 
 .game::before {
@@ -122,6 +123,7 @@ body {
   position: absolute;
   inset: 0;
   background: #07090f;
+  touch-action: manipulation;
 }
 .game__frame {
   width: 100%;
@@ -131,6 +133,7 @@ body {
   background: #07090f;
   opacity: 0;
   pointer-events: none;
+  touch-action: manipulation;
   transition: opacity 0.18s ease-out;
 }
 .game--ready .game__frame {

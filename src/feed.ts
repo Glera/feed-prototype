@@ -428,6 +428,7 @@ export class Feed {
     frame.setAttribute('allow', 'autoplay');
     frame.addEventListener('load', () => {
       if (this.frames.get(i) !== frame) return;
+      this.disableFrameDoubleTapZoom(frame);
       this.frameLoaded.add(i);
       this.setFramePaused(i, this.shouldPauseFrame(i));
       this.queueFrameReadyFallback(i, frame);
@@ -448,6 +449,36 @@ export class Feed {
     this.resetFrameReadiness(i);
     this.games[i].classList.add('game--loading');
     this.games[i].classList.remove('game--ready');
+  }
+
+  private disableFrameDoubleTapZoom(frame: HTMLIFrameElement) {
+    try {
+      const doc = frame.contentDocument;
+      if (!doc) return;
+
+      let meta = doc.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+      if (!meta) {
+        meta = doc.createElement('meta');
+        meta.name = 'viewport';
+        doc.head?.appendChild(meta);
+      }
+      const content = meta.getAttribute('content') || 'width=device-width, initial-scale=1.0';
+      const baseContent = content
+        .replace(/\s*,?\s*user-scalable\s*=\s*[^,\s]+/gi, '')
+        .replace(/\s*,?\s*maximum-scale\s*=\s*[^,\s]+/gi, '')
+        .replace(/,\s*,/g, ',')
+        .replace(/^\s*,|,\s*$/g, '')
+        .trim() || 'width=device-width, initial-scale=1.0';
+      meta.setAttribute('content', `${baseContent}, user-scalable=no, maximum-scale=1.0`);
+
+      if (doc.getElementById('feed-host-touch-guard')) return;
+      const style = doc.createElement('style');
+      style.id = 'feed-host-touch-guard';
+      style.textContent = 'html,body,canvas,#app,#root{touch-action:manipulation;-webkit-tap-highlight-color:transparent;}';
+      doc.head?.appendChild(style);
+    } catch {
+      /* cross-origin mechanics keep their own viewport policy */
+    }
   }
 
   private resetFrameReadiness(i: number) {
@@ -575,6 +606,7 @@ export class Feed {
     frame.className = 'story-view__frame';
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('allow', 'autoplay');
+    frame.addEventListener('load', () => this.disableFrameDoubleTapZoom(frame));
     frame.src = playableUrl(mechanic, { hostPaused: false });
     ov.querySelector('.story-view__stage')!.appendChild(frame);
     this.storyFrame = frame;
