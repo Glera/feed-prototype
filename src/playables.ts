@@ -29,8 +29,9 @@ export const PLAYABLES: Playable[] = [
 
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
  *  override the host with `?base=…` for local development. */
-export function playableUrl(id: string): string {
+export function playableUrl(id: string, options: { hostPaused?: boolean } = {}): string {
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
-  return `${base}${id}.html`;
+  const url = `${base}${id}.html`;
+  return options.hostPaused ? `${url}?hostPaused=1` : url;
 }

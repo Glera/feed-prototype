@@ -12,22 +12,21 @@ import { PLAYABLES, playableUrl, type Playable } from './playables';
  * Gesture separation (phase 1): paging is wired ONLY to the bottom gutter, so
  * in-game gestures (inside the playable's <iframe>) never page the feed.
  *
- * Loading model (phase 2):
- *  - A small LIVE window of neighbours (prev / current / next) is instantiated
- *    and rendered, so sliding either way shows no loader.
- *  - Only the CURRENT game RUNS; neighbours are PAUSED (ready but frozen) via
- *    the playable's own visibility lifecycle (flip the iframe document's
- *    `hidden` + dispatch `visibilitychange`; works same-origin). The next game
- *    RESUMES only after the slide settles; the previous one pauses.
- *  - Beyond the live window, RESERVE_AHEAD bundles are PREFETCHED (bytes only).
+ * Loading model:
+ *  - Only the CURRENT game is mounted while the feed is idle.
+ *  - During a drag/settle we temporarily mount the outgoing and incoming games;
+ *    non-current games enter the playable host-paused state and do not run
+ *    requestAnimationFrame until resumed.
+ *  - Ahead bundles are PREFETCHED (bytes only), so the next mount is warm
+ *    without spending CPU/GPU on hidden gameplay.
  *  - A fill-bar preloader covers the initial batch.
  */
 
 const DISTANCE_SNAP_FRAC = 0.18;   // drag past 18% of a page → commit to the next
 const VELOCITY_SNAP = 0.45;        // px/ms flick that commits regardless of distance
 
-const LIVE_AHEAD = 1;              // instantiate this many ahead (ready & rendered, paused)
-const LIVE_BEHIND = 1;             // and this many behind (instant back-swipe)
+const LIVE_AHEAD = 0;              // idle feed mounts current only; ahead is bytes-prefetched
+const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
 const RESERVE_AHEAD = 5;           // prefetch this many bundles ahead (bytes only)
 const PREFETCH_BEHIND = 1;
 const INITIAL_BATCH = 5;           // preloader fills until the first N are ready
@@ -62,11 +61,13 @@ export class Feed {
   private frames = new Map<number, HTMLIFrameElement>();
   private runSeq = 0;
   private completedRunIds = new Set<string>();
+  private liveHold = new Set<number>();
 
   private totalStars = 0;
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
   private hudEl: HTMLElement | null = null;
+  private storiesEl: HTMLElement | null = null;
   private levelBadgeEl: HTMLElement | null = null;
   private levelEl: HTMLElement | null = null;
   private levelProgressEl: HTMLElement | null = null;
@@ -107,7 +108,9 @@ export class Feed {
     this.feedEl.addEventListener('transitionend', (e) => {
       if (e.propertyName !== 'transform' || this.dragging) return;
       this.pos = this.realIndex();      // keep pos bounded; same visual (delta mod N)
+      this.liveHold.clear();
       this.render(false);
+      this.updateLive();
       this.applyActiveStates();
     });
 
@@ -121,7 +124,11 @@ export class Feed {
   }
 
   private realIndex(): number {
-    return ((Math.round(this.pos) % this.N) + this.N) % this.N;
+    return this.indexForPos(this.pos);
+  }
+
+  private indexForPos(pos: number): number {
+    return ((Math.round(pos) % this.N) + this.N) % this.N;
   }
 
   // ── Build DOM ──────────────────────────────────────────────────────────
@@ -178,17 +185,99 @@ export class Feed {
 
   private mountHud() {
     const hud = document.createElement('div');
+    const friendStories = [
+      ['Ava', 'A', 'sky'],
+      ['Mila', 'M', 'rose'],
+      ['Leo', 'L', 'mint'],
+      ['Nika', 'N', 'sun'],
+      ['Tim', 'T', 'violet'],
+      ['Zoe', 'Z', 'sky'],
+      ['Max', 'M', 'rose'],
+      ['Eva', 'E', 'mint'],
+      ['Sam', 'S', 'sun'],
+      ['Kai', 'K', 'violet'],
+      ['Mia', 'M', 'sky'],
+      ['Dan', 'D', 'rose'],
+      ['Liza', 'L', 'mint'],
+      ['Ben', 'B', 'sun'],
+    ].map(([name, initial, tone]) => this.friendStoryMarkup(name, initial, tone)).join('');
     hud.className = 'hud';
     hud.innerHTML =
-      '<div class="hud__level" aria-label="Level progress">' +
-        '<div class="hud__level-ring"></div>' +
-        '<div class="hud__level-core"><span class="hud__level-value">1</span></div>' +
+      '<div class="stories" aria-label="Friends">' +
+        '<div class="story story--me">' +
+          '<div class="hud__level" aria-label="Level progress">' +
+            '<div class="hud__level-ring"></div>' +
+            '<div class="hud__level-core"><span class="hud__level-value">1</span></div>' +
+            '<span class="hud__level-plus" aria-hidden="true"></span>' +
+          '</div>' +
+          '<div class="story__name">You</div>' +
+        '</div>' +
+        friendStories +
       '</div>';
     this.viewport.appendChild(hud);
     this.hudEl = hud;
     this.levelBadgeEl = hud.querySelector('.hud__level');
     this.levelEl = hud.querySelector('.hud__level-value');
     this.levelProgressEl = hud.querySelector('.hud__level-ring');
+    const stories = hud.querySelector<HTMLElement>('.stories');
+    this.storiesEl = stories;
+    if (stories) this.attachStoryScroller(stories);
+  }
+
+  private friendStoryMarkup(name: string, initial: string, tone: string): string {
+    return (
+      `<div class="story">` +
+        `<div class="story__avatar story__avatar--${tone}"><span>${initial}</span></div>` +
+        `<div class="story__name">${name}</div>` +
+      `</div>`
+    );
+  }
+
+  private attachStoryScroller(scroller: HTMLElement) {
+    let dragging = false;
+    let startX = 0;
+    let startScrollLeft = 0;
+
+    const updateMask = () => {
+      const maxScroll = scroller.scrollWidth - scroller.clientWidth;
+      scroller.classList.toggle('stories--can-left', scroller.scrollLeft > 1);
+      scroller.classList.toggle('stories--can-right', scroller.scrollLeft < maxScroll - 1);
+    };
+
+    const endDrag = (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      scroller.classList.remove('stories--dragging');
+      try { scroller.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+    };
+
+    scroller.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      startX = e.clientX;
+      startScrollLeft = scroller.scrollLeft;
+      scroller.classList.add('stories--dragging');
+      scroller.setPointerCapture(e.pointerId);
+    });
+
+    scroller.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      scroller.scrollLeft = startScrollLeft - (e.clientX - startX);
+    });
+
+    scroller.addEventListener('scroll', updateMask, { passive: true });
+    scroller.addEventListener('pointerup', endDrag);
+    scroller.addEventListener('pointercancel', endDrag);
+    scroller.addEventListener('lostpointercapture', endDrag);
+    window.addEventListener('resize', updateMask);
+    requestAnimationFrame(updateMask);
+  }
+
+  private resetStoriesToMyLevel() {
+    if (!this.storiesEl) return;
+    this.storiesEl.scrollLeft = 0;
+    this.storiesEl.classList.remove('stories--can-left');
+    this.storiesEl.classList.toggle('stories--can-right', this.storiesEl.scrollWidth > this.storiesEl.clientWidth + 1);
   }
 
   // ── Ring rendering ─────────────────────────────────────────────────────────
@@ -205,13 +294,15 @@ export class Feed {
       const pg = this.pageEls[i];
       pg.style.transition = animate && !wrapped ? 'transform 0.36s var(--ease-snap)' : 'none';
       pg.style.transform = `translate3d(0, ${delta * this.pageH}px, 0)`;
+      pg.style.zIndex = String(1000 - Math.round(Math.abs(delta) * 10));
       this.pageDelta[i] = delta;
     }
   }
 
   // ── Live window (instantiate neighbours, tear down the far ones) ───────────
   private liveSet(): Set<number> {
-    const s = new Set<number>();
+    const s = new Set<number>(this.liveHold);
+    s.add(this.realIndex());
     for (let d = -LIVE_BEHIND; d <= LIVE_AHEAD; d++) {
       s.add(((this.realIndex() + d) % this.N + this.N) % this.N);
     }
@@ -239,7 +330,7 @@ export class Feed {
       this.setFramePaused(i, this.shouldPauseFrame(i));
       this.markReady(i);
     });
-    frame.src = playableUrl(this.playables[i].id);
+    frame.src = playableUrl(this.playables[i].id, { hostPaused: this.shouldPauseFrame(i) });
     this.slots[i].appendChild(frame);
     this.frames.set(i, frame);
   }
@@ -264,6 +355,8 @@ export class Feed {
       const win = frame.contentWindow as (Window & typeof globalThis) | null;
       const doc = win?.document;
       if (!win || !doc) return;
+      const api = (win as any).__playable;
+      if (typeof api?.setHostPaused === 'function') api.setHostPaused(paused);
       Object.defineProperty(doc, 'hidden', { configurable: true, get: () => paused });
       Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (paused ? 'hidden' : 'visible') });
       doc.dispatchEvent(new win.Event('visibilitychange'));
@@ -355,13 +448,19 @@ export class Feed {
   }
 
   private onDown(e: PointerEvent, gutter: HTMLElement) {
+    const current = this.realIndex();
+    const next = (current + 1) % this.N;
+    this.liveHold = new Set([current, next]);
+    this.updateLive();
+    this.applyActiveStates();
+
     this.dragging = true;
     this.startY = e.clientY;
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
     this.velocity = 0;
     this.basePos = Math.round(this.pos);
-    this.unlockAudioForCurrentAndNext(this.realIndex());
+    this.unlockAudioForCurrentAndNext(current);
     gutter.setPointerCapture(e.pointerId);
   }
 
@@ -516,6 +615,7 @@ export class Feed {
     this.earnedThisCycle.add(i);
     this.updateMechanicState(i);
     this.applyActiveStates();
+    this.resetStoriesToMyLevel();
     this.playStarFlight(i);
   }
 
@@ -774,20 +874,27 @@ export class Feed {
   // ── Paging ───────────────────────────────────────────────────────────────
   goTo(targetPos: number) {
     const fromPos = Math.round(this.pos);
+    const fromIndex = this.indexForPos(fromPos);
+    const targetIndex = this.indexForPos(targetPos);
     const changed = targetPos !== this.pos;
+    if (changed) this.liveHold = new Set([fromIndex, targetIndex]);
     this.pos = targetPos;
     if (changed && this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycle();
     this.render(true);
     if (changed) {
       this.updateLive();        // bring the new neighbour live, drop the far tail
       this.prefetchReserve();   // keep the reserve topped up
+    } else {
+      this.liveHold.clear();
+      this.updateLive();
+      this.applyActiveStates();
     }
     // resume/pause happens on the transitionend (= after the slide)
   }
 
   // ── Layout ────────────────────────────────────────────────────────────────
   private measure() {
-    this.pageH = this.viewport.clientHeight;
+    this.pageH = this.feedEl.getBoundingClientRect().height;
   }
 
   private onResize = () => {

@@ -2,9 +2,13 @@
   /* Height of the bottom swipe gutter — the "glue" strip between two adjacent
      mini-games. This is the ONLY region that pages the feed; everything above
      it belongs to the mini-game and its own gestures. */
-  --gutter-h: 104px;
+  --chrome-zone-h: 88px;
+  --gutter-h: var(--chrome-zone-h);
+  --gutter-gap: 0px;
+  --top-zone-h: calc(var(--chrome-zone-h) + env(safe-area-inset-top));
+  --top-zone-pad-top: max(8px, env(safe-area-inset-top));
+  --story-size: 54px;
   --ease-snap: cubic-bezier(0.22, 0.61, 0.36, 1);
-  --hud-top: max(12px, env(safe-area-inset-top));
 }
 
 @property --level-progress {
@@ -50,8 +54,10 @@ body {
 
 .feed {
   position: absolute;
-  inset: 0;
-  height: 100%;
+  inset: var(--top-zone-h) 0 0;
+  height: auto;
+  overflow: hidden;
+  background: #000;
 }
 
 /* One full-screen page = mini-game container + the gutter below it. Pages are
@@ -69,6 +75,8 @@ body {
   height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  background: #000;
   will-change: transform;
 }
 
@@ -79,7 +87,7 @@ body {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  margin: 8px 8px 0;
+  margin: 0 8px;
   border-radius: 20px;
   overflow: hidden;
   background: #14141c;          /* shown behind the iframe while (un)loading */
@@ -99,7 +107,7 @@ body {
 
 .game__label {
   position: absolute;
-  top: calc(var(--hud-top) + 64px);
+  top: 12px;
   left: 14px;
   z-index: 2;
   font-size: 11px;
@@ -120,18 +128,123 @@ body {
 /* ── Progress HUD ───────────────────────────────────────────────────────────*/
 .hud {
   position: absolute;
-  top: var(--hud-top);
-  left: 12px;
-  z-index: 12;
-  width: 54px;
-  height: 54px;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1200;
+  height: var(--top-zone-h);
+  padding: var(--top-zone-pad-top) 10px 4px;
+  background:
+    linear-gradient(180deg, rgba(18, 20, 28, 0.98), rgba(9, 10, 15, 0.94));
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  box-shadow: inset 0 -10px 18px rgba(0,0,0,0.16);
   pointer-events: none;
+}
+
+.stories {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  touch-action: pan-x;
+  cursor: grab;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.stories::-webkit-scrollbar { display: none; }
+.stories--dragging { cursor: grabbing; }
+.stories--can-right {
+  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 26px), transparent 100%);
+}
+.stories--can-left {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 100%);
+}
+.stories--can-left.stories--can-right {
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
+}
+
+.stories::after {
+  content: '';
+  flex: 0 0 3px;
+}
+
+.story {
+  flex: 0 0 54px;
+  width: 54px;
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+}
+
+.story__avatar {
+  position: relative;
+  width: var(--story-size);
+  height: var(--story-size);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  padding: 3px;
+  background:
+    conic-gradient(from -35deg, #ff4f8b, #ffcc4a, #45d68c, #37a6ff, #ff4f8b);
+  box-shadow: 0 8px 16px rgba(0,0,0,0.28);
+}
+
+.story__avatar::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: inherit;
+  background: rgba(8, 10, 16, 0.82);
+}
+
+.story__avatar span {
+  position: relative;
+  z-index: 1;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 900;
+  text-shadow: 0 2px 7px rgba(0,0,0,0.45);
+}
+
+.story__avatar--sky span { background: linear-gradient(145deg, #37a6ff, #5ee6a8); }
+.story__avatar--rose span { background: linear-gradient(145deg, #ff4f8b, #ff9f45); }
+.story__avatar--mint span { background: linear-gradient(145deg, #45d68c, #a8f06b); }
+.story__avatar--sun span { background: linear-gradient(145deg, #ffd85a, #ff8b3d); color: #53330f; }
+.story__avatar--violet span { background: linear-gradient(145deg, #8d6bff, #f06bd8); }
+
+.story__name {
+  width: 100%;
+  min-width: 0;
+  color: rgba(255,255,255,0.82);
+  font-size: 11px;
+  line-height: 1.1;
+  font-weight: 700;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 5px rgba(0,0,0,0.5);
 }
 
 .hud__level {
   position: relative;
-  width: 54px;
-  height: 54px;
+  width: var(--story-size);
+  height: var(--story-size);
   display: grid;
   place-items: center;
   border-radius: 50%;
@@ -195,6 +308,36 @@ body {
   font-weight: 900;
   font-variant-numeric: tabular-nums;
   text-shadow: 0 2px 7px rgba(0,0,0,0.48);
+}
+
+.hud__level-plus {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #5ee6a8, #24b96f);
+  border: 2px solid #090a0f;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.36);
+}
+
+.hud__level-plus::before,
+.hud__level-plus::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9px;
+  height: 2px;
+  border-radius: 999px;
+  background: #fff;
+  transform: translate(-50%, -50%);
+}
+
+.hud__level-plus::after {
+  transform: translate(-50%, -50%) rotate(90deg);
 }
 
 .hud__level--bump { animation: hud-bump 0.26s ease-out; }
@@ -302,7 +445,7 @@ body {
   position: absolute;
   top: 0;
   left: 0;
-  z-index: 31;
+  z-index: 2200;
   width: 92px;
   height: 92px;
   display: grid;
@@ -321,7 +464,7 @@ body {
 
 .star-particle {
   position: absolute;
-  z-index: 30;
+  z-index: 2190;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -332,7 +475,7 @@ body {
 
 .star-impact {
   position: absolute;
-  z-index: 29;
+  z-index: 2180;
   width: 96px;
   height: 24px;
   border-radius: 50%;
@@ -348,6 +491,7 @@ body {
   position: relative;
   flex: 0 0 var(--gutter-h);
   height: var(--gutter-h);
+  margin-top: var(--gutter-gap);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -358,6 +502,8 @@ body {
   background:
     radial-gradient(120% 80% at 50% 0%, rgba(255,255,255,0.06), transparent 70%),
     #111119;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 -10px 22px rgba(0,0,0,0.22);
   user-select: none;
   -webkit-user-select: none;
 }
@@ -386,7 +532,7 @@ body {
 .preloader {
   position: absolute;
   inset: 0;
-  z-index: 20;
+  z-index: 3000;
   display: flex;
   flex-direction: column;
   align-items: center;
