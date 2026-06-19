@@ -33,9 +33,12 @@ const PREFETCH_BEHIND = 1;
 const INITIAL_BATCH = 5;           // preloader fills until the first N are ready
 const PRELOADER_TIMEOUT_MS = 15000;
 const ANALYTICS_POLL_MS = 350;     // fallback for older non-SWIPE exports
-const STAR_FLIGHT_MS = 920;
-const AUTO_ADVANCE_AFTER_STAR_MS = 180;
+const STAR_REWARD_MS = 1480;
+const STAR_PARTICLE_BURST_MS = 690;
+const LEVEL_PROGRESS_MS = 340;
+const AUTO_ADVANCE_AFTER_REWARD_MS = 120;
 const LEVEL_RESET_MS = 420;
+const STARS_PER_LEVEL = 5;
 
 type PlayableOutcome = 'won' | 'lost';
 
@@ -62,10 +65,9 @@ export class Feed {
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
   private hudEl: HTMLElement | null = null;
+  private levelBadgeEl: HTMLElement | null = null;
   private levelEl: HTMLElement | null = null;
-  private starCounterEl: HTMLElement | null = null;
-  private starCountEl: HTMLElement | null = null;
-  private levelFillEl: HTMLElement | null = null;
+  private levelProgressEl: HTMLElement | null = null;
   private levelResetTimer: number | null = null;
 
   private prefetched = new Set<number>();
@@ -88,7 +90,7 @@ export class Feed {
     this.feedEl = feedEl;
     this.playables = playables;
     this.N = playables.length;
-    this.starsPerLevel = Math.max(1, this.N);
+    this.starsPerLevel = STARS_PER_LEVEL;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     this.mountHud();
@@ -165,7 +167,7 @@ export class Feed {
     gutter.dataset.index = String(i);
     gutter.innerHTML =
       '<div class="gutter__grip"></div>' +
-      '<div class="gutter__label"><span class="gutter__chev">▲</span> Swipe to switch game <span class="gutter__chev">▼</span></div>';
+      '<div class="gutter__label"><span class="gutter__chev">▲</span> Swipe up for next game</div>';
     this.attachGutter(gutter);
     return gutter;
   }
@@ -174,15 +176,15 @@ export class Feed {
     const hud = document.createElement('div');
     hud.className = 'hud';
     hud.innerHTML =
-      '<div class="hud__level"><span class="hud__level-kicker">LVL</span><span class="hud__level-value">1</span></div>' +
-      '<div class="hud__progress" aria-label="Level progress"><div class="hud__progress-fill"></div></div>' +
-      '<div class="hud__stars"><span class="hud__star-icon">★</span><span class="hud__stars-value">0</span></div>';
+      '<div class="hud__level" aria-label="Level progress">' +
+        '<div class="hud__level-ring"></div>' +
+        '<div class="hud__level-core"><span class="hud__level-value">1</span></div>' +
+      '</div>';
     this.viewport.appendChild(hud);
     this.hudEl = hud;
+    this.levelBadgeEl = hud.querySelector('.hud__level');
     this.levelEl = hud.querySelector('.hud__level-value');
-    this.starCounterEl = hud.querySelector('.hud__stars');
-    this.starCountEl = hud.querySelector('.hud__stars-value');
-    this.levelFillEl = hud.querySelector('.hud__progress-fill');
+    this.levelProgressEl = hud.querySelector('.hud__level-ring');
   }
 
   // ── Ring rendering ─────────────────────────────────────────────────────────
@@ -344,7 +346,8 @@ export class Feed {
     if (dt > 0) this.velocity = (e.clientY - this.lastY) / dt;
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
-    this.pos = this.basePos - dy / this.pageH;   // drag up → pos increases → next
+    const forwardProgress = Math.max(0, -dy / this.pageH);
+    this.pos = this.basePos + forwardProgress;   // drag up → pos increases → next
     this.render(false);
   }
 
@@ -356,11 +359,8 @@ export class Feed {
     const dy = e.clientY - this.startY;
     let step = 0;
     const fastUp = this.velocity <= -VELOCITY_SNAP;
-    const fastDown = this.velocity >= VELOCITY_SNAP;
     const farUp = dy <= -this.pageH * DISTANCE_SNAP_FRAC;
-    const farDown = dy >= this.pageH * DISTANCE_SNAP_FRAC;
     if (fastUp || farUp) step = 1;
-    else if (fastDown || farDown) step = -1;
 
     this.goTo(this.basePos + step);
   }
@@ -477,18 +477,25 @@ export class Feed {
     const failed = this.failedThisCycle.has(i);
     game.classList.toggle('game--earned', earned);
     game.classList.toggle('game--failed', failed);
+    state.classList.toggle('game__state--earned', earned);
+    state.classList.toggle('game__state--failed', failed);
     state.replaceChildren();
     state.hidden = !earned && !failed;
     if (!earned && !failed) return;
 
-    const badge = document.createElement('div');
-    badge.className = 'game__state-badge';
-    badge.textContent = earned ? '★' : '↻';
-    state.appendChild(badge);
-
     const title = document.createElement('div');
     title.className = 'game__state-title';
     title.textContent = earned ? 'Star earned' : 'Try again';
+
+    if (earned) {
+      state.appendChild(title);
+      return;
+    }
+
+    const badge = document.createElement('div');
+    badge.className = 'game__state-badge';
+    badge.textContent = '↻';
+    state.appendChild(badge);
     state.appendChild(title);
 
     if (failed) {
@@ -545,47 +552,101 @@ export class Feed {
     const level = Math.floor(this.totalStars / this.starsPerLevel) + 1;
     const progress = (this.totalStars % this.starsPerLevel) / this.starsPerLevel;
     if (this.levelEl) this.levelEl.textContent = String(level);
-    if (this.starCountEl) this.starCountEl.textContent = String(this.totalStars);
-    if (this.levelFillEl) {
-      this.levelFillEl.style.transition = animate ? '' : 'none';
-      this.levelFillEl.style.transform = `scaleX(${progress})`;
-      if (!animate) {
-        this.levelFillEl.offsetHeight;
-        this.levelFillEl.style.transition = '';
-      }
+    this.setLevelProgress(progress, animate);
+  }
+
+  private setLevelProgress(progress: number, animate: boolean = true) {
+    if (!this.levelProgressEl) return;
+    const clamped = Math.max(0, Math.min(1, progress));
+    this.levelProgressEl.style.transition = animate ? '' : 'none';
+    this.levelProgressEl.style.setProperty('--level-progress', `${clamped * 360}deg`);
+    if (!animate) {
+      this.levelProgressEl.offsetHeight;
+      this.levelProgressEl.style.transition = '';
     }
   }
 
-  private addStarToHud() {
+  private bumpLevelBadge() {
+    this.levelBadgeEl?.classList.add('hud__level--bump');
+    window.setTimeout(() => this.levelBadgeEl?.classList.remove('hud__level--bump'), 260);
+  }
+
+  private pulseLevelUp() {
+    this.hudEl?.classList.add('hud--level-up');
+    window.setTimeout(() => this.hudEl?.classList.remove('hud--level-up'), 420);
+  }
+
+  private resetLevelProgressAfterLevelUp() {
+    if (this.levelResetTimer !== null) window.clearTimeout(this.levelResetTimer);
+    this.levelResetTimer = window.setTimeout(() => {
+      this.updateHud(false);
+      this.pulseLevelUp();
+      this.levelResetTimer = null;
+    }, LEVEL_RESET_MS);
+  }
+
+  private addStarToHud(): number {
     const previous = this.totalStars;
     const next = previous + 1;
     const previousLevel = Math.floor(previous / this.starsPerLevel) + 1;
     const nextLevel = Math.floor(next / this.starsPerLevel) + 1;
     this.totalStars = next;
-    if (this.starCountEl) this.starCountEl.textContent = String(this.totalStars);
 
-    this.starCounterEl?.classList.add('hud__stars--bump');
-    window.setTimeout(() => this.starCounterEl?.classList.remove('hud__stars--bump'), 260);
+    this.bumpLevelBadge();
 
-    if (nextLevel > previousLevel && this.levelFillEl) {
-      this.levelFillEl.style.transform = 'scaleX(1)';
-      if (this.levelResetTimer !== null) window.clearTimeout(this.levelResetTimer);
-      this.levelResetTimer = window.setTimeout(() => {
-        this.updateHud(true);
-        this.hudEl?.classList.add('hud--level-up');
-        window.setTimeout(() => this.hudEl?.classList.remove('hud--level-up'), 420);
-      }, LEVEL_RESET_MS);
-      return;
+    if (nextLevel > previousLevel) {
+      this.setLevelProgress(1, true);
+      this.resetLevelProgressAfterLevelUp();
+      return LEVEL_RESET_MS + AUTO_ADVANCE_AFTER_REWARD_MS;
     }
 
     this.updateHud(true);
+    return LEVEL_PROGRESS_MS + AUTO_ADVANCE_AFTER_REWARD_MS;
   }
 
-  private scheduleAutoAdvanceAfterStar(i: number) {
+  private finishStarReward(i: number) {
+    const autoAdvanceDelay = this.addStarToHud();
+    this.scheduleAutoAdvanceAfterStar(i, autoAdvanceDelay);
+  }
+
+  private scheduleAutoAdvanceAfterStar(i: number, delayMs: number) {
     window.setTimeout(() => {
       if (this.dragging || this.realIndex() !== i || !this.earnedThisCycle.has(i)) return;
       this.goTo(Math.round(this.pos) + 1);
-    }, AUTO_ADVANCE_AFTER_STAR_MS);
+    }, delayMs);
+  }
+
+  private burstStarParticles(x: number, y: number) {
+    const colors = ['#ffd85a', '#fff1a8', '#45d68c', '#ffb13d'];
+    const vectors = [
+      [-62, -18], [-48, -42], [-22, -58], [10, -62],
+      [38, -46], [62, -20], [-30, 8], [34, 10],
+    ];
+
+    vectors.forEach(([dx, dy], index) => {
+      const particle = document.createElement('div');
+      particle.className = 'star-particle';
+      particle.style.left = `${x}px`;
+      particle.style.top = `${y}px`;
+      particle.style.background = colors[index % colors.length];
+      this.viewport.appendChild(particle);
+
+      if (!particle.animate) {
+        window.setTimeout(() => particle.remove(), 520);
+        return;
+      }
+
+      const animation = particle.animate([
+        { transform: 'translate(-50%, -50%) scale(0.35)', opacity: 1 },
+        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(1)`, opacity: 0.92, offset: 0.38 },
+        { transform: `translate(calc(-50% + ${dx * 1.16}px), calc(-50% + ${dy * 1.08}px)) scale(0)`, opacity: 0 },
+      ], {
+        duration: 560,
+        easing: 'cubic-bezier(0.14, 0.74, 0.3, 1)',
+        fill: 'forwards',
+      });
+      animation.addEventListener('finish', () => particle.remove(), { once: true });
+    });
   }
 
   private playStarFlight(i: number) {
@@ -595,34 +656,39 @@ export class Feed {
     this.viewport.appendChild(star);
 
     const viewportRect = this.viewport.getBoundingClientRect();
-    const targetRect = this.starCounterEl?.getBoundingClientRect();
+    const targetRect = this.levelBadgeEl?.getBoundingClientRect();
     const size = 92;
     const startX = viewportRect.width / 2 - size / 2;
     const startY = viewportRect.height / 2 - size / 2;
-    const targetX = targetRect ? targetRect.left - viewportRect.left + targetRect.width / 2 - size / 2 : viewportRect.width - size;
+    const targetX = targetRect ? targetRect.left - viewportRect.left + targetRect.width / 2 - size / 2 : 12;
     const targetY = targetRect ? targetRect.top - viewportRect.top + targetRect.height / 2 - size / 2 : 18;
+    const impactX = startX + size / 2;
+    const impactY = startY + size * 0.82;
 
     if (!star.animate) {
       star.remove();
-      this.addStarToHud();
-      this.scheduleAutoAdvanceAfterStar(i);
+      this.finishStarReward(i);
       return;
     }
 
+    window.setTimeout(() => this.burstStarParticles(impactX, impactY), STAR_PARTICLE_BURST_MS);
     const animation = star.animate([
-      { transform: `translate3d(${startX}px, ${startY}px, 0) scale(0.35) rotate(-18deg)`, opacity: 0 },
-      { transform: `translate3d(${startX}px, ${startY}px, 0) scale(1.35) rotate(0deg)`, opacity: 1, offset: 0.18 },
-      { transform: `translate3d(${startX}px, ${startY}px, 0) scale(1.12) rotate(8deg)`, opacity: 1, offset: 0.38 },
-      { transform: `translate3d(${targetX}px, ${targetY}px, 0) scale(0.38) rotate(26deg)`, opacity: 0.9 },
+      { transform: `translate3d(${startX}px, ${startY}px, 0) rotate(-12deg) scale(0.18)`, opacity: 0, offset: 0 },
+      { transform: `translate3d(${startX}px, ${startY}px, 0) rotate(0deg) scale(1.28)`, opacity: 1, offset: 0.10 },
+      { transform: `translate3d(${startX}px, ${startY}px, 0) rotate(0deg) scale(0.98)`, opacity: 1, offset: 0.20 },
+      { transform: `translate3d(${startX}px, ${startY - 78}px, 0) rotate(-7deg) scale(1.04)`, opacity: 1, offset: 0.38 },
+      { transform: `translate3d(${startX}px, ${startY + 10}px, 0) rotate(5deg) scale(1.32, 0.68)`, opacity: 1, offset: 0.52 },
+      { transform: `translate3d(${startX}px, ${startY - 4}px, 0) rotate(0deg) scale(0.88, 1.18)`, opacity: 1, offset: 0.60 },
+      { transform: `translate3d(${startX}px, ${startY - 34}px, 0) rotate(-5deg) scale(1.06)`, opacity: 1, offset: 0.70 },
+      { transform: `translate3d(${targetX}px, ${targetY}px, 0) rotate(26deg) scale(0.38)`, opacity: 0.92, offset: 1 },
     ], {
-      duration: STAR_FLIGHT_MS,
+      duration: STAR_REWARD_MS,
       easing: 'cubic-bezier(0.2, 0.78, 0.22, 1)',
       fill: 'forwards',
     });
     animation.addEventListener('finish', () => {
       star.remove();
-      this.addStarToHud();
-      this.scheduleAutoAdvanceAfterStar(i);
+      this.finishStarReward(i);
     }, { once: true });
   }
 

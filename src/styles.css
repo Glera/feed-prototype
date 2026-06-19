@@ -7,6 +7,12 @@
   --hud-top: max(12px, env(safe-area-inset-top));
 }
 
+@property --level-progress {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
 html, body {
@@ -93,7 +99,7 @@ body {
 
 .game__label {
   position: absolute;
-  top: 64px;
+  top: calc(var(--hud-top) + 64px);
   left: 14px;
   z-index: 2;
   font-size: 11px;
@@ -111,82 +117,82 @@ body {
   position: absolute;
   top: var(--hud-top);
   left: 12px;
-  right: 12px;
   z-index: 12;
-  display: grid;
-  grid-template-columns: auto minmax(92px, 1fr) auto;
-  align-items: center;
-  gap: 10px;
+  width: 54px;
+  height: 54px;
   pointer-events: none;
 }
 
-.hud__level,
-.hud__stars {
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-radius: 999px;
-  background: rgba(9, 11, 17, 0.72);
-  border: 1px solid rgba(255,255,255,0.16);
-  box-shadow: 0 8px 22px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12);
+.hud__level {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  transform-origin: center;
+  filter: drop-shadow(0 9px 20px rgba(0,0,0,0.35));
+}
+
+.hud__level-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    conic-gradient(from -90deg,
+      #ffd85a 0deg,
+      #45d68c var(--level-progress),
+      rgba(255,255,255,0.16) var(--level-progress),
+      rgba(255,255,255,0.16) 360deg);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.34),
+    inset 0 -7px 14px rgba(0,0,0,0.28);
+  transition: --level-progress 0.34s ease-out;
+}
+
+.hud__level-ring::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 24%, rgba(255,255,255,0.44), transparent 30%);
+  opacity: 0.42;
+}
+
+.hud__level-ring::after {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: rgba(9, 11, 17, 0.82);
+  border: 1px solid rgba(255,255,255,0.15);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.13),
+    inset 0 -8px 15px rgba(0,0,0,0.28);
   backdrop-filter: blur(12px);
 }
 
-.hud__level {
-  min-width: 78px;
-  padding: 0 12px;
+.hud__level-core {
+  position: relative;
+  z-index: 1;
+  width: 39px;
+  height: 39px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(180deg, rgba(33, 38, 51, 0.92), rgba(9, 11, 17, 0.92));
+  border: 1px solid rgba(255,255,255,0.12);
 }
 
-.hud__level-kicker {
-  font-size: 10px;
-  font-weight: 800;
-  color: rgba(255,255,255,0.56);
-}
-
-.hud__level-value,
-.hud__stars-value {
-  font-size: 16px;
+.hud__level-value {
+  font-size: 20px;
+  line-height: 1;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
+  text-shadow: 0 2px 7px rgba(0,0,0,0.48);
 }
 
-.hud__progress {
-  position: relative;
-  height: 12px;
-  border-radius: 999px;
-  background: rgba(9, 11, 17, 0.66);
-  border: 1px solid rgba(255,255,255,0.14);
-  box-shadow: inset 0 1px 5px rgba(0,0,0,0.35);
-  overflow: hidden;
-}
-
-.hud__progress-fill {
-  position: absolute;
-  inset: 2px;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #45d68c, #ffd85a 78%, #ffb13d);
-  box-shadow: 0 0 12px rgba(255, 207, 83, 0.48);
-  transform: scaleX(0);
-  transform-origin: left center;
-  transition: transform 0.34s ease-out;
-}
-
-.hud__stars {
-  min-width: 74px;
-  padding: 0 12px 0 10px;
-  transform-origin: center;
-}
-
-.hud__star-icon {
-  color: #ffd85a;
-  font-size: 18px;
-  line-height: 1;
-  text-shadow: 0 2px 8px rgba(255, 190, 48, 0.65);
-}
-
-.hud__stars--bump { animation: hud-bump 0.26s ease-out; }
+.hud__level--bump { animation: hud-bump 0.26s ease-out; }
 .hud--level-up .hud__level { animation: hud-level-up 0.42s ease-out; }
 
 @keyframes hud-bump {
@@ -196,9 +202,9 @@ body {
 }
 
 @keyframes hud-level-up {
-  0% { transform: scale(1); box-shadow: 0 8px 22px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12); }
-  48% { transform: scale(1.12); box-shadow: 0 8px 26px rgba(255,216,90,0.3), inset 0 1px 0 rgba(255,255,255,0.18); }
-  100% { transform: scale(1); box-shadow: 0 8px 22px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12); }
+  0% { transform: scale(1); filter: drop-shadow(0 9px 20px rgba(0,0,0,0.35)); }
+  48% { transform: scale(1.16); filter: drop-shadow(0 10px 25px rgba(255,216,90,0.42)); }
+  100% { transform: scale(1); filter: drop-shadow(0 9px 20px rgba(0,0,0,0.35)); }
 }
 
 /* Per-slot loading spinner — visible only while the game is unloaded. */
@@ -241,6 +247,17 @@ body {
   pointer-events: auto;
 }
 .game__state[hidden] { display: none; }
+
+.game__state--earned {
+  background:
+    radial-gradient(72% 52% at 50% 46%, rgba(255,216,90,0.12), transparent 70%),
+    rgba(4, 6, 10, 0.58);
+}
+
+.game__state--earned .game__state-title {
+  transform: translateY(92px);
+  color: rgba(255,255,255,0.86);
+}
 
 .game__state-badge {
   width: 76px;
@@ -285,17 +302,30 @@ body {
   position: absolute;
   top: 0;
   left: 0;
-  z-index: 30;
+  z-index: 31;
   width: 92px;
   height: 92px;
   display: grid;
   place-items: center;
   color: #ffd85a;
-  font-size: 86px;
+  font-size: 88px;
   line-height: 1;
+  transform-origin: 50% 76%;
+  filter: drop-shadow(0 14px 24px rgba(255, 177, 50, 0.34));
   text-shadow:
-    0 4px 0 #9a5b15,
-    0 12px 28px rgba(255, 177, 50, 0.52);
+    0 3px 0 #9a5b15,
+    0 0 18px rgba(255, 221, 89, 0.46);
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.star-particle {
+  position: absolute;
+  z-index: 30;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 10px rgba(255, 216, 90, 0.62);
   pointer-events: none;
   will-change: transform, opacity;
 }

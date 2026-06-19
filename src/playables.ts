@@ -17,14 +17,14 @@ export interface Playable {
 
 export const PLAYABLES: Playable[] = [
   { id: 'pins-v1' },
-  { id: 'marble-sort' },
+  { id: 'marble-sort-swipe' },
   { id: 'merge-timepress-v1' },
-  { id: 'merge-timepress-v2' },
+  { id: 'merge-timepress-v2-swipe' },
   { id: 'merge-timepress-no-orders-v1' },
   { id: 'merge-timepress-no-orders-v2' },
   { id: 'merge-second-board-v1' },
   { id: 'merge-second-board-v2' },
-  { id: 'merge-locked-v1' },
+  { id: 'merge-locked-v1-swipe' },
 ];
 
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
