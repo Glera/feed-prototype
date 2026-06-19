@@ -34,7 +34,7 @@ const INITIAL_BATCH = 5;           // preloader fills until the first N are read
 const PRELOADER_TIMEOUT_MS = 15000;
 const ANALYTICS_POLL_MS = 350;     // fallback for older non-SWIPE exports
 const STAR_REWARD_MS = 1480;
-const STAR_PARTICLE_BURST_MS = 690;
+const STAR_IMPACT_MS = 770;
 const LEVEL_PROGRESS_MS = 340;
 const AUTO_ADVANCE_AFTER_REWARD_MS = 120;
 const LEVEL_RESET_MS = 420;
@@ -57,6 +57,8 @@ export class Feed {
   private slots: HTMLElement[] = [];
   private games: HTMLElement[] = [];
   private stateEls: HTMLElement[] = [];
+  private labelEls: HTMLElement[] = [];
+  private labelTimers = new Map<number, number>();
   private frames = new Map<number, HTMLIFrameElement>();
   private runSeq = 0;
   private completedRunIds = new Set<string>();
@@ -114,6 +116,7 @@ export class Feed {
     this.applyActiveStates();
     window.addEventListener('resize', this.onResize);
     window.addEventListener('message', this.onWindowMessage);
+    (window as any).__feedHostGesture = this.onHostGesture;
     window.setInterval(this.pollPlayableAnalytics, ANALYTICS_POLL_MS);
   }
 
@@ -157,6 +160,7 @@ export class Feed {
       this.games[i] = game;
       this.slots[i] = slot;
       this.stateEls[i] = state;
+      this.labelEls[i] = label;
     });
     this.feedEl.appendChild(frag);
   }
@@ -229,6 +233,7 @@ export class Feed {
     frame.dataset.runId = String(++this.runSeq);
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('title', this.playables[i].id);
+    frame.setAttribute('allow', 'autoplay');
     frame.addEventListener('load', () => {
       this.games[i].classList.remove('game--loading');
       this.setFramePaused(i, this.shouldPauseFrame(i));
@@ -273,6 +278,26 @@ export class Feed {
 
   private shouldPauseFrame(i: number): boolean {
     return i !== this.realIndex() || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i);
+  }
+
+  private callPlayableHostGesture(i: number): boolean {
+    const frame = this.frames.get(i);
+    if (!frame) return false;
+    try {
+      const api = (frame.contentWindow as any)?.__playable;
+      if (typeof api?.hostGesture !== 'function') return false;
+      api.hostGesture();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private unlockAudioForCurrentAndNext(fromIndex: number = this.realIndex()) {
+    const current = ((fromIndex % this.N) + this.N) % this.N;
+    const next = (current + 1) % this.N;
+    this.callPlayableHostGesture(current);
+    this.callPlayableHostGesture(next);
   }
 
   // ── Prefetch reserve (bytes only) ──────────────────────────────────────────
@@ -336,6 +361,7 @@ export class Feed {
     this.lastT = e.timeStamp;
     this.velocity = 0;
     this.basePos = Math.round(this.pos);
+    this.unlockAudioForCurrentAndNext(this.realIndex());
     gutter.setPointerCapture(e.pointerId);
   }
 
@@ -369,10 +395,35 @@ export class Feed {
   private onWindowMessage = (e: MessageEvent) => {
     const i = this.frameIndexForSource(e.source);
     if (i < 0) return;
+    if (this.isHostGestureMessage(e.data)) {
+      if (!this.hostGestureDeliveredSynchronously(e.data)) {
+        this.unlockAudioForCurrentAndNext(i);
+      }
+      this.revealLabel(i);
+      return;
+    }
     const outcome = this.outcomeFromMessage(e.data);
     if (!outcome) return;
     this.handlePlayableCompleted(i, outcome);
   };
+
+  private onHostGesture = (playableId?: string) => {
+    const i = playableId ? this.playables.findIndex((p) => p.id === playableId) : this.realIndex();
+    const idx = i >= 0 ? i : this.realIndex();
+    this.unlockAudioForCurrentAndNext(idx);
+    this.revealLabel(idx);
+  };
+
+  // Mechanic name is hidden by default (so it never overlaps the game) and
+  // flashed on the first tap on the level, then auto-hidden.
+  private revealLabel(i: number) {
+    const label = this.labelEls[i];
+    if (!label) return;
+    label.classList.add('game__label--show');
+    const prev = this.labelTimers.get(i);
+    if (prev) clearTimeout(prev);
+    this.labelTimers.set(i, window.setTimeout(() => label.classList.remove('game__label--show'), 2200));
+  }
 
   private frameIndexForSource(source: MessageEventSource | null): number {
     if (!source) return -1;
@@ -400,6 +451,17 @@ export class Feed {
     if (event === 'CHALLENGE_SOLVED') return 'won';
     if (event === 'CHALLENGE_FAILED') return 'lost';
     return null;
+  }
+
+  private isHostGestureMessage(data: unknown): boolean {
+    if (!data || typeof data !== 'object') return false;
+    const d = data as Record<string, unknown>;
+    return d.source === 'playable' && d.type === 'host_gesture';
+  }
+
+  private hostGestureDeliveredSynchronously(data: unknown): boolean {
+    if (!data || typeof data !== 'object') return false;
+    return (data as Record<string, unknown>).deliveredSynchronously === true;
   }
 
   private pollPlayableAnalytics = () => {
@@ -483,19 +545,16 @@ export class Feed {
     state.hidden = !earned && !failed;
     if (!earned && !failed) return;
 
-    const title = document.createElement('div');
-    title.className = 'game__state-title';
-    title.textContent = earned ? 'Star earned' : 'Try again';
-
-    if (earned) {
-      state.appendChild(title);
-      return;
-    }
+    if (earned) return;
 
     const badge = document.createElement('div');
     badge.className = 'game__state-badge';
     badge.textContent = '↻';
     state.appendChild(badge);
+
+    const title = document.createElement('div');
+    title.className = 'game__state-title';
+    title.textContent = 'Try again';
     state.appendChild(title);
 
     if (failed) {
@@ -623,6 +682,26 @@ export class Feed {
       [38, -46], [62, -20], [-30, 8], [34, 10],
     ];
 
+    const impact = document.createElement('div');
+    impact.className = 'star-impact';
+    impact.style.left = `${x}px`;
+    impact.style.top = `${y}px`;
+    this.viewport.appendChild(impact);
+    if (impact.animate) {
+      const animation = impact.animate([
+        { transform: 'translate(-50%, -50%) scale(0.35, 0.22)', opacity: 0.74 },
+        { transform: 'translate(-50%, -50%) scale(1.12, 0.72)', opacity: 0.32, offset: 0.42 },
+        { transform: 'translate(-50%, -50%) scale(1.55, 0.86)', opacity: 0 },
+      ], {
+        duration: 430,
+        easing: 'cubic-bezier(0.14, 0.74, 0.3, 1)',
+        fill: 'forwards',
+      });
+      animation.addEventListener('finish', () => impact.remove(), { once: true });
+    } else {
+      window.setTimeout(() => impact.remove(), 430);
+    }
+
     vectors.forEach(([dx, dy], index) => {
       const particle = document.createElement('div');
       particle.className = 'star-particle';
@@ -671,7 +750,7 @@ export class Feed {
       return;
     }
 
-    window.setTimeout(() => this.burstStarParticles(impactX, impactY), STAR_PARTICLE_BURST_MS);
+    window.setTimeout(() => this.burstStarParticles(impactX, impactY), STAR_IMPACT_MS);
     const animation = star.animate([
       { transform: `translate3d(${startX}px, ${startY}px, 0) rotate(-12deg) scale(0.18)`, opacity: 0, offset: 0 },
       { transform: `translate3d(${startX}px, ${startY}px, 0) rotate(0deg) scale(1.28)`, opacity: 1, offset: 0.10 },

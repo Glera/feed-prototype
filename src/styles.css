@@ -110,7 +110,12 @@ body {
   background: rgba(0,0,0,0.45);
   color: rgba(255,255,255,0.9);
   pointer-events: none;
+  /* Hidden by default so it never overlaps the game; revealed briefly on the
+     first tap on the level (Feed.revealLabel), then fades out. */
+  opacity: 0;
+  transition: opacity 0.25s ease;
 }
+.game__label--show { opacity: 1; }
 
 /* ── Progress HUD ───────────────────────────────────────────────────────────*/
 .hud {
@@ -254,11 +259,6 @@ body {
     rgba(4, 6, 10, 0.58);
 }
 
-.game__state--earned .game__state-title {
-  transform: translateY(92px);
-  color: rgba(255,255,255,0.86);
-}
-
 .game__state-badge {
   width: 76px;
   height: 76px;
@@ -326,6 +326,19 @@ body {
   height: 8px;
   border-radius: 50%;
   box-shadow: 0 0 10px rgba(255, 216, 90, 0.62);
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.star-impact {
+  position: absolute;
+  z-index: 29;
+  width: 96px;
+  height: 24px;
+  border-radius: 50%;
+  background:
+    radial-gradient(ellipse at center, rgba(255, 216, 90, 0.62), rgba(255, 177, 50, 0.18) 52%, transparent 72%);
+  box-shadow: 0 0 20px rgba(255, 216, 90, 0.28);
   pointer-events: none;
   will-change: transform, opacity;
 }
