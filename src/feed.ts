@@ -398,6 +398,7 @@ export class Feed {
       pg.style.zIndex = String(1000 - Math.round(Math.abs(delta) * 10));
       pg.style.visibility = near ? 'visible' : 'hidden';
       pg.classList.toggle('page--near', near);
+      pg.classList.toggle('page--in-viewport', delta > -0.98 && delta < 0.98);
       this.pageDelta[i] = delta;
     }
   }

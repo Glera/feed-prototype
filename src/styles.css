@@ -428,15 +428,24 @@ body {
   border-top-color: rgba(255,216,90,0.96);
   border-right-color: rgba(94,230,168,0.86);
   box-shadow: 0 0 24px rgba(255,216,90,0.12);
-  animation: spin 0.74s linear infinite;
   opacity: 0;
-  transition: opacity 0.2s;
+  transform: translateZ(0) rotate(0deg);
+  transform-origin: 50% 50%;
+  backface-visibility: hidden;
+  will-change: transform, opacity;
+  transition: opacity 0.16s;
   pointer-events: none;
 }
-.game--loading .game__spinner { opacity: 1; }
+.page--in-viewport .game--loading .game__spinner {
+  opacity: 1;
+  animation: spin 0.74s linear infinite;
+}
 .game--ready .game__frame { animation: fadein 0.18s ease-out; }
 
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes spin {
+  from { transform: translateZ(0) rotate(0deg); }
+  to { transform: translateZ(0) rotate(360deg); }
+}
 @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
 
 /* ── Completion overlays ────────────────────────────────────────────────────*/
