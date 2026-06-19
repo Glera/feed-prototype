@@ -623,6 +623,45 @@ body {
   text-shadow: 0 3px 12px rgba(0,0,0,0.48);
 }
 
+.levelup__gutter-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  height: var(--gutter-h);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(255,255,255,0.1), transparent 70%),
+    #111119;
+  border-top: 1px solid rgba(255,255,255,0.16);
+  box-shadow: 0 -16px 34px rgba(0,0,0,0.34), 0 -1px 0 rgba(255,216,90,0.18);
+  pointer-events: none;
+  animation: levelup-gutter-nudge 1.15s cubic-bezier(0.2, 0.8, 0.25, 1) infinite;
+}
+
+.levelup__gutter-hint .gutter__grip,
+.gutter--levelup-prompt .gutter__grip {
+  background: rgba(255,241,168,0.82);
+  box-shadow: 0 0 16px rgba(255,216,90,0.34);
+  animation: levelup-grip-pulse 1.15s ease-in-out infinite;
+}
+
+.levelup__gutter-hint .gutter__label,
+.gutter--levelup-prompt .gutter__label {
+  opacity: 0.9;
+}
+
+.levelup__gutter-hint .gutter__chev,
+.gutter--levelup-prompt .gutter__chev {
+  color: #fff1a8;
+  animation: levelup-chevron-rise 1.15s ease-in-out infinite;
+}
+
 .confetti {
   position: absolute;
   z-index: 0;
@@ -670,6 +709,22 @@ body {
   gap: 6px;
 }
 .gutter__chev { font-size: 13px; opacity: 0.8; }
+
+@keyframes levelup-gutter-nudge {
+  0%, 100% { transform: translateY(0); }
+  38% { transform: translateY(-10px); }
+  62% { transform: translateY(-4px); }
+}
+
+@keyframes levelup-grip-pulse {
+  0%, 100% { transform: scaleX(1); opacity: 0.74; }
+  42% { transform: scaleX(1.32); opacity: 1; }
+}
+
+@keyframes levelup-chevron-rise {
+  0%, 100% { transform: translateY(2px); opacity: 0.64; }
+  42% { transform: translateY(-5px); opacity: 1; }
+}
 
 /* ── Initial preloader ──────────────────────────────────────────────────────
    Full-screen cover while the first batch of mini-games loads, so the opening

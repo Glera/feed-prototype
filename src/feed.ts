@@ -52,6 +52,7 @@ export class Feed {
 
   private slots: HTMLElement[] = [];
   private games: HTMLElement[] = [];
+  private gutters: HTMLElement[] = [];
   private stateEls: HTMLElement[] = [];
   private labelEls: HTMLElement[] = [];
   private labelTimers = new Map<number, number>();
@@ -76,6 +77,8 @@ export class Feed {
   private levelBadgeEl: HTMLElement | null = null;
   private levelEl: HTMLElement | null = null;
   private levelProgressEl: HTMLElement | null = null;
+  private heldLevelUpOverlay: HTMLElement | null = null;
+  private heldLevelUpIndex: number | null = null;
 
   // Friend stories (top rail). Tapping one opens a full-screen story showing a
   // playable mechanic; the background feed game is paused while it's open.
@@ -196,12 +199,14 @@ export class Feed {
       state.hidden = true;
       game.appendChild(state);
 
+      const gutter = this.makeGutter(i);
       page.appendChild(game);
-      page.appendChild(this.makeGutter(i));
+      page.appendChild(gutter);
       frag.appendChild(page);
 
       this.pageEls[i] = page;
       this.games[i] = game;
+      this.gutters[i] = gutter;
       this.slots[i] = slot;
       this.stateEls[i] = state;
       this.labelEls[i] = label;
@@ -893,6 +898,7 @@ export class Feed {
     const farUp = dy <= -this.pageH * DISTANCE_SNAP_FRAC;
     if (fastUp || farUp) step = 1;
 
+    if (step > 0) this.releaseHeldLevelUp();
     this.goTo(this.basePos + step);
   }
 
@@ -1160,23 +1166,20 @@ export class Feed {
     const nextLevel = Math.floor(this.totalStars / this.starsPerLevel) + 1;
 
     if (nextLevel > prevLevel) {
-      // Fill the ring, then play the congratulatory level-up screen (confetti)
-      // BEFORE auto-advancing to the next mechanic.
       this.setLevelProgress(1, true);
-      this.playLevelUp(nextLevel, () => {
+      const overlay = this.playLevelUp(nextLevel);
+      this.holdLevelUpUntilSwipe(i, overlay);
+      window.setTimeout(() => {
         this.updateHud(false);                 // ring resets to the new level (0 progress)
         this.pulseLevelUp();
-        this.scheduleAutoAdvanceAfterStar(i, AUTO_ADVANCE_AFTER_REWARD_MS);
-      });
+      }, LEVEL_PROGRESS_MS);
     } else {
       this.updateHud(true);
       this.scheduleAutoAdvanceAfterStar(i, LEVEL_PROGRESS_MS + AUTO_ADVANCE_AFTER_REWARD_MS);
     }
   }
 
-  // Congratulatory level-up screen: a popped badge + confetti rain, held briefly
-  // then faded out. `onDone` fires after the fade (drives the auto-advance).
-  private playLevelUp(level: number, onDone: () => void) {
+  private playLevelUp(level: number): HTMLElement {
     const overlay = document.createElement('div');
     overlay.className = 'levelup';
     overlay.innerHTML =
@@ -1184,6 +1187,10 @@ export class Feed {
         '<div class="levelup__kicker">LEVEL UP</div>' +
         '<div class="levelup__badge"><span class="levelup__star">★</span><span class="levelup__num">' + level + '</span></div>' +
         '<div class="levelup__title">Level ' + level + '</div>' +
+      '</div>' +
+      '<div class="levelup__gutter-hint">' +
+        '<div class="gutter__grip"></div>' +
+        '<div class="gutter__label"><span class="gutter__chev">▲</span> Swipe up for next game</div>' +
       '</div>';
     this.viewport.appendChild(overlay);
     this.spawnConfetti(overlay);
@@ -1197,13 +1204,30 @@ export class Feed {
         { transform: 'scale(1)', opacity: 1 },
       ], { duration: 460, easing: 'cubic-bezier(0.2, 0.9, 0.3, 1.4)', fill: 'forwards' });
     }
+    return overlay;
+  }
 
-    const HOLD = 1600;
-    window.setTimeout(() => {
-      if (!overlay.animate) { overlay.remove(); onDone(); return; }
-      const out = overlay.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 280, fill: 'forwards' });
-      out.addEventListener('finish', () => { overlay.remove(); onDone(); }, { once: true });
-    }, HOLD);
+  private holdLevelUpUntilSwipe(i: number, overlay: HTMLElement) {
+    this.releaseHeldLevelUp(false);
+    this.heldLevelUpOverlay = overlay;
+    this.heldLevelUpIndex = i;
+    this.gutters[i]?.classList.add('gutter--levelup-prompt');
+  }
+
+  private releaseHeldLevelUp(animate: boolean = true) {
+    const overlay = this.heldLevelUpOverlay;
+    const index = this.heldLevelUpIndex;
+    this.heldLevelUpOverlay = null;
+    this.heldLevelUpIndex = null;
+    if (index !== null) this.gutters[index]?.classList.remove('gutter--levelup-prompt');
+    if (!overlay) return;
+
+    if (!animate || !overlay.animate) {
+      overlay.remove();
+      return;
+    }
+    const out = overlay.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 220, fill: 'forwards' });
+    out.addEventListener('finish', () => overlay.remove(), { once: true });
   }
 
   private spawnConfetti(parent: HTMLElement) {
