@@ -4,6 +4,7 @@
      it belongs to the mini-game and its own gestures. */
   --gutter-h: 104px;
   --ease-snap: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --hud-top: max(12px, env(safe-area-inset-top));
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -92,7 +93,7 @@ body {
 
 .game__label {
   position: absolute;
-  top: 12px;
+  top: 64px;
   left: 14px;
   z-index: 2;
   font-size: 11px;
@@ -103,6 +104,101 @@ body {
   background: rgba(0,0,0,0.45);
   color: rgba(255,255,255,0.9);
   pointer-events: none;
+}
+
+/* ── Progress HUD ───────────────────────────────────────────────────────────*/
+.hud {
+  position: absolute;
+  top: var(--hud-top);
+  left: 12px;
+  right: 12px;
+  z-index: 12;
+  display: grid;
+  grid-template-columns: auto minmax(92px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.hud__level,
+.hud__stars {
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 999px;
+  background: rgba(9, 11, 17, 0.72);
+  border: 1px solid rgba(255,255,255,0.16);
+  box-shadow: 0 8px 22px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12);
+  backdrop-filter: blur(12px);
+}
+
+.hud__level {
+  min-width: 78px;
+  padding: 0 12px;
+}
+
+.hud__level-kicker {
+  font-size: 10px;
+  font-weight: 800;
+  color: rgba(255,255,255,0.56);
+}
+
+.hud__level-value,
+.hud__stars-value {
+  font-size: 16px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud__progress {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(9, 11, 17, 0.66);
+  border: 1px solid rgba(255,255,255,0.14);
+  box-shadow: inset 0 1px 5px rgba(0,0,0,0.35);
+  overflow: hidden;
+}
+
+.hud__progress-fill {
+  position: absolute;
+  inset: 2px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #45d68c, #ffd85a 78%, #ffb13d);
+  box-shadow: 0 0 12px rgba(255, 207, 83, 0.48);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.34s ease-out;
+}
+
+.hud__stars {
+  min-width: 74px;
+  padding: 0 12px 0 10px;
+  transform-origin: center;
+}
+
+.hud__star-icon {
+  color: #ffd85a;
+  font-size: 18px;
+  line-height: 1;
+  text-shadow: 0 2px 8px rgba(255, 190, 48, 0.65);
+}
+
+.hud__stars--bump { animation: hud-bump 0.26s ease-out; }
+.hud--level-up .hud__level { animation: hud-level-up 0.42s ease-out; }
+
+@keyframes hud-bump {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.14); }
+  100% { transform: scale(1); }
+}
+
+@keyframes hud-level-up {
+  0% { transform: scale(1); box-shadow: 0 8px 22px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12); }
+  48% { transform: scale(1.12); box-shadow: 0 8px 26px rgba(255,216,90,0.3), inset 0 1px 0 rgba(255,255,255,0.18); }
+  100% { transform: scale(1); box-shadow: 0 8px 22px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12); }
 }
 
 /* Per-slot loading spinner — visible only while the game is unloaded. */
@@ -125,6 +221,84 @@ body {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+
+/* ── Completion overlays ────────────────────────────────────────────────────*/
+.game__state {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  background:
+    radial-gradient(90% 62% at 50% 36%, rgba(255,255,255,0.08), transparent 72%),
+    rgba(4, 6, 10, 0.62);
+  backdrop-filter: blur(7px);
+  pointer-events: auto;
+}
+.game__state[hidden] { display: none; }
+
+.game__state-badge {
+  width: 76px;
+  height: 76px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #fff2a3, #ffc13f);
+  color: #704316;
+  font-size: 42px;
+  font-weight: 900;
+  box-shadow: 0 10px 30px rgba(255, 184, 52, 0.36), inset 0 2px 0 rgba(255,255,255,0.5);
+}
+
+.game--failed .game__state-badge {
+  background: linear-gradient(180deg, #f7fbff, #9dd4ff);
+  color: #16466d;
+  font-size: 36px;
+}
+
+.game__state-title {
+  font-size: 18px;
+  line-height: 1.15;
+  font-weight: 900;
+  text-shadow: 0 2px 8px rgba(0,0,0,0.45);
+}
+
+.game__restart {
+  min-width: 128px;
+  height: 44px;
+  border: 0;
+  border-radius: 999px;
+  color: #0c1c16;
+  background: linear-gradient(180deg, #7ff3b3, #38cf85);
+  box-shadow: 0 9px 20px rgba(56, 207, 133, 0.28), inset 0 1px 0 rgba(255,255,255,0.44);
+  font: 900 15px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  cursor: pointer;
+}
+.game__restart:active { transform: translateY(1px) scale(0.98); }
+
+.star-flight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 30;
+  width: 92px;
+  height: 92px;
+  display: grid;
+  place-items: center;
+  color: #ffd85a;
+  font-size: 86px;
+  line-height: 1;
+  text-shadow:
+    0 4px 0 #9a5b15,
+    0 12px 28px rgba(255, 177, 50, 0.52);
+  pointer-events: none;
+  will-change: transform, opacity;
+}
 
 /* ── Gutter: the paging handle that glues page N to page N+1 ────────────────*/
 .gutter {
