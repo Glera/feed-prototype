@@ -110,6 +110,9 @@ export class Feed {
   private levelProgressEl: HTMLElement | null = null;
   private heldLevelUpOverlay: HTMLElement | null = null;
   private heldLevelUpIndex: number | null = null;
+  private levelUpPageEl: HTMLElement | null = null;
+  private levelUpPageState: 'idle' | 'entering' | 'settled' | 'leaving' = 'idle';
+  private levelUpPageBasePos = 0;
   private confettiTimer: number | null = null;
   private manualRuns = new Set<number>();
   private pendingEditorLaunch = new Set<number>();
@@ -118,7 +121,7 @@ export class Feed {
   private likeCounts = new Map<number, number>();
   private likedMechanics = new Set<number>();
   private postedStories = new Set<number>();
-  private dragMode: 'feed' | 'reward' = 'feed';
+  private dragMode: 'feed' | 'reward' | 'levelup' = 'feed';
   private rewardDragIndex: number | null = null;
   private dragAutoplayIndex: number | null = null;
   private dragAllowsBack = false;
@@ -191,6 +194,11 @@ export class Feed {
     // game and pause the rest. transitionend bubbles up from the pages.
     this.feedEl.addEventListener('transitionend', (e) => {
       if (e.propertyName !== 'transform' || this.dragging) return;
+      if (this.levelUpPageState === 'entering') {
+        this.settleLevelUpPage();
+        return;
+      }
+      const leavingLevelUp = this.levelUpPageState === 'leaving';
       this.settlingTargetIndex = null;
       this.pos = this.realIndex();      // keep pos bounded; same visual (delta mod N)
       this.liveHold.clear();
@@ -203,6 +211,7 @@ export class Feed {
       this.applyActiveStates();
       this.prefetchReserve();
       this.pumpPrefetchQueue();
+      if (leavingLevelUp) this.removeLevelUpPage();
     });
 
     this.updateLive();
@@ -268,7 +277,9 @@ export class Feed {
       swipebarText.className = 'game__autoplay-text';
       swipebarText.textContent = 'tap to play or swipe';
       swipebar.appendChild(swipebarText);
-      this.attachSwipeSurface(swipebar);
+      // preferReward: when a reward is pending (win screen), a swipe here collects
+      // it (star flies to the avatar) and advances; otherwise it just pages.
+      this.attachSwipeSurface(swipebar, () => true, true);
       game.appendChild(swipebar);
       this.swipebarTextEls[i] = swipebarText;
 
@@ -485,6 +496,76 @@ export class Feed {
       pg.classList.toggle('page--in-viewport', delta > -0.98 && delta < 0.98);
       this.pageDelta[i] = delta;
     }
+    this.renderLevelUpPage(animate);
+  }
+
+  private renderLevelUpPage(animate: boolean) {
+    const page = this.levelUpPageEl;
+    if (!page) return;
+    const progress = Math.max(0, Math.min(1, this.pos - this.levelUpPageBasePos));
+    let delta = 1 - progress;
+    if (this.levelUpPageState === 'settled') {
+      delta = this.dragging && this.dragMode === 'levelup' ? -progress : 0;
+    } else if (this.levelUpPageState === 'leaving') {
+      delta = -progress;
+    }
+    page.style.transition = animate ? 'transform 0.36s var(--ease-snap)' : 'none';
+    page.style.transform = `translate3d(0, ${delta * this.pageH}px, 0)`;
+    page.style.visibility = 'visible';
+  }
+
+  private previewRewardLevel(): number {
+    return Math.floor((this.totalStars + 1) / this.starsPerLevel) + 1;
+  }
+
+  private levelUpMarkup(level: number): string {
+    return '<div class="levelup__card">' +
+      '<div class="levelup__kicker">LEVEL UP</div>' +
+      '<div class="levelup__badge"><span class="levelup__star">★</span><span class="levelup__num">' + level + '</span></div>' +
+      '<div class="levelup__title">Level ' + level + '</div>' +
+    '</div>';
+  }
+
+  private prepareLevelUpPage(level: number, basePos: number) {
+    this.removeLevelUpPage();
+    this.levelUpPageBasePos = basePos;
+    this.levelUpPageState = 'entering';
+    const page = document.createElement('div');
+    page.className = 'levelup levelup--page';
+    page.innerHTML = this.levelUpMarkup(level);
+    this.feedEl.appendChild(page);
+    this.levelUpPageEl = page;
+    this.attachSwipeSurface(page, () => this.levelUpPageState === 'settled');
+    this.spawnConfetti(page);
+    this.renderLevelUpPage(false);
+  }
+
+  private animateLevelUpPageIn() {
+    if (!this.levelUpPageEl) return;
+    this.levelUpPageState = 'entering';
+    this.pos = this.levelUpPageBasePos + 1;
+    this.render(true);
+  }
+
+  private settleLevelUpPage() {
+    if (!this.levelUpPageEl) return;
+    this.levelUpPageState = 'settled';
+    this.pos = this.levelUpPageBasePos;
+    this.liveHold = new Set([this.indexForPos(this.levelUpPageBasePos)]);
+    this.render(false);
+    this.updateLive();
+    this.applyActiveStates();
+  }
+
+  private removeLevelUpPage() {
+    if (!this.levelUpPageEl) {
+      this.levelUpPageState = 'idle';
+      return;
+    }
+    this.stopConfetti();
+    this.levelUpPageEl.remove();
+    this.levelUpPageEl = null;
+    this.levelUpPageState = 'idle';
   }
 
   // ── Live window (instantiate neighbours, tear down the far ones) ───────────
@@ -539,12 +620,19 @@ export class Feed {
     if (!frame) return;
     const runId = frame.dataset.runId;
     if (runId) this.completedRunIds.delete(runId);
-    frame.remove();
+    this.disposeFrame(i, frame);
     this.frames.delete(i);
     this.resetFrameReadiness(i);
     this.stopRewardSparks(i);
     this.games[i].classList.add('game--loading');
     this.games[i].classList.remove('game--ready');
+  }
+
+  private disposeFrame(i: number, frame: HTMLIFrameElement) {
+    try { this.setFramePaused(i, true); } catch { /* noop */ }
+    try { this.stopFrameAutoPlay(i); } catch { /* noop */ }
+    try { frame.src = 'about:blank'; } catch { /* noop */ }
+    frame.remove();
   }
 
   private disableFrameDoubleTapZoom(frame: HTMLIFrameElement) {
@@ -652,6 +740,11 @@ export class Feed {
       const doc = win?.document;
       if (!win || !doc) return;
       const api = (win as Window & { __playable?: PlayableHostApi }).__playable;
+      if (paused) {
+        try { api?.swipe?.stopAutoPlay(); } catch { /* noop */ }
+        if (typeof api?.setAutoPlayEnabled === 'function') api.setAutoPlayEnabled(false);
+        else if (typeof api?.stopAutoPlay === 'function') api.stopAutoPlay();
+      }
       if (typeof api?.setHostPaused === 'function') api.setHostPaused(paused);
       Object.defineProperty(doc, 'hidden', { configurable: true, get: () => paused });
       Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (paused ? 'hidden' : 'visible') });
@@ -758,18 +851,17 @@ export class Feed {
       }
       this.setAutoplayUi(i, active);
 
-      // Swipe bar label switches by mode: once the player has taken over (manual,
-      // not yet won/failed) it's swipe-only; otherwise it's the autoplay/attract
-      // "tap to play or swipe" prompt.
+      // Swipe bar label: only the autoplay/attract state offers "tap to play"
+      // (tapping takes over the demo); once the player is playing, has won, or has
+      // failed, tapping does nothing new — so it's swipe-only.
       const txt = this.swipebarTextEls[i];
-      if (txt) {
-        const manualPlaying = manual && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
-        txt.textContent = manualPlaying ? 'swipe for next mechanic' : 'tap to play or swipe';
-      }
+      const label = active ? 'tap to play or swipe' : 'swipe for next mechanic';
+      if (txt && txt.textContent !== label) txt.textContent = label;
     }
   };
 
   private setAutoplayUi(i: number, active: boolean) {
+    if (this.autoplayUiActive.has(i) === active) return;
     if (active) this.autoplayUiActive.add(i);
     else this.autoplayUiActive.delete(i);
     this.games[i]?.classList.toggle('game--autoplay', active);
@@ -863,10 +955,20 @@ export class Feed {
       const doc = win?.document;
       if (!win || !doc) return;
       const api = (win as any).__playable;
+      if (paused) {
+        try { api?.swipe?.stopAutoPlay(); } catch { /* noop */ }
+        if (typeof api?.setAutoPlayEnabled === 'function') api.setAutoPlayEnabled(false);
+        else if (typeof api?.stopAutoPlay === 'function') api.stopAutoPlay();
+      }
       if (typeof api?.setHostPaused === 'function') api.setHostPaused(paused);
       Object.defineProperty(doc, 'hidden', { configurable: true, get: () => paused });
       Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (paused ? 'hidden' : 'visible') });
       doc.dispatchEvent(new win.Event('visibilitychange'));
+      if (!paused) {
+        if (api?.swipe?.hasAutoPlay) api.swipe.startAutoPlay();
+        else if (typeof api?.setAutoPlayEnabled === 'function') api.setAutoPlayEnabled(true);
+        else if (typeof api?.startAutoPlay === 'function') api.startAutoPlay({ immediate: true });
+      }
     } catch { /* cross-origin — leave as-is */ }
   }
 
@@ -927,6 +1029,12 @@ export class Feed {
     if (!this.overlayOpen) return;
     this.overlayOpen = false;
     const ov = this.overlayEl;
+    const storyFrame = this.storyFrame;
+    if (storyFrame) {
+      this.pauseStoryFrame(true);
+      try { storyFrame.src = 'about:blank'; } catch { /* noop */ }
+      storyFrame.remove();
+    }
     this.overlayEl = null;
     this.storyFrame = null;
     if (ov && ov.animate) {
@@ -1073,6 +1181,10 @@ export class Feed {
       const target = e.target as HTMLElement | null;
       if (target?.closest?.('button, input, textarea, select, a')) return;
       if (!canStart()) return;
+      if (surface === this.levelUpPageEl && this.levelUpPageState === 'settled') {
+        this.onDown(e, surface, 'levelup');
+        return;
+      }
       const rewardIndex = this.rewardSwipeIndexFor(surface, preferReward);
       if (rewardIndex !== null) this.onDown(e, surface, 'reward', rewardIndex);
       else this.onDown(e, surface, 'feed');
@@ -1090,7 +1202,7 @@ export class Feed {
     return null;
   }
 
-  private onDown(e: PointerEvent, surface: HTMLElement, mode: 'feed' | 'reward', rewardIndex: number | null = null) {
+  private onDown(e: PointerEvent, surface: HTMLElement, mode: 'feed' | 'reward' | 'levelup', rewardIndex: number | null = null) {
     if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
     e.preventDefault();
     const current = this.realIndex();
@@ -1103,6 +1215,8 @@ export class Feed {
     this.dragAllowsBack = autoplayIndex !== null;
     if (mode === 'feed' || mode === 'reward') {
       this.liveHold = this.dragAllowsBack ? new Set([prev, current, next]) : new Set([current, next]);
+    } else if (mode === 'levelup') {
+      this.liveHold = new Set([current, next]);
     }
 
     this.dragging = true;
@@ -1111,6 +1225,10 @@ export class Feed {
     this.lastT = e.timeStamp;
     this.velocity = 0;
     this.basePos = Math.round(this.pos);
+    if (mode === 'levelup') this.basePos = this.levelUpPageBasePos;
+    if (mode === 'reward' && rewardIndex !== null && this.rewardWouldLevelUp()) {
+      this.prepareLevelUpPage(this.previewRewardLevel(), this.basePos);
+    }
     if (mode === 'feed' || mode === 'reward') this.render(false);
     surface.setPointerCapture(e.pointerId);
   }
@@ -1150,6 +1268,22 @@ export class Feed {
     const fromIndex = this.indexForPos(this.basePos);
     const allowsBack = this.dragAllowsBack;
 
+    if (this.dragMode === 'levelup') {
+      this.dragMode = 'feed';
+      this.rewardDragIndex = null;
+      this.dragAutoplayIndex = null;
+      this.dragAllowsBack = false;
+      if (step > 0) {
+        this.levelUpPageState = 'leaving';
+        this.unlockAudioForCurrentAndNext(fromIndex);
+        this.goTo(this.basePos + step);
+      } else {
+        this.levelUpPageState = 'settled';
+        this.goTo(this.basePos);
+      }
+      return;
+    }
+
     if (this.dragMode === 'reward') {
       const rewardIndex = this.rewardDragIndex;
       this.dragMode = 'feed';
@@ -1157,12 +1291,14 @@ export class Feed {
       this.dragAutoplayIndex = null;
       this.dragAllowsBack = false;
       if (step > 0 && rewardIndex !== null) {
-        const willShowLevelUp = this.rewardWouldLevelUp();
+        const willShowLevelUp = this.levelUpPageState === 'entering' && this.levelUpPageEl !== null;
         this.unlockAudioForCurrentAndNext(fromIndex);
         this.collectReward(rewardIndex);
-        this.goTo(this.basePos + (willShowLevelUp ? 0 : step));
+        if (willShowLevelUp) this.animateLevelUpPageIn();
+        else this.goTo(this.basePos + step);
         return;
       }
+      this.removeLevelUpPage();
       this.goTo(this.basePos + step);
       return;
     }
@@ -1468,14 +1604,9 @@ export class Feed {
 
     state.appendChild(reward);
 
-    // Same swipe affordance as the autoplay overlay, pinned to the bottom — but only
-    // the "swipe for next" half (no "tap to play", the level is already won).
-    const hint = document.createElement('div');
-    hint.className = 'game__swipe-hint';
-    hint.innerHTML =
-      '<div class="game__autoplay-arrow">▲</div>' +
-      '<div class="game__autoplay-text">swipe for next mechanic</div>';
-    state.appendChild(hint);
+    // No separate swipe hint here — the permanent swipe bar shows below this overlay
+    // (the overlay is inset above it) in the exact same spot, already reading
+    // "swipe for next mechanic", and a swipe on it collects the reward.
 
     return icon;
   }
@@ -1680,28 +1811,34 @@ export class Feed {
     const hopY = startY - Math.max(56, sz * 0.42);
     const midX = startX + (badgeX - startX) * 0.22;
     const midY = Math.min(hopY, startY + (badgeY - startY) * 0.18 - 42);
+    // Per-segment easing: gentle pop-up, then a hard ACCELERATION into the badge so
+    // the star snaps to the avatar centre at the end. transform-origin is 50% 50%
+    // (set in CSS for --collect), so scaling keeps the glyph centred on the target.
     const anim = star.animate([
       {
         transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
         opacity: 1,
         offset: 0,
+        easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)',
       },
       {
         transform: `translate3d(${startX - sz / 2}px, ${hopY - sz / 2}px, 0) scale(1.16) rotate(-8deg)`,
         opacity: 1,
-        offset: 0.24,
+        offset: 0.26,
+        easing: 'cubic-bezier(0.4, 0, 0.7, 0.4)',
       },
       {
-        transform: `translate3d(${midX - sz / 2}px, ${midY - sz / 2}px, 0) scale(0.92) rotate(8deg)`,
+        transform: `translate3d(${midX - sz / 2}px, ${midY - sz / 2}px, 0) scale(0.94) rotate(8deg)`,
         opacity: 1,
-        offset: 0.46,
+        offset: 0.5,
+        easing: 'cubic-bezier(0.6, 0, 0.95, 0.35)',   // ramp hard toward the finish
       },
       {
-        transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.34) rotate(18deg)`,
-        opacity: 0.98,
+        transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(18deg)`,
+        opacity: 1,
         offset: 1,
       },
-    ], { duration: 720, easing: 'cubic-bezier(0.18, 0.76, 0.24, 1)', fill: 'forwards' });
+    ], { duration: 540, fill: 'forwards' });
 
     anim.addEventListener('finish', () => {
       star.remove();
@@ -1809,8 +1946,10 @@ export class Feed {
 
     if (nextLevel > prevLevel) {
       this.setLevelProgress(1, true);
-      const overlay = this.playLevelUp(nextLevel);
-      this.holdLevelUpUntilSwipe(i, overlay);
+      if (!this.levelUpPageEl) {
+        const overlay = this.playLevelUp(nextLevel);
+        this.holdLevelUpUntilSwipe(i, overlay);
+      }
       window.setTimeout(() => {
         this.updateHud(false);                 // ring resets to the new level (0 progress)
         this.pulseLevelUp();
@@ -1826,12 +1965,7 @@ export class Feed {
   private playLevelUp(level: number): HTMLElement {
     const overlay = document.createElement('div');
     overlay.className = 'levelup';
-    overlay.innerHTML =
-      '<div class="levelup__card">' +
-        '<div class="levelup__kicker">LEVEL UP</div>' +
-        '<div class="levelup__badge"><span class="levelup__star">★</span><span class="levelup__num">' + level + '</span></div>' +
-        '<div class="levelup__title">Level ' + level + '</div>' +
-      '</div>';
+    overlay.innerHTML = this.levelUpMarkup(level);
     // Legacy bottom swipe hint, kept here for quick restore if needed:
     // overlay.insertAdjacentHTML('beforeend',
     //   '<div class="levelup__gutter-hint">' +
