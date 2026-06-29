@@ -171,6 +171,15 @@ body {
   pointer-events: auto;
 }
 
+/* During the post-reward arrival slide, hide the (possibly warmed/ready) iframe so a
+   heavy iframe layer isn't composited+moved mid-slide (judder). The page slides as a
+   dark box; the iframe fades in once arrived (game--arriving removed). */
+.game--arriving .game__frame {
+  opacity: 0 !important;
+  visibility: hidden;
+}
+.game--arriving::before { opacity: 1; }   /* dark placeholder behind the hidden frame */
+
 .game__label {
   position: absolute;
   top: 12px;

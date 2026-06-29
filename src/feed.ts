@@ -2174,11 +2174,18 @@ export class Feed {
           // won board is never seen sliding out — only a dark panel exits up while the
           // next mechanic slides up into view.
           this.holdNextAutoplay = true;       // ...but don't start its autoplay mid-slide
+          // Slide a DARK placeholder, not the live warmed iframe: compositing/moving a
+          // heavy (ready) iframe layer mid-slide is what judders. Hidden during the
+          // slide → the page slides as a light dark box (like an un-warmed one), then
+          // the iframe reveals once it has arrived.
+          const arrivingIdx = this.indexForPos(advanceToPos);
+          this.games[arrivingIdx]?.classList.add('game--arriving');
           this.goTo(advanceToPos);
           this.slideOutCollectCover();
-          // Start autoplay only after it has fully arrived (slide 0.36s + buffer), so
-          // the physics/finger spin-up doesn't jank the arrival.
+          // Reveal the iframe + start autoplay only after it has fully arrived (slide
+          // 0.36s + buffer), so neither the paint nor the physics spin-up janks it.
           window.setTimeout(() => {
+            this.games[arrivingIdx]?.classList.remove('game--arriving');
             this.holdNextAutoplay = false;
             this.ensureFrameAutoPlay(this.realIndex());
             this.pollAutoplayUi();
@@ -2560,6 +2567,8 @@ export class Feed {
     const changed = targetPos !== this.pos;
     const pageChanged = targetIndex !== fromIndex;
     if (changed && pageChanged) {
+      this.clearWarmTimer();
+      this.warmIndex = null;
       this.liveHold = new Set([fromIndex, targetIndex]);
       this.settlingTargetIndex = targetIndex;
       this.stopRewardSparks(fromIndex);
