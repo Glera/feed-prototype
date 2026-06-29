@@ -1741,6 +1741,12 @@ export class Feed {
 
   private renderRewardState(i: number, state: HTMLElement) {
     const icon = this.renderResultState(i, state, '★', 'reward__star');
+    // Readable affordance on the win screen (sits in the centred content, well above
+    // the bar). Both a tap and a swipe collect + advance.
+    const hint = document.createElement('div');
+    hint.className = 'reward__hint';
+    hint.textContent = 'tap or swipe for next game';
+    state.appendChild(hint);
     this.startRewardSparks(i, icon);
   }
 
