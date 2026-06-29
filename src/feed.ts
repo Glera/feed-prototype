@@ -13,12 +13,12 @@ import { PLAYABLES, playableUrl, type Playable } from './playables';
  * is exposed only by explicit host overlays: autoplay, reward, and level-up.
  *
  * Loading model:
- *  - Only the CURRENT game is mounted while the feed is idle.
- *  - Drag/settle never waits for the incoming game's iframe. The next page can
- *    show its mini-loader while the iframe mounts after the slide lands.
- *  - Ahead bundles are PREFETCHED (bytes only), so the next mount is warm
- *    without spending CPU/GPU on hidden gameplay.
- *  - A fill-bar preloader covers the initial batch.
+ *  - The CURRENT game is active.
+ *  - One NEXT game may be mounted warm in the background, but it is host-paused
+ *    and has autoplay stopped until the slide settles on it.
+ *  - Drag/settle never waits for iframe creation; if the next warm page is ready,
+ *    it is already painted under the incoming page.
+ *  - A fill-bar preloader covers only the first visible game.
  */
 
 const DISTANCE_SNAP_FRAC = 0.06;   // short upward drag commits to the next page
@@ -27,14 +27,16 @@ const TAP_SLOP_PX = 8;             // micro movement still counts as a tap
 const MIN_SWIPE_INTENT_PX = 8;     // velocity alone cannot turn a tiny wiggle into a swipe
 const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of distance
 
-const LIVE_AHEAD = 0;              // idle feed mounts current only; ahead is bytes-prefetched
+const LIVE_AHEAD = 0;              // explicit warm-next scheduling below owns ahead iframe lifetime
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
-const RESERVE_AHEAD = 2;           // prefetch this many bundles ahead (bytes only)
-const INITIAL_BATCH = 2;           // preloader fills until the first N are ready
+const RESERVE_AHEAD = 0;           // byte-prefetching big HTMLs heated phones without preparing iframes
+const INITIAL_BATCH = 1;           // get the first mechanic visible; warm-next starts after it settles
 const PRELOADER_TIMEOUT_MS = 15000;
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
 const FRAME_READY_FALLBACK_MS = 900;
 const FRAME_REVEAL_DELAY_MS = 90;
+const WARM_NEXT_DELAY_MS = 900;    // let the current game paint/play before parsing the next bundle
+const WARM_NEXT_IDLE_TIMEOUT_MS = 1800;
 const LEVEL_PROGRESS_MS = 340;
 const STARS_PER_LEVEL = 5;
 
@@ -91,6 +93,8 @@ export class Feed {
   private liveHold = new Set<number>();
   private settlingTargetIndex: number | null = null;
   private resetCycleAfterSettle = false;
+  private warmIndex: number | null = null;
+  private warmTimer: number | null = null;
   private frameLoaded = new Set<number>();
   private frameReady = new Set<number>();
   private frameRevealed = new Set<number>();
@@ -209,6 +213,7 @@ export class Feed {
       }
       this.updateLive();
       this.applyActiveStates();
+      this.scheduleWarmNext();
       this.prefetchReserve();
       this.pumpPrefetchQueue();
       if (leavingLevelUp) this.removeLevelUpPage();
@@ -574,6 +579,7 @@ export class Feed {
   private liveSet(): Set<number> {
     const s = new Set<number>(this.liveHold);
     s.add(this.realIndex());
+    if (this.warmIndex !== null) s.add(this.warmIndex);
     for (let d = -LIVE_BEHIND; d <= LIVE_AHEAD; d++) {
       s.add(((this.realIndex() + d) % this.N + this.N) % this.N);
     }
@@ -705,20 +711,28 @@ export class Feed {
   private tryRevealFrame(i: number) {
     const frame = this.frames.get(i);
     if (!frame || this.frameRevealed.has(i) || this.frameRevealTimers.has(i)) return;
-    if (!this.frameLoaded.has(i) || !this.frameReady.has(i) || this.shouldPauseFrame(i)) return;
+    if (!this.frameLoaded.has(i) || !this.frameReady.has(i) || !this.canRevealFrame(i)) return;
 
     const timer = window.setTimeout(() => {
       this.frameRevealTimers.delete(i);
       if (this.frames.get(i) !== frame) return;
-      if (!this.frameLoaded.has(i) || !this.frameReady.has(i) || this.shouldPauseFrame(i)) return;
+      if (!this.frameLoaded.has(i) || !this.frameReady.has(i) || !this.canRevealFrame(i)) return;
       this.frameRevealed.add(i);
       this.games[i].classList.remove('game--loading');
       this.games[i].classList.add('game--ready');
       this.markReady(i);
       this.ensureFrameAutoPlay(i);
       this.applyPendingEditor(i);
+      if (i === this.realIndex()) this.scheduleWarmNext();
     }, FRAME_REVEAL_DELAY_MS);
     this.frameRevealTimers.set(i, timer);
+  }
+
+  private canRevealFrame(i: number): boolean {
+    if (!this.shouldPauseFrame(i)) return true;
+    // A warm or incoming page is paused on purpose, but it is safe to remove the
+    // spinner while it is off-screen/settling so the eventual swipe is seamless.
+    return this.warmIndex === i || this.liveHold.has(i);
   }
 
   private playableApi(i: number): PlayableHostApi | null {
@@ -1735,9 +1749,11 @@ export class Feed {
     const emit = (count: number) => {
       if (!star.isConnected) { this.stopRewardSparks(i); return; }
       const starRect = star.getBoundingClientRect();
-      const stateRect = this.stateEls[i].getBoundingClientRect();
-      const cx = starRect.left - stateRect.left + starRect.width / 2;
-      const cy = starRect.top - stateRect.top + starRect.height / 2;
+      // Position in VIEWPORT coordinates: sparks live on the fixed viewport layer,
+      // not inside the page overlay, so a collect-swipe can't drag them upward.
+      const vp = this.viewport.getBoundingClientRect();
+      const cx = starRect.left - vp.left + starRect.width / 2;
+      const cy = starRect.top - vp.top + starRect.height / 2;
       for (let n = 0; n < count; n++) this.spawnRewardSpark(i, cx, cy, starRect.width);
     };
 
@@ -1765,7 +1781,7 @@ export class Feed {
     const radius = starSize * (0.16 + Math.random() * 0.22);
     const x = cx + Math.cos(angle) * radius;
     const y = cy + Math.sin(angle) * radius;
-    const size = 3 + Math.random() * 4;
+    const size = 6 + Math.random() * 7;
     const dist = 44 + Math.random() * 58;
     const dx = Math.cos(angle) * dist + (Math.random() - 0.5) * 22;
     const dy = Math.sin(angle) * dist - 18 - Math.random() * 24;
@@ -1773,8 +1789,11 @@ export class Feed {
     spark.style.top = `${y}px`;
     spark.style.width = `${size}px`;
     spark.style.height = `${size}px`;
-    spark.style.background = Math.random() < 0.35 ? '#ff3d22' : (Math.random() < 0.7 ? '#ff8b2e' : '#ffd05b');
-    state.appendChild(spark);
+    // Brighter palette — leans gold/white with hot-orange accents.
+    const r = Math.random();
+    spark.style.background = r < 0.5 ? '#ffe27a' : (r < 0.8 ? '#ffac3a' : '#fff6d4');
+    // Fixed viewport layer so a collect-swipe doesn't carry the sparks up the page.
+    this.viewport.appendChild(spark);
 
     const duration = 520 + Math.random() * 360;
     if (!spark.animate) {

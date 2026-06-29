@@ -747,11 +747,12 @@ body {
 
 .reward__spark {
   position: absolute;
-  z-index: 1;
+  z-index: 2650;                  /* fixed viewport layer, above the win overlay */
   border-radius: 50%;
   box-shadow:
-    0 0 8px rgba(255, 89, 28, 0.62),
-    0 0 14px rgba(255, 166, 58, 0.32);
+    0 0 10px rgba(255, 214, 90, 0.9),
+    0 0 22px rgba(255, 176, 60, 0.6),
+    0 0 34px rgba(255, 138, 46, 0.32);
   pointer-events: none;
   will-change: transform, opacity;
 }
