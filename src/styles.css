@@ -154,7 +154,13 @@ body {
   inset: 0 0 var(--swipebar-h) 0;   /* leave the bottom strip for the swipe bar */
   background: var(--platform-bg);
   touch-action: manipulation;
+  transform-origin: 50% 50%;
+  transition: transform 0.34s var(--ease-snap);
 }
+/* Autoplay: the game sits slightly inset (a dark "footage frame" around it). Tapping
+   to take over removes game--autoplay → it scales back to full, like expanding to a
+   fuller screen. GPU transform (no iframe resize) so it stays smooth. */
+.game--autoplay .game__slot { transform: scale(0.92); }
 .game__frame {
   width: 100%;
   height: 100%;
@@ -319,10 +325,15 @@ body {
 }
 .game--autoplay .game__reel { opacity: 1; }
 /* But NOT while the frame is the dark loading / arriving / preview placeholder — the
-   reel (corners, PLAY, scanlines, timecode) appears only once the live mechanic shows. */
+   reel (corners, PLAY, scanlines, timecode) AND the "tap to play or swipe" hint appear
+   only once the live mechanic shows (i.e. together with autoplay starting). */
 .game--loading .game__reel,
 .game--arriving .game__reel,
 .game--autoplay-preview .game__reel { opacity: 0; }
+/* Hint blinks (animated opacity) → hide via visibility so the animation can't override. */
+.game--loading .game__swipehint,
+.game--arriving .game__swipehint,
+.game--autoplay-preview .game__swipehint { visibility: hidden; }
 
 .game__reel-corner {
   position: absolute;

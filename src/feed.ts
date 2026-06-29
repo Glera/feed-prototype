@@ -1939,17 +1939,18 @@ export class Feed {
   }
 
   private renderFailedState(i: number, state: HTMLElement) {
-    this.renderResultState(i, state, '↻', 'reward__star reward__star--retry');
+    // On a loss: no big centre icon — just the 4 action buttons.
+    this.renderResultState(i, state, '↻', 'reward__star reward__star--retry', false);
   }
 
-  private renderResultState(i: number, state: HTMLElement, iconText: string, iconClass: string): HTMLElement {
+  private renderResultState(i: number, state: HTMLElement, iconText: string, iconClass: string, centerIcon: boolean = true): HTMLElement {
     const reward = document.createElement('div');
     reward.className = 'reward';
 
     const icon = document.createElement('div');
     icon.className = iconClass;
     icon.textContent = iconText;
-    reward.appendChild(icon);
+    if (centerIcon) reward.appendChild(icon);
 
     const actions = document.createElement('div');
     actions.className = 'reward__actions';
@@ -2286,9 +2287,10 @@ export class Feed {
     // Level-up-style confetti rains down evenly across the whole screen.
     this.burstStarConfetti();
 
-    // Pulse modelled on the merge playables' merge pop (scale 0.7→1.45→1.0): a quick
-    // smooth GROW to a peak, then a gentle SETTLE back to normal — dynamic but smooth.
-    // Then it flies to the counter with a full spin. (Centred — transform-origin 50%.)
+    // Quick smooth GROW to a peak, then straight into the FLIGHT (no shrink-back):
+    // during the flight to the counter it gradually shrinks and the spin accelerates.
+    // (Centred — transform-origin 50%.)
+    const DURATION = 850;
     const anim = star.animate([
       {
         transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
@@ -2297,28 +2299,25 @@ export class Feed {
         easing: 'cubic-bezier(0.16, 0.84, 0.3, 1)',      // quick, decelerating grow (smooth)
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1.55) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1.6) rotate(0deg)`,
         opacity: 1,
-        offset: 0.2,                                     // peak (merge-like overshoot)
-        easing: 'cubic-bezier(0.4, 0, 0.35, 1)',         // gentle settle
+        offset: 0.22,                                    // peak — then launch (no settle-back)
+        easing: 'cubic-bezier(0.5, 0, 0.95, 0.45)',      // accelerate into the counter (shrink + spin)
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
+        transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(540deg)`,
         opacity: 1,
-        offset: 0.46,                                    // settled back to normal, then launches
-        easing: 'cubic-bezier(0.5, 0, 0.5, 1)',          // smooth ease-in-out into the flight
+        offset: 1,                                       // shrinks gradually, spin speeds up to the end
       },
-      {
-        transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(360deg)`,
-        opacity: 1,
-        offset: 1,                                       // flies to the counter, spinning a full turn
-      },
-    ], { duration: 850, fill: 'forwards' });
+    ], { duration: DURATION, fill: 'forwards' });
+
+    // Pulse the level counter slightly BEFORE the star lands, so it's already reacting
+    // as the star hits.
+    window.setTimeout(() => this.bumpLevelBadge(), Math.round(DURATION * 0.8));
 
     anim.addEventListener('finish', () => {
       star.remove();
       this.burstRewardCollectParticles(badgeX, badgeY);
-      this.bumpLevelBadge();
       onDone();
     }, { once: true });
   }
