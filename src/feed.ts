@@ -2034,30 +2034,31 @@ export class Feed {
     // Level-up-style confetti rains down evenly across the whole screen.
     this.burstStarConfetti();
 
-    // On swipe the star stays put and does ONE size-up pulse, dipping slightly DOWN
-    // (anticipation against the upward swipe) before launching to the badge with a
-    // hard ACCELERATION into the finish. transform-origin is 50% 50% (CSS for
-    // --collect), so scaling keeps the glyph centred on the avatar.
+    // On swipe the star stays put and does ONE pronounced pulse: the size INCREASE
+    // accelerates into the peak (ease-in), then the DECREASE accelerates as it
+    // launches to the badge (ease-in). Slightly dips DOWN at the peak (anticipation
+    // against the upward swipe). transform-origin is 50% 50% (CSS for --collect), so
+    // scaling keeps the glyph centred on the avatar.
     const dipY = startY + Math.max(16, sz * 0.13);
     const anim = star.animate([
       {
         transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
         opacity: 1,
         offset: 0,
-        easing: 'cubic-bezier(0.34, 1.5, 0.5, 1)',       // pop the pulse up (overshoot) + dip
+        easing: 'cubic-bezier(0.55, 0, 0.9, 0.45)',      // grow ACCELERATES into the peak
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(1.7) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(1.85) rotate(0deg)`,
         opacity: 1,
-        offset: 0.34,                                    // peak pulse, sagged down a touch
-        easing: 'cubic-bezier(0.62, 0, 0.95, 0.35)',     // then ramp hard toward the badge
+        offset: 0.52,                                    // bigger peak, more time spent growing
+        easing: 'cubic-bezier(0.5, 0, 0.9, 0.4)',        // shrink ACCELERATES as it launches
       },
       {
         transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(16deg)`,
         opacity: 1,
         offset: 1,
       },
-    ], { duration: 640, fill: 'forwards' });
+    ], { duration: 900, fill: 'forwards' });
 
     anim.addEventListener('finish', () => {
       star.remove();
