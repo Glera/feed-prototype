@@ -37,6 +37,9 @@ const FRAME_READY_FALLBACK_MS = 900;
 const FRAME_REVEAL_DELAY_MS = 90;
 const WARM_NEXT_DELAY_MS = 900;    // let the current game paint/play before parsing the next bundle
 const WARM_NEXT_IDLE_TIMEOUT_MS = 1800;
+const WARM_NEXT_CALM_FRAME_MS = 24;
+const WARM_NEXT_CALM_FRAMES = 8;
+const WARM_NEXT_IDLE_MIN_MS = 3;
 const LEVEL_PROGRESS_MS = 340;
 const STARS_PER_LEVEL = 5;
 
@@ -101,9 +104,11 @@ export class Feed {
   private resetCycleAfterSettle = false;
   private warmIndex: number | null = null;
   private warmTimer: number | null = null;
+  private warmIdleCancel: (() => void) | null = null;
   private frameLoaded = new Set<number>();
   private frameReady = new Set<number>();
   private frameRevealed = new Set<number>();
+  private framePaused = new Map<number, boolean>();
   private frameFallbackTimers = new Map<number, number>();
   private frameRevealTimers = new Map<number, number>();
 
@@ -138,6 +143,7 @@ export class Feed {
   private collectingRewardIndex: number | null = null;
   private autoplayLoopTimers = new Map<number, number>();
   private collectCover: HTMLElement | null = null;
+  private holdNextAutoplay = false;
 
   // Friend stories (top rail). Tapping one opens a full-screen story showing a
   // playable mechanic; the background feed game is paused while it's open.
@@ -179,6 +185,8 @@ export class Feed {
   // while we decide which feels better.)
   private restartOnTakeover =
     (new URLSearchParams(location.search).get('takeover') || 'restart') !== 'continue';
+  private warmNextEnabled =
+    (new URLSearchParams(location.search).get('warm') || 'idle') !== 'off';
 
   private dragging = false;
   private startY = 0;
@@ -700,6 +708,7 @@ export class Feed {
     if (!frame) return;
     const runId = frame.dataset.runId;
     if (runId) this.completedRunIds.delete(runId);
+    this.clearAutoplayLoopTimer(i);
     this.disposeFrame(i, frame);
     this.frames.delete(i);
     this.resetFrameReadiness(i);
@@ -749,6 +758,7 @@ export class Feed {
     this.frameLoaded.delete(i);
     this.frameReady.delete(i);
     this.frameRevealed.delete(i);
+    this.framePaused.delete(i);
     const fallbackTimer = this.frameFallbackTimers.get(i);
     if (fallbackTimer) window.clearTimeout(fallbackTimer);
     this.frameFallbackTimers.delete(i);
@@ -831,6 +841,7 @@ export class Feed {
   private setFramePaused(i: number, paused: boolean) {
     const frame = this.frames.get(i);
     if (!frame) return;
+    if (this.frameLoaded.has(i) && this.framePaused.get(i) === paused) return;
     this.postPlayableCommand(frame, 'setHostPaused', { paused });
     if (paused) this.postPlayableCommand(frame, 'stopAutoPlay');
     try {
@@ -847,8 +858,10 @@ export class Feed {
       Object.defineProperty(doc, 'hidden', { configurable: true, get: () => paused });
       Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (paused ? 'hidden' : 'visible') });
       doc.dispatchEvent(new win.Event('visibilitychange'));
+      if (this.frameLoaded.has(i)) this.framePaused.set(i, paused);
       if (!paused) this.ensureFrameAutoPlay(i);
     } catch {
+      if (this.frameLoaded.has(i)) this.framePaused.set(i, paused);
       /* cross-origin or not ready — leave as-is */
     }
   }
@@ -858,6 +871,9 @@ export class Feed {
     // While a reward star is still flying to the counter, hold off starting the
     // next mechanic's autoplay — it kicks in once the collect finishes (afterCollect).
     if (this.collectingRewardIndex !== null) return;
+    // Don't start autoplay while the post-reward mechanic is still sliding into place —
+    // kicking off physics/finger mid-slide janks the arrival (started after it lands).
+    if (this.holdNextAutoplay) return;
     const frame = this.frames.get(i);
     const api = this.playableApi(i);
     try {
@@ -930,6 +946,7 @@ export class Feed {
   }
 
   private desiredWarmIndex(): number | null {
+    if (!this.warmNextEnabled) return null;
     if (this.N < 2 || document.hidden || this.overlayOpen || this.isGestureBusy()) return null;
     if (this.levelUpPageState !== 'idle') return null;
     const current = this.realIndex();
@@ -944,6 +961,10 @@ export class Feed {
       window.clearTimeout(this.warmTimer);
       this.warmTimer = null;
     }
+    if (this.warmIdleCancel) {
+      this.warmIdleCancel();
+      this.warmIdleCancel = null;
+    }
   }
 
   private scheduleWarmNext() {
@@ -953,7 +974,10 @@ export class Feed {
     if (this.warmIndex === next && this.frames.has(next)) return;
     this.warmTimer = window.setTimeout(() => {
       this.warmTimer = null;
-      this.scheduleIdlePrefetch(() => this.startWarmNext(next), WARM_NEXT_IDLE_TIMEOUT_MS);
+      this.warmIdleCancel = this.scheduleLowImpactTask(() => {
+        this.warmIdleCancel = null;
+        this.startWarmNext(next);
+      }, WARM_NEXT_IDLE_TIMEOUT_MS);
     }, WARM_NEXT_DELAY_MS);
   }
 
@@ -989,7 +1013,15 @@ export class Feed {
   private pollAutoplayUi = () => {
     if (document.hidden) return;
     if (this.isGestureBusy()) return;
-    for (let i = 0; i < this.N; i++) {
+    const indices = new Set<number>(this.autoplayUiActive);
+    indices.add(this.realIndex());
+    if (this.warmIndex !== null) indices.add(this.warmIndex);
+    if (this.settlingTargetIndex !== null) indices.add(this.settlingTargetIndex);
+    this.liveHold.forEach((i) => indices.add(i));
+    this.manualRuns.forEach((i) => indices.add(i));
+
+    for (const i of indices) {
+      if (i < 0 || i >= this.N) continue;
       const isCurrent = i === this.realIndex();
       const paused = this.shouldPauseFrame(i);
       const manual = this.manualRuns.has(i);
@@ -1333,14 +1365,85 @@ export class Feed {
   }
 
   private scheduleIdlePrefetch(fn: () => void, timeout = 800) {
+    this.scheduleLowImpactTask(fn, timeout);
+  }
+
+  private scheduleLowImpactTask(fn: () => void, timeout = 800): () => void {
+    let cancelled = false;
+    let raf = 0;
+    let fallbackTimer = 0;
+    let idleId = 0;
+    let calmFrames = 0;
+    let lastFrameT = performance.now();
+    let calmWindowStartedAt = lastFrameT;
     const requestIdleCallback = (window as any).requestIdleCallback as
       | undefined
-      | ((callback: () => void, options?: { timeout: number }) => number);
-    if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(fn, { timeout });
-      return;
-    }
-    window.setTimeout(fn, 120);
+      | ((callback: (deadline: { timeRemaining: () => number; didTimeout?: boolean }) => void, options?: { timeout: number }) => number);
+    const cancelIdleCallback = (window as any).cancelIdleCallback as undefined | ((id: number) => void);
+
+    const clear = () => {
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      if (fallbackTimer) { window.clearTimeout(fallbackTimer); fallbackTimer = 0; }
+      if (idleId && cancelIdleCallback) { cancelIdleCallback(idleId); idleId = 0; }
+    };
+
+    const run = () => {
+      if (cancelled) return;
+      clear();
+      fn();
+    };
+
+    const waitForCalmFrames = (now: number) => {
+      if (cancelled) return;
+      const dt = now - lastFrameT;
+      lastFrameT = now;
+      if (!document.hidden && !this.isGestureBusy() && dt <= WARM_NEXT_CALM_FRAME_MS) calmFrames++;
+      else calmFrames = 0;
+      if (calmFrames >= WARM_NEXT_CALM_FRAMES) {
+        scheduleIdle();
+        return;
+      }
+      // If the page never becomes calm, do not force heavy iframe parsing. It is
+      // better to try again later than to jank the current game.
+      if (now - calmWindowStartedAt > timeout * 2) {
+        fallbackTimer = window.setTimeout(() => {
+          fallbackTimer = 0;
+          calmFrames = 0;
+          calmWindowStartedAt = performance.now();
+          lastFrameT = calmWindowStartedAt;
+          raf = requestAnimationFrame(waitForCalmFrames);
+        }, timeout);
+        return;
+      }
+      raf = requestAnimationFrame(waitForCalmFrames);
+    };
+
+    const scheduleIdle = () => {
+      if (cancelled) return;
+      if (typeof requestIdleCallback === 'function') {
+        idleId = requestIdleCallback((deadline) => {
+          idleId = 0;
+          if (cancelled) return;
+          if (!document.hidden && !this.isGestureBusy() && deadline.timeRemaining() >= WARM_NEXT_IDLE_MIN_MS) {
+            run();
+            return;
+          }
+          calmFrames = 0;
+          raf = requestAnimationFrame(waitForCalmFrames);
+        }, { timeout });
+        return;
+      }
+      fallbackTimer = window.setTimeout(() => {
+        fallbackTimer = 0;
+        if (!document.hidden && !this.isGestureBusy()) run();
+      }, 0);
+    };
+
+    raf = requestAnimationFrame(waitForCalmFrames);
+    return () => {
+      cancelled = true;
+      clear();
+    };
   }
 
   // ── Preloader (rectangular fill bar) ───────────────────────────────────────
@@ -1662,7 +1765,9 @@ export class Feed {
     if (!frame || !runId || this.completedRunIds.has(runId)) return;
 
     try {
-      const history = this.playableApi(i)?.getAnalyticsHistory?.();
+      const api = this.playableApi(i);
+      if (api?.swipe) return;
+      const history = api?.getAnalyticsHistory?.();
       if (!Array.isArray(history)) return;
       for (let n = history.length - 1; n >= 0; n--) {
         const outcome = this.outcomeFromAnalytics(history[n]);
@@ -1724,6 +1829,13 @@ export class Feed {
       } catch { /* cross-origin */ }
     }, 800);
     this.autoplayLoopTimers.set(i, t);
+  }
+
+  private clearAutoplayLoopTimer(i: number) {
+    const t = this.autoplayLoopTimers.get(i);
+    if (!t) return;
+    window.clearTimeout(t);
+    this.autoplayLoopTimers.delete(i);
   }
 
   private handleWin(i: number) {
@@ -2060,9 +2172,17 @@ export class Feed {
           // Once the star is credited, the next mechanic ARRIVES by sliding in (normal
           // animated paging). The dark cover lifts away in sync (like a curtain) so the
           // won board is never seen sliding out — only a dark panel exits up while the
-          // next mechanic slides up into view. Autoplay starts on the slide's settle.
+          // next mechanic slides up into view.
+          this.holdNextAutoplay = true;       // ...but don't start its autoplay mid-slide
           this.goTo(advanceToPos);
           this.slideOutCollectCover();
+          // Start autoplay only after it has fully arrived (slide 0.36s + buffer), so
+          // the physics/finger spin-up doesn't jank the arrival.
+          window.setTimeout(() => {
+            this.holdNextAutoplay = false;
+            this.ensureFrameAutoPlay(this.realIndex());
+            this.pollAutoplayUi();
+          }, 560);
         }, LEVEL_PROGRESS_MS + 90);
       }
     };
@@ -2235,6 +2355,7 @@ export class Feed {
     if (frame) {
       const runId = frame.dataset.runId;
       if (runId) this.completedRunIds.delete(runId);
+      this.clearAutoplayLoopTimer(i);
       this.disposeFrame(i, frame);
       this.frames.delete(i);
       this.resetFrameReadiness(i);
