@@ -285,7 +285,7 @@ export class Feed {
       // switches by mode in pollAutoplayUi. Purely visual (pointer-events: none).
       const swipeHint = document.createElement('div');
       swipeHint.className = 'game__swipehint';
-      swipeHint.textContent = 'tap to play or swipe';
+      swipeHint.textContent = 'tap to play or swipe for next game';
       game.appendChild(swipeHint);
       this.swipebarTextEls[i] = swipeHint;
 
@@ -955,7 +955,7 @@ export class Feed {
       // (tapping takes over the demo); once the player is playing, has won, or has
       // failed, tapping does nothing new — so it's swipe-only.
       const txt = this.swipebarTextEls[i];
-      const label = active ? 'tap to play or swipe' : 'swipe for next mechanic';
+      const label = active ? 'tap to play or swipe for next game' : 'swipe for next game';
       if (txt && txt.textContent !== label) txt.textContent = label;
 
       // Manual play (taken over, not won/failed): show the close (×) → next.
