@@ -2057,11 +2057,12 @@ export class Feed {
       // Nothing of the next mechanic shows before the star is counted.
       if (advanceToPos !== null) {
         window.setTimeout(() => {
-          // INSTANT advance (no slide) — we're under the opaque cover, so the page
-          // change must not be seen. The next mechanic settles + autoplays behind the
-          // cover, then the cover fades to reveal it (no mechanic-sliding-away).
-          this.goTo(advanceToPos, true);
-          this.hideCollectCover();
+          // Once the star is credited, the next mechanic ARRIVES by sliding in (normal
+          // animated paging). The dark cover lifts away in sync (like a curtain) so the
+          // won board is never seen sliding out — only a dark panel exits up while the
+          // next mechanic slides up into view. Autoplay starts on the slide's settle.
+          this.goTo(advanceToPos);
+          this.slideOutCollectCover();
         }, LEVEL_PROGRESS_MS + 90);
       }
     };
@@ -2091,6 +2092,21 @@ export class Feed {
     const remove = () => cover.remove();
     cover.addEventListener('transitionend', remove, { once: true });
     window.setTimeout(remove, 900);    // fallback if transitionend never fires
+  }
+
+  // Lift the dark cover up and out in sync with the page slide (same duration/easing
+  // as render's 0.36s transform), so the leaving won board stays hidden behind a
+  // dark "curtain" while the next mechanic slides in.
+  private slideOutCollectCover() {
+    const cover = this.collectCover;
+    if (!cover) return;
+    this.collectCover = null;
+    cover.style.willChange = 'transform';
+    cover.style.transition = 'transform 0.36s var(--ease-snap)';
+    cover.style.transform = `translateY(-${this.pageH}px)`;
+    const remove = () => cover.remove();
+    cover.addEventListener('transitionend', remove, { once: true });
+    window.setTimeout(remove, 700);    // fallback if transitionend never fires
   }
 
   private rewardWouldLevelUp(): boolean {
