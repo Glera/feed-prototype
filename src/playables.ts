@@ -16,6 +16,7 @@ export interface Playable {
 }
 
 export const PLAYABLES: Playable[] = [
+  { id: 'merge-locked-v1-swipe' },
   { id: 'pins-v1' },
   { id: 'marble-sort-swipe' },
   { id: 'merge-timepress-v1' },
@@ -24,14 +25,17 @@ export const PLAYABLES: Playable[] = [
   { id: 'merge-timepress-no-orders-v2' },
   { id: 'merge-second-board-v1' },
   { id: 'merge-second-board-v2' },
-  { id: 'merge-locked-v1-swipe' },
 ];
 
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
  *  override the host with `?base=…` for local development. */
-export function playableUrl(id: string, options: { hostPaused?: boolean } = {}): string {
+export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: boolean } = {}): string {
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
   const url = `${base}${id}.html`;
-  return options.hostPaused ? `${url}?hostPaused=1` : url;
+  const params = new URLSearchParams();
+  if (options.hostPaused) params.set('hostPaused', '1');
+  if (options.auto !== undefined) params.set('auto', options.auto ? '1' : '0');
+  const query = params.toString();
+  return query ? `${url}?${query}` : url;
 }

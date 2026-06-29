@@ -7,6 +7,10 @@
        two-finger pinch never fights the swipe paging. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no, maximum-scale=1.0" />
   <title>Mini-Game Feed — Prototype</title>
+  <!-- Telegram Mini App SDK. Must be loaded from telegram.org (not bundled) so
+       it stays current; stays an external <script> through the single-file build.
+       Harmless outside Telegram — telegram.ts no-ops when Telegram.WebApp is absent. -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <!-- The phone "screen". On desktop it's letterboxed to a phone aspect so

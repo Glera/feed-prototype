@@ -1,14 +1,22 @@
 :root {
-  /* Height of the bottom swipe gutter — the "glue" strip between two adjacent
-     mini-games. This is the ONLY region that pages the feed; everything above
-     it belongs to the mini-game and its own gestures. */
+  /* Shared chrome height: top stories rail now uses it directly. The old bottom
+     swipe gutter keeps this var as legacy styling, but it is not mounted. */
   --chrome-zone-h: 88px;
   --gutter-h: var(--chrome-zone-h);
   --gutter-gap: 0px;
-  --top-zone-h: calc(var(--chrome-zone-h) + env(safe-area-inset-top));
-  --top-zone-pad-top: max(11px, calc(env(safe-area-inset-top) + 3px));
+  /* Safe-area insets. Default to the OS values via env(); inside a Telegram Mini
+     App, telegram.ts OVERRIDES these with Telegram's insets (device + its own
+     header) because env() is not populated in Telegram fullscreen. */
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-left: env(safe-area-inset-left);
+  --safe-right: env(safe-area-inset-right);
+  --top-zone-h: calc(var(--chrome-zone-h) + var(--safe-top));
+  --top-zone-pad-top: max(11px, calc(var(--safe-top) + 3px));
   --story-size: 54px;
   --ease-snap: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dev-phone-aspect-w: 390;
+  --dev-phone-aspect-h: 844;
 }
 
 @property --level-progress {
@@ -43,25 +51,33 @@ body {
   max-width: 480px;
   overflow: hidden;
   background: #000;
-  /* Keep the game surface free for the iframe. Paging gestures are constrained
-     to the bottom gutter, and the top rail owns only its horizontal drag. */
+  /* Keep the game surface free for the iframe. Paging gestures live on explicit
+     overlays, and the top rail owns only its horizontal drag. */
   touch-action: auto;
 }
 @media (min-width: 540px) {
   /* Desktop: a centered phone frame with rounded corners. */
-  .viewport { height: min(92dvh, 900px); border-radius: 28px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+  .viewport {
+    height: min(92dvh, 932px);
+    width: calc(min(92dvh, 932px) * var(--dev-phone-aspect-w) / var(--dev-phone-aspect-h));
+    max-width: none;
+    border-radius: 28px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  }
 }
 
 .feed {
   position: absolute;
-  inset: var(--top-zone-h) 0 0;
+  /* top clears the HUD (which already includes --safe-top); bottom/sides clear
+     the home indicator / side notches. */
+  inset: var(--top-zone-h) var(--safe-right) var(--safe-bottom) var(--safe-left);
   height: auto;
   overflow: hidden;
   background: #000;
   contain: layout paint;
 }
 
-/* One full-screen page = mini-game container + the gutter below it. Pages are
+/* One full-screen page = mini-game container. Pages are
    absolutely stacked at the same origin and positioned individually by a JS
    transform (translateY = ring offset × page height) — that's what makes the
    feed an INFINITE loop: a page far from the current one wraps to the other
@@ -85,9 +101,10 @@ body {
 }
 
 /* ── Mini-game container ───────────────────────────────────────────────────
-   Does NOT fill the page — leaves the gutter free at the bottom. All in-game
-   gestures live here and must NOT page the feed. */
+   Fills the page below the stories rail. All in-game gestures live here and
+   must NOT page the feed. */
 .game {
+  --swipebar-h: 46px;            /* reserved strip below the game for the swipe bar */
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
@@ -118,10 +135,10 @@ body {
 .game--loading::before { opacity: 1; }
 
 /* The playable <iframe> mounts here and fills the container. Its own gestures
-   stay inside it; only the gutter (sibling, below) pages the feed. */
+   stay inside it; host overlays decide when the feed can page. */
 .game__slot {
   position: absolute;
-  inset: 0;
+  inset: 0 0 var(--swipebar-h) 0;   /* leave the bottom strip for the swipe bar */
   background: #07090f;
   touch-action: manipulation;
 }
@@ -160,6 +177,89 @@ body {
   transition: opacity 0.25s ease;
 }
 .game__label--show { opacity: 1; }
+
+.game__autoplay {
+  position: absolute;
+  inset: 0 0 var(--swipebar-h) 0;   /* dim only the game area, never the swipe bar */
+  z-index: 4;
+  background:
+    linear-gradient(180deg, rgba(82, 52, 18, 0.12), rgba(38, 24, 10, 0.28)),
+    rgba(93, 63, 28, 0.1);
+  backdrop-filter: sepia(0.48) saturate(0.72) contrast(0.94);
+  opacity: 0;
+  pointer-events: none;
+  touch-action: none;
+  transition: opacity 0.18s ease-out;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.game--autoplay .game__autoplay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Permanent swipe bar — the reserved strip directly below the game. Always
+   visible; the label inside switches by mode (set in JS). */
+.game__swipebar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--swipebar-h);
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: linear-gradient(180deg, rgba(14, 16, 23, 0.96), rgba(7, 9, 14, 0.98));
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  color: rgba(255,255,255,0.92);
+  text-shadow: 0 2px 9px rgba(0,0,0,0.52);
+}
+
+.game__autoplay-arrow {
+  color: #fff1a8;
+  font-size: 19px;
+  line-height: 1;
+  filter: drop-shadow(0 0 8px rgba(255,216,90,0.34));
+  animation: autoplay-arrow-rise 1.05s ease-in-out infinite;
+}
+
+.game__autoplay-text {
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: rgba(0,0,0,0.26);
+  border: 1px solid rgba(255,255,255,0.13);
+  color: rgba(255,255,255,0.9);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 850;
+  letter-spacing: 0.2px;
+  backdrop-filter: blur(8px);
+}
+
+@keyframes autoplay-arrow-rise {
+  0%, 100% { transform: translateY(3px); opacity: 0.58; }
+  45% { transform: translateY(-6px); opacity: 1; }
+}
+
+/* Swipe affordance on the win screen — reuses the autoplay arrow/pill, pinned bottom. */
+.game__swipe-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: max(20px, calc(var(--safe-bottom) + 16px));
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  z-index: 3;
+  pointer-events: none;
+  text-shadow: 0 2px 9px rgba(0,0,0,0.52);
+}
 
 /* ── Progress HUD ───────────────────────────────────────────────────────────*/
 .hud {
@@ -465,6 +565,9 @@ body {
     rgba(4, 6, 10, 0.62);
   backdrop-filter: blur(7px);
   pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .game__state[hidden] { display: none; }
 
@@ -472,6 +575,12 @@ body {
   background:
     radial-gradient(72% 52% at 50% 46%, rgba(255,216,90,0.12), transparent 70%),
     rgba(4, 6, 10, 0.58);
+}
+
+.game__state--failed {
+  background:
+    radial-gradient(74% 54% at 50% 46%, rgba(94,230,168,0.13), transparent 70%),
+    rgba(4, 6, 10, 0.6);
 }
 
 .game__state-badge {
@@ -513,6 +622,174 @@ body {
 }
 .game__restart:active { transform: translateY(1px) scale(0.98); }
 
+.reward {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  justify-items: center;
+  gap: 22px;
+  width: min(92%, 360px);
+  pointer-events: none;
+}
+
+.reward__star {
+  width: 128px;
+  height: 128px;
+  display: grid;
+  place-items: center;
+  color: #ffd85a;
+  font-size: 118px;
+  line-height: 1;
+  transform-origin: 50% 58%;
+  filter: drop-shadow(0 18px 34px rgba(255, 147, 42, 0.36));
+  text-shadow:
+    0 4px 0 #8d4a12,
+    0 0 18px rgba(255, 221, 89, 0.52),
+    0 0 36px rgba(255, 105, 28, 0.24);
+  animation:
+    reward-star-pop 0.5s cubic-bezier(0.16, 0.9, 0.28, 1.4) both,
+    reward-star-float 2.4s ease-in-out 0.5s infinite;
+  will-change: transform;
+}
+
+.reward__star--retry {
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.22);
+  background:
+    radial-gradient(circle at 34% 26%, rgba(255,255,255,0.34), transparent 34%),
+    linear-gradient(180deg, rgba(127,243,179,0.96), rgba(46,184,125,0.94));
+  color: #052318;
+  font-size: 70px;
+  text-shadow: 0 2px 0 rgba(255,255,255,0.22);
+  box-shadow:
+    0 18px 34px rgba(46,184,125,0.34),
+    inset 0 2px 0 rgba(255,255,255,0.34),
+    inset 0 -12px 22px rgba(0,0,0,0.16);
+  filter: drop-shadow(0 18px 34px rgba(46,184,125,0.24));
+}
+
+.reward__actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: max-content;
+  max-width: 100%;
+  justify-self: center;
+  pointer-events: auto;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.reward--collecting .reward__actions,
+.reward--collecting .reward__toast {
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+
+.reward__action {
+  flex: 0 0 54px;
+  width: 54px;
+  height: 54px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 50%;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.18), rgba(255,255,255,0.08));
+  color: #fff;
+  box-shadow: 0 12px 24px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.16);
+  backdrop-filter: blur(14px);
+  font: 900 24px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.reward__action:active { transform: translateY(1px) scale(0.96); }
+
+.reward__action--like {
+  flex-basis: 76px;
+  width: 76px;
+  border-radius: 999px;
+  padding: 0 12px;
+  color: #fff;
+}
+
+.reward__action--liked {
+  color: #ff4668;
+  border-color: rgba(255,70,104,0.34);
+  background:
+    linear-gradient(180deg, rgba(255,92,124,0.24), rgba(255,71,103,0.1));
+}
+
+.reward__action--posted {
+  color: #7ff3b3;
+  border-color: rgba(127,243,179,0.34);
+}
+
+.reward__icon {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  line-height: 1;
+}
+
+.reward__count {
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255,255,255,0.86);
+}
+
+.reward__toast {
+  min-height: 18px;
+  color: rgba(255,255,255,0.82);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 800;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.reward__toast--show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.reward__spark {
+  position: absolute;
+  z-index: 1;
+  border-radius: 50%;
+  box-shadow:
+    0 0 8px rgba(255, 89, 28, 0.62),
+    0 0 14px rgba(255, 166, 58, 0.32);
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.story--posted .hud__level-ring {
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.34),
+    inset 0 -7px 14px rgba(0,0,0,0.28),
+    0 0 0 3px rgba(127,243,179,0.16),
+    0 0 18px rgba(127,243,179,0.22);
+}
+
+@keyframes reward-star-pop {
+  0% { transform: scale(0.2) rotate(-12deg); opacity: 0; }
+  58% { transform: scale(1.18) rotate(5deg); opacity: 1; }
+  78% { transform: scale(0.94) rotate(-2deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+@keyframes reward-star-float {
+  0%, 100% { transform: translateY(0) rotate(-1.5deg); }
+  50% { transform: translateY(-8px) rotate(1.5deg); }
+}
+
 .star-flight {
   position: absolute;
   top: 0;
@@ -532,6 +809,10 @@ body {
     0 0 18px rgba(255, 221, 89, 0.46);
   pointer-events: none;
   will-change: transform, opacity;
+}
+
+.star-flight--collect {
+  z-index: 2600;
 }
 
 .star-particle {
@@ -566,7 +847,10 @@ body {
   place-items: center;
   overflow: hidden;
   background: radial-gradient(70% 55% at 50% 42%, rgba(255,216,90,0.2), rgba(4,6,10,0.82) 68%);
-  pointer-events: none;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .levelup__card {
@@ -684,7 +968,7 @@ body {
   will-change: transform, opacity;
 }
 
-/* ── Gutter: the paging handle that glues page N to page N+1 ────────────────*/
+/* ── Legacy gutter: the old bottom paging handle, currently not mounted. ───*/
 .gutter {
   position: relative;
   flex: 0 0 var(--gutter-h);

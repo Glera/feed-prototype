@@ -9,8 +9,8 @@ import { PLAYABLES, playableUrl, type Playable } from './playables';
  * other — after the last game comes the first again (and swiping back from the
  * first lands on the last). The wrap always happens off-screen, so it's seamless.
  *
- * Gesture separation (phase 1): paging is wired ONLY to the bottom gutter, so
- * in-game gestures (inside the playable's <iframe>) never page the feed.
+ * Gesture separation: in-game gestures stay inside the playable iframe. Paging
+ * is exposed only by explicit host overlays: autoplay, reward, and level-up.
  *
  * Loading model:
  *  - Only the CURRENT game is mounted while the feed is idle.
@@ -21,8 +21,11 @@ import { PLAYABLES, playableUrl, type Playable } from './playables';
  *  - A fill-bar preloader covers the initial batch.
  */
 
-const DISTANCE_SNAP_FRAC = 0.18;   // drag past 18% of a page → commit to the next
-const VELOCITY_SNAP = 0.45;        // px/ms flick that commits regardless of distance
+const DISTANCE_SNAP_FRAC = 0.06;   // short upward drag commits to the next page
+const DISTANCE_SNAP_PX = 14;       // absolute cap so mobile swipes feel sharp
+const TAP_SLOP_PX = 8;             // micro movement still counts as a tap
+const MIN_SWIPE_INTENT_PX = 8;     // velocity alone cannot turn a tiny wiggle into a swipe
+const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of distance
 
 const LIVE_AHEAD = 0;              // idle feed mounts current only; ahead is bytes-prefetched
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
@@ -33,10 +36,34 @@ const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
 const FRAME_READY_FALLBACK_MS = 900;
 const FRAME_REVEAL_DELAY_MS = 90;
 const LEVEL_PROGRESS_MS = 340;
-const AUTO_ADVANCE_AFTER_REWARD_MS = 120;
 const STARS_PER_LEVEL = 5;
 
 type PlayableOutcome = 'won' | 'lost';
+type SwipeApi = {
+  version: number;
+  hasAutoPlay: boolean;
+  hasEditor: boolean;
+  hasRestart: boolean;
+  startAutoPlay: () => void;
+  stopAutoPlay: () => void;
+  isAutoPlayActive: () => boolean;
+  openEditor: () => void;
+  closeEditor: () => void;
+  isEditorOpen: () => boolean;
+  restart: () => void;
+};
+type PlayableHostApi = {
+  swipe?: SwipeApi;                  // uniform swipe-platform API (preferred)
+  getAnalyticsHistory?: () => unknown[];
+  getSwipeState?: () => Record<string, unknown>;
+  hostGesture?: () => void;
+  setEditorMode?: (enabled: boolean) => void;
+  setHostPaused?: (paused: boolean) => void;
+  setAutoPlayEnabled?: (enabled: boolean) => void;       // legacy fallback
+  startAutoPlay?: (options?: { immediate?: boolean }) => void;  // legacy fallback
+  stopAutoPlay?: () => void;
+  toggleEditor?: () => void;
+};
 
 export class Feed {
   private viewport: HTMLElement;
@@ -54,6 +81,8 @@ export class Feed {
   private games: HTMLElement[] = [];
   private gutters: HTMLElement[] = [];
   private stateEls: HTMLElement[] = [];
+  private autoplayEls: HTMLElement[] = [];
+  private swipebarTextEls: HTMLElement[] = [];
   private labelEls: HTMLElement[] = [];
   private labelTimers = new Map<number, number>();
   private frames = new Map<number, HTMLIFrameElement>();
@@ -71,6 +100,8 @@ export class Feed {
   private totalStars = 0;
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
+  private pendingStarRewards = new Set<number>();
+  private claimedStarRewards = new Set<number>();
   private hudEl: HTMLElement | null = null;
   private storiesEl: HTMLElement | null = null;
   private storiesMomentumFrame: number | null = null;
@@ -80,6 +111,18 @@ export class Feed {
   private heldLevelUpOverlay: HTMLElement | null = null;
   private heldLevelUpIndex: number | null = null;
   private confettiTimer: number | null = null;
+  private manualRuns = new Set<number>();
+  private pendingEditorLaunch = new Set<number>();
+  private rewardSparkTimers = new Map<number, number>();
+  private autoplayUiActive = new Set<number>();
+  private likeCounts = new Map<number, number>();
+  private likedMechanics = new Set<number>();
+  private postedStories = new Set<number>();
+  private dragMode: 'feed' | 'reward' = 'feed';
+  private rewardDragIndex: number | null = null;
+  private dragAutoplayIndex: number | null = null;
+  private dragAllowsBack = false;
+  private collectingRewardIndex: number | null = null;
 
   // Friend stories (top rail). Tapping one opens a full-screen story showing a
   // playable mechanic; the background feed game is paused while it's open.
@@ -114,6 +157,13 @@ export class Feed {
   private preloaderProgressEl: HTMLElement | null = null;
   private preloaderEl: HTMLElement | null = null;
   private initialTarget = 0;
+
+  // When the user taps to take over an autoplay demo, restart the mechanic from
+  // scratch (fresh level) by default. `?takeover=continue` keeps the old behavior
+  // — manual play picks up exactly where the autoplay left off. (Kept as a toggle
+  // while we decide which feels better.)
+  private restartOnTakeover =
+    (new URLSearchParams(location.search).get('takeover') || 'restart') !== 'continue';
 
   private dragging = false;
   private startY = 0;
@@ -162,6 +212,7 @@ export class Feed {
     window.addEventListener('message', this.onWindowMessage);
     (window as any).__feedHostGesture = this.onHostGesture;
     window.setInterval(this.pollPlayableAnalytics, ANALYTICS_POLL_MS);
+    window.setInterval(this.pollAutoplayUi, 250);
   }
 
   private realIndex(): number {
@@ -195,36 +246,68 @@ export class Feed {
       label.textContent = p.id;
       game.appendChild(label);
 
+      // Full-screen dim over the GAME AREA (inset above the swipe bar) shown only
+      // while autoplay runs — a "this is a demo" veil that also captures tap-anywhere
+      // to take over. The label itself lives in the swipe bar below.
+      const autoplay = document.createElement('div');
+      autoplay.className = 'game__autoplay';
+      autoplay.dataset.autoplayIndex = String(i);
+      this.attachSwipeSurface(autoplay);
+      game.appendChild(autoplay);
+
+      // Permanent swipe bar reserved BELOW the game (the slot/overlays are inset by
+      // its height, so the playable is shorter — the bar never overlaps gameplay).
+      // Always a swipe surface; its label switches by mode in pollAutoplayUi
+      // ("tap to play or swipe" during autoplay, "swipe for next mechanic" once the
+      // player takes over). dataset.autoplayIndex lets a tap here take over too.
+      const swipebar = document.createElement('div');
+      swipebar.className = 'game__swipebar';
+      swipebar.dataset.autoplayIndex = String(i);
+      swipebar.innerHTML = '<div class="game__autoplay-arrow">▲</div>';
+      const swipebarText = document.createElement('div');
+      swipebarText.className = 'game__autoplay-text';
+      swipebarText.textContent = 'tap to play or swipe';
+      swipebar.appendChild(swipebarText);
+      this.attachSwipeSurface(swipebar);
+      game.appendChild(swipebar);
+      this.swipebarTextEls[i] = swipebarText;
+
       const state = document.createElement('div');
       state.className = 'game__state';
       state.hidden = true;
+      this.attachRewardSwipe(state);
       game.appendChild(state);
 
-      const gutter = this.makeGutter(i);
       page.appendChild(game);
-      page.appendChild(gutter);
+
+      // Legacy bottom swipe component, kept commented while swipe lives on
+      // autoplay/reward/level-up overlays instead.
+      // const gutter = this.makeGutter(i);
+      // page.appendChild(gutter);
+
       frag.appendChild(page);
 
       this.pageEls[i] = page;
       this.games[i] = game;
-      this.gutters[i] = gutter;
+      // this.gutters[i] = gutter;
       this.slots[i] = slot;
       this.stateEls[i] = state;
+      this.autoplayEls[i] = autoplay;
       this.labelEls[i] = label;
     });
     this.feedEl.appendChild(frag);
   }
 
-  private makeGutter(i: number): HTMLElement {
-    const gutter = document.createElement('div');
-    gutter.className = 'gutter';
-    gutter.dataset.index = String(i);
-    gutter.innerHTML =
-      '<div class="gutter__grip"></div>' +
-      '<div class="gutter__label"><span class="gutter__chev">▲</span> Swipe up for next game</div>';
-    this.attachGutter(gutter);
-    return gutter;
-  }
+  // private makeGutter(i: number): HTMLElement {
+  //   const gutter = document.createElement('div');
+  //   gutter.className = 'gutter';
+  //   gutter.dataset.index = String(i);
+  //   gutter.innerHTML =
+  //     '<div class="gutter__grip"></div>' +
+  //     '<div class="gutter__label"><span class="gutter__chev">▲</span> Swipe up for next game</div>';
+  //   this.attachGutter(gutter);
+  //   return gutter;
+  // }
 
   private mountHud() {
     const hud = document.createElement('div');
@@ -440,9 +523,14 @@ export class Feed {
       this.setFramePaused(i, this.shouldPauseFrame(i));
       this.queueFrameReadyFallback(i, frame);
       this.tryRevealFrame(i);
+      this.ensureFrameAutoPlay(i);
+      this.applyPendingEditor(i);
     });
     this.frames.set(i, frame);
-    frame.src = playableUrl(this.playables[i].id, { hostPaused: this.shouldPauseFrame(i) });
+    frame.src = playableUrl(this.playables[i].id, {
+      hostPaused: this.shouldPauseFrame(i),
+      auto: !this.manualRuns.has(i),
+    });
     this.slots[i].appendChild(frame);
   }
 
@@ -454,6 +542,7 @@ export class Feed {
     frame.remove();
     this.frames.delete(i);
     this.resetFrameReadiness(i);
+    this.stopRewardSparks(i);
     this.games[i].classList.add('game--loading');
     this.games[i].classList.remove('game--ready');
   }
@@ -519,6 +608,8 @@ export class Feed {
     if (fallbackTimer) window.clearTimeout(fallbackTimer);
     this.frameFallbackTimers.delete(i);
     this.tryRevealFrame(i);
+    this.ensureFrameAutoPlay(i);
+    this.applyPendingEditor(i);
   }
 
   private tryRevealFrame(i: number) {
@@ -534,8 +625,20 @@ export class Feed {
       this.games[i].classList.remove('game--loading');
       this.games[i].classList.add('game--ready');
       this.markReady(i);
+      this.ensureFrameAutoPlay(i);
+      this.applyPendingEditor(i);
     }, FRAME_REVEAL_DELAY_MS);
     this.frameRevealTimers.set(i, timer);
+  }
+
+  private playableApi(i: number): PlayableHostApi | null {
+    const frame = this.frames.get(i);
+    if (!frame) return null;
+    try {
+      return ((frame.contentWindow as Window & { __playable?: PlayableHostApi } | null)?.__playable) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   // Pause/resume a playable by flipping its document visibility — the same
@@ -548,14 +651,70 @@ export class Feed {
       const win = frame.contentWindow as (Window & typeof globalThis) | null;
       const doc = win?.document;
       if (!win || !doc) return;
-      const api = (win as any).__playable;
+      const api = (win as Window & { __playable?: PlayableHostApi }).__playable;
       if (typeof api?.setHostPaused === 'function') api.setHostPaused(paused);
       Object.defineProperty(doc, 'hidden', { configurable: true, get: () => paused });
       Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (paused ? 'hidden' : 'visible') });
       doc.dispatchEvent(new win.Event('visibilitychange'));
+      if (!paused) this.ensureFrameAutoPlay(i);
     } catch {
       /* cross-origin or not ready — leave as-is */
     }
+  }
+
+  private ensureFrameAutoPlay(i: number) {
+    if (this.manualRuns.has(i) || this.shouldPauseFrame(i)) return;
+    const api = this.playableApi(i);
+    try {
+      // Prefer the uniform swipe API; fall back to the legacy per-game hooks.
+      if (api?.swipe) {
+        if (api.swipe.hasAutoPlay) api.swipe.startAutoPlay();
+      } else if (typeof api?.setAutoPlayEnabled === 'function') api.setAutoPlayEnabled(true);
+      else if (typeof api?.startAutoPlay === 'function') api.startAutoPlay({ immediate: true });
+    } catch {
+      /* cross-origin or unsupported autoplay API */
+    }
+  }
+
+  private stopFrameAutoPlay(i: number) {
+    const api = this.playableApi(i);
+    try {
+      if (api?.swipe) {
+        api.swipe.stopAutoPlay();
+        if (typeof api?.setAutoPlayEnabled === 'function') api.setAutoPlayEnabled(false);
+      } else {
+        if (typeof api?.setAutoPlayEnabled === 'function') api.setAutoPlayEnabled(false);
+        if (typeof api?.stopAutoPlay === 'function') api.stopAutoPlay();
+      }
+    } catch {
+      /* cross-origin or unsupported autoplay API */
+    }
+  }
+
+  private enterManualMode(i: number) {
+    if (i < 0 || i >= this.N) return;
+    this.manualRuns.add(i);
+    this.stopFrameAutoPlay(i);
+    this.setAutoplayUi(i, false);
+  }
+
+  private activateManualFromAutoplay(i: number) {
+    if (i !== this.realIndex()) return;
+    this.enterManualMode(i);
+    this.revealLabel(i);
+    // Restart the round for the manual run. Prefer the in-place swipe.restart
+    // (bundle already parsed → no iframe reload, no preloader flash); fall back to
+    // a full remount otherwise. `?takeover=continue` keeps the in-progress autoplay
+    // state and does neither.
+    if (this.restartOnTakeover) {
+      const swipe = this.playableApi(i)?.swipe;
+      if (swipe?.hasRestart) {
+        try { swipe.restart(); } catch { /* cross-origin */ }
+      } else {
+        this.reloadFrame(i);
+      }
+    }
+    this.applyActiveStates();
   }
 
   private applyActiveStates() {
@@ -563,12 +722,57 @@ export class Feed {
       this.setFramePaused(i, this.shouldPauseFrame(i));
       this.tryRevealFrame(i);
     });
+    this.pollAutoplayUi();
   }
 
   private shouldPauseFrame(i: number): boolean {
     if (this.overlayOpen) return true;   // a story / editor is up — freeze the whole feed
     if (this.settlingTargetIndex === i) return true;
-    return i !== this.realIndex() || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i);
+    return i !== this.realIndex() || (this.earnedThisCycle.has(i) && !this.manualRuns.has(i)) || this.failedThisCycle.has(i);
+  }
+
+  private pollAutoplayUi = () => {
+    for (let i = 0; i < this.N; i++) {
+      const isCurrent = i === this.realIndex();
+      const paused = this.shouldPauseFrame(i);
+      const manual = this.manualRuns.has(i);
+
+      // Autoplay / attract overlay ("tap to play or swipe"): only on the active
+      // frame the player hasn't taken over yet.
+      let active = false;
+      if (isCurrent && !manual && !paused) {
+        const api = this.playableApi(i);
+        try {
+          if (api?.swipe) {
+            // Autoplay mechanics mirror the running demo. Mechanics WITHOUT autoplay
+            // get the same overlay anyway — an attract prompt waiting for the first
+            // tap/swipe (dismissed by activateManualFromAutoplay).
+            active = api.swipe.hasAutoPlay ? api.swipe.isAutoPlayActive() : true;
+          } else {
+            const state = api?.getSwipeState?.();
+            // Legacy swipe games report their own autoplay state; plain playables
+            // (no swipe state) also get the attract prompt.
+            active = state ? (state.autoPlayActive === true || state.autoPlayRequested === true) : true;
+          }
+        } catch { /* cross-origin */ }
+      }
+      this.setAutoplayUi(i, active);
+
+      // Swipe bar label switches by mode: once the player has taken over (manual,
+      // not yet won/failed) it's swipe-only; otherwise it's the autoplay/attract
+      // "tap to play or swipe" prompt.
+      const txt = this.swipebarTextEls[i];
+      if (txt) {
+        const manualPlaying = manual && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
+        txt.textContent = manualPlaying ? 'swipe for next mechanic' : 'tap to play or swipe';
+      }
+    }
+  };
+
+  private setAutoplayUi(i: number, active: boolean) {
+    if (active) this.autoplayUiActive.add(i);
+    else this.autoplayUiActive.delete(i);
+    this.games[i]?.classList.toggle('game--autoplay', active);
   }
 
   // ── Friend story (Instagram-style) ─────────────────────────────────────────
@@ -614,7 +818,7 @@ export class Feed {
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('allow', 'autoplay');
     frame.addEventListener('load', () => this.disableFrameDoubleTapZoom(frame));
-    frame.src = playableUrl(mechanic, { hostPaused: false });
+    frame.src = playableUrl(mechanic, { hostPaused: false, auto: true });
     ov.querySelector('.story-view__stage')!.appendChild(frame);
     this.storyFrame = frame;
 
@@ -735,23 +939,21 @@ export class Feed {
   }
 
   private callPlayableHostGesture(i: number): boolean {
-    const frame = this.frames.get(i);
-    if (!frame) return false;
-    try {
-      const api = (frame.contentWindow as any)?.__playable;
-      if (typeof api?.hostGesture !== 'function') return false;
-      api.hostGesture();
-      return true;
-    } catch {
-      return false;
-    }
+    const api = this.playableApi(i);
+    if (typeof api?.hostGesture !== 'function') return false;
+    try { api.hostGesture(); return true; }
+    catch { return false; }
   }
 
-  private unlockAudioForCurrentAndNext(fromIndex: number = this.realIndex()) {
+  private unlockAudioForCurrentAndNext(fromIndex: number = this.realIndex(), includePrevious = false) {
     const current = ((fromIndex % this.N) + this.N) % this.N;
     const next = (current + 1) % this.N;
     this.callPlayableHostGesture(current);
     this.callPlayableHostGesture(next);
+    if (includePrevious) {
+      const prev = ((current - 1) % this.N + this.N) % this.N;
+      this.callPlayableHostGesture(prev);
+    }
   }
 
   // ── Prefetch reserve (bytes only) ──────────────────────────────────────────
@@ -789,7 +991,7 @@ export class Feed {
         this.pumpPrefetchQueue();
         return;
       }
-      fetch(playableUrl(this.playables[i].id, { hostPaused: true }), { mode: 'no-cors' })
+      fetch(playableUrl(this.playables[i].id, { hostPaused: true, auto: true }), { mode: 'no-cors' })
         .then(() => this.markReady(i))
         .catch(() => this.markReady(i))
         .finally(() => {
@@ -853,18 +1055,55 @@ export class Feed {
     el.addEventListener('transitionend', () => el.remove(), { once: true });
   }
 
-  // ── Gutter pointer handling ──────────────────────────────────────────────
-  private attachGutter(gutter: HTMLElement) {
-    gutter.addEventListener('pointerdown', (e) => this.onDown(e, gutter));
-    gutter.addEventListener('pointermove', (e) => this.onMove(e));
-    gutter.addEventListener('pointerup', (e) => this.onUp(e, gutter));
-    gutter.addEventListener('pointercancel', (e) => this.onUp(e, gutter));
+  // ── Overlay pointer handling ─────────────────────────────────────────────
+  // private attachGutter(gutter: HTMLElement) {
+  //   this.attachSwipeSurface(gutter);
+  // }
+
+  private attachRewardSwipe(state: HTMLElement) {
+    this.attachSwipeSurface(
+      state,
+      () => !state.hidden && (state.classList.contains('game__state--earned') || state.classList.contains('game__state--failed')),
+      true,
+    );
   }
 
-  private onDown(e: PointerEvent, gutter: HTMLElement) {
+  private attachSwipeSurface(surface: HTMLElement, canStart: () => boolean = () => true, preferReward = false) {
+    surface.addEventListener('pointerdown', (e) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.('button, input, textarea, select, a')) return;
+      if (!canStart()) return;
+      const rewardIndex = this.rewardSwipeIndexFor(surface, preferReward);
+      if (rewardIndex !== null) this.onDown(e, surface, 'reward', rewardIndex);
+      else this.onDown(e, surface, 'feed');
+    });
+    surface.addEventListener('pointermove', (e) => this.onMove(e));
+    surface.addEventListener('pointerup', (e) => this.onUp(e, surface));
+    surface.addEventListener('pointercancel', (e) => this.onUp(e, surface));
+  }
+
+  private rewardSwipeIndexFor(surface: HTMLElement, preferReward: boolean): number | null {
+    if (this.collectingRewardIndex !== null) return null;
+    const current = this.realIndex();
+    if (!this.pendingStarRewards.has(current)) return null;
+    if (preferReward || surface === this.gutters[current]) return current;
+    return null;
+  }
+
+  private onDown(e: PointerEvent, surface: HTMLElement, mode: 'feed' | 'reward', rewardIndex: number | null = null) {
+    if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    e.preventDefault();
     const current = this.realIndex();
     const next = (current + 1) % this.N;
-    this.liveHold = new Set([current, next]);
+    const prev = ((current - 1) % this.N + this.N) % this.N;
+    const autoplayIndex = mode === 'feed' ? this.autoplayTapIndexFor(surface) : null;
+    this.dragMode = mode;
+    this.rewardDragIndex = rewardIndex;
+    this.dragAutoplayIndex = autoplayIndex;
+    this.dragAllowsBack = autoplayIndex !== null;
+    if (mode === 'feed' || mode === 'reward') {
+      this.liveHold = this.dragAllowsBack ? new Set([prev, current, next]) : new Set([current, next]);
+    }
 
     this.dragging = true;
     this.startY = e.clientY;
@@ -872,9 +1111,8 @@ export class Feed {
     this.lastT = e.timeStamp;
     this.velocity = 0;
     this.basePos = Math.round(this.pos);
-    this.render(false);
-    this.unlockAudioForCurrentAndNext(current);
-    gutter.setPointerCapture(e.pointerId);
+    if (mode === 'feed' || mode === 'reward') this.render(false);
+    surface.setPointerCapture(e.pointerId);
   }
 
   private onMove(e: PointerEvent) {
@@ -884,24 +1122,74 @@ export class Feed {
     if (dt > 0) this.velocity = (e.clientY - this.lastY) / dt;
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
-    const forwardProgress = Math.max(0, -dy / this.pageH);
-    this.pos = this.basePos + forwardProgress;   // drag up → pos increases → next
+    const rawProgress = -dy / this.pageH;         // drag up → positive → next; drag down → negative → previous
+    const pageProgress = this.dragAllowsBack
+      ? Math.max(-1, Math.min(1, rawProgress))
+      : Math.max(0, Math.min(1, rawProgress));
+    this.pos = this.basePos + pageProgress;
     this.render(false);
   }
 
-  private onUp(e: PointerEvent, gutter: HTMLElement) {
+  private onUp(e: PointerEvent, surface: HTMLElement) {
     if (!this.dragging) return;
     this.dragging = false;
-    try { gutter.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+    try { surface.releasePointerCapture(e.pointerId); } catch { /* noop */ }
 
     const dy = e.clientY - this.startY;
     let step = 0;
-    const fastUp = this.velocity <= -VELOCITY_SNAP;
-    const farUp = dy <= -this.pageH * DISTANCE_SNAP_FRAC;
+    const hasSwipeIntent = Math.abs(dy) >= MIN_SWIPE_INTENT_PX;
+    const fastUp = hasSwipeIntent && this.velocity <= -VELOCITY_SNAP;
+    const fastDown = hasSwipeIntent && this.dragAllowsBack && this.velocity >= VELOCITY_SNAP;
+    const snapDistance = Math.min(this.pageH * DISTANCE_SNAP_FRAC, DISTANCE_SNAP_PX);
+    const farUp = dy <= -snapDistance;
+    const farDown = this.dragAllowsBack && dy >= snapDistance;
+    const movedPastTap = Math.abs(dy) > TAP_SLOP_PX;
     if (fastUp || farUp) step = 1;
+    else if (fastDown || farDown) step = -1;
 
+    const fromIndex = this.indexForPos(this.basePos);
+    const allowsBack = this.dragAllowsBack;
+
+    if (this.dragMode === 'reward') {
+      const rewardIndex = this.rewardDragIndex;
+      this.dragMode = 'feed';
+      this.rewardDragIndex = null;
+      this.dragAutoplayIndex = null;
+      this.dragAllowsBack = false;
+      if (step > 0 && rewardIndex !== null) {
+        const willShowLevelUp = this.rewardWouldLevelUp();
+        this.unlockAudioForCurrentAndNext(fromIndex);
+        this.collectReward(rewardIndex);
+        this.goTo(this.basePos + (willShowLevelUp ? 0 : step));
+        return;
+      }
+      this.goTo(this.basePos + step);
+      return;
+    }
+
+    this.dragMode = 'feed';
+    this.rewardDragIndex = null;
+    const autoplayTapIndex = this.dragAutoplayIndex;
+    this.dragAutoplayIndex = null;
+    this.dragAllowsBack = false;
+    if (step === 0 && autoplayTapIndex !== null && !movedPastTap) {
+      this.unlockAudioForCurrentAndNext(autoplayTapIndex, true);
+      this.goTo(this.basePos);
+      this.activateManualFromAutoplay(autoplayTapIndex);
+      return;
+    }
+    if (step !== 0) this.unlockAudioForCurrentAndNext(fromIndex, allowsBack);
     if (step > 0) this.releaseHeldLevelUp();
     this.goTo(this.basePos + step);
+  }
+
+  private autoplayTapIndexFor(surface: HTMLElement): number | null {
+    const raw = surface.dataset.autoplayIndex;
+    if (raw === undefined) return null;
+    const index = Number(raw);
+    if (!Number.isInteger(index) || index !== this.realIndex()) return null;
+    if (!this.autoplayUiActive.has(index)) return null;
+    return index;
   }
 
   // ── Playable completion / progression ────────────────────────────────────
@@ -915,6 +1203,7 @@ export class Feed {
     if (this.isHostGestureMessage(e.data)) {
       if (!this.hostGestureDeliveredSynchronously(e.data)) {
         this.unlockAudioForCurrentAndNext(i);
+        this.enterManualMode(i);
       }
       this.revealLabel(i);
       return;
@@ -928,6 +1217,7 @@ export class Feed {
     const i = playableId ? this.playables.findIndex((p) => p.id === playableId) : this.realIndex();
     const idx = i >= 0 ? i : this.realIndex();
     this.unlockAudioForCurrentAndNext(idx);
+    this.enterManualMode(idx);
     this.revealLabel(idx);
   };
 
@@ -996,7 +1286,7 @@ export class Feed {
     if (!frame || !runId || this.completedRunIds.has(runId)) return;
 
     try {
-      const history = (frame.contentWindow as any)?.__playable?.getAnalyticsHistory?.();
+      const history = this.playableApi(i)?.getAnalyticsHistory?.();
       if (!Array.isArray(history)) return;
       for (let n = history.length - 1; n >= 0; n--) {
         const outcome = this.outcomeFromAnalytics(history[n]);
@@ -1036,13 +1326,22 @@ export class Feed {
   }
 
   private handleWin(i: number) {
-    if (this.earnedThisCycle.has(i)) return;
+    if (this.earnedThisCycle.has(i)) {
+      this.manualRuns.delete(i);
+      this.failedThisCycle.delete(i);
+      this.updateMechanicState(i);
+      this.applyActiveStates();
+      this.resetStoriesToMyLevel();
+      return;
+    }
     this.failedThisCycle.delete(i);
+    this.manualRuns.delete(i);
     this.earnedThisCycle.add(i);
+    this.pendingStarRewards.add(i);
+    this.claimedStarRewards.delete(i);
     this.updateMechanicState(i);
     this.applyActiveStates();
     this.resetStoriesToMyLevel();
-    this.playStarFlight(i);
   }
 
   private handleLoss(i: number) {
@@ -1063,46 +1362,381 @@ export class Feed {
 
     const earned = this.earnedThisCycle.has(i);
     const failed = this.failedThisCycle.has(i);
+    const manual = this.manualRuns.has(i);
+    const pendingReward = earned && this.pendingStarRewards.has(i) && this.collectingRewardIndex !== i;
     game.classList.toggle('game--earned', earned);
     game.classList.toggle('game--failed', failed);
-    state.classList.toggle('game__state--earned', earned);
+    state.classList.toggle('game__state--earned', pendingReward && !manual);
     state.classList.toggle('game__state--failed', failed);
+    this.stopRewardSparks(i);
     state.replaceChildren();
-    state.hidden = !earned && !failed;
+    state.hidden = (!pendingReward || manual) && !failed;
     if (!earned && !failed) return;
+    if (earned && !pendingReward) return;
 
-    if (earned) return;
-
-    const badge = document.createElement('div');
-    badge.className = 'game__state-badge';
-    badge.textContent = '↻';
-    state.appendChild(badge);
-
-    const title = document.createElement('div');
-    title.className = 'game__state-title';
-    title.textContent = 'Try again';
-    state.appendChild(title);
+    if (pendingReward && !manual) {
+      this.renderRewardState(i, state);
+      return;
+    }
 
     if (failed) {
-      const btn = document.createElement('button');
-      btn.className = 'game__restart';
-      btn.type = 'button';
-      btn.textContent = 'Restart';
-      btn.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.restart(i);
-      });
-      state.appendChild(btn);
+      this.renderFailedState(i, state);
     }
   }
 
-  private restart(i: number) {
-    if (this.earnedThisCycle.has(i)) return;
+  private replayManual(i: number) {
+    this.manualRuns.add(i);
+    this.pendingEditorLaunch.delete(i);
     this.failedThisCycle.delete(i);
     this.updateMechanicState(i);
     this.reloadFrame(i);
     this.applyActiveStates();
+  }
+
+  private renderRewardState(i: number, state: HTMLElement) {
+    const icon = this.renderResultState(i, state, '★', 'reward__star');
+    this.startRewardSparks(i, icon);
+  }
+
+  private renderFailedState(i: number, state: HTMLElement) {
+    this.renderResultState(i, state, '↻', 'reward__star reward__star--retry');
+  }
+
+  private renderResultState(i: number, state: HTMLElement, iconText: string, iconClass: string): HTMLElement {
+    const reward = document.createElement('div');
+    reward.className = 'reward';
+
+    const icon = document.createElement('div');
+    icon.className = iconClass;
+    icon.textContent = iconText;
+    reward.appendChild(icon);
+
+    const actions = document.createElement('div');
+    actions.className = 'reward__actions';
+    reward.appendChild(actions);
+
+    const replay = this.rewardButton('↻', 'Replay', 'reward__action--replay');
+    replay.addEventListener('click', () => this.replayManual(i));
+    actions.appendChild(replay);
+
+    const swipe = this.playableApi(i)?.swipe;
+
+    const likedInitially = this.likedMechanics.has(i);
+    const like = this.rewardButton(likedInitially ? '♥' : '♡', 'Like', 'reward__action--like');
+    const likeCount = document.createElement('span');
+    likeCount.className = 'reward__count';
+    likeCount.textContent = this.formatLikeCount(this.getLikeCount(i));
+    like.appendChild(likeCount);
+    like.classList.toggle('reward__action--liked', likedInitially);
+    like.addEventListener('click', () => {
+      const liked = !this.likedMechanics.has(i);
+      const next = this.getLikeCount(i) + (liked ? 1 : -1);
+      if (liked) this.likedMechanics.add(i);
+      else this.likedMechanics.delete(i);
+      this.likeCounts.set(i, Math.max(0, next));
+      like.classList.toggle('reward__action--liked', liked);
+      like.firstElementChild!.textContent = liked ? '♥' : '♡';
+      likeCount.textContent = this.formatLikeCount(this.getLikeCount(i));
+      if (like.animate) {
+        like.animate(
+          [{ transform: 'scale(1)' }, { transform: 'scale(1.16)' }, { transform: 'scale(1)' }],
+          { duration: 230, easing: 'cubic-bezier(0.2, 0.9, 0.3, 1.4)' },
+        );
+      }
+    });
+    actions.appendChild(like);
+
+    const post = this.rewardButton(this.postedStories.has(i) ? '✓' : '◎', 'Post to story', 'reward__action--post');
+    post.classList.toggle('reward__action--posted', this.postedStories.has(i));
+    post.addEventListener('click', () => this.postMechanicAsStory(i, post));
+    actions.appendChild(post);
+
+    const edit = this.rewardButton('✎', 'Edit level', 'reward__action--edit');
+    edit.addEventListener('click', () => {
+      if (swipe?.hasEditor) {
+        try { swipe.openEditor(); } catch { /* noop */ }
+        state.hidden = true;
+        return;
+      }
+      this.openMechanicEditor(i);
+    });
+    actions.appendChild(edit);
+
+    const toast = document.createElement('div');
+    toast.className = 'reward__toast';
+    reward.appendChild(toast);
+
+    state.appendChild(reward);
+
+    // Same swipe affordance as the autoplay overlay, pinned to the bottom — but only
+    // the "swipe for next" half (no "tap to play", the level is already won).
+    const hint = document.createElement('div');
+    hint.className = 'game__swipe-hint';
+    hint.innerHTML =
+      '<div class="game__autoplay-arrow">▲</div>' +
+      '<div class="game__autoplay-text">swipe for next mechanic</div>';
+    state.appendChild(hint);
+
+    return icon;
+  }
+
+  private rewardButton(icon: string, label: string, extraClass: string): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.className = `reward__action ${extraClass}`;
+    btn.type = 'button';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.innerHTML = `<span class="reward__icon">${icon}</span>`;
+    const stop = (e: Event) => {
+      e.stopPropagation();
+    };
+    btn.addEventListener('pointerdown', stop);
+    btn.addEventListener('pointerup', (e) => e.stopPropagation());
+    return btn;
+  }
+
+  private getLikeCount(i: number): number {
+    const existing = this.likeCounts.get(i);
+    if (existing !== undefined) return existing;
+    let hash = 0;
+    const id = this.playables[i]?.id ?? String(i);
+    for (let n = 0; n < id.length; n++) hash = (hash * 31 + id.charCodeAt(n)) >>> 0;
+    const count = 320 + (hash % 9400);
+    this.likeCounts.set(i, count);
+    return count;
+  }
+
+  private formatLikeCount(count: number): string {
+    if (count >= 1000) return `${(count / 1000).toFixed(count >= 10000 ? 0 : 1)}K`;
+    return String(count);
+  }
+
+  private postMechanicAsStory(i: number, button: HTMLButtonElement) {
+    this.postedStories.add(i);
+    button.classList.add('reward__action--posted');
+    const icon = button.querySelector('.reward__icon');
+    if (icon) icon.textContent = '✓';
+    const you = this.storiesEl?.querySelector('.story--me');
+    you?.classList.add('story--posted');
+    const toast = this.stateEls[i]?.querySelector<HTMLElement>('.reward__toast');
+    if (toast) {
+      toast.textContent = 'Posted to story';
+      toast.classList.remove('reward__toast--show');
+      toast.offsetHeight;
+      toast.classList.add('reward__toast--show');
+    }
+  }
+
+  private openMechanicEditor(i: number) {
+    this.manualRuns.add(i);
+    this.failedThisCycle.delete(i);
+    this.pendingEditorLaunch.add(i);
+    this.updateMechanicState(i);
+    this.reloadFrame(i);
+    this.applyActiveStates();
+    this.applyPendingEditor(i);
+  }
+
+  private applyPendingEditor(i: number, attempt: number = 0) {
+    if (!this.pendingEditorLaunch.has(i)) return;
+    const api = this.playableApi(i);
+    try {
+      if (typeof api?.setEditorMode === 'function') {
+        api.setEditorMode(true);
+        this.pendingEditorLaunch.delete(i);
+        return;
+      }
+      if (typeof api?.toggleEditor === 'function') {
+        api.toggleEditor();
+        this.pendingEditorLaunch.delete(i);
+        return;
+      }
+    } catch {
+      /* retry below */
+    }
+
+    if (attempt < 10) {
+      window.setTimeout(() => this.applyPendingEditor(i, attempt + 1), 120);
+      return;
+    }
+
+    this.pendingEditorLaunch.delete(i);
+    this.openEditor();
+  }
+
+  private startRewardSparks(i: number, star: HTMLElement) {
+    this.stopRewardSparks(i);
+    const emit = (count: number) => {
+      if (!star.isConnected) { this.stopRewardSparks(i); return; }
+      const starRect = star.getBoundingClientRect();
+      const stateRect = this.stateEls[i].getBoundingClientRect();
+      const cx = starRect.left - stateRect.left + starRect.width / 2;
+      const cy = starRect.top - stateRect.top + starRect.height / 2;
+      for (let n = 0; n < count; n++) this.spawnRewardSpark(i, cx, cy, starRect.width);
+    };
+
+    emit(16);
+    const timer = window.setInterval(() => emit(3 + Math.floor(Math.random() * 3)), 220);
+    this.rewardSparkTimers.set(i, timer);
+  }
+
+  private stopRewardSparks(i: number) {
+    const timer = this.rewardSparkTimers.get(i);
+    if (timer) window.clearInterval(timer);
+    this.rewardSparkTimers.delete(i);
+  }
+
+  private spawnRewardSpark(i: number, cx: number, cy: number, starSize: number) {
+    const state = this.stateEls[i];
+    if (!state || state.hidden) return;
+    const spark = document.createElement('div');
+    spark.className = 'reward__spark';
+    const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.55;
+    const radius = starSize * (0.16 + Math.random() * 0.22);
+    const x = cx + Math.cos(angle) * radius;
+    const y = cy + Math.sin(angle) * radius;
+    const size = 3 + Math.random() * 4;
+    const dist = 44 + Math.random() * 58;
+    const dx = Math.cos(angle) * dist + (Math.random() - 0.5) * 22;
+    const dy = Math.sin(angle) * dist - 18 - Math.random() * 24;
+    spark.style.left = `${x}px`;
+    spark.style.top = `${y}px`;
+    spark.style.width = `${size}px`;
+    spark.style.height = `${size}px`;
+    spark.style.background = Math.random() < 0.35 ? '#ff3d22' : (Math.random() < 0.7 ? '#ff8b2e' : '#ffd05b');
+    state.appendChild(spark);
+
+    const duration = 520 + Math.random() * 360;
+    if (!spark.animate) {
+      window.setTimeout(() => spark.remove(), duration);
+      return;
+    }
+    const anim = spark.animate([
+      { transform: 'translate(-50%, -50%) scale(0.45)', opacity: 0 },
+      { transform: 'translate(-50%, -50%) scale(1)', opacity: 0.95, offset: 0.18 },
+      { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.18)`, opacity: 0 },
+    ], { duration, easing: 'cubic-bezier(0.14, 0.72, 0.28, 1)', fill: 'forwards' });
+    anim.addEventListener('finish', () => spark.remove(), { once: true });
+  }
+
+  private collectReward(i: number) {
+    if (!this.pendingStarRewards.has(i) || this.collectingRewardIndex !== null) return false;
+    this.collectingRewardIndex = i;
+    this.stopRewardSparks(i);
+
+    const state = this.stateEls[i];
+    const source = state?.querySelector<HTMLElement>('.reward__star') ?? null;
+    const reward = state?.querySelector<HTMLElement>('.reward') ?? null;
+    state?.classList.add('game__state--collecting');
+    reward?.classList.add('reward--collecting');
+    if (source) source.style.visibility = 'hidden';
+
+    const afterCollect = () => {
+      this.collectingRewardIndex = null;
+      this.pendingStarRewards.delete(i);
+      this.claimedStarRewards.add(i);
+      state?.classList.remove('game__state--collecting');
+      this.updateMechanicState(i);
+      this.finishStarReward(i);
+    };
+
+    this.playRewardStarCollect(source, afterCollect);
+    return true;
+  }
+
+  private rewardWouldLevelUp(): boolean {
+    const currentLevel = Math.floor(this.totalStars / this.starsPerLevel) + 1;
+    const nextLevel = Math.floor((this.totalStars + 1) / this.starsPerLevel) + 1;
+    return nextLevel > currentLevel;
+  }
+
+  private playRewardStarCollect(source: HTMLElement | null, onDone: () => void) {
+    const vp = this.viewport.getBoundingClientRect();
+    const src = source?.getBoundingClientRect();
+    const badge = this.levelBadgeEl?.getBoundingClientRect();
+    const sz = src ? Math.max(src.width, src.height) : 128;
+    const startX = src ? src.left - vp.left + src.width / 2 : vp.width / 2;
+    const startY = src ? src.top - vp.top + src.height / 2 : vp.height * 0.46;
+    const badgeX = badge ? badge.left - vp.left + badge.width / 2 : 40;
+    const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
+
+    const star = document.createElement('div');
+    star.className = 'star-flight star-flight--collect';
+    star.textContent = '★';
+    star.style.width = `${sz}px`;
+    star.style.height = `${sz}px`;
+    star.style.fontSize = `${Math.round(sz * 0.92)}px`;
+    star.style.transform = `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0)`;
+    this.viewport.appendChild(star);
+
+    if (!star.animate) {
+      star.remove();
+      this.burstRewardCollectParticles(badgeX, badgeY);
+      this.bumpLevelBadge();
+      onDone();
+      return;
+    }
+
+    const hopY = startY - Math.max(56, sz * 0.42);
+    const midX = startX + (badgeX - startX) * 0.22;
+    const midY = Math.min(hopY, startY + (badgeY - startY) * 0.18 - 42);
+    const anim = star.animate([
+      {
+        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
+        opacity: 1,
+        offset: 0,
+      },
+      {
+        transform: `translate3d(${startX - sz / 2}px, ${hopY - sz / 2}px, 0) scale(1.16) rotate(-8deg)`,
+        opacity: 1,
+        offset: 0.24,
+      },
+      {
+        transform: `translate3d(${midX - sz / 2}px, ${midY - sz / 2}px, 0) scale(0.92) rotate(8deg)`,
+        opacity: 1,
+        offset: 0.46,
+      },
+      {
+        transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.34) rotate(18deg)`,
+        opacity: 0.98,
+        offset: 1,
+      },
+    ], { duration: 720, easing: 'cubic-bezier(0.18, 0.76, 0.24, 1)', fill: 'forwards' });
+
+    anim.addEventListener('finish', () => {
+      star.remove();
+      this.burstRewardCollectParticles(badgeX, badgeY);
+      this.bumpLevelBadge();
+      onDone();
+    }, { once: true });
+  }
+
+  private burstRewardCollectParticles(x: number, y: number) {
+    const colors = ['#ffd85a', '#fff1a8', '#ffb13d', '#ff7b38', '#ffffff'];
+    for (let n = 0; n < 18; n++) {
+      const p = document.createElement('div');
+      p.className = 'star-particle';
+      const size = 5 + Math.random() * 6;
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 34 + Math.random() * 44;
+      const dx = Math.cos(angle) * dist;
+      const dy = Math.sin(angle) * dist;
+      p.style.left = `${x}px`;
+      p.style.top = `${y}px`;
+      p.style.width = `${size}px`;
+      p.style.height = `${size}px`;
+      p.style.background = colors[n % colors.length];
+      this.viewport.appendChild(p);
+
+      const dur = 420 + Math.random() * 260;
+      if (!p.animate) { window.setTimeout(() => p.remove(), dur); continue; }
+      const anim = p.animate([
+        { transform: 'translate(-50%, -50%) scale(0.35)', opacity: 1 },
+        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(1)`, opacity: 0.95, offset: 0.38 },
+        { transform: `translate(calc(-50% + ${dx * 1.1}px), calc(-50% + ${dy + 34}px)) scale(0.12)`, opacity: 0 },
+      ], { duration: dur, easing: 'cubic-bezier(0.18, 0.7, 0.3, 1)', fill: 'forwards' });
+      anim.addEventListener('finish', () => p.remove(), { once: true });
+    }
   }
 
   private reloadFrame(i: number) {
@@ -1119,9 +1753,15 @@ export class Feed {
 
   private resetCycle() {
     const reload = new Set([...this.earnedThisCycle, ...this.failedThisCycle]);
+    this.manualRuns.clear();
+    this.pendingEditorLaunch.clear();
+    this.pendingStarRewards.clear();
+    this.claimedStarRewards.clear();
+    this.collectingRewardIndex = null;
     if (reload.size === 0) return;
     this.earnedThisCycle.clear();
     this.failedThisCycle.clear();
+    reload.forEach((i) => this.stopRewardSparks(i));
     this.updateMechanicStates();
     reload.forEach((i) => this.reloadFrame(i));
   }
@@ -1161,7 +1801,7 @@ export class Feed {
     window.setTimeout(() => this.hudEl?.classList.remove('hud--level-up'), 420);
   }
 
-  private finishStarReward(i: number) {
+  private finishStarReward(i: number): boolean {
     const prev = this.totalStars;
     const prevLevel = Math.floor(prev / this.starsPerLevel) + 1;
     this.totalStars = prev + 1;
@@ -1175,9 +1815,11 @@ export class Feed {
         this.updateHud(false);                 // ring resets to the new level (0 progress)
         this.pulseLevelUp();
       }, LEVEL_PROGRESS_MS);
+      return true;
     } else {
       this.updateHud(true);
-      this.scheduleAutoAdvanceAfterStar(i, LEVEL_PROGRESS_MS + AUTO_ADVANCE_AFTER_REWARD_MS);
+      window.setTimeout(() => this.bumpLevelBadge(), LEVEL_PROGRESS_MS);
+      return false;
     }
   }
 
@@ -1189,12 +1831,15 @@ export class Feed {
         '<div class="levelup__kicker">LEVEL UP</div>' +
         '<div class="levelup__badge"><span class="levelup__star">★</span><span class="levelup__num">' + level + '</span></div>' +
         '<div class="levelup__title">Level ' + level + '</div>' +
-      '</div>' +
-      '<div class="levelup__gutter-hint">' +
-        '<div class="gutter__grip"></div>' +
-        '<div class="gutter__label"><span class="gutter__chev">▲</span> Swipe up for next game</div>' +
       '</div>';
+    // Legacy bottom swipe hint, kept here for quick restore if needed:
+    // overlay.insertAdjacentHTML('beforeend',
+    //   '<div class="levelup__gutter-hint">' +
+    //     '<div class="gutter__grip"></div>' +
+    //     '<div class="gutter__label"><span class="gutter__chev">▲</span> Swipe up for next game</div>' +
+    //   '</div>');
     this.viewport.appendChild(overlay);
+    this.attachSwipeSurface(overlay);
     this.spawnConfetti(overlay);
 
     const card = overlay.querySelector('.levelup__card') as HTMLElement | null;
@@ -1273,157 +1918,25 @@ export class Feed {
     if (this.confettiTimer) { window.clearInterval(this.confettiTimer); this.confettiTimer = null; }
   }
 
-  private scheduleAutoAdvanceAfterStar(i: number, delayMs: number) {
-    window.setTimeout(() => {
-      if (this.dragging || this.realIndex() !== i || !this.earnedThisCycle.has(i)) return;
-      this.goTo(Math.round(this.pos) + 1);
-    }, delayMs);
-  }
-
-  // Playable-style radial burst (ported from merge spawnBurst): particles fly
-  // out at random angles, arc DOWN with gravity, and fade — plus a soft impact
-  // flash. `land` biases up/outward (bounced off the floor) and arcs harder;
-  // `collect` is a tight full-radial pop at the level badge.
-  private burstStarParticles(x: number, y: number, kind: 'land' | 'collect' = 'collect') {
-    const colors = ['#ffd85a', '#fff1a8', '#ffb13d', '#ffffff', '#ffe27a'];
-    const count = kind === 'collect' ? 12 : 16;
-    const spread = kind === 'collect' ? 54 : 82;
-    const grav = kind === 'collect' ? 34 : 112;
-
-    const impact = document.createElement('div');
-    impact.className = 'star-impact';
-    impact.style.left = `${x}px`;
-    impact.style.top = `${y}px`;
-    this.viewport.appendChild(impact);
-    if (impact.animate) {
-      const a = impact.animate([
-        { transform: 'translate(-50%, -50%) scale(0.4, 0.3)', opacity: 0.8 },
-        { transform: 'translate(-50%, -50%) scale(1.55, 1.0)', opacity: 0 },
-      ], { duration: 360, easing: 'cubic-bezier(0.14, 0.74, 0.3, 1)', fill: 'forwards' });
-      a.addEventListener('finish', () => impact.remove(), { once: true });
-    } else {
-      window.setTimeout(() => impact.remove(), 360);
-    }
-
-    for (let n = 0; n < count; n++) {
-      const angle = kind === 'land'
-        ? -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.15
-        : Math.random() * Math.PI * 2;
-      const dist = spread * (0.45 + Math.random() * 0.55);
-      const dx = Math.cos(angle) * dist;
-      const dy = Math.sin(angle) * dist;
-      const size = (kind === 'collect' ? 7 : 9) * (0.6 + Math.random() * 0.6);
-
-      const p = document.createElement('div');
-      p.className = 'star-particle';
-      p.style.left = `${x}px`;
-      p.style.top = `${y}px`;
-      p.style.width = `${size}px`;
-      p.style.height = `${size}px`;
-      p.style.background = colors[n % colors.length];
-      this.viewport.appendChild(p);
-
-      const dur = 460 + Math.random() * 320;
-      if (!p.animate) { window.setTimeout(() => p.remove(), dur); continue; }
-      const a = p.animate([
-        { transform: 'translate(-50%, -50%) scale(0.4)', opacity: 1, offset: 0 },
-        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(1)`, opacity: 1, offset: 0.4 },
-        { transform: `translate(calc(-50% + ${dx * 1.15}px), calc(-50% + ${dy + grav}px)) scale(0.1)`, opacity: 0, offset: 1 },
-      ], { duration: dur, easing: 'cubic-bezier(0.18, 0.7, 0.3, 1)', fill: 'forwards' });
-      a.addEventListener('finish', () => p.remove(), { once: true });
-    }
-  }
-
-  // Star reward, playable-style (ported feel from the merge piggy drop+squash):
-  //  1. falls from above the screen with gravity (cubic ease-in → accelerates)
-  //  2. lands at centre and squashes elastically (sin pulse), little rebound
-  //  3. flies into the level badge ACCELERATING (ease-in), shrinking
-  // Particle splash on the landing impact and again on collect at the badge.
-  // Driven by rAF for precise squash control (transform-origin 50%/76% pins the
-  // bottom during the squash).
-  private playStarFlight(i: number) {
-    const star = document.createElement('div');
-    star.className = 'star-flight';
-    star.textContent = '★';
-    this.viewport.appendChild(star);
-
-    const vp = this.viewport.getBoundingClientRect();
-    const badge = this.levelBadgeEl?.getBoundingClientRect();
-    const sz = 92;
-    const cx = vp.width / 2;
-    const groundY = vp.height * 0.44;           // landing point
-    const startY = -sz * 0.7;                   // above the screen
-    const bx = badge ? badge.left - vp.left + badge.width / 2 : 40;
-    const by = badge ? badge.top - vp.top + badge.height / 2 : 40;
-
-    if (!star.animate || typeof requestAnimationFrame !== 'function') {
-      star.remove();
-      this.finishStarReward(i);
-      return;
-    }
-
-    const DROP = 360, SQUASH = 150, REBOUND = 160, HOLD = 70, FLY = 470;
-    const TOTAL = DROP + SQUASH + REBOUND + HOLD + FLY;
-    const t0 = performance.now();
-    let landed = false, done = false;
-
-    const frame = (now: number) => {
-      if (done) return;
-      const e = now - t0;
-      let x = cx, y = groundY, sx = 1, sy = 1, op = 1;
-
-      if (e < DROP) {
-        const t = e / DROP; const eased = t * t * t;          // accelerate down
-        y = startY + (groundY - startY) * eased;
-        op = Math.min(1, t * 3);
-      } else if (e < DROP + SQUASH) {
-        const t = (e - DROP) / SQUASH; const sq = Math.sin(t * Math.PI);
-        sx = 1 + sq * 0.32; sy = 1 - sq * 0.3;                // squash (bottom pinned by origin)
-        if (!landed) { landed = true; this.burstStarParticles(cx, groundY + sz * 0.32, 'land'); }
-      } else if (e < DROP + SQUASH + REBOUND) {
-        const t = (e - DROP - SQUASH) / REBOUND; const up = Math.sin(t * Math.PI);
-        y = groundY - sz * 0.3 * up;                          // little elastic hop
-        sx = 1 - up * 0.08; sy = 1 + up * 0.08;
-      } else if (e < DROP + SQUASH + REBOUND + HOLD) {
-        y = groundY;
-      } else {
-        const t = Math.min(1, (e - DROP - SQUASH - REBOUND - HOLD) / FLY);
-        const eased = t * t;                                  // accelerate toward the badge
-        x = cx + (bx - cx) * eased; y = groundY + (by - groundY) * eased;
-        sx = sy = 1 - 0.64 * eased; op = 1 - 0.22 * t;
-      }
-
-      star.style.opacity = String(op);
-      star.style.transform = `translate3d(${x - sz / 2}px, ${y - sz / 2}px, 0) scale(${sx}, ${sy})`;
-
-      if (e >= TOTAL) {
-        done = true;
-        star.remove();
-        this.burstStarParticles(bx, by, 'collect');
-        this.bumpLevelBadge();
-        this.finishStarReward(i);
-      } else {
-        requestAnimationFrame(frame);
-      }
-    };
-    requestAnimationFrame(frame);
-  }
-
   // ── Paging ───────────────────────────────────────────────────────────────
   goTo(targetPos: number) {
     const fromPos = Math.round(this.pos);
     const fromIndex = this.indexForPos(fromPos);
     const targetIndex = this.indexForPos(targetPos);
     const changed = targetPos !== this.pos;
-    if (changed) {
+    const pageChanged = targetIndex !== fromIndex;
+    if (changed && pageChanged) {
       this.liveHold = new Set([fromIndex, targetIndex]);
       this.settlingTargetIndex = targetIndex;
+      this.stopRewardSparks(fromIndex);
       if (this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycleAfterSettle = true;
     }
     this.pos = targetPos;
     this.render(true);
-    if (changed) {
+    if (changed && pageChanged) {
       this.prefetchReserve();   // keep the reserve topped up
+    } else if (changed) {
+      this.settlingTargetIndex = null;
     } else {
       this.settlingTargetIndex = null;
       this.liveHold.clear();
