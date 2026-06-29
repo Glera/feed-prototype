@@ -854,7 +854,47 @@ export class Feed {
     return i !== this.realIndex() || (this.earnedThisCycle.has(i) && !this.manualRuns.has(i)) || this.failedThisCycle.has(i);
   }
 
+  private desiredWarmIndex(): number | null {
+    if (this.N < 2 || document.hidden || this.overlayOpen || this.isGestureBusy()) return null;
+    if (this.levelUpPageState !== 'idle') return null;
+    const current = this.realIndex();
+    if (!this.frameRevealed.has(current)) return null;
+    const next = (current + 1) % this.N;
+    if (next === current || this.earnedThisCycle.has(next) || this.failedThisCycle.has(next)) return null;
+    return next;
+  }
+
+  private clearWarmTimer() {
+    if (this.warmTimer) {
+      window.clearTimeout(this.warmTimer);
+      this.warmTimer = null;
+    }
+  }
+
+  private scheduleWarmNext() {
+    this.clearWarmTimer();
+    const next = this.desiredWarmIndex();
+    if (next === null) return;
+    if (this.warmIndex === next && this.frames.has(next)) return;
+    this.warmTimer = window.setTimeout(() => {
+      this.warmTimer = null;
+      this.scheduleIdlePrefetch(() => this.startWarmNext(next), WARM_NEXT_IDLE_TIMEOUT_MS);
+    }, WARM_NEXT_DELAY_MS);
+  }
+
+  private startWarmNext(expected: number) {
+    if (this.desiredWarmIndex() !== expected) {
+      this.scheduleWarmNext();
+      return;
+    }
+    this.warmIndex = expected;
+    this.updateLive();
+    this.setFramePaused(expected, true);
+    this.tryRevealFrame(expected);
+  }
+
   private pauseAllFrames = () => {
+    this.clearWarmTimer();
     this.frames.forEach((_frame, i) => this.setFramePaused(i, true));
     this.pauseStoryFrame(true);
   };
@@ -866,6 +906,7 @@ export class Feed {
     }
     this.applyActiveStates();
     this.tryRevealFrame(this.realIndex());
+    this.scheduleWarmNext();
     this.pumpPrefetchQueue();
   };
 
@@ -1168,12 +1209,12 @@ export class Feed {
     return this.dragging || this.settlingTargetIndex !== null;
   }
 
-  private scheduleIdlePrefetch(fn: () => void) {
+  private scheduleIdlePrefetch(fn: () => void, timeout = 800) {
     const requestIdleCallback = (window as any).requestIdleCallback as
       | undefined
       | ((callback: () => void, options?: { timeout: number }) => number);
     if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(fn, { timeout: 800 });
+      requestIdleCallback(fn, { timeout });
       return;
     }
     window.setTimeout(fn, 120);
