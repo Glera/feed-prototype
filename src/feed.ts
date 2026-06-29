@@ -2129,42 +2129,34 @@ export class Feed {
     // Level-up-style confetti rains down evenly across the whole screen.
     this.burstStarConfetti();
 
-    // The juicy pulse, then the launch (all centred — transform-origin 50% 50%):
-    //   1. accelerating GROW to a big peak,
-    //   2. brief HOLD at full size (lets it land),
-    //   3. fast accelerating COLLAPSE down small,
-    //   4. zip to the badge, spinning a full turn.
+    // Pulse modelled on the merge playables' merge pop (scale 0.7→1.45→1.0): a quick
+    // smooth GROW to a peak, then a gentle SETTLE back to normal — dynamic but smooth.
+    // Then it flies to the counter with a full spin. (Centred — transform-origin 50%.)
     const anim = star.animate([
       {
         transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
         opacity: 1,
         offset: 0,
-        easing: 'cubic-bezier(0.55, 0, 0.85, 0.25)',     // grow ACCELERATES into the peak
+        easing: 'cubic-bezier(0.16, 0.84, 0.3, 1)',      // quick, decelerating grow (smooth)
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(2.45) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1.55) rotate(0deg)`,
         opacity: 1,
-        offset: 0.2,                                     // big peak, reached fast
-        easing: 'linear',                                // HOLD enlarged
+        offset: 0.2,                                     // peak (merge-like overshoot)
+        easing: 'cubic-bezier(0.4, 0, 0.35, 1)',         // gentle settle
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(2.45) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
         opacity: 1,
-        offset: 0.36,                                    // end of the hold
-        easing: 'cubic-bezier(0.7, 0, 0.84, 0.2)',       // collapse ACCELERATES (fast snap)
-      },
-      {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(0.45) rotate(0deg)`,
-        opacity: 1,
-        offset: 0.52,                                    // snapped small in place
-        easing: 'cubic-bezier(0.45, 0, 0.9, 0.45)',      // then zip to the badge
+        offset: 0.46,                                    // settled back to normal, then launches
+        easing: 'cubic-bezier(0.5, 0, 0.5, 1)',          // smooth ease-in-out into the flight
       },
       {
         transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(360deg)`,
         opacity: 1,
-        offset: 1,                                       // spins a full turn while flying to the counter
+        offset: 1,                                       // flies to the counter, spinning a full turn
       },
-    ], { duration: 1000, fill: 'forwards' });
+    ], { duration: 850, fill: 'forwards' });
 
     anim.addEventListener('finish', () => {
       star.remove();
