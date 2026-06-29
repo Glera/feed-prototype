@@ -78,6 +78,12 @@ export class Feed {
   private pos = 0;                  // continuous ring position (settles to an integer)
   private pageEls: HTMLElement[] = [];
   private pageDelta: number[] = [];
+  private pageNearState: boolean[] = [];
+  private pageInViewportState: boolean[] = [];
+  private pageVisibilityState: boolean[] = [];
+  private pageTransitionState: string[] = [];
+  private pageTransformState: string[] = [];
+  private pageZState: string[] = [];
 
   private slots: HTMLElement[] = [];
   private games: HTMLElement[] = [];
@@ -505,12 +511,44 @@ export class Feed {
       const wrapped = prev !== undefined && Math.abs(delta - prev) > N / 2;
       const pg = this.pageEls[i];
       const near = this.liveHold.has(i) || (delta > -0.05 && delta <= 1.55);
-      pg.style.transition = animate && !wrapped ? 'transform 0.36s var(--ease-snap)' : 'none';
-      pg.style.transform = `translate3d(0, ${delta * this.pageH}px, 0)`;
-      pg.style.zIndex = String(1000 - Math.round(Math.abs(delta) * 10));
-      pg.style.visibility = near ? 'visible' : 'hidden';
-      pg.classList.toggle('page--near', near);
-      pg.classList.toggle('page--in-viewport', delta > -0.98 && delta < 0.98);
+      const wasNear = this.pageNearState[i] === true;
+      const shouldTouchDom = near || wasNear || prev === undefined || animate;
+
+      if (shouldTouchDom) {
+        const transition = animate && !wrapped ? 'transform 0.36s var(--ease-snap)' : 'none';
+        const transform = `translate3d(0, ${delta * this.pageH}px, 0)`;
+        const zIndex = String(1000 - Math.round(Math.abs(delta) * 10));
+        const visible = near;
+        const inViewport = delta > -0.98 && delta < 0.98;
+
+        if (this.pageTransitionState[i] !== transition) {
+          pg.style.transition = transition;
+          this.pageTransitionState[i] = transition;
+        }
+        if (this.pageTransformState[i] !== transform) {
+          pg.style.transform = transform;
+          this.pageTransformState[i] = transform;
+        }
+        if (this.pageZState[i] !== zIndex) {
+          pg.style.zIndex = zIndex;
+          this.pageZState[i] = zIndex;
+        }
+        if (this.pageVisibilityState[i] !== visible) {
+          pg.style.visibility = visible ? 'visible' : 'hidden';
+          this.pageVisibilityState[i] = visible;
+        }
+        if (this.pageNearState[i] !== near) {
+          pg.classList.toggle('page--near', near);
+          this.pageNearState[i] = near;
+        }
+        if (this.pageInViewportState[i] !== inViewport) {
+          pg.classList.toggle('page--in-viewport', inViewport);
+          this.pageInViewportState[i] = inViewport;
+        }
+      } else if (this.pageVisibilityState[i] !== false) {
+        pg.style.visibility = 'hidden';
+        this.pageVisibilityState[i] = false;
+      }
       this.pageDelta[i] = delta;
     }
     this.renderLevelUpPage(animate);
@@ -529,6 +567,28 @@ export class Feed {
     page.style.transition = animate ? 'transform 0.36s var(--ease-snap)' : 'none';
     page.style.transform = `translate3d(0, ${delta * this.pageH}px, 0)`;
     page.style.visibility = 'visible';
+  }
+
+  private syncSettlingPositionToVisual(): number {
+    if (this.settlingTargetIndex === null || this.pageH <= 0) return this.pos;
+    const targetPage = this.pageEls[this.settlingTargetIndex];
+    const y = this.currentTranslateY(targetPage);
+    if (!Number.isFinite(y)) return this.pos;
+    this.pos = this.pos - y / this.pageH;
+    this.settlingTargetIndex = null;
+    this.render(false);
+    return this.pos;
+  }
+
+  private currentTranslateY(el: HTMLElement | undefined): number {
+    if (!el) return 0;
+    try {
+      const transform = getComputedStyle(el).transform;
+      if (!transform || transform === 'none') return 0;
+      return new DOMMatrixReadOnly(transform).m42;
+    } catch {
+      return 0;
+    }
   }
 
   private previewRewardLevel(): number {
@@ -923,6 +983,7 @@ export class Feed {
 
   private pollAutoplayUi = () => {
     if (document.hidden) return;
+    if (this.isGestureBusy()) return;
     for (let i = 0; i < this.N; i++) {
       const isCurrent = i === this.realIndex();
       const paused = this.shouldPauseFrame(i);
@@ -991,6 +1052,14 @@ export class Feed {
     else this.autoplayUiActive.delete(i);
     game?.classList.toggle('game--autoplay', active);
     game?.classList.toggle('game--autoplay-preview', preview);
+  }
+
+  private primeIncomingAutoplayPreview(indices: number[]) {
+    for (const i of indices) {
+      if (i < 0 || i >= this.N) continue;
+      if (this.manualRuns.has(i) || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i)) continue;
+      this.setAutoplayUi(i, true, true);
+    }
   }
 
   // ── Friend story (Instagram-style) ─────────────────────────────────────────

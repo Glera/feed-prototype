@@ -262,6 +262,9 @@ body {
   50% { opacity: 1; }
 }
 
+/* In manual play the hint goes away (the close × takes over as the affordance). */
+.game--manual .game__swipehint { display: none; }
+
 /* Close (×) shown only in manual play — tap to advance to the next mechanic. */
 .game__close {
   position: absolute;
@@ -283,8 +286,15 @@ body {
   -webkit-tap-highlight-color: transparent;
   backdrop-filter: blur(6px);
 }
-.game--manual .game__close { display: flex; }
+/* Appears with a single attention pulse when manual play starts. */
+.game--manual .game__close { display: flex; animation: close-pulse 0.55s ease-out 1; }
 .game__close:active { transform: scale(0.92); }
+
+@keyframes close-pulse {
+  0% { transform: scale(0.6); opacity: 0; }
+  45% { transform: scale(1.28); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
 
 /* ── Progress HUD ───────────────────────────────────────────────────────────*/
 .hud {
