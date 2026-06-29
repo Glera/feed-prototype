@@ -888,6 +888,7 @@ export class Feed {
       return;
     }
     this.warmIndex = expected;
+    this.setAutoplayUi(expected, true, true);
     this.updateLive();
     this.setFramePaused(expected, true);
     this.tryRevealFrame(expected);
@@ -917,10 +918,12 @@ export class Feed {
       const paused = this.shouldPauseFrame(i);
       const manual = this.manualRuns.has(i);
 
-      // Autoplay / attract overlay ("tap to play or swipe"): only on the active
-      // frame the player hasn't taken over yet.
-      let active = false;
-      if (isCurrent && !manual && !paused) {
+      // Autoplay / attract overlay. Warm/incoming frames get the same visual
+      // treatment while staying host-paused, so a prepared next mechanic never
+      // flashes as a fully-coloured raw frame during the swipe.
+      const preview = this.shouldShowAutoplayPreview(i, isCurrent, manual);
+      let active = preview;
+      if (!active && isCurrent && !manual && !paused) {
         const api = this.playableApi(i);
         try {
           if (api?.swipe) {
@@ -936,7 +939,7 @@ export class Feed {
           }
         } catch { /* cross-origin */ }
       }
-      this.setAutoplayUi(i, active);
+      this.setAutoplayUi(i, active, preview);
 
       // Swipe bar label: only the autoplay/attract state offers "tap to play"
       // (tapping takes over the demo); once the player is playing, has won, or has
@@ -947,11 +950,19 @@ export class Feed {
     }
   };
 
-  private setAutoplayUi(i: number, active: boolean) {
-    if (this.autoplayUiActive.has(i) === active) return;
+  private shouldShowAutoplayPreview(i: number, isCurrent: boolean, manual: boolean): boolean {
+    if (isCurrent || manual || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i)) return false;
+    return i === this.warmIndex || i === this.settlingTargetIndex;
+  }
+
+  private setAutoplayUi(i: number, active: boolean, preview: boolean = false) {
+    const game = this.games[i];
+    const previewChanged = !!game?.classList.contains('game--autoplay-preview') !== preview;
+    if (this.autoplayUiActive.has(i) === active && !previewChanged) return;
     if (active) this.autoplayUiActive.add(i);
     else this.autoplayUiActive.delete(i);
-    this.games[i]?.classList.toggle('game--autoplay', active);
+    game?.classList.toggle('game--autoplay', active);
+    game?.classList.toggle('game--autoplay-preview', preview);
   }
 
   // ── Friend story (Instagram-style) ─────────────────────────────────────────
@@ -1330,6 +1341,10 @@ export class Feed {
     if (dt > 0) this.velocity = (e.clientY - this.lastY) / dt;
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
+    // Reward-collect drags don't scroll the page: the win star must stay PUT so the
+    // collect flight starts from its resting spot (and pulses there) instead of
+    // riding the finger upward first. The flick threshold still uses dy/velocity.
+    if (this.dragMode === 'reward') return;
     const rawProgress = -dy / this.pageH;         // drag up → positive → next; drag down → negative → previous
     const pageProgress = this.dragAllowsBack
       ? Math.max(-1, Math.min(1, rawProgress))
