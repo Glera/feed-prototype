@@ -951,8 +951,12 @@ export class Feed {
   };
 
   private shouldShowAutoplayPreview(i: number, isCurrent: boolean, manual: boolean): boolean {
-    if (isCurrent || manual || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i)) return false;
-    return i === this.warmIndex || i === this.settlingTargetIndex;
+    if (manual || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i)) return false;
+    const baseIndex = this.indexForPos(this.basePos);
+    if (this.settlingTargetIndex === i && i !== baseIndex) return true;
+    if (this.dragging && this.liveHold.has(i) && i !== baseIndex) return true;
+    if (isCurrent) return false;
+    return i === this.warmIndex;
   }
 
   private setAutoplayUi(i: number, active: boolean, preview: boolean = false) {
@@ -1935,7 +1939,7 @@ export class Feed {
         easing: 'cubic-bezier(0.34, 1.5, 0.5, 1)',       // pop the pulse up (overshoot) + dip
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(1.36) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(1.7) rotate(0deg)`,
         opacity: 1,
         offset: 0.34,                                    // peak pulse, sagged down a touch
         easing: 'cubic-bezier(0.62, 0, 0.95, 0.35)',     // then ramp hard toward the badge

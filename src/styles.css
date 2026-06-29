@@ -134,6 +134,23 @@ body {
 
 .game--loading::before { opacity: 1; }
 
+.game::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 var(--swipebar-h) 0;
+  z-index: 4;
+  background:
+    radial-gradient(86% 64% at 50% 38%, rgba(92, 60, 25, 0.42), transparent 68%),
+    linear-gradient(180deg, rgba(28, 22, 17, 0.98), rgba(7, 8, 11, 0.99));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.26s ease-out;
+}
+
+.game--autoplay-preview::after {
+  opacity: 1;
+}
+
 /* The playable <iframe> mounts here and fills the container. Its own gestures
    stay inside it; host overlays decide when the feed can page. */
 .game__slot {
@@ -195,25 +212,9 @@ body {
   -webkit-user-select: none;
 }
 
-.game__autoplay::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(86% 64% at 50% 38%, rgba(92, 60, 25, 0.42), transparent 68%),
-    linear-gradient(180deg, rgba(28, 22, 17, 0.98), rgba(7, 8, 11, 0.99));
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.26s ease-out;
-}
-
 .game--autoplay .game__autoplay {
   opacity: 1;
   pointer-events: auto;
-}
-
-.game--autoplay-preview .game__autoplay::before {
-  opacity: 1;
 }
 
 /* Permanent swipe bar — the reserved strip directly below the game. Always
