@@ -2193,14 +2193,18 @@ export class Feed {
           this.games[arrivingIdx]?.classList.add('game--arriving');
           this.goTo(advanceToPos);
           this.slideOutCollectCover();
-          // Reveal the iframe + start autoplay only after it has fully arrived (slide
-          // 0.36s + buffer), so neither the paint nor the physics spin-up janks it.
+          // 1) Once the dark rectangle has arrived (slide 0.36s + settle buffer), REVEAL
+          //    the mechanic — static, not yet playing (like an un-warmed one appearing).
           window.setTimeout(() => {
             this.games[arrivingIdx]?.classList.remove('game--arriving');
+          }, 430);
+          // 2) A beat after it's shown, START its autoplay — so it appears static first,
+          //    then begins to play (never revealed already-in-motion).
+          window.setTimeout(() => {
             this.holdNextAutoplay = false;
             this.ensureFrameAutoPlay(this.realIndex());
             this.pollAutoplayUi();
-          }, 560);
+          }, 720);
         }, LEVEL_PROGRESS_MS + 90);
       }
     };
