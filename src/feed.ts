@@ -308,6 +308,19 @@ export class Feed {
       close.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(); });
       game.appendChild(close);
 
+      // "Footage reel" chrome shown during autoplay (see .game--autoplay): camera
+      // viewfinder corner brackets + a blinking REC/play indicator, so a demo reads
+      // as a clip playing. Purely decorative (pointer-events: none).
+      const reel = document.createElement('div');
+      reel.className = 'game__reel';
+      reel.innerHTML =
+        '<span class="game__reel-corner game__reel-corner--tl"></span>' +
+        '<span class="game__reel-corner game__reel-corner--tr"></span>' +
+        '<span class="game__reel-corner game__reel-corner--bl"></span>' +
+        '<span class="game__reel-corner game__reel-corner--br"></span>' +
+        '<span class="game__reel-rec"><span class="game__reel-play">▶</span>PLAY</span>';
+      game.appendChild(reel);
+
       const state = document.createElement('div');
       state.className = 'game__state';
       state.hidden = true;
@@ -602,7 +615,8 @@ export class Feed {
       '<div class="levelup__kicker">LEVEL UP</div>' +
       '<div class="levelup__badge"><span class="levelup__star">★</span><span class="levelup__num">' + level + '</span></div>' +
       '<div class="levelup__title">Level ' + level + '</div>' +
-    '</div>';
+    '</div>' +
+    '<div class="levelup__hint">tap or swipe for next game</div>';
   }
 
   private prepareLevelUpPage(level: number, basePos: number) {
@@ -1024,10 +1038,12 @@ export class Feed {
       const label = active ? 'tap to play or swipe for next game' : 'swipe for next game';
       if (txt && txt.textContent !== label) txt.textContent = label;
 
-      // Manual play (taken over, not won/failed): show the close (×) → next.
-      const manualPlaying = isCurrent && manual && !paused
-        && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
-      this.games[i]?.classList.toggle('game--manual', manualPlaying);
+      const playable = isCurrent && !paused && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
+      // Manual play hides the blinking hint (the close × takes over as the affordance).
+      this.games[i]?.classList.toggle('game--manual', playable && manual);
+      // Close (×) is available in BOTH autoplay and manual — a convenient way to page
+      // to the next mechanic (duplicates the swipe). Tap still takes over the demo.
+      this.games[i]?.classList.toggle('game--show-close', playable);
     }
   };
 
@@ -1494,10 +1510,12 @@ export class Feed {
       this.rewardDragIndex = null;
       this.dragAutoplayIndex = null;
       this.dragAllowsBack = false;
-      if (step > 0) {
+      // Dismiss the level-up by a swipe-up OR a plain tap (anywhere except buttons).
+      const tapToLeave = step === 0 && !movedPastTap;
+      if (step > 0 || tapToLeave) {
         this.levelUpPageState = 'leaving';
         this.unlockAudioForCurrentAndNext(fromIndex);
-        this.goTo(commitBasePos + step);
+        this.goTo(commitBasePos + (step > 0 ? step : 1));
       } else {
         this.levelUpPageState = 'settled';
         this.goTo(commitBasePos);
@@ -1539,6 +1557,13 @@ export class Feed {
       this.unlockAudioForCurrentAndNext(autoplayTapIndex, true);
       this.goTo(commitBasePos);
       this.activateManualFromAutoplay(autoplayTapIndex);
+      return;
+    }
+    // Held level-up overlay: a plain tap (not just a swipe) dismisses it and advances.
+    if (this.heldLevelUpOverlay && step === 0 && !movedPastTap) {
+      this.unlockAudioForCurrentAndNext(fromIndex);
+      this.releaseHeldLevelUp();
+      this.goTo(commitBasePos + 1);
       return;
     }
     if (step !== 0 && autoplayTapIndex !== null) {
@@ -2040,13 +2065,16 @@ export class Feed {
       this.claimedStarRewards.add(i);
       state?.classList.remove('game__state--collecting');
       this.updateMechanicState(i);
-      this.finishStarReward(i);
-      // Star has landed. Now advance to the next mechanic UNDER the cover; its
-      // autoplay starts once via the settle path (the gate above is now clear), then
-      // fade the cover away to reveal it.
+      this.finishStarReward(i);   // credits the star (counter bump ~LEVEL_PROGRESS_MS)
+      // Hold the opaque cover until the star has BOTH landed and finished crediting
+      // (the counter bump), THEN advance to the next mechanic under the cover — its
+      // autoplay starts once via the settle path — and fade the cover to reveal it.
+      // Nothing of the next mechanic shows before the star is counted.
       if (advanceToPos !== null) {
-        this.goTo(advanceToPos);
-        this.hideCollectCover();
+        window.setTimeout(() => {
+          this.goTo(advanceToPos);
+          this.hideCollectCover();
+        }, LEVEL_PROGRESS_MS + 90);
       }
     };
 
@@ -2357,8 +2385,10 @@ export class Feed {
         const c = document.createElement('div');
         c.className = 'confetti';
         const w = 6 + Math.random() * 6, h = 9 + Math.random() * 9;
+        // Spread evenly across the width (column + jitter) so the fall is uniform.
+        const x = ((n + Math.random()) / count) * rect.width;
         c.style.cssText =
-          `left:${Math.random() * rect.width}px;top:-24px;width:${w}px;height:${h}px;` +
+          `left:${x}px;top:-24px;width:${w}px;height:${h}px;` +
           `background:${colors[(n + Math.floor(Math.random() * colors.length)) % colors.length]};` +
           `border-radius:${Math.random() < 0.4 ? '50%' : '2px'};`;
         parent.appendChild(c);
@@ -2376,16 +2406,15 @@ export class Feed {
       }
     };
 
-    emitWave(36);                                   // opening burst
-    // A short celebratory tail is enough; unbounded DOM confetti makes the held
-    // level-up screen warm phones if the player pauses here.
+    emitWave(34);                                   // opening burst
+    // Rain continuously and evenly until the level-up screen is dismissed (tap/swipe)
+    // — stops when the parent leaves the DOM or stopConfetti() is called. Modest
+    // per-wave count keeps the steady-state node count (and heat) in check.
     if (this.confettiTimer) window.clearInterval(this.confettiTimer);
-    let waves = 0;
     this.confettiTimer = window.setInterval(() => {
       if (!parent.isConnected) { this.stopConfetti(); return; }
-      if (++waves > 6) { this.stopConfetti(); return; }
-      emitWave(8);
-    }, 600);
+      emitWave(7);
+    }, 520);
   }
 
   private stopConfetti() {

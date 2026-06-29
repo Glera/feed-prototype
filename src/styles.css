@@ -280,22 +280,87 @@ body {
   justify-content: center;
   border: 0;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.42);
+  background: rgba(0, 0, 0, 0.5);   /* no backdrop-filter — it's always on during autoplay */
   color: rgba(255, 255, 255, 0.92);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  backdrop-filter: blur(6px);
 }
-/* Appears with a single attention pulse when manual play starts. */
-.game--manual .game__close { display: flex; animation: close-pulse 0.55s ease-out 1; }
+/* Available in autoplay AND manual; appears with a single attention pulse. */
+.game--show-close .game__close { display: flex; animation: close-pulse 0.55s ease-out 1; }
 .game__close:active { transform: scale(0.92); }
 
 @keyframes close-pulse {
   0% { transform: scale(0.6); opacity: 0; }
   45% { transform: scale(1.28); opacity: 1; }
   100% { transform: scale(1); opacity: 1; }
+}
+
+/* ── "Footage reel" chrome (autoplay only) ──────────────────────────────────
+   Camera-viewfinder corner brackets + a blinking PLAY indicator, so an autoplay
+   demo reads as a clip playing. Pure CSS, decorative, no per-frame GPU cost. */
+.game__reel {
+  position: absolute;
+  inset: 0 0 var(--swipebar-h) 0;
+  z-index: 5;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+}
+.game--autoplay .game__reel { opacity: 1; }
+
+.game__reel-corner {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.7);
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
+}
+.game__reel-corner--tl { top: 10px; left: 10px; border-right: 0; border-bottom: 0; }
+.game__reel-corner--tr { top: 10px; right: 10px; border-left: 0; border-bottom: 0; }
+.game__reel-corner--bl { bottom: 10px; left: 10px; border-right: 0; border-top: 0; }
+.game__reel-corner--br { bottom: 10px; right: 10px; border-left: 0; border-top: 0; }
+
+.game__reel-rec {
+  position: absolute;
+  top: 14px;
+  left: 18px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+.game__reel-play {
+  font-size: 10px;
+  line-height: 1;
+  color: #ff5a5a;
+  filter: drop-shadow(0 0 6px rgba(255, 90, 90, 0.7));
+  animation: reel-blink 1.05s steps(1, end) infinite;
+}
+@keyframes reel-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.12; }
+}
+
+/* Level-up affordance — blinking, same spot/style as the win-screen hint. */
+.levelup__hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--swipebar-h) + 10px);
+  text-align: center;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  color: rgba(255, 255, 255, 0.95);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.65);
+  pointer-events: none;
+  animation: swipehint-blink 2.4s ease-in-out infinite;
 }
 
 /* ── Progress HUD ───────────────────────────────────────────────────────────*/
