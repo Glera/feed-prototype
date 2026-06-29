@@ -2062,14 +2062,14 @@ export class Feed {
       {
         transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(1.85) rotate(0deg)`,
         opacity: 1,
-        offset: 0.34,                                    // peak reached sooner → FASTER grow,
+        offset: 0.26,                                    // peak reached even sooner → FASTER grow,
                                                          // leaving more of the timeline for a SLOWER shrink
         easing: 'cubic-bezier(0.45, 0, 0.7, 0.65)',      // gentle, slower shrink toward the badge
       },
       {
-        transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(16deg)`,
+        transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(360deg)`,
         opacity: 1,
-        offset: 1,
+        offset: 1,                                       // spins a full turn while flying to the counter
       },
     ], { duration: 900, fill: 'forwards' });
 
