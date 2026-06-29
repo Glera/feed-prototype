@@ -1847,20 +1847,22 @@ export class Feed {
       return;
     }
 
-    // Star stays put on swipe and does ONE size-up pulse in place, then flies to the
-    // badge with a hard ACCELERATION into the finish. transform-origin is 50% 50%
-    // (CSS for --collect), so scaling keeps the glyph centred on the avatar.
+    // On swipe the star stays put and does ONE size-up pulse, dipping slightly DOWN
+    // (anticipation against the upward swipe) before launching to the badge with a
+    // hard ACCELERATION into the finish. transform-origin is 50% 50% (CSS for
+    // --collect), so scaling keeps the glyph centred on the avatar.
+    const dipY = startY + Math.max(16, sz * 0.13);
     const anim = star.animate([
       {
         transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
         opacity: 1,
         offset: 0,
-        easing: 'cubic-bezier(0.34, 1.45, 0.5, 1)',     // pop the pulse up (slight overshoot)
+        easing: 'cubic-bezier(0.34, 1.5, 0.5, 1)',       // pop the pulse up (overshoot) + dip
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1.24) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(1.36) rotate(0deg)`,
         opacity: 1,
-        offset: 0.32,                                    // hold in place at the pulse peak
+        offset: 0.34,                                    // peak pulse, sagged down a touch
         easing: 'cubic-bezier(0.62, 0, 0.95, 0.35)',     // then ramp hard toward the badge
       },
       {
@@ -1868,7 +1870,7 @@ export class Feed {
         opacity: 1,
         offset: 1,
       },
-    ], { duration: 620, fill: 'forwards' });
+    ], { duration: 640, fill: 'forwards' });
 
     anim.addEventListener('finish', () => {
       star.remove();
