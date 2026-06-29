@@ -1064,17 +1064,6 @@ export class Feed {
       this.games[i]?.classList.toggle('game--manual', playable && manual);
       // Close (×) only in MANUAL play — during autoplay the demo is paged by tap/swipe.
       this.games[i]?.classList.toggle('game--show-close', playable && manual);
-
-      // "PLAY" reel indicator only when autoplay is GENUINELY running (not during
-      // preview/attract/init) — i.e. the mechanic reports its autoplay active.
-      let playing = false;
-      if (isCurrent && !manual && !paused && !preview) {
-        try {
-          const s = this.playableApi(i)?.swipe;
-          playing = !!(s?.hasAutoPlay && s.isAutoPlayActive());
-        } catch { /* cross-origin */ }
-      }
-      this.games[i]?.classList.toggle('game--playing', playing);
     }
   };
 
