@@ -271,24 +271,34 @@ export class Feed {
       this.attachSwipeSurface(autoplay);
       game.appendChild(autoplay);
 
-      // Permanent swipe bar reserved BELOW the game (the slot/overlays are inset by
-      // its height, so the playable is shorter — the bar never overlaps gameplay).
-      // Always a swipe surface; its label switches by mode in pollAutoplayUi
-      // ("tap to play or swipe" during autoplay, "swipe for next mechanic" once the
-      // player takes over). dataset.autoplayIndex lets a tap here take over too.
+      // Reserved dark bar BELOW the game (slot/overlays are inset above it). Left
+      // EMPTY for now — buttons land here later. It stays the swipe surface; a swipe
+      // here pages (and collects a pending reward, via preferReward). dataset
+      // .autoplayIndex lets a tap take over during autoplay.
       const swipebar = document.createElement('div');
       swipebar.className = 'game__swipebar';
       swipebar.dataset.autoplayIndex = String(i);
-      swipebar.innerHTML = '<div class="game__autoplay-arrow">▲</div>';
-      const swipebarText = document.createElement('div');
-      swipebarText.className = 'game__autoplay-text';
-      swipebarText.textContent = 'tap to play or swipe';
-      swipebar.appendChild(swipebarText);
-      // preferReward: when a reward is pending (win screen), a swipe here collects
-      // it (star flies to the avatar) and advances; otherwise it just pages.
       this.attachSwipeSurface(swipebar, () => true, true);
       game.appendChild(swipebar);
-      this.swipebarTextEls[i] = swipebarText;
+
+      // Slowly-blinking hint text, floating ABOVE the bar (not inside it). Label
+      // switches by mode in pollAutoplayUi. Purely visual (pointer-events: none).
+      const swipeHint = document.createElement('div');
+      swipeHint.className = 'game__swipehint';
+      swipeHint.textContent = 'tap to play or swipe';
+      game.appendChild(swipeHint);
+      this.swipebarTextEls[i] = swipeHint;
+
+      // Close (×) — shown only in manual play (see .game--manual). Tapping it
+      // advances to the next mechanic, like a swipe.
+      const close = document.createElement('button');
+      close.className = 'game__close';
+      close.type = 'button';
+      close.setAttribute('aria-label', 'Next mechanic');
+      close.textContent = '✕';
+      close.addEventListener('pointerdown', (e) => e.stopPropagation());
+      close.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(); });
+      game.appendChild(close);
 
       const state = document.createElement('div');
       state.className = 'game__state';
@@ -947,8 +957,22 @@ export class Feed {
       const txt = this.swipebarTextEls[i];
       const label = active ? 'tap to play or swipe' : 'swipe for next mechanic';
       if (txt && txt.textContent !== label) txt.textContent = label;
+
+      // Manual play (taken over, not won/failed): show the close (×) → next.
+      const manualPlaying = isCurrent && manual && !paused
+        && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
+      this.games[i]?.classList.toggle('game--manual', manualPlaying);
     }
   };
+
+  // Advance forward one mechanic (the close × and any "skip" affordance use this).
+  private advanceToNext() {
+    if (this.dragging) return;
+    const base = Math.round(this.pos);
+    this.unlockAudioForCurrentAndNext(this.indexForPos(base));
+    this.releaseHeldLevelUp();
+    this.goTo(base + 1);
+  }
 
   private shouldShowAutoplayPreview(i: number, isCurrent: boolean, manual: boolean): boolean {
     if (manual || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i)) return false;
@@ -1399,12 +1423,15 @@ export class Feed {
       this.rewardDragIndex = null;
       this.dragAutoplayIndex = null;
       this.dragAllowsBack = false;
-      if (step > 0 && rewardIndex !== null) {
+      // After a win, advance by a swipe-up OR a plain tap anywhere (except buttons,
+      // which stop the gesture before it starts) — both collect and move on.
+      const tapToAdvance = step === 0 && !movedPastTap;
+      if ((step > 0 || tapToAdvance) && rewardIndex !== null) {
         const willShowLevelUp = this.levelUpPageState === 'entering' && this.levelUpPageEl !== null;
         this.unlockAudioForCurrentAndNext(fromIndex);
         this.collectReward(rewardIndex);
         if (willShowLevelUp) this.animateLevelUpPageIn();
-        else this.goTo(this.basePos + step);
+        else this.goTo(this.basePos + 1);
         return;
       }
       this.removeLevelUpPage();
@@ -1818,11 +1845,9 @@ export class Feed {
     };
 
     emit(16);
-    let waves = 0;
-    const timer = window.setInterval(() => {
-      if (++waves > 8) { this.stopRewardSparks(i); return; }
-      emit(2 + Math.floor(Math.random() * 3));
-    }, 260);
+    // Loop continuously while the win screen is up — stops only on collect
+    // (stopRewardSparks) or when the star leaves the DOM (emit's isConnected guard).
+    const timer = window.setInterval(() => emit(2 + Math.floor(Math.random() * 3)), 260);
     this.rewardSparkTimers.set(i, timer);
   }
 

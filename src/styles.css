@@ -239,31 +239,52 @@ body {
   text-shadow: 0 2px 9px rgba(0,0,0,0.52);
 }
 
-.game__autoplay-arrow {
-  color: #fff1a8;
-  font-size: 19px;
-  line-height: 1;
-  filter: drop-shadow(0 0 8px rgba(255,216,90,0.34));
-  animation: autoplay-arrow-rise 1.05s ease-in-out infinite;
-}
-
-.game__autoplay-text {
-  padding: 5px 11px;
-  border-radius: 999px;
-  background: rgba(0,0,0,0.26);
-  border: 1px solid rgba(255,255,255,0.13);
-  color: rgba(255,255,255,0.9);
-  font-size: 12px;
-  line-height: 1;
-  font-weight: 850;
+/* Slowly-blinking hint text, floating ABOVE the dark bar (the bar itself stays
+   empty for future buttons). Purely visual. */
+.game__swipehint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--swipebar-h) + 10px);
+  z-index: 4;
+  text-align: center;
+  pointer-events: none;
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 13px;
+  font-weight: 800;
   letter-spacing: 0.2px;
-  backdrop-filter: blur(8px);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+  animation: swipehint-blink 2.4s ease-in-out infinite;
 }
 
-@keyframes autoplay-arrow-rise {
-  0%, 100% { transform: translateY(3px); opacity: 0.58; }
-  45% { transform: translateY(-6px); opacity: 1; }
+@keyframes swipehint-blink {
+  0%, 100% { opacity: 0.32; }
+  50% { opacity: 1; }
 }
+
+/* Close (×) shown only in manual play — tap to advance to the next mechanic. */
+.game__close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 6;
+  width: 34px;
+  height: 34px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.42);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  backdrop-filter: blur(6px);
+}
+.game--manual .game__close { display: flex; }
+.game__close:active { transform: scale(0.92); }
 
 /* ── Progress HUD ───────────────────────────────────────────────────────────*/
 .hud {
