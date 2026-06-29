@@ -2353,30 +2353,33 @@ export class Feed {
     }
   }
 
+  // Ember burst at the counter when the star lands — styled like the coal sparks
+  // ("угольки") in the pins playable: hot orange embers with a glowing core that
+  // pop outward (upward-biased), wiggle, and fade.
   private burstRewardCollectParticles(x: number, y: number) {
-    const colors = ['#ffd85a', '#fff1a8', '#ffb13d', '#ff7b38', '#ffffff'];
-    for (let n = 0; n < 18; n++) {
+    for (let n = 0; n < 16; n++) {
       const p = document.createElement('div');
-      p.className = 'star-particle';
-      const size = 5 + Math.random() * 6;
-      const angle = Math.random() * Math.PI * 2;
-      const dist = 34 + Math.random() * 44;
+      p.className = 'ember';
+      const size = 4 + Math.random() * 6;
+      // Upward-biased spray (embers fly up and out from the impact).
+      const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.5;
+      const dist = 26 + Math.random() * 46;
       const dx = Math.cos(angle) * dist;
       const dy = Math.sin(angle) * dist;
+      const wob = (Math.random() - 0.5) * 18;   // slight sideways wiggle
       p.style.left = `${x}px`;
       p.style.top = `${y}px`;
       p.style.width = `${size}px`;
       p.style.height = `${size}px`;
-      p.style.background = colors[n % colors.length];
       this.viewport.appendChild(p);
 
-      const dur = 420 + Math.random() * 260;
+      const dur = 460 + Math.random() * 380;
       if (!p.animate) { window.setTimeout(() => p.remove(), dur); continue; }
       const anim = p.animate([
-        { transform: 'translate(-50%, -50%) scale(0.35)', opacity: 1 },
-        { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(1)`, opacity: 0.95, offset: 0.38 },
-        { transform: `translate(calc(-50% + ${dx * 1.1}px), calc(-50% + ${dy + 34}px)) scale(0.12)`, opacity: 0 },
-      ], { duration: dur, easing: 'cubic-bezier(0.18, 0.7, 0.3, 1)', fill: 'forwards' });
+        { transform: 'translate(-50%, -50%) scale(1)', opacity: 1 },
+        { transform: `translate(calc(-50% + ${dx * 0.6 + wob}px), calc(-50% + ${dy * 0.6}px)) scale(0.9)`, opacity: 1, offset: 0.45 },
+        { transform: `translate(calc(-50% + ${dx + wob}px), calc(-50% + ${dy + 22}px)) scale(0.2)`, opacity: 0 },
+      ], { duration: dur, easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)', fill: 'forwards' });
       anim.addEventListener('finish', () => p.remove(), { once: true });
     }
   }
@@ -2436,8 +2439,12 @@ export class Feed {
   }
 
   private bumpLevelBadge() {
-    this.levelBadgeEl?.classList.add('hud__level--bump');
-    window.setTimeout(() => this.levelBadgeEl?.classList.remove('hud__level--bump'), 260);
+    const el = this.levelBadgeEl;
+    if (!el) return;
+    el.classList.remove('hud__level--bump');
+    void el.offsetWidth;                 // restart the animation if it's already running
+    el.classList.add('hud__level--bump');
+    window.setTimeout(() => el.classList.remove('hud__level--bump'), 440);
   }
 
   private pulseLevelUp() {

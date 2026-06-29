@@ -650,12 +650,14 @@ body {
   transform: translate(-50%, -50%) rotate(90deg);
 }
 
-.hud__level--bump { animation: hud-bump 0.26s ease-out; }
+.hud__level--bump { animation: hud-bump 0.42s; }
 .hud--level-up .hud__level { animation: hud-level-up 0.42s ease-out; }
 
+/* Merge-pop feel (like merging items in the merge playables): a quick smooth grow to
+   a strong peak, then a gentle settle — not the old tight jerky bump. */
 @keyframes hud-bump {
-  0% { transform: scale(1); }
-  45% { transform: scale(1.14); }
+  0%   { transform: scale(1);    animation-timing-function: cubic-bezier(0.2, 0.8, 0.3, 1); }
+  34%  { transform: scale(1.45); animation-timing-function: cubic-bezier(0.35, 0, 0.4, 1); }
   100% { transform: scale(1); }
 }
 
@@ -1003,13 +1005,14 @@ body {
   transform-origin: 50% 50%;
 }
 
-.star-particle {
+/* Coal-spark "ember" (like the pins playable's угольки): hot orange with a bright
+   yellow-white core and an orange glow. */
+.ember {
   position: absolute;
-  z-index: 2190;
-  width: 8px;
-  height: 8px;
+  z-index: 2620;
   border-radius: 50%;
-  box-shadow: 0 0 10px rgba(255, 216, 90, 0.62);
+  background: radial-gradient(circle, #ffe9b0 0%, #ff8a3d 42%, rgba(255, 90, 42, 0.55) 74%, transparent 100%);
+  box-shadow: 0 0 8px rgba(255, 90, 42, 0.85), 0 0 16px rgba(255, 120, 50, 0.4);
   pointer-events: none;
   will-change: transform, opacity;
 }
