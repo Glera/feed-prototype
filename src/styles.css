@@ -1,4 +1,5 @@
 :root {
+  --platform-bg: #07090f;
   /* Shared chrome height: top stories rail now uses it directly. The old bottom
      swipe gutter keeps this var as legacy styling, but it is not mounted. */
   --chrome-zone-h: 88px;
@@ -30,7 +31,7 @@
 html, body {
   margin: 0;
   height: 100%;
-  background: #0a0a0f;
+  background: var(--platform-bg);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   color: #fff;
   overscroll-behavior: none;            /* kill the browser's own pull-to-refresh / bounce */
@@ -50,7 +51,7 @@ body {
   height: 100dvh;
   max-width: 480px;
   overflow: hidden;
-  background: #000;
+  background: var(--platform-bg);
   /* Keep the game surface free for the iframe. Paging gestures live on explicit
      overlays, and the top rail owns only its horizontal drag. */
   touch-action: auto;
@@ -73,7 +74,7 @@ body {
   inset: var(--top-zone-h) var(--safe-right) var(--safe-bottom) var(--safe-left);
   height: auto;
   overflow: hidden;
-  background: #000;
+  background: var(--platform-bg);
   contain: layout paint;
 }
 
@@ -93,7 +94,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #000;
+  background: var(--platform-bg);
   contain: layout paint;
 }
 .page--near {
@@ -111,9 +112,7 @@ body {
   margin: 0;
   border-radius: 0;
   overflow: hidden;
-  background:
-    radial-gradient(90% 70% at 50% 42%, rgba(53, 61, 82, 0.2), transparent 72%),
-    #07090f;                    /* shown behind the iframe while (un)loading */
+  background: var(--platform-bg); /* shown behind the iframe while (un)loading */
   isolation: isolate;
   contain: layout paint;
   touch-action: manipulation;
@@ -124,9 +123,7 @@ body {
   position: absolute;
   inset: 0;
   z-index: 3;
-  background:
-    radial-gradient(86% 66% at 50% 40%, rgba(255,255,255,0.055), transparent 70%),
-    linear-gradient(180deg, rgba(11, 14, 22, 0.96), rgba(5, 7, 12, 0.98));
+  background: var(--platform-bg);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.18s ease-out;
@@ -139,9 +136,7 @@ body {
   position: absolute;
   inset: 0 0 var(--swipebar-h) 0;
   z-index: 4;
-  background:
-    radial-gradient(86% 64% at 50% 38%, rgba(92, 60, 25, 0.42), transparent 68%),
-    linear-gradient(180deg, rgba(28, 22, 17, 0.98), rgba(7, 8, 11, 0.99));
+  background: var(--platform-bg);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.26s ease-out;
@@ -156,7 +151,7 @@ body {
 .game__slot {
   position: absolute;
   inset: 0 0 var(--swipebar-h) 0;   /* leave the bottom strip for the swipe bar */
-  background: #07090f;
+  background: var(--platform-bg);
   touch-action: manipulation;
 }
 .game__frame {
@@ -164,7 +159,7 @@ body {
   height: 100%;
   border: 0;
   display: block;
-  background: #07090f;
+  background: var(--platform-bg);
   opacity: 0;
   pointer-events: none;
   touch-action: manipulation;
@@ -215,6 +210,11 @@ body {
 .game--autoplay .game__autoplay {
   opacity: 1;
   pointer-events: auto;
+}
+
+.game.game--autoplay-preview .game__autoplay {
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* Permanent swipe bar — the reserved strip directly below the game. Always
@@ -865,7 +865,7 @@ body {
   z-index: 2400;
   background:
     radial-gradient(70% 55% at 50% 42%, rgba(255,216,90,0.2), rgba(4,6,10,0.88) 68%),
-    #05070d;
+    var(--platform-bg);
   will-change: transform;
 }
 
@@ -1042,7 +1042,7 @@ body {
   align-items: center;
   justify-content: center;
   gap: 16px;
-  background: radial-gradient(120% 90% at 50% 35%, #1a1a26, #0a0a0f);
+  background: var(--platform-bg);
   opacity: 1;
   transition: opacity 0.35s ease-out;
 }
@@ -1079,7 +1079,7 @@ body {
   z-index: 3000;
   display: flex;
   flex-direction: column;
-  background: #07090f;
+  background: var(--platform-bg);
 }
 .story-view__header { display: flex; align-items: center; gap: 10px; padding: calc(env(safe-area-inset-top) + 12px) 12px 10px; }
 .story-view__avatar { width: 40px; height: 40px; flex: 0 0 40px; }
@@ -1093,9 +1093,9 @@ body {
 }
 .story-view__stage {
   position: relative; flex: 1 1 auto; min-height: 0;
-  margin: 2px 8px 0; border-radius: 18px; overflow: hidden; background: #07090f;
+  margin: 2px 8px 0; border-radius: 18px; overflow: hidden; background: var(--platform-bg);
 }
-.story-view__frame { width: 100%; height: 100%; border: 0; display: block; background: #07090f; }
+.story-view__frame { width: 100%; height: 100%; border: 0; display: block; background: var(--platform-bg); }
 .story-view__footer { display: flex; align-items: center; gap: 10px; padding: 12px 14px calc(env(safe-area-inset-bottom) + 14px); }
 .story-view__reply {
   flex: 1 1 auto; min-width: 0; height: 44px; padding: 0 16px;

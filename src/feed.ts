@@ -1926,6 +1926,9 @@ export class Feed {
       return;
     }
 
+    // Level-up-style confetti sprays from the star as it pulses, raining down screen.
+    this.burstStarConfetti(startX, startY);
+
     // On swipe the star stays put and does ONE size-up pulse, dipping slightly DOWN
     // (anticipation against the upward swipe) before launching to the badge with a
     // hard ACCELERATION into the finish. transform-origin is 50% 50% (CSS for
@@ -1957,6 +1960,35 @@ export class Feed {
       this.bumpLevelBadge();
       onDone();
     }, { once: true });
+  }
+
+  // Level-up-style confetti, sprayed from (cx,cy) — the pulsing star — and raining
+  // down off the bottom of the screen. Lives on the fixed viewport layer.
+  private burstStarConfetti(cx: number, cy: number) {
+    const colors = ['#ffd85a', '#45d68c', '#37a6ff', '#ff4f8b', '#ff9f45', '#b07bff', '#5ee6a8'];
+    const rect = this.viewport.getBoundingClientRect();
+    for (let n = 0; n < 34; n++) {
+      const c = document.createElement('div');
+      c.className = 'confetti';
+      const w = 7 + Math.random() * 7, h = 10 + Math.random() * 10;
+      c.style.cssText =
+        `left:${cx}px;top:${cy}px;width:${w}px;height:${h}px;z-index:2580;` +
+        `background:${colors[(n + Math.floor(Math.random() * colors.length)) % colors.length]};` +
+        `border-radius:${Math.random() < 0.4 ? '50%' : '2px'};`;
+      this.viewport.appendChild(c);
+      const dur = 1100 + Math.random() * 900;
+      if (!c.animate) { window.setTimeout(() => c.remove(), dur); continue; }
+      const driftX = (Math.random() - 0.5) * rect.width * 0.95;   // spray outward
+      const fall = (rect.height - cy) + 90;                       // all the way down + off-screen
+      const rot = Math.random() * 900 - 450;
+      const a = c.animate([
+        { transform: 'translate(-50%, -50%) rotate(0deg) scale(0.6)', opacity: 1, offset: 0 },
+        { transform: `translate(calc(-50% + ${driftX * 0.55}px), -${24 + Math.random() * 40}px) rotate(${rot * 0.3}deg) scale(1)`, opacity: 1, offset: 0.16 },
+        { transform: `translate(calc(-50% + ${driftX}px), ${fall * 0.86}px) rotate(${rot}deg) scale(1)`, opacity: 1, offset: 0.82 },
+        { transform: `translate(calc(-50% + ${driftX}px), ${fall + 50}px) rotate(${rot}deg) scale(1)`, opacity: 0, offset: 1 },
+      ], { duration: dur, delay: Math.random() * 130, easing: 'cubic-bezier(0.28, 0.5, 0.4, 1)', fill: 'forwards' });
+      a.addEventListener('finish', () => c.remove(), { once: true });
+    }
   }
 
   private burstRewardCollectParticles(x: number, y: number) {
