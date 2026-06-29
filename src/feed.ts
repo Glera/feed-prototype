@@ -210,21 +210,7 @@ export class Feed {
         this.settleLevelUpPage();
         return;
       }
-      const leavingLevelUp = this.levelUpPageState === 'leaving';
-      this.settlingTargetIndex = null;
-      this.pos = this.realIndex();      // keep pos bounded; same visual (delta mod N)
-      this.liveHold.clear();
-      this.render(false);
-      if (this.resetCycleAfterSettle) {
-        this.resetCycleAfterSettle = false;
-        this.resetCycle();
-      }
-      this.updateLive();
-      this.applyActiveStates();
-      this.scheduleWarmNext();
-      this.prefetchReserve();
-      this.pumpPrefetchQueue();
-      if (leavingLevelUp) this.removeLevelUpPage();
+      this.settleSlide();
     });
 
     this.updateLive();
@@ -2071,7 +2057,10 @@ export class Feed {
       // Nothing of the next mechanic shows before the star is counted.
       if (advanceToPos !== null) {
         window.setTimeout(() => {
-          this.goTo(advanceToPos);
+          // INSTANT advance (no slide) — we're under the opaque cover, so the page
+          // change must not be seen. The next mechanic settles + autoplays behind the
+          // cover, then the cover fades to reveal it (no mechanic-sliding-away).
+          this.goTo(advanceToPos, true);
           this.hideCollectCover();
         }, LEVEL_PROGRESS_MS + 90);
       }
@@ -2140,37 +2129,42 @@ export class Feed {
     // Level-up-style confetti rains down evenly across the whole screen.
     this.burstStarConfetti();
 
-    // A pronounced PULSE, then the launch:
-    //   1. fast accelerating GROW to a big peak (with a slight downward dip),
-    //   2. quick RETURN to a size a touch below normal,
-    //   3. then accelerate-fly to the badge, spinning a full turn.
-    // transform-origin is 50% 50% (CSS for --collect), so scaling stays centred.
-    const dipY = startY + Math.max(16, sz * 0.13);
+    // The juicy pulse, then the launch (all centred — transform-origin 50% 50%):
+    //   1. accelerating GROW to a big peak,
+    //   2. brief HOLD at full size (lets it land),
+    //   3. fast accelerating COLLAPSE down small,
+    //   4. zip to the badge, spinning a full turn.
     const anim = star.animate([
       {
         transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
         opacity: 1,
         offset: 0,
-        easing: 'cubic-bezier(0.5, 0, 0.6, 0.55)',       // fast accelerating grow
+        easing: 'cubic-bezier(0.55, 0, 0.85, 0.25)',     // grow ACCELERATES into the peak
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(2.3) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(2.45) rotate(0deg)`,
         opacity: 1,
-        offset: 0.2,                                     // big peak, reached early
-        easing: 'cubic-bezier(0.4, 0, 0.4, 1)',          // quick return back down
+        offset: 0.2,                                     // big peak, reached fast
+        easing: 'linear',                                // HOLD enlarged
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(0.88) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(2.45) rotate(0deg)`,
         opacity: 1,
-        offset: 0.38,                                    // returned to a touch below normal, then launches
-        easing: 'cubic-bezier(0.55, 0, 0.9, 0.4)',       // accelerate toward the badge
+        offset: 0.36,                                    // end of the hold
+        easing: 'cubic-bezier(0.7, 0, 0.84, 0.2)',       // collapse ACCELERATES (fast snap)
+      },
+      {
+        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(0.45) rotate(0deg)`,
+        opacity: 1,
+        offset: 0.52,                                    // snapped small in place
+        easing: 'cubic-bezier(0.45, 0, 0.9, 0.45)',      // then zip to the badge
       },
       {
         transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(360deg)`,
         opacity: 1,
         offset: 1,                                       // spins a full turn while flying to the counter
       },
-    ], { duration: 900, fill: 'forwards' });
+    ], { duration: 1000, fill: 'forwards' });
 
     anim.addEventListener('finish', () => {
       star.remove();
@@ -2420,8 +2414,28 @@ export class Feed {
     if (this.confettiTimer) { window.clearInterval(this.confettiTimer); this.confettiTimer = null; }
   }
 
+  // Normalise after a slide arrives: resume the arrived game, pause the rest, warm
+  // the next. Runs on transitionend, or synchronously for an instant (no-slide) goTo.
+  private settleSlide() {
+    const leavingLevelUp = this.levelUpPageState === 'leaving';
+    this.settlingTargetIndex = null;
+    this.pos = this.realIndex();      // keep pos bounded; same visual (delta mod N)
+    this.liveHold.clear();
+    this.render(false);
+    if (this.resetCycleAfterSettle) {
+      this.resetCycleAfterSettle = false;
+      this.resetCycle();
+    }
+    this.updateLive();
+    this.applyActiveStates();
+    this.scheduleWarmNext();
+    this.prefetchReserve();
+    this.pumpPrefetchQueue();
+    if (leavingLevelUp) this.removeLevelUpPage();
+  }
+
   // ── Paging ───────────────────────────────────────────────────────────────
-  goTo(targetPos: number) {
+  goTo(targetPos: number, instant: boolean = false) {
     const fromPos = Math.round(this.pos);
     const fromIndex = this.indexForPos(fromPos);
     const targetIndex = this.indexForPos(targetPos);
@@ -2434,8 +2448,9 @@ export class Feed {
       if (this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycleAfterSettle = true;
     }
     this.pos = targetPos;
-    this.render(true);
+    this.render(!instant);
     if (changed && pageChanged) {
+      if (instant) { this.settleSlide(); return; }   // no slide — settle now (used under the collect cover)
       this.prefetchReserve();   // keep the reserve topped up
     } else if (changed) {
       this.settlingTargetIndex = null;
