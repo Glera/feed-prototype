@@ -2311,13 +2311,10 @@ export class Feed {
       },
     ], { duration: DURATION, fill: 'forwards' });
 
-    // Pulse the level counter slightly BEFORE the star lands, so it's already reacting
-    // as the star hits.
-    window.setTimeout(() => this.bumpLevelBadge(), Math.round(DURATION * 0.8));
-
     anim.addEventListener('finish', () => {
       star.remove();
       this.burstRewardCollectParticles(badgeX, badgeY);
+      this.bumpLevelBadge();   // single pulse — exactly when the star arrives/is removed
       onDone();
     }, { once: true });
   }
@@ -2471,7 +2468,8 @@ export class Feed {
       return true;
     } else {
       this.updateHud(true);
-      window.setTimeout(() => this.bumpLevelBadge(), LEVEL_PROGRESS_MS);
+      // No bump here — the single counter pulse fires in playRewardStarCollect's
+      // finish (exactly when the star arrives/is removed), so it isn't duplicated.
       return false;
     }
   }
