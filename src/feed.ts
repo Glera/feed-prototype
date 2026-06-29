@@ -1403,6 +1403,8 @@ export class Feed {
   private onDown(e: PointerEvent, surface: HTMLElement, mode: 'feed' | 'reward' | 'levelup', rewardIndex: number | null = null) {
     if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
     e.preventDefault();
+    this.clearWarmTimer();
+    if (this.settlingTargetIndex !== null) this.syncSettlingPositionToVisual();
     const current = this.realIndex();
     const next = (current + 1) % this.N;
     const prev = ((current - 1) % this.N + this.N) % this.N;
@@ -1413,8 +1415,10 @@ export class Feed {
     this.dragAllowsBack = autoplayIndex !== null;
     if (mode === 'feed' || mode === 'reward') {
       this.liveHold = this.dragAllowsBack ? new Set([prev, current, next]) : new Set([current, next]);
+      this.primeIncomingAutoplayPreview(this.dragAllowsBack ? [prev, next] : [next]);
     } else if (mode === 'levelup') {
       this.liveHold = new Set([current, next]);
+      this.primeIncomingAutoplayPreview([next]);
     }
 
     this.dragging = true;
@@ -1422,10 +1426,10 @@ export class Feed {
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
     this.velocity = 0;
-    this.basePos = Math.round(this.pos);
+    this.basePos = this.pos;
     if (mode === 'levelup') this.basePos = this.levelUpPageBasePos;
     if (mode === 'reward' && rewardIndex !== null && this.rewardWouldLevelUp()) {
-      this.prepareLevelUpPage(this.previewRewardLevel(), this.basePos);
+      this.prepareLevelUpPage(this.previewRewardLevel(), Math.round(this.basePos));
     }
     if (mode === 'feed' || mode === 'reward') this.render(false);
     surface.setPointerCapture(e.pointerId);
@@ -1468,6 +1472,7 @@ export class Feed {
     else if (fastDown || farDown) step = -1;
 
     const fromIndex = this.indexForPos(this.basePos);
+    const commitBasePos = Math.round(this.basePos);
     const allowsBack = this.dragAllowsBack;
 
     if (this.dragMode === 'levelup') {
@@ -1478,10 +1483,10 @@ export class Feed {
       if (step > 0) {
         this.levelUpPageState = 'leaving';
         this.unlockAudioForCurrentAndNext(fromIndex);
-        this.goTo(this.basePos + step);
+        this.goTo(commitBasePos + step);
       } else {
         this.levelUpPageState = 'settled';
-        this.goTo(this.basePos);
+        this.goTo(commitBasePos);
       }
       return;
     }
@@ -1500,11 +1505,11 @@ export class Feed {
         this.unlockAudioForCurrentAndNext(fromIndex);
         this.collectReward(rewardIndex);
         if (willShowLevelUp) this.animateLevelUpPageIn();
-        else this.goTo(this.basePos + 1);
+        else this.goTo(commitBasePos + 1);
         return;
       }
       this.removeLevelUpPage();
-      this.goTo(this.basePos + step);
+      this.goTo(commitBasePos + step);
       return;
     }
 
@@ -1515,13 +1520,13 @@ export class Feed {
     this.dragAllowsBack = false;
     if (step === 0 && autoplayTapIndex !== null && !movedPastTap) {
       this.unlockAudioForCurrentAndNext(autoplayTapIndex, true);
-      this.goTo(this.basePos);
+      this.goTo(commitBasePos);
       this.activateManualFromAutoplay(autoplayTapIndex);
       return;
     }
     if (step !== 0) this.unlockAudioForCurrentAndNext(fromIndex, allowsBack);
     if (step > 0) this.releaseHeldLevelUp();
-    this.goTo(this.basePos + step);
+    this.goTo(commitBasePos + step);
   }
 
   private autoplayTapIndexFor(surface: HTMLElement): number | null {
