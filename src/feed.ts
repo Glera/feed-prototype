@@ -1041,9 +1041,8 @@ export class Feed {
       const playable = isCurrent && !paused && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
       // Manual play hides the blinking hint (the close × takes over as the affordance).
       this.games[i]?.classList.toggle('game--manual', playable && manual);
-      // Close (×) is available in BOTH autoplay and manual — a convenient way to page
-      // to the next mechanic (duplicates the swipe). Tap still takes over the demo.
-      this.games[i]?.classList.toggle('game--show-close', playable);
+      // Close (×) only in MANUAL play — during autoplay the demo is paged by tap/swipe.
+      this.games[i]?.classList.toggle('game--show-close', playable && manual);
     }
   };
 
