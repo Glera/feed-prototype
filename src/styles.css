@@ -667,11 +667,17 @@ body {
   pointer-events: none;
 }
 
-/* Win-screen affordance — readable, in the centred content (well above the bar). */
+/* Win-screen affordance — pinned to the SAME spot as the autoplay hint (just above
+   the dark bar). The win overlay is inset above the bar, so bottom:10px here lands
+   10px above the bar top, matching .game__swipehint. */
 .reward__hint {
-  margin-top: 18px;
-  z-index: 2;
-  font-size: 14px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 10px;
+  z-index: 3;
+  text-align: center;
+  font-size: 13px;
   font-weight: 800;
   letter-spacing: 0.2px;
   color: rgba(255, 255, 255, 0.95);
