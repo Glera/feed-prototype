@@ -853,6 +853,9 @@ export class Feed {
 
   private ensureFrameAutoPlay(i: number) {
     if (this.manualRuns.has(i) || this.shouldPauseFrame(i)) return;
+    // While a reward star is still flying to the counter, hold off starting the
+    // next mechanic's autoplay — it kicks in once the collect finishes (afterCollect).
+    if (this.collectingRewardIndex !== null) return;
     const frame = this.frames.get(i);
     const api = this.playableApi(i);
     try {
@@ -2004,6 +2007,10 @@ export class Feed {
       state?.classList.remove('game__state--collecting');
       this.updateMechanicState(i);
       this.finishStarReward(i);
+      // Star has landed in the counter — now kick off the next mechanic's autoplay
+      // (it was held back by the collectingRewardIndex gate in ensureFrameAutoPlay).
+      this.ensureFrameAutoPlay(this.realIndex());
+      this.pollAutoplayUi();
     };
 
     this.playRewardStarCollect(source, afterCollect);
