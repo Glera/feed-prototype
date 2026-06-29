@@ -196,9 +196,11 @@ body {
   inset: 0 0 var(--swipebar-h) 0;   /* dim only the game area, never the swipe bar */
   z-index: 4;
   overflow: hidden;
-  background: rgba(var(--platform-bg-rgb), 0.42);
-  -webkit-backdrop-filter: saturate(0.74) brightness(0.78) contrast(0.96);
-  backdrop-filter: saturate(0.74) brightness(0.78) contrast(0.96);
+  /* Plain dim — NO backdrop-filter. This overlay is shown for the whole autoplay
+     demo over an animating game; a backdrop-filter would have the GPU recompute a
+     full-screen filter every frame the entire time (a real battery/heat cost). A
+     flat translucent fill reads almost identically. */
+  background: rgba(var(--platform-bg-rgb), 0.5);
   opacity: 0;
   pointer-events: none;
   touch-action: none;
@@ -612,8 +614,8 @@ body {
    hideCollectCover() overrides the transition to a slower fade-out. */
 .collect-cover {
   position: absolute;
-  inset: 0;
-  z-index: 30;
+  inset: var(--top-zone-h) 0 0 0;   /* cover the feed area, leave the HUD/counter visible */
+  z-index: 1000;                    /* above the feed, below the HUD (1200) and flying star */
   background: var(--platform-bg);
   opacity: 0;
   pointer-events: none;

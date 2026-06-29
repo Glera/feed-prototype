@@ -1517,9 +1517,12 @@ export class Feed {
       if ((step > 0 || tapToAdvance) && rewardIndex !== null) {
         const willShowLevelUp = this.levelUpPageState === 'entering' && this.levelUpPageEl !== null;
         this.unlockAudioForCurrentAndNext(fromIndex);
-        this.collectReward(rewardIndex);
+        // Non-level-up: DON'T advance now. The opaque cover holds over the won screen
+        // for the whole star flight; the feed advances only once the star lands
+        // (afterCollect), under the cover, so the next mechanic never peeks through and
+        // its autoplay starts exactly once.
+        this.collectReward(rewardIndex, willShowLevelUp ? null : commitBasePos + 1);
         if (willShowLevelUp) this.animateLevelUpPageIn();
-        else this.goTo(commitBasePos + 1);
         return;
       }
       this.removeLevelUpPage();
@@ -2015,7 +2018,7 @@ export class Feed {
     anim.addEventListener('finish', () => spark.remove(), { once: true });
   }
 
-  private collectReward(i: number) {
+  private collectReward(i: number, advanceToPos: number | null = null) {
     if (!this.pendingStarRewards.has(i) || this.collectingRewardIndex !== null) return false;
     this.collectingRewardIndex = i;
     this.stopRewardSparks(i);
@@ -2027,10 +2030,9 @@ export class Feed {
     reward?.classList.add('reward--collecting');
     if (source) source.style.visibility = 'hidden';
 
-    // Opaque cover over the feed for the whole flight, so the focus is purely on the
-    // star being awarded (the feed advances underneath it, hidden). It fades out once
-    // the star lands — revealing the now-autoplaying next mechanic.
-    this.showCollectCover();
+    // Opaque cover over the feed for the whole flight — focus stays on the star; the
+    // won screen sits behind it (the feed has NOT advanced yet).
+    if (advanceToPos !== null) this.showCollectCover();
 
     const afterCollect = () => {
       this.collectingRewardIndex = null;
@@ -2039,12 +2041,13 @@ export class Feed {
       state?.classList.remove('game__state--collecting');
       this.updateMechanicState(i);
       this.finishStarReward(i);
-      // Star has landed in the counter — now kick off the next mechanic's autoplay
-      // (it was held back by the collectingRewardIndex gate in ensureFrameAutoPlay)
-      // and fade the cover away to reveal it.
-      this.ensureFrameAutoPlay(this.realIndex());
-      this.pollAutoplayUi();
-      this.hideCollectCover();
+      // Star has landed. Now advance to the next mechanic UNDER the cover; its
+      // autoplay starts once via the settle path (the gate above is now clear), then
+      // fade the cover away to reveal it.
+      if (advanceToPos !== null) {
+        this.goTo(advanceToPos);
+        this.hideCollectCover();
+      }
     };
 
     this.playRewardStarCollect(source, afterCollect);
@@ -2057,8 +2060,8 @@ export class Feed {
     if (this.collectCover) this.collectCover.remove();
     const cover = document.createElement('div');
     cover.className = 'collect-cover';
-    this.feedEl.appendChild(cover);
-    void cover.offsetWidth;            // commit initial opacity before raising it
+    this.viewport.appendChild(cover);   // viewport-level: covers the feed, never the HUD/counter
+    void cover.offsetWidth;             // commit initial opacity before raising it
     cover.style.opacity = '1';
     this.collectCover = cover;
   }
