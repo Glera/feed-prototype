@@ -136,6 +136,8 @@ export class Feed {
   private dragAutoplayIndex: number | null = null;
   private dragAllowsBack = false;
   private collectingRewardIndex: number | null = null;
+  private autoplayLoopTimers = new Map<number, number>();
+  private collectCover: HTMLElement | null = null;
 
   // Friend stories (top rail). Tapping one opens a full-screen story showing a
   // playable mechanic; the background feed game is paused while it's open.
@@ -1679,11 +1681,36 @@ export class Feed {
   private handlePlayableCompleted(i: number, outcome: PlayableOutcome) {
     const frame = this.frames.get(i);
     const runId = frame?.dataset.runId;
-    if (i !== this.realIndex() || !runId || this.completedRunIds.has(runId)) return;
-    this.completedRunIds.add(runId);
+    if (i !== this.realIndex() || !runId) return;
 
+    // Autoplay demo (the player hasn't taken over): never award a star or show the
+    // win/fail endcard. The demo just loops — restart and keep playing.
+    if (!this.manualRuns.has(i)) {
+      this.loopAutoplayMechanic(i);
+      return;
+    }
+
+    if (this.completedRunIds.has(runId)) return;
+    this.completedRunIds.add(runId);
     if (outcome === 'won') this.handleWin(i);
     else this.handleLoss(i);
+  }
+
+  // Restart an autoplaying mechanic so the demo loops on win/loss. A short beat lets
+  // the result read, then we reset in place and resume autoplay. Deduped per frame
+  // so repeated completion signals don't stack restarts.
+  private loopAutoplayMechanic(i: number) {
+    if (this.autoplayLoopTimers.has(i)) return;
+    const t = window.setTimeout(() => {
+      this.autoplayLoopTimers.delete(i);
+      if (this.manualRuns.has(i) || i !== this.realIndex() || this.collectingRewardIndex !== null) return;
+      const api = this.playableApi(i);
+      try {
+        api?.swipe?.restart();
+        if (api?.swipe?.hasAutoPlay) api.swipe.startAutoPlay();
+      } catch { /* cross-origin */ }
+    }, 800);
+    this.autoplayLoopTimers.set(i, t);
   }
 
   private handleWin(i: number) {
@@ -2000,6 +2027,11 @@ export class Feed {
     reward?.classList.add('reward--collecting');
     if (source) source.style.visibility = 'hidden';
 
+    // Opaque cover over the feed for the whole flight, so the focus is purely on the
+    // star being awarded (the feed advances underneath it, hidden). It fades out once
+    // the star lands — revealing the now-autoplaying next mechanic.
+    this.showCollectCover();
+
     const afterCollect = () => {
       this.collectingRewardIndex = null;
       this.pendingStarRewards.delete(i);
@@ -2008,13 +2040,38 @@ export class Feed {
       this.updateMechanicState(i);
       this.finishStarReward(i);
       // Star has landed in the counter — now kick off the next mechanic's autoplay
-      // (it was held back by the collectingRewardIndex gate in ensureFrameAutoPlay).
+      // (it was held back by the collectingRewardIndex gate in ensureFrameAutoPlay)
+      // and fade the cover away to reveal it.
       this.ensureFrameAutoPlay(this.realIndex());
       this.pollAutoplayUi();
+      this.hideCollectCover();
     };
 
     this.playRewardStarCollect(source, afterCollect);
     return true;
+  }
+
+  // Full-feed opaque cover during a collect (below the flying star/particles, above
+  // the pages; never covers the HUD/counter, which lives in the viewport).
+  private showCollectCover() {
+    if (this.collectCover) this.collectCover.remove();
+    const cover = document.createElement('div');
+    cover.className = 'collect-cover';
+    this.feedEl.appendChild(cover);
+    void cover.offsetWidth;            // commit initial opacity before raising it
+    cover.style.opacity = '1';
+    this.collectCover = cover;
+  }
+
+  private hideCollectCover() {
+    const cover = this.collectCover;
+    if (!cover) return;
+    this.collectCover = null;
+    cover.style.transition = 'opacity 0.5s ease-out';   // gradual fade-out
+    cover.style.opacity = '0';
+    const remove = () => cover.remove();
+    cover.addEventListener('transitionend', remove, { once: true });
+    window.setTimeout(remove, 900);    // fallback if transitionend never fires
   }
 
   private rewardWouldLevelUp(): boolean {

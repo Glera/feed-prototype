@@ -606,6 +606,20 @@ body {
 }
 .game__state[hidden] { display: none; }
 
+/* Opaque cover during reward collection — keeps focus on the flying star, then
+   fades to reveal the next (autoplaying) mechanic. Sits above the feed pages but
+   below the flying star/particles, and never over the HUD (which is in .viewport).
+   hideCollectCover() overrides the transition to a slower fade-out. */
+.collect-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: var(--platform-bg);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease-out;
+}
+
 .game__state--earned {
   background:
     radial-gradient(72% 52% at 50% 46%, rgba(255,216,90,0.12), transparent 70%),
