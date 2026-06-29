@@ -219,6 +219,8 @@ export class Feed {
     this.applyActiveStates();
     window.addEventListener('resize', this.onResize);
     window.addEventListener('message', this.onWindowMessage);
+    document.addEventListener('visibilitychange', this.onHostVisibilityChange);
+    window.addEventListener('pagehide', this.pauseAllFrames);
     (window as any).__feedHostGesture = this.onHostGesture;
     window.setInterval(this.pollPlayableAnalytics, ANALYTICS_POLL_MS);
     window.setInterval(this.pollAutoplayUi, 250);
@@ -729,12 +731,22 @@ export class Feed {
     }
   }
 
+  private postPlayableCommand(frame: HTMLIFrameElement | null | undefined, type: string, extra: Record<string, unknown> = {}) {
+    try {
+      frame?.contentWindow?.postMessage({ target: 'playable-swipe', type, ...extra }, '*');
+    } catch {
+      /* missing/cross-origin frame */
+    }
+  }
+
   // Pause/resume a playable by flipping its document visibility — the same
   // signal the playable's lifecycle honors. Best-effort: works same-origin
-  // (Render / dev middleware); cross-origin throws and we leave it running.
+  // (Render / dev middleware); cross-origin still gets the postMessage commands.
   private setFramePaused(i: number, paused: boolean) {
     const frame = this.frames.get(i);
     if (!frame) return;
+    this.postPlayableCommand(frame, 'setHostPaused', { paused });
+    if (paused) this.postPlayableCommand(frame, 'stopAutoPlay');
     try {
       const win = frame.contentWindow as (Window & typeof globalThis) | null;
       const doc = win?.document;
@@ -757,6 +769,7 @@ export class Feed {
 
   private ensureFrameAutoPlay(i: number) {
     if (this.manualRuns.has(i) || this.shouldPauseFrame(i)) return;
+    const frame = this.frames.get(i);
     const api = this.playableApi(i);
     try {
       // Prefer the uniform swipe API; fall back to the legacy per-game hooks.
@@ -767,9 +780,11 @@ export class Feed {
     } catch {
       /* cross-origin or unsupported autoplay API */
     }
+    this.postPlayableCommand(frame, 'startAutoPlay');
   }
 
   private stopFrameAutoPlay(i: number) {
+    this.postPlayableCommand(this.frames.get(i), 'stopAutoPlay');
     const api = this.playableApi(i);
     try {
       if (api?.swipe) {
@@ -819,12 +834,29 @@ export class Feed {
   }
 
   private shouldPauseFrame(i: number): boolean {
+    if (document.hidden) return true;
     if (this.overlayOpen) return true;   // a story / editor is up — freeze the whole feed
     if (this.settlingTargetIndex === i) return true;
     return i !== this.realIndex() || (this.earnedThisCycle.has(i) && !this.manualRuns.has(i)) || this.failedThisCycle.has(i);
   }
 
+  private pauseAllFrames = () => {
+    this.frames.forEach((_frame, i) => this.setFramePaused(i, true));
+    this.pauseStoryFrame(true);
+  };
+
+  private onHostVisibilityChange = () => {
+    if (document.hidden) {
+      this.pauseAllFrames();
+      return;
+    }
+    this.applyActiveStates();
+    this.tryRevealFrame(this.realIndex());
+    this.pumpPrefetchQueue();
+  };
+
   private pollAutoplayUi = () => {
+    if (document.hidden) return;
     for (let i = 0; i < this.N; i++) {
       const isCurrent = i === this.realIndex();
       const paused = this.shouldPauseFrame(i);
@@ -950,21 +982,24 @@ export class Feed {
   private pauseStoryFrame(paused: boolean) {
     const frame = this.storyFrame;
     if (!frame) return;
+    const effectivePaused = paused || document.hidden;
+    this.postPlayableCommand(frame, 'setHostPaused', { paused: effectivePaused });
+    if (effectivePaused) this.postPlayableCommand(frame, 'stopAutoPlay');
     try {
       const win = frame.contentWindow as (Window & typeof globalThis) | null;
       const doc = win?.document;
       if (!win || !doc) return;
       const api = (win as any).__playable;
-      if (paused) {
+      if (effectivePaused) {
         try { api?.swipe?.stopAutoPlay(); } catch { /* noop */ }
         if (typeof api?.setAutoPlayEnabled === 'function') api.setAutoPlayEnabled(false);
         else if (typeof api?.stopAutoPlay === 'function') api.stopAutoPlay();
       }
-      if (typeof api?.setHostPaused === 'function') api.setHostPaused(paused);
-      Object.defineProperty(doc, 'hidden', { configurable: true, get: () => paused });
-      Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (paused ? 'hidden' : 'visible') });
+      if (typeof api?.setHostPaused === 'function') api.setHostPaused(effectivePaused);
+      Object.defineProperty(doc, 'hidden', { configurable: true, get: () => effectivePaused });
+      Object.defineProperty(doc, 'visibilityState', { configurable: true, get: () => (effectivePaused ? 'hidden' : 'visible') });
       doc.dispatchEvent(new win.Event('visibilitychange'));
-      if (!paused) {
+      if (!effectivePaused) {
         if (api?.swipe?.hasAutoPlay) api.swipe.startAutoPlay();
         else if (typeof api?.setAutoPlayEnabled === 'function') api.setAutoPlayEnabled(true);
         else if (typeof api?.startAutoPlay === 'function') api.startAutoPlay({ immediate: true });
@@ -1707,7 +1742,11 @@ export class Feed {
     };
 
     emit(16);
-    const timer = window.setInterval(() => emit(3 + Math.floor(Math.random() * 3)), 220);
+    let waves = 0;
+    const timer = window.setInterval(() => {
+      if (++waves > 8) { this.stopRewardSparks(i); return; }
+      emit(2 + Math.floor(Math.random() * 3));
+    }, 260);
     this.rewardSparkTimers.set(i, timer);
   }
 
@@ -1881,8 +1920,9 @@ export class Feed {
     if (frame) {
       const runId = frame.dataset.runId;
       if (runId) this.completedRunIds.delete(runId);
-      frame.remove();
+      this.disposeFrame(i, frame);
       this.frames.delete(i);
+      this.resetFrameReadiness(i);
     }
     this.games[i].classList.add('game--loading');
     if (this.liveSet().has(i)) this.mount(i);
@@ -2039,12 +2079,15 @@ export class Feed {
       }
     };
 
-    emitWave(40);                                   // opening burst
-    // Keep raining in light waves until the overlay is dismissed (= the swipe).
+    emitWave(36);                                   // opening burst
+    // A short celebratory tail is enough; unbounded DOM confetti makes the held
+    // level-up screen warm phones if the player pauses here.
     if (this.confettiTimer) window.clearInterval(this.confettiTimer);
+    let waves = 0;
     this.confettiTimer = window.setInterval(() => {
       if (!parent.isConnected) { this.stopConfetti(); return; }
-      emitWave(12);
+      if (++waves > 6) { this.stopConfetti(); return; }
+      emitWave(8);
     }, 600);
   }
 
