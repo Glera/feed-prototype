@@ -2083,17 +2083,6 @@ export class Feed {
     this.collectCover = cover;
   }
 
-  private hideCollectCover() {
-    const cover = this.collectCover;
-    if (!cover) return;
-    this.collectCover = null;
-    cover.style.transition = 'opacity 0.5s ease-out';   // gradual fade-out
-    cover.style.opacity = '0';
-    const remove = () => cover.remove();
-    cover.addEventListener('transitionend', remove, { once: true });
-    window.setTimeout(remove, 900);    // fallback if transitionend never fires
-  }
-
   // Lift the dark cover up and out in sync with the page slide (same duration/easing
   // as render's 0.36s transform), so the leaving won board stays hidden behind a
   // dark "curtain" while the next mechanic slides in.
