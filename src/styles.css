@@ -343,7 +343,10 @@ body {
   letter-spacing: 1.5px;
   color: rgba(255, 255, 255, 0.92);
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  opacity: 0;                       /* shown only once autoplay is genuinely running */
+  transition: opacity 0.2s ease-out;
 }
+.game--playing .game__reel-rec { opacity: 1; }
 .game__reel-play {
   font-size: 10px;
   line-height: 1;
