@@ -1926,8 +1926,8 @@ export class Feed {
       return;
     }
 
-    // Level-up-style confetti sprays from the star as it pulses, raining down screen.
-    this.burstStarConfetti(startX, startY);
+    // Level-up-style confetti rains down evenly across the whole screen.
+    this.burstStarConfetti();
 
     // On swipe the star stays put and does ONE size-up pulse, dipping slightly DOWN
     // (anticipation against the upward swipe) before launching to the badge with a
@@ -1962,31 +1962,33 @@ export class Feed {
     }, { once: true });
   }
 
-  // Level-up-style confetti, sprayed from (cx,cy) — the pulsing star — and raining
-  // down off the bottom of the screen. Lives on the fixed viewport layer.
-  private burstStarConfetti(cx: number, cy: number) {
+  // Level-up-style confetti: a one-shot burst that rains down evenly across the
+  // WHOLE screen from the top. Lives on the fixed viewport layer.
+  private burstStarConfetti() {
     const colors = ['#ffd85a', '#45d68c', '#37a6ff', '#ff4f8b', '#ff9f45', '#b07bff', '#5ee6a8'];
     const rect = this.viewport.getBoundingClientRect();
-    for (let n = 0; n < 34; n++) {
+    const count = 40;
+    for (let n = 0; n < count; n++) {
       const c = document.createElement('div');
       c.className = 'confetti';
       const w = 7 + Math.random() * 7, h = 10 + Math.random() * 10;
+      // Spread evenly across the width (n-based columns + jitter) so the fall is uniform.
+      const x = ((n + Math.random()) / count) * rect.width;
       c.style.cssText =
-        `left:${cx}px;top:${cy}px;width:${w}px;height:${h}px;z-index:2580;` +
+        `left:${x}px;top:-24px;width:${w}px;height:${h}px;z-index:2580;` +
         `background:${colors[(n + Math.floor(Math.random() * colors.length)) % colors.length]};` +
         `border-radius:${Math.random() < 0.4 ? '50%' : '2px'};`;
       this.viewport.appendChild(c);
-      const dur = 1100 + Math.random() * 900;
+      const dur = 1500 + Math.random() * 1100;
       if (!c.animate) { window.setTimeout(() => c.remove(), dur); continue; }
-      const driftX = (Math.random() - 0.5) * rect.width * 0.95;   // spray outward
-      const fall = (rect.height - cy) + 90;                       // all the way down + off-screen
+      const driftX = (Math.random() - 0.5) * 150;
+      const fall = rect.height + 80;
       const rot = Math.random() * 900 - 450;
       const a = c.animate([
-        { transform: 'translate(-50%, -50%) rotate(0deg) scale(0.6)', opacity: 1, offset: 0 },
-        { transform: `translate(calc(-50% + ${driftX * 0.55}px), -${24 + Math.random() * 40}px) rotate(${rot * 0.3}deg) scale(1)`, opacity: 1, offset: 0.16 },
-        { transform: `translate(calc(-50% + ${driftX}px), ${fall * 0.86}px) rotate(${rot}deg) scale(1)`, opacity: 1, offset: 0.82 },
-        { transform: `translate(calc(-50% + ${driftX}px), ${fall + 50}px) rotate(${rot}deg) scale(1)`, opacity: 0, offset: 1 },
-      ], { duration: dur, delay: Math.random() * 130, easing: 'cubic-bezier(0.28, 0.5, 0.4, 1)', fill: 'forwards' });
+        { transform: 'translate(0, 0) rotate(0deg)', opacity: 1 },
+        { transform: `translate(${driftX}px, ${fall}px) rotate(${rot}deg)`, opacity: 1, offset: 0.85 },
+        { transform: `translate(${driftX}px, ${fall + 40}px) rotate(${rot}deg)`, opacity: 0 },
+      ], { duration: dur, delay: Math.random() * 220, easing: 'cubic-bezier(0.3, 0.2, 0.5, 1)', fill: 'forwards' });
       a.addEventListener('finish', () => c.remove(), { once: true });
     }
   }

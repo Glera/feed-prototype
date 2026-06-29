@@ -1,5 +1,6 @@
 :root {
   --platform-bg: #07090f;
+  --platform-bg-rgb: 7, 9, 15;
   /* Shared chrome height: top stories rail now uses it directly. The old bottom
      swipe gutter keeps this var as legacy styling, but it is not mounted. */
   --chrome-zone-h: 88px;
@@ -195,10 +196,9 @@ body {
   inset: 0 0 var(--swipebar-h) 0;   /* dim only the game area, never the swipe bar */
   z-index: 4;
   overflow: hidden;
-  background:
-    linear-gradient(180deg, rgba(82, 52, 18, 0.12), rgba(38, 24, 10, 0.28)),
-    rgba(93, 63, 28, 0.1);
-  backdrop-filter: sepia(0.48) saturate(0.72) contrast(0.94);
+  background: rgba(var(--platform-bg-rgb), 0.42);
+  -webkit-backdrop-filter: saturate(0.74) brightness(0.78) contrast(0.96);
+  backdrop-filter: saturate(0.74) brightness(0.78) contrast(0.96);
   opacity: 0;
   pointer-events: none;
   touch-action: none;
