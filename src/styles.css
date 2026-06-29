@@ -318,6 +318,11 @@ body {
   transition: opacity 0.2s ease-out;
 }
 .game--autoplay .game__reel { opacity: 1; }
+/* But NOT while the frame is the dark loading / arriving / preview placeholder — the
+   reel (corners, PLAY, scanlines, timecode) appears only once the live mechanic shows. */
+.game--loading .game__reel,
+.game--arriving .game__reel,
+.game--autoplay-preview .game__reel { opacity: 0; }
 
 .game__reel-corner {
   position: absolute;

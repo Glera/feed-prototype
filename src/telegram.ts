@@ -47,6 +47,13 @@ export function initTelegram(): void {
   call('setHeaderColor', '#0a0a0f'); // blend Telegram's chrome with the feed bg
   call('setBackgroundColor', '#0a0a0f');
 
+  // Lock to portrait — the feed is a vertical pager, landscape makes no sense.
+  // Telegram lockOrientation() (Bot API 8.0+) pins the Mini App to its current
+  // (portrait) orientation. Best-effort screen.orientation.lock as a web fallback
+  // (Android/Chrome in fullscreen; iOS Safari ignores it — harmless).
+  call('lockOrientation');
+  try { (screen.orientation as any)?.lock?.('portrait').catch(() => {}); } catch { /* unsupported */ }
+
   const applyInsets = () => {
     const sa = tg.safeAreaInset || {};         // device notch / home indicator
     const ca = tg.contentSafeAreaInset || {};  // Telegram's own header/controls
