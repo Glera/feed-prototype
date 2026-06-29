@@ -262,7 +262,7 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: calc(var(--swipebar-h) + 10px);
+  bottom: calc(var(--swipebar-h) + 5px);   /* a touch closer to the dark bar (not flush) */
   z-index: 4;
   text-align: center;
   pointer-events: none;
@@ -321,9 +321,13 @@ body {
   z-index: 5;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.2s ease-out;
+  /* Scale in lock-step with the shrunken game (.game__slot scale 0.92, same box +
+     origin) so the corners, PLAY and timecode sit neatly at the edges of the smaller
+     mechanic — top corners drop, bottom corners rise, PLAY/timer follow. */
+  transform-origin: 50% 50%;
+  transition: opacity 0.2s ease-out, transform 0.34s var(--ease-snap);
 }
-.game--autoplay .game__reel { opacity: 1; }
+.game--autoplay .game__reel { opacity: 1; transform: scale(0.92); }
 /* But NOT while the frame is the dark loading / arriving / preview placeholder — the
    reel (corners, PLAY, scanlines, timecode) AND the "tap to play or swipe" hint appear
    only once the live mechanic shows (i.e. together with autoplay starting). */
