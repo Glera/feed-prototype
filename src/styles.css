@@ -321,39 +321,64 @@ body {
 
 .game__reel-corner {
   position: absolute;
-  width: 20px;
-  height: 20px;
-  border: 2px solid rgba(255, 255, 255, 0.7);
-  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.5));
+  width: 30px;
+  height: 30px;
+  border: 4px solid rgba(255, 255, 255, 0.82);
+  filter: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.55));
 }
-.game__reel-corner--tl { top: 10px; left: 10px; border-right: 0; border-bottom: 0; }
-.game__reel-corner--tr { top: 10px; right: 10px; border-left: 0; border-bottom: 0; }
-.game__reel-corner--bl { bottom: 10px; left: 10px; border-right: 0; border-top: 0; }
-.game__reel-corner--br { bottom: 10px; right: 10px; border-left: 0; border-top: 0; }
+.game__reel-corner--tl { top: 12px; left: 12px; border-right: 0; border-bottom: 0; }
+.game__reel-corner--tr { top: 12px; right: 12px; border-left: 0; border-bottom: 0; }
+.game__reel-corner--bl { bottom: 12px; left: 12px; border-right: 0; border-top: 0; }
+.game__reel-corner--br { bottom: 12px; right: 12px; border-left: 0; border-top: 0; }
 
 .game__reel-rec {
   position: absolute;
-  top: 14px;
-  left: 18px;
+  top: 18px;
+  left: 22px;
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 1.5px;
-  color: rgba(255, 255, 255, 0.92);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.95);
+  text-shadow: 0 1px 5px rgba(0, 0, 0, 0.65);
 }
 .game__reel-play {
-  font-size: 10px;
+  font-size: 15px;
   line-height: 1;
-  color: #ff5a5a;
-  filter: drop-shadow(0 0 6px rgba(255, 90, 90, 0.7));
+  color: #ff4646;
+  filter: drop-shadow(0 0 9px rgba(255, 70, 70, 0.85));
   animation: reel-blink 1.05s steps(1, end) infinite;
 }
 @keyframes reel-blink {
   0%, 49% { opacity: 1; }
-  50%, 100% { opacity: 0.12; }
+  50%, 100% { opacity: 0.1; }
+}
+
+/* Running tape timecode, top-right (camcorder counter). */
+.game__reel-time {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  font: 800 14px/1 "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 5px rgba(0, 0, 0, 0.65);
+}
+
+/* Subtle static scanlines — pure CSS, no animation (the "video signal" feel). */
+.game__reel-scan {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.06) 0,
+    rgba(0, 0, 0, 0.06) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: multiply;
 }
 
 /* Level-up affordance — blinking, same spot/style as the win-screen hint. */

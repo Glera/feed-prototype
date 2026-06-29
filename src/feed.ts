@@ -234,7 +234,23 @@ export class Feed {
     (window as any).__feedHostGesture = this.onHostGesture;
     window.setInterval(this.pollPlayableAnalytics, ANALYTICS_POLL_MS);
     window.setInterval(this.pollAutoplayUi, 250);
+    window.setInterval(this.tickReelTimecode, 1000);
   }
+
+  // Camcorder-style running timecode on the video reel. Counts up while a mechanic
+  // is shown; resets when the shown mechanic changes. One cheap text update/sec.
+  private reelTimeIndex = -1;
+  private reelTimeSeconds = 0;
+  private tickReelTimecode = () => {
+    if (document.hidden) return;
+    const i = this.realIndex();
+    if (i !== this.reelTimeIndex) { this.reelTimeIndex = i; this.reelTimeSeconds = 0; }
+    else this.reelTimeSeconds++;
+    const s = this.reelTimeSeconds;
+    const txt = `0:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+    const el = this.games[i]?.querySelector<HTMLElement>('.game__reel-time');
+    if (el && el.textContent !== txt) el.textContent = txt;
+  };
 
   private realIndex(): number {
     return this.indexForPos(this.pos);
@@ -311,11 +327,13 @@ export class Feed {
       const reel = document.createElement('div');
       reel.className = 'game__reel';
       reel.innerHTML =
+        '<span class="game__reel-scan"></span>' +
         '<span class="game__reel-corner game__reel-corner--tl"></span>' +
         '<span class="game__reel-corner game__reel-corner--tr"></span>' +
         '<span class="game__reel-corner game__reel-corner--bl"></span>' +
         '<span class="game__reel-corner game__reel-corner--br"></span>' +
-        '<span class="game__reel-rec"><span class="game__reel-play">▶</span>PLAY</span>';
+        '<span class="game__reel-rec"><span class="game__reel-play">▶</span>PLAY</span>' +
+        '<span class="game__reel-time">0:00:00</span>';
       game.appendChild(reel);
 
       const state = document.createElement('div');
