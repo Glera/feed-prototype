@@ -1057,9 +1057,18 @@ export class Feed {
   private primeIncomingAutoplayPreview(indices: number[]) {
     for (const i of indices) {
       if (i < 0 || i >= this.N) continue;
-      if (this.manualRuns.has(i) || this.earnedThisCycle.has(i) || this.failedThisCycle.has(i)) continue;
+      if (this.earnedThisCycle.has(i) || this.failedThisCycle.has(i)) continue;
       this.setAutoplayUi(i, true, true);
     }
+  }
+
+  private prepareAutoplayNavigationTarget(i: number) {
+    if (i < 0 || i >= this.N) return;
+    if (this.earnedThisCycle.has(i) || this.failedThisCycle.has(i)) return;
+    this.manualRuns.delete(i);
+    this.pendingEditorLaunch.delete(i);
+    this.games[i]?.classList.remove('game--manual');
+    this.setAutoplayUi(i, true, true);
   }
 
   // ── Friend story (Instagram-style) ─────────────────────────────────────────
@@ -1523,6 +1532,9 @@ export class Feed {
       this.goTo(commitBasePos);
       this.activateManualFromAutoplay(autoplayTapIndex);
       return;
+    }
+    if (step !== 0 && autoplayTapIndex !== null) {
+      this.prepareAutoplayNavigationTarget(this.indexForPos(commitBasePos + step));
     }
     if (step !== 0) this.unlockAudioForCurrentAndNext(fromIndex, allowsBack);
     if (step > 0) this.releaseHeldLevelUp();
@@ -2045,13 +2057,14 @@ export class Feed {
         transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
         opacity: 1,
         offset: 0,
-        easing: 'cubic-bezier(0.55, 0, 0.9, 0.45)',      // grow ACCELERATES into the peak
+        easing: 'cubic-bezier(0.4, 0, 0.8, 0.6)',        // quick grow into the peak
       },
       {
         transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(1.85) rotate(0deg)`,
         opacity: 1,
-        offset: 0.52,                                    // bigger peak, more time spent growing
-        easing: 'cubic-bezier(0.5, 0, 0.9, 0.4)',        // shrink ACCELERATES as it launches
+        offset: 0.34,                                    // peak reached sooner → FASTER grow,
+                                                         // leaving more of the timeline for a SLOWER shrink
+        easing: 'cubic-bezier(0.45, 0, 0.7, 0.65)',      // gentle, slower shrink toward the badge
       },
       {
         transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(16deg)`,
