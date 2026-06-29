@@ -2113,25 +2113,30 @@ export class Feed {
     // Level-up-style confetti rains down evenly across the whole screen.
     this.burstStarConfetti();
 
-    // On swipe the star stays put and does ONE pronounced pulse: the size INCREASE
-    // accelerates into the peak (ease-in), then the DECREASE accelerates as it
-    // launches to the badge (ease-in). Slightly dips DOWN at the peak (anticipation
-    // against the upward swipe). transform-origin is 50% 50% (CSS for --collect), so
-    // scaling keeps the glyph centred on the avatar.
+    // A pronounced PULSE, then the launch:
+    //   1. fast accelerating GROW to a big peak (with a slight downward dip),
+    //   2. quick RETURN to a size a touch below normal,
+    //   3. then accelerate-fly to the badge, spinning a full turn.
+    // transform-origin is 50% 50% (CSS for --collect), so scaling stays centred.
     const dipY = startY + Math.max(16, sz * 0.13);
     const anim = star.animate([
       {
         transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
         opacity: 1,
         offset: 0,
-        easing: 'cubic-bezier(0.4, 0, 0.8, 0.6)',        // quick grow into the peak
+        easing: 'cubic-bezier(0.5, 0, 0.6, 0.55)',       // fast accelerating grow
       },
       {
-        transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(1.85) rotate(0deg)`,
+        transform: `translate3d(${startX - sz / 2}px, ${dipY - sz / 2}px, 0) scale(2.3) rotate(0deg)`,
         opacity: 1,
-        offset: 0.26,                                    // peak reached even sooner → FASTER grow,
-                                                         // leaving more of the timeline for a SLOWER shrink
-        easing: 'cubic-bezier(0.45, 0, 0.7, 0.65)',      // gentle, slower shrink toward the badge
+        offset: 0.2,                                     // big peak, reached early
+        easing: 'cubic-bezier(0.4, 0, 0.4, 1)',          // quick return back down
+      },
+      {
+        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(0.88) rotate(0deg)`,
+        opacity: 1,
+        offset: 0.38,                                    // returned to a touch below normal, then launches
+        easing: 'cubic-bezier(0.55, 0, 0.9, 0.4)',       // accelerate toward the badge
       },
       {
         transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(360deg)`,
