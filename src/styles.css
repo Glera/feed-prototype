@@ -295,7 +295,7 @@ body {
   bottom: 0;   /* fill the FULL panel height, safe-area included */
   left: 50%;
   transform: translateX(-50%);
-  width: 46px;
+  width: var(--bar-reserve);   /* square: width == panel height (button fills top:0→bottom:0) */
   display: flex;
   align-items: center;
   justify-content: center;
