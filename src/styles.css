@@ -313,14 +313,17 @@ body {
    empty for future buttons). Purely visual. */
 .game__swipehint {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(var(--bar-reserve) + 6px);   /* centred in the autoplay bottom frame-gap (~28px) */
+  left: 50%;
+  top: calc((100% - var(--bar-reserve)) / 2);   /* centre of the mechanic (slot) area */
+  transform: translate(-50%, -50%);
   z-index: 4;
   text-align: center;
   pointer-events: none;
+  padding: 11px 20px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);   /* dark pill → obvious "tap the mechanic" affordance */
   color: rgba(255, 255, 255, 0.95);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 800;
   letter-spacing: 0.2px;
   text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
