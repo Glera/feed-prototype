@@ -193,11 +193,11 @@ export class Feed {
   // while we decide which feels better.)
   private restartOnTakeover =
     (new URLSearchParams(location.search).get('takeover') || 'restart') !== 'continue';
-  // TEMP: warm-prefetch of the next mechanic disabled (default 'off') — testing the
-  // un-warmed arrival (mechanic mounts on advance). Re-enable with ?warm=idle, or
-  // flip the default back to 'idle'.
+  // Warm-prefetch the next mechanic so it's mounted/parsed before the advance (default
+  // 'idle' — warms during idle time). Disable with ?warm=off to compare the un-warmed
+  // arrival (mechanic mounts on advance).
   private warmNextEnabled =
-    (new URLSearchParams(location.search).get('warm') || 'off') !== 'off';
+    (new URLSearchParams(location.search).get('warm') || 'idle') !== 'off';
 
   private dragging = false;
   private startY = 0;
