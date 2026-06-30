@@ -19,6 +19,10 @@
      .feed-bar — which is NOT inside a .game — can read it too; otherwise the bar
      collapses to content height and a gap opens above it. */
   --swipebar-h: 58px;
+  /* Total bottom-bar footprint = visible bar + the device's bottom safe area, so the
+     panel's background reaches the very bottom of the screen (no dark strip under it).
+     The tappable button stays within --swipebar-h, above the home-indicator zone. */
+  --bar-reserve: calc(var(--swipebar-h) + var(--safe-bottom));
   --story-size: 54px;
   --ease-snap: cubic-bezier(0.22, 0.61, 0.36, 1);
   --dev-phone-aspect-w: 390;
@@ -76,7 +80,7 @@ body {
   position: absolute;
   /* top clears the HUD (which already includes --safe-top); bottom/sides clear
      the home indicator / side notches. */
-  inset: var(--top-zone-h) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  inset: var(--top-zone-h) var(--safe-right) 0 var(--safe-left);   /* reach the very bottom; the bar covers the safe area */
   height: auto;
   overflow: hidden;
   background: var(--platform-bg);
@@ -138,7 +142,7 @@ body {
 .game::after {
   content: '';
   position: absolute;
-  inset: 0 0 var(--swipebar-h) 0;
+  inset: 0 0 var(--bar-reserve) 0;
   z-index: 4;
   background: var(--platform-bg);
   opacity: 0;
@@ -154,7 +158,7 @@ body {
    stay inside it; host overlays decide when the feed can page. */
 .game__slot {
   position: absolute;
-  inset: 0 0 var(--swipebar-h) 0;   /* leave the bottom strip for the swipe bar */
+  inset: 0 0 var(--bar-reserve) 0;   /* leave the bottom strip for the swipe bar */
   background: var(--platform-bg);
   touch-action: manipulation;
   transform-origin: 50% 100%;   /* scale from the BOTTOM — game stays flush with the bar */
@@ -240,7 +244,7 @@ body {
 
 .game__autoplay {
   position: absolute;
-  inset: 0 0 var(--swipebar-h) 0;   /* dim only the game area, never the swipe bar */
+  inset: 0 0 var(--bar-reserve) 0;   /* dim only the game area, never the swipe bar */
   z-index: 4;
   overflow: hidden;
   /* Plain dim — NO backdrop-filter. This overlay is shown for the whole autoplay
@@ -273,7 +277,7 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
-  height: var(--swipebar-h);
+  height: var(--bar-reserve);   /* visible bar + safe area → reaches the screen bottom */
   z-index: 1050;        /* above the pages (render() gives the current page z up to 1000) */
   display: flex;
   align-items: stretch; /* the button fills the FULL panel height */
@@ -288,7 +292,7 @@ body {
      quirks. Centred horizontally; width unchanged. */
   position: absolute;
   top: 0;
-  bottom: 0;
+  bottom: var(--safe-bottom);   /* fill the visible bar; stay above the home-indicator zone */
   left: 50%;
   transform: translateX(-50%);
   width: 46px;
@@ -311,7 +315,7 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: calc(var(--swipebar-h) + 10px);   /* floats just above the bottom bar */
+  bottom: calc(var(--bar-reserve) + 10px);   /* floats just above the bottom bar */
   z-index: 4;
   text-align: center;
   pointer-events: none;
@@ -366,7 +370,7 @@ body {
    demo reads as a clip playing. Pure CSS, decorative, no per-frame GPU cost. */
 .game__reel {
   position: absolute;
-  inset: 0 0 var(--swipebar-h) 0;
+  inset: 0 0 var(--bar-reserve) 0;
   z-index: 5;
   pointer-events: none;
   opacity: 0;
@@ -455,7 +459,7 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: calc(var(--swipebar-h) + 10px);
+  bottom: calc(var(--bar-reserve) + 10px);
   text-align: center;
   font-size: 13px;
   font-weight: 800;
@@ -757,7 +761,7 @@ body {
 /* ── Completion overlays ────────────────────────────────────────────────────*/
 .game__state {
   position: absolute;
-  inset: 0 0 var(--swipebar-h) 0;   /* leave the swipe bar visible below the win/fail overlay */
+  inset: 0 0 var(--bar-reserve) 0;   /* leave the swipe bar visible below the win/fail overlay */
   z-index: 5;
   display: flex;
   flex-direction: column;
