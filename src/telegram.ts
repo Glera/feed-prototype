@@ -44,8 +44,12 @@ export function initTelegram(): void {
   const platform = String(tg.platform || '');
   const isMobile = platform === 'ios' || platform === 'android';
   if (isMobile) call('requestFullscreen'); // edge-to-edge under the notch (8.0+)
-  call('setHeaderColor', '#0a0a0f'); // blend Telegram's chrome with the feed bg
-  call('setBackgroundColor', '#0a0a0f');
+  // Match the feed bg EXACTLY (--platform-bg #07090f) so if Telegram's fullscreen
+  // webview is even a hair shorter than the screen, the strip it leaves at the
+  // bottom is the same colour as our bar and is invisible (was #0a0a0f — slightly
+  // lighter — which read as a visible band under the bottom bar).
+  call('setHeaderColor', '#07090f');
+  call('setBackgroundColor', '#07090f');
 
   // Lock to portrait — the feed is a vertical pager, landscape makes no sense.
   // Telegram lockOrientation() (Bot API 8.0+) pins the Mini App to its current

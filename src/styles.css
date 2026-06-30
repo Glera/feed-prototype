@@ -217,7 +217,7 @@ body {
    the live mechanic/autoplay is up (not during init), like the reel chrome. */
 .game__reward {
   position: absolute;
-  top: 18px;
+  top: 6px;   /* vertically centred in the autoplay top frame-gap (~28px tall) */
   left: 14px;
   z-index: 6;
   display: flex;
@@ -315,7 +315,7 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: calc(var(--bar-reserve) + 10px);   /* floats just above the bottom bar */
+  bottom: calc(var(--bar-reserve) + 6px);   /* centred in the autoplay bottom frame-gap (~28px) */
   z-index: 4;
   text-align: center;
   pointer-events: none;
