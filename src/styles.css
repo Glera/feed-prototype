@@ -206,7 +206,8 @@ body {
 }
 .game__label--show { opacity: 1; }
 
-/* Reward badge (top-left): the 1–5 stars this mechanic awards on a win. */
+/* Reward badge (top-left): the 1–5 stars this mechanic awards on a win. Hidden until
+   the live mechanic/autoplay is up (not during init), like the reel chrome. */
 .game__reward {
   position: absolute;
   top: 18px;
@@ -215,7 +216,9 @@ body {
   display: flex;
   gap: 2px;
   pointer-events: none;
+  opacity: 0;
 }
+.game--autoplay .game__reward { opacity: 1; }
 .game__reward-star {
   font-size: 15px;
   line-height: 1;
@@ -223,8 +226,11 @@ body {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
   filter: drop-shadow(0 0 4px rgba(255, 200, 60, 0.5));
 }
-/* Reward badge is the autoplay/attract affordance — gone once the player takes over,
-   and during the win star-credit (the stars are flying to the counter). */
+/* Hidden during init (dark loading/arriving/preview), once the player takes over, and
+   during the win star-credit (the stars are flying to the counter). */
+.game--loading .game__reward,
+.game--arriving .game__reward,
+.game--autoplay-preview .game__reward,
 .game--manual .game__reward,
 .game--earned .game__reward { opacity: 0; }
 .game__reward { transition: opacity 0.2s ease-out; }
@@ -267,7 +273,7 @@ body {
   height: var(--swipebar-h);
   z-index: 1050;        /* above the pages (render() gives the current page z up to 1000) */
   display: flex;
-  align-items: center;
+  align-items: stretch; /* the button fills the FULL panel height */
   justify-content: center;
   background: linear-gradient(180deg, rgba(14, 16, 23, 0.96), rgba(7, 9, 14, 0.98));
   border-top: 1px solid rgba(255, 255, 255, 0.07);
@@ -278,10 +284,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 46px;
-  height: 100%;           /* full height of the bottom panel; width unchanged */
+  width: 46px;            /* full panel height (via align-items: stretch); width unchanged */
   border: 0;
-  border-radius: 11px;
+  border-radius: 0;
   background: rgba(255, 255, 255, 0.13);
   color: rgba(255, 255, 255, 0.95);
   cursor: pointer;
