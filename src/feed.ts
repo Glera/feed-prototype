@@ -150,7 +150,6 @@ export class Feed {
   private dragAllowsBack = false;
   private collectingRewardIndex: number | null = null;
   private autoplayLoopTimers = new Map<number, number>();
-  private collectCover: HTMLElement | null = null;
   private holdNextAutoplay = false;
 
   // Friend stories (top rail). Tapping one opens a full-screen story showing a
@@ -2217,7 +2216,7 @@ export class Feed {
   private collectReward(i: number, advanceToPos: number | null = null) {
     if (!this.pendingStarRewards.has(i) || this.collectingRewardIndex !== null) return false;
     this.collectingRewardIndex = i;
-    this.applyActiveStates();   // freeze all frames for the duration of the credit (cover is up)
+    this.applyActiveStates();   // freeze all frames for the duration of the credit
     this.stopRewardSparks(i);
 
     const state = this.stateEls[i];
@@ -2227,81 +2226,51 @@ export class Feed {
     reward?.classList.add('reward--collecting');
     if (source) source.style.visibility = 'hidden';
 
-    // Opaque cover over the feed for the whole flight — focus stays on the star; the
-    // won screen sits behind it (the feed has NOT advanced yet).
-    if (advanceToPos !== null) this.showCollectCover();
-
     const afterCollect = () => {
       this.collectingRewardIndex = null;
       this.pendingStarRewards.delete(i);
       this.claimedStarRewards.add(i);
-      state?.classList.remove('game__state--collecting');
-      this.updateMechanicState(i);
       this.finishStarReward(i);   // credits the star (counter bump ~LEVEL_PROGRESS_MS)
-      // Hold the opaque cover until the star has BOTH landed and finished crediting
-      // (the counter bump), THEN advance to the next mechanic under the cover — its
-      // autoplay starts once via the settle path — and fade the cover to reveal it.
-      // Nothing of the next mechanic shows before the star is counted.
       if (advanceToPos !== null) {
+        // Star is credited — now the won page SLIDES OUT (carrying its dark win overlay)
+        // while the next mechanic slides in. The won page's iframe is hidden during the
+        // slide (game--leaving) so a ready iframe layer isn't composited+moved (judder);
+        // its dark overlay is the panel that visibly drives away. The incoming iframe is
+        // likewise hidden (game--arriving) until it has arrived. This reads as a real
+        // paired slide (previous leaves, next enters) — not a dark curtain lifting.
         window.setTimeout(() => {
-          // Once the star is credited, the next mechanic ARRIVES by sliding in (normal
-          // animated paging). The dark cover lifts away in sync (like a curtain) so the
-          // won board is never seen sliding out — only a dark panel exits up while the
-          // next mechanic slides up into view.
-          this.holdNextAutoplay = true;       // ...but don't start its autoplay mid-slide
-          // Slide a DARK placeholder, not the live warmed iframe: compositing/moving a
-          // heavy (ready) iframe layer mid-slide is what judders. Hidden during the
-          // slide → the page slides as a light dark box (like an un-warmed one), then
-          // the iframe reveals once it has arrived.
+          this.holdNextAutoplay = true;       // don't start the incoming autoplay mid-slide
           const arrivingIdx = this.indexForPos(advanceToPos);
+          const leavingIdx = i;
           this.games[arrivingIdx]?.classList.add('game--arriving');
+          this.games[leavingIdx]?.classList.add('game--leaving');
           this.goTo(advanceToPos);
-          this.slideOutCollectCover();
-          // 1) Once the dark rectangle has arrived (slide 0.36s + settle buffer), REVEAL
-          //    the mechanic — static, not yet playing (like an un-warmed one appearing).
+          // Once both have arrived (slide 0.36s + settle buffer): reveal the incoming
+          // mechanic (static), and tear down the now-off-screen won screen.
           window.setTimeout(() => {
             this.games[arrivingIdx]?.classList.remove('game--arriving');
+            this.games[leavingIdx]?.classList.remove('game--leaving');
+            state?.classList.remove('game__state--collecting');
+            reward?.classList.remove('reward--collecting');
+            this.updateMechanicState(leavingIdx);
           }, 430);
-          // 2) A beat after it's shown, START its autoplay — so it appears static first,
-          //    then begins to play (never revealed already-in-motion).
+          // A beat after it's shown, START its autoplay — appears static first, then plays.
           window.setTimeout(() => {
             this.holdNextAutoplay = false;
             this.ensureFrameAutoPlay(this.realIndex());
             this.pollAutoplayUi();
           }, 720);
         }, LEVEL_PROGRESS_MS + 90);
+      } else {
+        // No advance (level-up path owns the transition) — just clear the won screen.
+        state?.classList.remove('game__state--collecting');
+        reward?.classList.remove('reward--collecting');
+        this.updateMechanicState(i);
       }
     };
 
     this.playRewardStarCollect(source, this.rewardStarsFor(i), afterCollect);
     return true;
-  }
-
-  // Full-feed opaque cover during a collect (below the flying star/particles, above
-  // the pages; never covers the HUD/counter, which lives in the viewport).
-  private showCollectCover() {
-    if (this.collectCover) this.collectCover.remove();
-    const cover = document.createElement('div');
-    cover.className = 'collect-cover';
-    this.viewport.appendChild(cover);   // viewport-level: covers the feed, never the HUD/counter
-    void cover.offsetWidth;             // commit initial opacity before raising it
-    cover.style.opacity = '1';
-    this.collectCover = cover;
-  }
-
-  // Lift the dark cover up and out in sync with the page slide (same duration/easing
-  // as render's 0.36s transform), so the leaving won board stays hidden behind a
-  // dark "curtain" while the next mechanic slides in.
-  private slideOutCollectCover() {
-    const cover = this.collectCover;
-    if (!cover) return;
-    this.collectCover = null;
-    cover.style.willChange = 'transform';
-    cover.style.transition = 'transform 0.36s var(--ease-snap)';
-    cover.style.transform = `translateY(-${this.pageH}px)`;
-    const remove = () => cover.remove();
-    cover.addEventListener('transitionend', remove, { once: true });
-    window.setTimeout(remove, 700);    // fallback if transitionend never fires
   }
 
   private rewardWouldLevelUp(): boolean {
