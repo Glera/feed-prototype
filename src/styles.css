@@ -292,7 +292,7 @@ body {
      quirks. Centred horizontally; width unchanged. */
   position: absolute;
   top: 0;
-  bottom: var(--safe-bottom);   /* fill the visible bar; stay above the home-indicator zone */
+  bottom: 0;   /* fill the FULL panel height, safe-area included */
   left: 50%;
   transform: translateX(-50%);
   width: 46px;
