@@ -287,7 +287,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 46px;            /* full panel height (via align-items: stretch); width unchanged */
+  width: 46px;            /* width unchanged */
+  height: 100%;           /* explicit — <button> doesn't reliably stretch via align-items */
   border: 0;
   border-radius: 0;
   background: rgba(255, 255, 255, 0.13);
