@@ -2401,28 +2401,30 @@ export class Feed {
   // ("угольки") in the pins playable: hot orange embers with a glowing core that
   // pop outward (upward-biased), wiggle, and fade.
   private burstRewardCollectParticles(x: number, y: number) {
-    for (let n = 0; n < 16; n++) {
+    for (let n = 0; n < 13; n++) {
       const p = document.createElement('div');
       p.className = 'ember';
-      const size = 4 + Math.random() * 6;
-      // Upward-biased spray (embers fly up and out from the impact).
+      const size = 4 + Math.random() * 5;
+      // Upward-biased spray. Each spark STARTS at the badge rim (startR) and flies
+      // OUTWARD — never piled up on the counter centre (which read as a red disc).
       const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.5;
-      const dist = 26 + Math.random() * 46;
-      const dx = Math.cos(angle) * dist;
-      const dy = Math.sin(angle) * dist;
-      const wob = (Math.random() - 0.5) * 18;   // slight sideways wiggle
+      const startR = 17 + Math.random() * 6;
+      const endR = startR + 28 + Math.random() * 40;
+      const ux = Math.cos(angle), uy = Math.sin(angle);
+      const wob = (Math.random() - 0.5) * 16;   // slight sideways wiggle
       p.style.left = `${x}px`;
       p.style.top = `${y}px`;
       p.style.width = `${size}px`;
       p.style.height = `${size}px`;
       this.viewport.appendChild(p);
 
-      const dur = 460 + Math.random() * 380;
+      const at = (r: number) => `translate(calc(-50% + ${ux * r + wob}px), calc(-50% + ${uy * r}px))`;
+      const dur = 420 + Math.random() * 360;
       if (!p.animate) { window.setTimeout(() => p.remove(), dur); continue; }
       const anim = p.animate([
-        { transform: 'translate(-50%, -50%) scale(1)', opacity: 1 },
-        { transform: `translate(calc(-50% + ${dx * 0.6 + wob}px), calc(-50% + ${dy * 0.6}px)) scale(0.9)`, opacity: 1, offset: 0.45 },
-        { transform: `translate(calc(-50% + ${dx + wob}px), calc(-50% + ${dy + 22}px)) scale(0.2)`, opacity: 0 },
+        { transform: `${at(startR)} scale(0.6)`, opacity: 0 },
+        { transform: `${at((startR + endR) / 2)} scale(1)`, opacity: 1, offset: 0.3 },
+        { transform: `${at(endR)} scale(0.25)`, opacity: 0 },
       ], { duration: dur, easing: 'cubic-bezier(0.2, 0.7, 0.3, 1)', fill: 'forwards' });
       anim.addEventListener('finish', () => p.remove(), { once: true });
     }

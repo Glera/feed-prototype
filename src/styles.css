@@ -1066,14 +1066,15 @@ body {
   transform-origin: 50% 50%;
 }
 
-/* Coal-spark "ember" (like the pins playable's угольки): hot orange with a bright
-   yellow-white core and an orange glow. */
+/* Collect spark — gold to match the star (was coal-red, which stacked into a red
+   disc over the counter). Bright core + soft amber glow; fired ringing OUT from the
+   badge rim so the level number is never covered. */
 .ember {
   position: absolute;
   z-index: 2620;
   border-radius: 50%;
-  background: radial-gradient(circle, #ffe9b0 0%, #ff8a3d 42%, rgba(255, 90, 42, 0.55) 74%, transparent 100%);
-  box-shadow: 0 0 8px rgba(255, 90, 42, 0.85), 0 0 16px rgba(255, 120, 50, 0.4);
+  background: radial-gradient(circle, #fff6cf 0%, #ffd85a 46%, rgba(255, 184, 64, 0.5) 76%, transparent 100%);
+  box-shadow: 0 0 6px rgba(255, 206, 92, 0.7);
   pointer-events: none;
   will-change: transform, opacity;
 }
