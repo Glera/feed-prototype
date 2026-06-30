@@ -207,6 +207,7 @@ export class Feed {
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     this.mountHud();
+    this.mountFeedBar();
     this.measure();
     this.render(false);
     this.updateMechanicStates();
@@ -292,21 +293,12 @@ export class Feed {
       this.attachSwipeSurface(autoplay);
       game.appendChild(autoplay);
 
-      // Reserved dark bar BELOW the game (slot/overlays are inset above it). Left
-      // EMPTY for now — buttons land here later. It stays the swipe surface; a swipe
-      // here pages (and collects a pending reward, via preferReward). dataset
-      // .autoplayIndex lets a tap take over during autoplay.
-      const swipebar = document.createElement('div');
-      swipebar.className = 'game__swipebar';
-      swipebar.dataset.autoplayIndex = String(i);
-      this.attachSwipeSurface(swipebar, () => true, true);
-      game.appendChild(swipebar);
-
-      // Slowly-blinking hint text, floating ABOVE the bar (not inside it). Label
-      // switches by mode in pollAutoplayUi. Purely visual (pointer-events: none).
+      // The bottom bar is now a single FIXED element (mountFeedBar) that doesn't page
+      // with the mechanics — the per-game slot is still inset by --swipebar-h to leave
+      // room for it. Here we only keep the per-mechanic hint text floating above it.
       const swipeHint = document.createElement('div');
       swipeHint.className = 'game__swipehint';
-      swipeHint.textContent = 'tap to play or swipe for next game';
+      swipeHint.textContent = 'tap to play';
       game.appendChild(swipeHint);
       this.swipebarTextEls[i] = swipeHint;
 
@@ -360,6 +352,23 @@ export class Feed {
       this.labelEls[i] = label;
     });
     this.feedEl.appendChild(frag);
+  }
+
+  // Single FIXED bottom bar — lives at the feed's bottom and does NOT page with the
+  // mechanics (the per-game slots reserve --swipebar-h of space above it). A centered
+  // button advances to the next mechanic.
+  private mountFeedBar() {
+    const bar = document.createElement('div');
+    bar.className = 'feed-bar';
+    const next = document.createElement('button');
+    next.className = 'feed-bar__next';
+    next.type = 'button';
+    next.setAttribute('aria-label', 'Next mechanic');
+    next.innerHTML = '<span class="feed-bar__next-icon">▲</span>';
+    next.addEventListener('pointerdown', (e) => e.stopPropagation());
+    next.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(); });
+    bar.appendChild(next);
+    this.feedEl.appendChild(bar);
   }
 
   // private makeGutter(i: number): HTMLElement {
@@ -1070,12 +1079,10 @@ export class Feed {
       }
       this.setAutoplayUi(i, active, preview);
 
-      // Swipe bar label: only the autoplay/attract state offers "tap to play"
-      // (tapping takes over the demo); once the player is playing, has won, or has
-      // failed, tapping does nothing new — so it's swipe-only.
+      // Hint above the fixed bar: only about TAPPING to play this mechanic (paging is
+      // the bar's button now). Shown during autoplay/attract; hidden in manual play.
       const txt = this.swipebarTextEls[i];
-      const label = active ? 'tap to play or swipe for next game' : 'swipe for next game';
-      if (txt && txt.textContent !== label) txt.textContent = label;
+      if (txt && txt.textContent !== 'tap to play') txt.textContent = 'tap to play';
 
       const playable = isCurrent && !paused && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
       // Manual play hides the blinking hint (the close × takes over as the affordance).

@@ -234,27 +234,38 @@ body {
   pointer-events: auto;
 }
 
-/* Permanent swipe bar — the reserved strip directly below the game. Always
-   visible; the label inside switches by mode (set in JS). */
-.game__swipebar {
+/* Single FIXED bottom bar — sits at the feed's bottom, does NOT page with the
+   mechanics (slots reserve --swipebar-h above it). Centered button → next mechanic. */
+.feed-bar {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
   height: var(--swipebar-h);
-  z-index: 4;
+  z-index: 30;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
   background: linear-gradient(180deg, rgba(14, 16, 23, 0.96), rgba(7, 9, 14, 0.98));
   border-top: 1px solid rgba(255, 255, 255, 0.07);
-  touch-action: none;
   user-select: none;
   -webkit-user-select: none;
-  color: rgba(255,255,255,0.92);
-  text-shadow: 0 2px 9px rgba(0,0,0,0.52);
 }
+.feed-bar__next {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 38px;
+  border: 0;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.13);
+  color: rgba(255, 255, 255, 0.95);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.feed-bar__next:active { transform: scale(0.94); }
+.feed-bar__next-icon { font-size: 16px; line-height: 1; }
 
 /* Slowly-blinking hint text, floating ABOVE the dark bar (the bar itself stays
    empty for future buttons). Purely visual. */
