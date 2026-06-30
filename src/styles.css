@@ -223,6 +223,9 @@ body {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
   filter: drop-shadow(0 0 4px rgba(255, 200, 60, 0.5));
 }
+/* Reward badge is the autoplay/attract affordance — gone once the player takes over. */
+.game--manual .game__reward { opacity: 0; }
+.game__reward { transition: opacity 0.2s ease-out; }
 
 .game__autoplay {
   position: absolute;
@@ -260,7 +263,7 @@ body {
   right: 0;
   bottom: 0;
   height: var(--swipebar-h);
-  z-index: 30;
+  z-index: 1050;        /* above the pages (render() gives the current page z up to 1000) */
   display: flex;
   align-items: center;
   justify-content: center;
