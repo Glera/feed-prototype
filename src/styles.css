@@ -209,7 +209,7 @@ body {
 /* Reward badge (top-left): the 1–5 stars this mechanic awards on a win. */
 .game__reward {
   position: absolute;
-  top: 6px;
+  top: 18px;
   left: 14px;
   z-index: 6;
   display: flex;
@@ -278,16 +278,16 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
-  height: 100%;           /* full height of the bottom panel */
+  width: 46px;
+  height: 100%;           /* full height of the bottom panel; width unchanged */
   border: 0;
-  border-radius: 0;
-  background: transparent;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.13);
   color: rgba(255, 255, 255, 0.95);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
-.feed-bar__next:active { background: rgba(255, 255, 255, 0.06); }
+.feed-bar__next:active { transform: scale(0.96); }
 .feed-bar__next-icon { font-size: 18px; line-height: 1; }
 
 /* Slowly-blinking hint text, floating ABOVE the dark bar (the bar itself stays
