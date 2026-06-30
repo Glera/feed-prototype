@@ -47,6 +47,7 @@ const REWARD_SCATTER_MS = 240;
 const REWARD_PAUSE_MS = 140;
 const REWARD_FLY_MS = 380;
 const REWARD_STAGGER_MS = 55;   // per-star launch offset
+const RING_STEP_MS = 180;       // snappy ring growth per star impact (synced to the bump)
 
 type PlayableOutcome = 'won' | 'lost';
 type SwipeApi = {
@@ -2318,11 +2319,18 @@ export class Feed {
     this.burstStarConfetti();
 
     const flySz = Math.max(34, Math.round(sz * 0.42));
+    // Ring grows one star's worth per IMPACT (synced to the bump), capped at full on
+    // the level-up star. totalStars isn't credited until finishStarReward (after the
+    // last land), so `base` stays the pre-batch progress for the whole flight.
+    const spl = this.starsPerLevel;
+    const base = this.totalStars % spl;
     let landed = 0;
     const onLand = () => {
       this.burstRewardCollectParticles(badgeX, badgeY);
       this.bumpLevelBadge();
-      if (++landed >= n) onDone();
+      landed++;
+      this.setLevelProgress(Math.min(1, (base + landed) / spl), true, RING_STEP_MS);
+      if (landed >= n) onDone();
     };
 
     // Each star flies on a single Web Animations API timeline — phase 1 scatter
@@ -2473,10 +2481,12 @@ export class Feed {
     this.setLevelProgress(progress, animate);
   }
 
-  private setLevelProgress(progress: number, animate: boolean = true) {
+  private setLevelProgress(progress: number, animate: boolean = true, durationMs?: number) {
     if (!this.levelProgressEl) return;
     const clamped = Math.max(0, Math.min(1, progress));
-    this.levelProgressEl.style.transition = animate ? '' : 'none';
+    this.levelProgressEl.style.transition = !animate
+      ? 'none'
+      : durationMs != null ? `--level-progress ${durationMs}ms ease-out` : '';
     this.levelProgressEl.style.setProperty('--level-progress', `${clamped * 360}deg`);
     if (!animate) {
       this.levelProgressEl.offsetHeight;
