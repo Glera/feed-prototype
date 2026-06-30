@@ -986,6 +986,7 @@ export class Feed {
   private shouldPauseFrame(i: number): boolean {
     if (document.hidden) return true;
     if (this.overlayOpen) return true;   // a story / editor is up — freeze the whole feed
+    if (this.collectingRewardIndex !== null) return true;   // star credit in flight — freeze EVERY frame behind the cover so nothing competes for the main thread
     if (this.settlingTargetIndex === i) return true;
     return i !== this.realIndex() || (this.earnedThisCycle.has(i) && !this.manualRuns.has(i)) || this.failedThisCycle.has(i);
   }
@@ -1102,9 +1103,8 @@ export class Feed {
       const playable = isCurrent && !paused && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
       // Manual play hides the blinking hint (the close × takes over as the affordance).
       this.games[i]?.classList.toggle('game--manual', playable && manual);
-      // No close (×) anymore: the always-present bottom bar button is the way out of a
-      // manual run (advances to the next mechanic), so the × is redundant.
-      this.games[i]?.classList.remove('game--show-close');
+      // Close (×) only in MANUAL play — during autoplay the demo is paged by tap/swipe.
+      this.games[i]?.classList.toggle('game--show-close', playable && manual);
     }
   };
 
@@ -2207,6 +2207,7 @@ export class Feed {
   private collectReward(i: number, advanceToPos: number | null = null) {
     if (!this.pendingStarRewards.has(i) || this.collectingRewardIndex !== null) return false;
     this.collectingRewardIndex = i;
+    this.applyActiveStates();   // freeze all frames for the duration of the credit (cover is up)
     this.stopRewardSparks(i);
 
     const state = this.stateEls[i];
@@ -2324,11 +2325,15 @@ export class Feed {
       if (++landed >= n) onDone();
     };
 
-    // rAF loop that mirrors the merge playables' coin credit EXACTLY: phase 1 scatter
-    // (ease-out cubic), phase 2 hold, phase 3 fly to the counter (ease-in t²). Constant
-    // size throughout (the coins don't scale) — that's what reads smooth, not jerky.
-    type Fly = { el: HTMLElement; scX: number; scY: number; t0: number; landed: boolean };
-    const flies: Fly[] = [];
+    // Each star flies on a single Web Animations API timeline — phase 1 scatter
+    // (ease-out cubic), phase 2 hold, phase 3 fly to the counter (ease-in quad). WAAPI
+    // runs on the COMPOSITOR, so a main-thread spike (confetti/ember DOM bursts, the
+    // arriving iframe) can't make the motion stutter — that's what the old rAF loop did.
+    // Constant size throughout (the coins don't scale) — that's what reads smooth.
+    const total = REWARD_SCATTER_MS + REWARD_PAUSE_MS + REWARD_FLY_MS;
+    const scatterOff = REWARD_SCATTER_MS / total;
+    const holdOff = (REWARD_SCATTER_MS + REWARD_PAUSE_MS) / total;
+    const xy = (x: number, y: number) => `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0)`;
     for (let ci = 0; ci < n; ci++) {
       const el = document.createElement('div');
       el.className = 'star-flight star-flight--collect';
@@ -2336,50 +2341,29 @@ export class Feed {
       el.style.width = `${flySz}px`;
       el.style.height = `${flySz}px`;
       el.style.fontSize = `${Math.round(flySz * 0.92)}px`;
-      el.style.transform = `translate3d(${startX - flySz / 2}px, ${startY - flySz / 2}px, 0)`;
+      el.style.transform = xy(startX, startY);
+      el.style.willChange = 'transform';
       this.viewport.appendChild(el);
+
       const ang = Math.random() * Math.PI * 2;
       const scatter = sz * 0.4 + Math.random() * sz * 0.4;
-      flies.push({
-        el,
-        scX: startX + Math.cos(ang) * scatter,
-        scY: startY + Math.sin(ang) * scatter,
-        t0: performance.now() + ci * REWARD_STAGGER_MS,
-        landed: false,
-      });
-    }
+      const scX = startX + Math.cos(ang) * scatter;
+      const scY = startY + Math.sin(ang) * scatter;
 
-    const place = (el: HTMLElement, x: number, y: number) => {
-      el.style.transform = `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0)`;
-    };
-    const step = (now: number) => {
-      let pending = false;
-      for (const f of flies) {
-        if (f.landed) continue;
-        const e = now - f.t0;
-        if (e < 0) { pending = true; continue; }
-        if (e < REWARD_SCATTER_MS) {
-          const t = e / REWARD_SCATTER_MS;
-          const k = 1 - Math.pow(1 - t, 3);                 // scatter: ease-out cubic
-          place(f.el, startX + (f.scX - startX) * k, startY + (f.scY - startY) * k);
-          pending = true;
-        } else if (e < REWARD_SCATTER_MS + REWARD_PAUSE_MS) {
-          place(f.el, f.scX, f.scY);                        // hold
-          pending = true;
-        } else if (e < REWARD_SCATTER_MS + REWARD_PAUSE_MS + REWARD_FLY_MS) {
-          const t = (e - REWARD_SCATTER_MS - REWARD_PAUSE_MS) / REWARD_FLY_MS;
-          const k = t * t;                                  // fly: ease-in quad
-          place(f.el, f.scX + (badgeX - f.scX) * k, f.scY + (badgeY - f.scY) * k);
-          pending = true;
-        } else {
-          f.landed = true;
-          f.el.remove();
-          onLand();
-        }
+      const land = () => { el.remove(); onLand(); };
+      if (!el.animate) {                              // ancient browser fallback
+        el.style.transform = xy(badgeX, badgeY);
+        window.setTimeout(land, total + ci * REWARD_STAGGER_MS);
+        continue;
       }
-      if (pending) requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
+      const anim = el.animate([
+        { transform: xy(startX, startY), easing: 'cubic-bezier(0.215, 0.61, 0.355, 1)' },           // scatter: ease-out cubic
+        { transform: xy(scX, scY), offset: scatterOff, easing: 'linear' },                          // hold
+        { transform: xy(scX, scY), offset: holdOff, easing: 'cubic-bezier(0.55, 0.085, 0.68, 0.53)' }, // fly: ease-in quad
+        { transform: xy(badgeX, badgeY), offset: 1 },
+      ], { duration: total, delay: ci * REWARD_STAGGER_MS, fill: 'forwards' });
+      anim.addEventListener('finish', land, { once: true });
+    }
   }
 
   // Level-up-style confetti: a one-shot burst that rains down evenly across the
