@@ -284,11 +284,17 @@ body {
   -webkit-user-select: none;
 }
 .feed-bar__next {
+  /* Absolutely fill the panel height (top:0/bottom:0) — bulletproof vs <button> flex
+     quirks. Centred horizontally; width unchanged. */
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 46px;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 46px;            /* width unchanged */
-  height: 100%;           /* explicit — <button> doesn't reliably stretch via align-items */
   border: 0;
   border-radius: 0;
   background: rgba(255, 255, 255, 0.13);
@@ -296,7 +302,7 @@ body {
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
-.feed-bar__next:active { transform: scale(0.96); }
+.feed-bar__next:active { background: rgba(255, 255, 255, 0.22); }
 .feed-bar__next-icon { font-size: 18px; line-height: 1; }
 
 /* Slowly-blinking hint text, floating ABOVE the dark bar (the bar itself stays
