@@ -206,6 +206,24 @@ body {
 }
 .game__label--show { opacity: 1; }
 
+/* Reward badge (top-left): the 1–5 stars this mechanic awards on a win. */
+.game__reward {
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  z-index: 6;
+  display: flex;
+  gap: 2px;
+  pointer-events: none;
+}
+.game__reward-star {
+  font-size: 15px;
+  line-height: 1;
+  color: #ffd54a;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  filter: drop-shadow(0 0 4px rgba(255, 200, 60, 0.5));
+}
+
 .game__autoplay {
   position: absolute;
   inset: 0 0 var(--swipebar-h) 0;   /* dim only the game area, never the swipe bar */
@@ -364,7 +382,7 @@ body {
 
 .game__reel-rec {
   position: absolute;
-  top: 18px;
+  top: 46px;            /* below the reward-stars badge */
   left: 22px;
   display: flex;
   align-items: center;

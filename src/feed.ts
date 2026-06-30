@@ -41,7 +41,12 @@ const WARM_NEXT_CALM_FRAME_MS = 24;
 const WARM_NEXT_CALM_FRAMES = 8;
 const WARM_NEXT_IDLE_MIN_MS = 3;
 const LEVEL_PROGRESS_MS = 340;
-const STARS_PER_LEVEL = 5;
+const STARS_PER_LEVEL = 15;   // a win drops 1–5 stars, so a level needs several wins
+// Merge-coin-style star credit timing (scatter → pause → fly to the counter).
+const REWARD_SCATTER_MS = 240;
+const REWARD_PAUSE_MS = 140;
+const REWARD_FLY_MS = 380;
+const REWARD_STAGGER_MS = 55;   // per-star launch offset
 
 type PlayableOutcome = 'won' | 'lost';
 type SwipeApi = {
@@ -283,6 +288,12 @@ export class Feed {
       label.className = 'game__label';
       label.textContent = p.id;
       game.appendChild(label);
+
+      // Reward badge (top-left): the 1–5 stars this mechanic awards on a win.
+      const reward = document.createElement('div');
+      reward.className = 'game__reward';
+      reward.innerHTML = '<span class="game__reward-star">★</span>'.repeat(this.rewardStarsFor(i));
+      game.appendChild(reward);
 
       // Full-screen dim over the GAME AREA (inset above the swipe bar) shown only
       // while autoplay runs — a "this is a demo" veil that also captures tap-anywhere
@@ -631,7 +642,7 @@ export class Feed {
   }
 
   private previewRewardLevel(): number {
-    return Math.floor((this.totalStars + 1) / this.starsPerLevel) + 1;
+    return Math.floor((this.totalStars + this.rewardStarsFor(this.realIndex())) / this.starsPerLevel) + 1;
   }
 
   private levelUpMarkup(level: number): string {
@@ -2038,6 +2049,14 @@ export class Feed {
     return btn;
   }
 
+  // Per-mechanic star reward (1–5), deterministic per mechanic id.
+  private rewardStarsFor(i: number): number {
+    const id = this.playables[i]?.id ?? String(i);
+    let hash = 0;
+    for (let n = 0; n < id.length; n++) hash = (hash * 31 + id.charCodeAt(n) + 7) >>> 0;
+    return 1 + (hash % 5);
+  }
+
   private getLikeCount(i: number): number {
     const existing = this.likeCounts.get(i);
     if (existing !== undefined) return existing;
@@ -2227,7 +2246,7 @@ export class Feed {
       }
     };
 
-    this.playRewardStarCollect(source, afterCollect);
+    this.playRewardStarCollect(source, this.rewardStarsFor(i), afterCollect);
     return true;
   }
 
@@ -2260,11 +2279,14 @@ export class Feed {
 
   private rewardWouldLevelUp(): boolean {
     const currentLevel = Math.floor(this.totalStars / this.starsPerLevel) + 1;
-    const nextLevel = Math.floor((this.totalStars + 1) / this.starsPerLevel) + 1;
+    const nextLevel = Math.floor((this.totalStars + this.rewardStarsFor(this.realIndex())) / this.starsPerLevel) + 1;
     return nextLevel > currentLevel;
   }
 
-  private playRewardStarCollect(source: HTMLElement | null, onDone: () => void) {
+  // Credit `count` stars (1–5) with the merge-coin effect: each star SCATTERS out from
+  // the win star, holds, then FLIES to the level counter (staggered). Each landing bumps
+  // the counter + bursts embers; onDone fires after the last lands.
+  private playRewardStarCollect(source: HTMLElement | null, count: number, onDone: () => void) {
     const vp = this.viewport.getBoundingClientRect();
     const src = source?.getBoundingClientRect();
     const badge = this.levelBadgeEl?.getBoundingClientRect();
@@ -2273,57 +2295,55 @@ export class Feed {
     const startY = src ? src.top - vp.top + src.height / 2 : vp.height * 0.46;
     const badgeX = badge ? badge.left - vp.left + badge.width / 2 : 40;
     const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
-
-    const star = document.createElement('div');
-    star.className = 'star-flight star-flight--collect';
-    star.textContent = '★';
-    star.style.width = `${sz}px`;
-    star.style.height = `${sz}px`;
-    star.style.fontSize = `${Math.round(sz * 0.92)}px`;
-    star.style.transform = `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0)`;
-    this.viewport.appendChild(star);
-
-    if (!star.animate) {
-      star.remove();
-      this.burstRewardCollectParticles(badgeX, badgeY);
-      this.bumpLevelBadge();
-      onDone();
-      return;
-    }
+    const n = Math.max(1, count);
 
     // Level-up-style confetti rains down evenly across the whole screen.
     this.burstStarConfetti();
 
-    // Quick smooth GROW to a peak, then straight into the FLIGHT (no shrink-back):
-    // during the flight to the counter it gradually shrinks and the spin accelerates.
-    // (Centred — transform-origin 50%.)
-    const DURATION = 850;
-    const anim = star.animate([
-      {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1) rotate(0deg)`,
-        opacity: 1,
-        offset: 0,
-        easing: 'cubic-bezier(0.16, 0.84, 0.3, 1)',      // quick, decelerating grow (smooth)
-      },
-      {
-        transform: `translate3d(${startX - sz / 2}px, ${startY - sz / 2}px, 0) scale(1.6) rotate(0deg)`,
-        opacity: 1,
-        offset: 0.22,                                    // peak — then launch (no settle-back)
-        easing: 'cubic-bezier(0.5, 0, 0.95, 0.45)',      // accelerate into the counter (shrink + spin)
-      },
-      {
-        transform: `translate3d(${badgeX - sz / 2}px, ${badgeY - sz / 2}px, 0) scale(0.3) rotate(540deg)`,
-        opacity: 1,
-        offset: 1,                                       // shrinks gradually, spin speeds up to the end
-      },
-    ], { duration: DURATION, fill: 'forwards' });
-
-    anim.addEventListener('finish', () => {
-      star.remove();
+    const flySz = Math.max(34, Math.round(sz * 0.42));
+    const total = REWARD_SCATTER_MS + REWARD_PAUSE_MS + REWARD_FLY_MS;
+    const sOff = REWARD_SCATTER_MS / total;
+    const pOff = (REWARD_SCATTER_MS + REWARD_PAUSE_MS) / total;
+    let landed = 0;
+    const onLand = () => {
       this.burstRewardCollectParticles(badgeX, badgeY);
-      this.bumpLevelBadge();   // single pulse — exactly when the star arrives/is removed
-      onDone();
-    }, { once: true });
+      this.bumpLevelBadge();
+      if (++landed >= n) onDone();
+    };
+
+    for (let ci = 0; ci < n; ci++) {
+      const star = document.createElement('div');
+      star.className = 'star-flight star-flight--collect';
+      star.textContent = '★';
+      star.style.width = `${flySz}px`;
+      star.style.height = `${flySz}px`;
+      star.style.fontSize = `${Math.round(flySz * 0.92)}px`;
+      star.style.transform = `translate3d(${startX - flySz / 2}px, ${startY - flySz / 2}px, 0)`;
+      this.viewport.appendChild(star);
+
+      if (!star.animate) {
+        star.remove();
+        window.setTimeout(onLand, total + ci * REWARD_STAGGER_MS);
+        continue;
+      }
+
+      const ang = (ci / n) * Math.PI * 2 + Math.random() * 0.7;
+      const rad = sz * (0.45 + Math.random() * 0.5);
+      const scX = startX + Math.cos(ang) * rad;
+      const scY = startY + Math.sin(ang) * rad - sz * 0.15;   // bias the scatter upward a touch
+      const spin = 360 + Math.round(Math.random() * 360);
+      const at = (x: number, y: number, s: number, r: number) =>
+        `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0) scale(${s}) rotate(${r}deg)`;
+
+      const anim = star.animate([
+        { transform: at(startX, startY, 0.5, 0), opacity: 1, offset: 0, easing: 'cubic-bezier(0.2, 0.8, 0.3, 1)' },     // scatter out
+        { transform: at(scX, scY, 1, spin * 0.18), opacity: 1, offset: sOff, easing: 'linear' },                         // hold
+        { transform: at(scX, scY, 1, spin * 0.18), opacity: 1, offset: pOff, easing: 'cubic-bezier(0.5, 0, 0.95, 0.5)' }, // then accelerate
+        { transform: at(badgeX, badgeY, 0.34, spin), opacity: 1, offset: 1 },                                            // fly to counter
+      ], { duration: total, delay: ci * REWARD_STAGGER_MS, fill: 'forwards' });
+
+      anim.addEventListener('finish', () => { star.remove(); onLand(); }, { once: true });
+    }
   }
 
   // Level-up-style confetti: a one-shot burst that rains down evenly across the
@@ -2459,7 +2479,7 @@ export class Feed {
   private finishStarReward(i: number): boolean {
     const prev = this.totalStars;
     const prevLevel = Math.floor(prev / this.starsPerLevel) + 1;
-    this.totalStars = prev + 1;
+    this.totalStars = prev + this.rewardStarsFor(i);   // 1–5 stars per win
     const nextLevel = Math.floor(this.totalStars / this.starsPerLevel) + 1;
 
     if (nextLevel > prevLevel) {
