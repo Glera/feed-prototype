@@ -312,7 +312,7 @@ export class Feed {
       // room for it. Here we only keep the per-mechanic hint text floating above it.
       const swipeHint = document.createElement('div');
       swipeHint.className = 'game__swipehint';
-      swipeHint.textContent = 'tap to play';
+      swipeHint.textContent = 'tap to play or swipe';
       game.appendChild(swipeHint);
       this.swipebarTextEls[i] = swipeHint;
 
@@ -1097,7 +1097,7 @@ export class Feed {
       // Hint above the fixed bar: only about TAPPING to play this mechanic (paging is
       // the bar's button now). Shown during autoplay/attract; hidden in manual play.
       const txt = this.swipebarTextEls[i];
-      if (txt && txt.textContent !== 'tap to play') txt.textContent = 'tap to play';
+      if (txt && txt.textContent !== 'tap to play or swipe') txt.textContent = 'tap to play or swipe';
 
       const playable = isCurrent && !paused && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
       // Manual play hides the blinking hint (the close × takes over as the affordance).
@@ -1956,12 +1956,14 @@ export class Feed {
 
   private renderRewardState(i: number, state: HTMLElement) {
     const icon = this.renderResultState(i, state, '★', 'reward__star');
-    // Readable affordance on the win screen (sits in the centred content, well above
-    // the bar). Both a tap and a swipe collect + advance.
+    // Readable affordance — placed directly UNDER the action buttons (which sit under
+    // the star), in the reward grid flow. Both a tap and a swipe collect + advance.
     const hint = document.createElement('div');
     hint.className = 'reward__hint';
     hint.textContent = 'tap or swipe for next game';
-    state.appendChild(hint);
+    const reward = state.querySelector('.reward');
+    const toast = reward?.querySelector('.reward__toast') ?? null;
+    reward?.insertBefore(hint, toast);
     this.startRewardSparks(i, icon);
   }
 
