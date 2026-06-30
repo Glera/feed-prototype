@@ -161,7 +161,7 @@ body {
   inset: 0 0 var(--bar-reserve) 0;   /* leave the bottom strip for the swipe bar */
   background: var(--platform-bg);
   touch-action: manipulation;
-  transform-origin: 50% 100%;   /* scale from the BOTTOM — game stays flush with the bar */
+  transform-origin: 50% 50%;   /* scale from the CENTRE — autoplay frame gaps on ALL sides */
   transition: transform 0.34s var(--ease-snap);
 }
 /* Autoplay: the game sits slightly inset (a dark "footage frame" around it), anchored
@@ -376,8 +376,8 @@ body {
   opacity: 0;
   /* Scale in lock-step with the shrunken game (.game__slot scale 0.92, same box +
      origin) so the corners, PLAY and timecode sit neatly at the edges of the smaller
-     mechanic. Bottom-anchored, matching the slot (game stays flush with the bar). */
-  transform-origin: 50% 100%;
+     mechanic. Centre origin → frame gaps on all sides, matching the slot. */
+  transform-origin: 50% 50%;
   transition: opacity 0.2s ease-out, transform 0.34s var(--ease-snap);
 }
 .game--autoplay .game__reel { opacity: 1; transform: scale(0.92); }
