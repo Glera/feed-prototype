@@ -409,14 +409,10 @@ body {
 
 .game__reel-rec {
   position: absolute;
-  top: 46px;            /* below the reward-stars badge */
-  left: 22px;
+  top: 20px;            /* vertically centred on the top corner brackets (12px + 30px tall) */
+  left: 22px;           /* 10px inside the top-left bracket — mirrors the timer on the right */
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 16px;
-  font-weight: 900;
-  letter-spacing: 2px;
   color: rgba(255, 255, 255, 0.95);
   text-shadow: 0 1px 5px rgba(0, 0, 0, 0.65);
 }
@@ -435,8 +431,8 @@ body {
 /* Running tape timecode, top-right (camcorder counter). */
 .game__reel-time {
   position: absolute;
-  top: 18px;
-  right: 22px;
+  top: 20px;            /* same row as the ▶, centred on the top corner brackets */
+  right: 22px;          /* 10px inside the top-right bracket — mirrors the ▶ on the left */
   font: 800 14px/1 "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
   letter-spacing: 1px;
   color: rgba(255, 255, 255, 0.9);

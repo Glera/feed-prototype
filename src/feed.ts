@@ -338,7 +338,7 @@ export class Feed {
         '<span class="game__reel-corner game__reel-corner--tr"></span>' +
         '<span class="game__reel-corner game__reel-corner--bl"></span>' +
         '<span class="game__reel-corner game__reel-corner--br"></span>' +
-        '<span class="game__reel-rec"><span class="game__reel-play">▶</span>PLAY</span>' +
+        '<span class="game__reel-rec"><span class="game__reel-play">▶</span></span>' +
         '<span class="game__reel-time">0:00:00</span>';
       game.appendChild(reel);
 
@@ -1871,6 +1871,10 @@ export class Feed {
         api?.swipe?.restart();
         if (api?.swipe?.hasAutoPlay) api.swipe.startAutoPlay();
       } catch { /* cross-origin */ }
+      // The demo just restarted — reset the camcorder timecode so it counts from 0 again.
+      this.reelTimeSeconds = 0;
+      const timeEl = this.games[i]?.querySelector<HTMLElement>('.game__reel-time');
+      if (timeEl) timeEl.textContent = '0:00:00';
     }, 800);
     this.autoplayLoopTimers.set(i, t);
   }
