@@ -226,10 +226,19 @@ export class Feed {
     // game and pause the rest. transitionend bubbles up from the pages.
     this.feedEl.addEventListener('transitionend', (e) => {
       if (e.propertyName !== 'transform' || this.dragging) return;
+      // Settle ONLY when the sliding PAGE (or the level-up page) finishes its transform
+      // transition — NOT when an inner element's transform transition bubbles up here.
+      // The reel/slot autoplay scale (0.34s) and the reward buttons (0.16s) also fire
+      // 'transform' transitionend events; if we settled on those, settleSlide() would
+      // render(false) mid-slide and SNAP the page into place with no animation. That
+      // race is exactly why the arrival was sometimes animated and sometimes not.
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
       if (this.levelUpPageState === 'entering') {
-        this.settleLevelUpPage();
+        if (t === this.levelUpPageEl) this.settleLevelUpPage();
         return;
       }
+      if (!t.classList.contains('page')) return;
       this.settleSlide();
     });
 
@@ -2667,6 +2676,12 @@ export class Feed {
     if (changed && pageChanged) {
       if (instant) { this.settleSlide(); return; }   // no slide — settle now (used under the collect cover)
       this.prefetchReserve();   // keep the reserve topped up
+      // Safety net: the page-only transitionend filter above means we no longer settle
+      // on stray inner transitions. If the page's own transform transitionend is ever
+      // missed (interrupted/coalesced), settle anyway just after the slide should end.
+      window.setTimeout(() => {
+        if (!this.dragging && this.settlingTargetIndex === targetIndex) this.settleSlide();
+      }, 460);
     } else if (changed) {
       this.settlingTargetIndex = null;
     } else {
