@@ -15,6 +15,10 @@
   --safe-right: env(safe-area-inset-right);
   --top-zone-h: calc(var(--chrome-zone-h) + var(--safe-top));
   --top-zone-pad-top: max(11px, calc(var(--safe-top) + 3px));
+  /* Bottom swipe-bar height. MUST be defined here (not on .game) so the fixed
+     .feed-bar — which is NOT inside a .game — can read it too; otherwise the bar
+     collapses to content height and a gap opens above it. */
+  --swipebar-h: 58px;
   --story-size: 54px;
   --ease-snap: cubic-bezier(0.22, 0.61, 0.36, 1);
   --dev-phone-aspect-w: 390;
@@ -106,7 +110,6 @@ body {
    Fills the page below the stories rail. All in-game gestures live here and
    must NOT page the feed. */
 .game {
-  --swipebar-h: 58px;            /* reserved strip below the game for the swipe bar */
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
