@@ -95,6 +95,8 @@ export class Feed {
 
   private slots: HTMLElement[] = [];
   private games: HTMLElement[] = [];
+  private rewardEls: HTMLElement[] = [];
+  private rewardStars: number[] = [];   // current 1–5 reward per frame, re-rolled each appearance
   private gutters: HTMLElement[] = [];
   private stateEls: HTMLElement[] = [];
   private autoplayEls: HTMLElement[] = [];
@@ -289,11 +291,12 @@ export class Feed {
       label.textContent = p.id;
       game.appendChild(label);
 
-      // Reward badge (top-left): the 1–5 stars this mechanic awards on a win.
+      // Reward badge (top-left): the 1–5 stars this mechanic awards on a win. Re-rolled
+      // (rollReward) each time the mechanic is (re)mounted, so a repeat shows a new count.
       const reward = document.createElement('div');
       reward.className = 'game__reward';
-      reward.innerHTML = '<span class="game__reward-star">★</span>'.repeat(this.rewardStarsFor(i));
       game.appendChild(reward);
+      this.rewardEls[i] = reward;
 
       // Full-screen dim over the GAME AREA (inset above the swipe bar) shown only
       // while autoplay runs — a "this is a demo" veil that also captures tap-anywhere
@@ -717,6 +720,7 @@ export class Feed {
 
   private mount(i: number) {
     if (this.frames.has(i)) return;
+    this.rollReward(i);                 // fresh random reward each appearance
     this.resetFrameReadiness(i);
     this.games[i].classList.add('game--loading');
     this.games[i].classList.remove('game--ready');
@@ -2049,12 +2053,17 @@ export class Feed {
     return btn;
   }
 
-  // Per-mechanic star reward (1–5), deterministic per mechanic id.
+  // Current star reward (1–5) for this frame's CURRENT appearance.
   private rewardStarsFor(i: number): number {
-    const id = this.playables[i]?.id ?? String(i);
-    let hash = 0;
-    for (let n = 0; n < id.length; n++) hash = (hash * 31 + id.charCodeAt(n) + 7) >>> 0;
-    return 1 + (hash % 5);
+    if (!this.rewardStars[i]) this.rollReward(i);
+    return this.rewardStars[i];
+  }
+
+  // Roll a fresh random 1–5 reward for this frame and refresh its top-left badge.
+  private rollReward(i: number): void {
+    this.rewardStars[i] = 1 + Math.floor(Math.random() * 5);
+    const el = this.rewardEls[i];
+    if (el) el.innerHTML = '<span class="game__reward-star">★</span>'.repeat(this.rewardStars[i]);
   }
 
   private getLikeCount(i: number): number {
@@ -2301,9 +2310,6 @@ export class Feed {
     this.burstStarConfetti();
 
     const flySz = Math.max(34, Math.round(sz * 0.42));
-    const total = REWARD_SCATTER_MS + REWARD_PAUSE_MS + REWARD_FLY_MS;
-    const sOff = REWARD_SCATTER_MS / total;
-    const pOff = (REWARD_SCATTER_MS + REWARD_PAUSE_MS) / total;
     let landed = 0;
     const onLand = () => {
       this.burstRewardCollectParticles(badgeX, badgeY);
@@ -2311,39 +2317,62 @@ export class Feed {
       if (++landed >= n) onDone();
     };
 
+    // rAF loop that mirrors the merge playables' coin credit EXACTLY: phase 1 scatter
+    // (ease-out cubic), phase 2 hold, phase 3 fly to the counter (ease-in t²). Constant
+    // size throughout (the coins don't scale) — that's what reads smooth, not jerky.
+    type Fly = { el: HTMLElement; scX: number; scY: number; t0: number; landed: boolean };
+    const flies: Fly[] = [];
     for (let ci = 0; ci < n; ci++) {
-      const star = document.createElement('div');
-      star.className = 'star-flight star-flight--collect';
-      star.textContent = '★';
-      star.style.width = `${flySz}px`;
-      star.style.height = `${flySz}px`;
-      star.style.fontSize = `${Math.round(flySz * 0.92)}px`;
-      star.style.transform = `translate3d(${startX - flySz / 2}px, ${startY - flySz / 2}px, 0)`;
-      this.viewport.appendChild(star);
-
-      if (!star.animate) {
-        star.remove();
-        window.setTimeout(onLand, total + ci * REWARD_STAGGER_MS);
-        continue;
-      }
-
-      const ang = (ci / n) * Math.PI * 2 + Math.random() * 0.7;
-      const rad = sz * (0.45 + Math.random() * 0.5);
-      const scX = startX + Math.cos(ang) * rad;
-      const scY = startY + Math.sin(ang) * rad - sz * 0.15;   // bias the scatter upward a touch
-      const spin = 360 + Math.round(Math.random() * 360);
-      const at = (x: number, y: number, s: number, r: number) =>
-        `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0) scale(${s}) rotate(${r}deg)`;
-
-      const anim = star.animate([
-        { transform: at(startX, startY, 0.5, 0), opacity: 1, offset: 0, easing: 'cubic-bezier(0.2, 0.8, 0.3, 1)' },     // scatter out
-        { transform: at(scX, scY, 1, spin * 0.18), opacity: 1, offset: sOff, easing: 'linear' },                         // hold
-        { transform: at(scX, scY, 1, spin * 0.18), opacity: 1, offset: pOff, easing: 'cubic-bezier(0.5, 0, 0.95, 0.5)' }, // then accelerate
-        { transform: at(badgeX, badgeY, 0.34, spin), opacity: 1, offset: 1 },                                            // fly to counter
-      ], { duration: total, delay: ci * REWARD_STAGGER_MS, fill: 'forwards' });
-
-      anim.addEventListener('finish', () => { star.remove(); onLand(); }, { once: true });
+      const el = document.createElement('div');
+      el.className = 'star-flight star-flight--collect';
+      el.textContent = '★';
+      el.style.width = `${flySz}px`;
+      el.style.height = `${flySz}px`;
+      el.style.fontSize = `${Math.round(flySz * 0.92)}px`;
+      el.style.transform = `translate3d(${startX - flySz / 2}px, ${startY - flySz / 2}px, 0)`;
+      this.viewport.appendChild(el);
+      const ang = Math.random() * Math.PI * 2;
+      const scatter = sz * 0.4 + Math.random() * sz * 0.4;
+      flies.push({
+        el,
+        scX: startX + Math.cos(ang) * scatter,
+        scY: startY + Math.sin(ang) * scatter,
+        t0: performance.now() + ci * REWARD_STAGGER_MS,
+        landed: false,
+      });
     }
+
+    const place = (el: HTMLElement, x: number, y: number) => {
+      el.style.transform = `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0)`;
+    };
+    const step = (now: number) => {
+      let pending = false;
+      for (const f of flies) {
+        if (f.landed) continue;
+        const e = now - f.t0;
+        if (e < 0) { pending = true; continue; }
+        if (e < REWARD_SCATTER_MS) {
+          const t = e / REWARD_SCATTER_MS;
+          const k = 1 - Math.pow(1 - t, 3);                 // scatter: ease-out cubic
+          place(f.el, startX + (f.scX - startX) * k, startY + (f.scY - startY) * k);
+          pending = true;
+        } else if (e < REWARD_SCATTER_MS + REWARD_PAUSE_MS) {
+          place(f.el, f.scX, f.scY);                        // hold
+          pending = true;
+        } else if (e < REWARD_SCATTER_MS + REWARD_PAUSE_MS + REWARD_FLY_MS) {
+          const t = (e - REWARD_SCATTER_MS - REWARD_PAUSE_MS) / REWARD_FLY_MS;
+          const k = t * t;                                  // fly: ease-in quad
+          place(f.el, f.scX + (badgeX - f.scX) * k, f.scY + (badgeY - f.scY) * k);
+          pending = true;
+        } else {
+          f.landed = true;
+          f.el.remove();
+          onLand();
+        }
+      }
+      if (pending) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
   }
 
   // Level-up-style confetti: a one-shot burst that rains down evenly across the

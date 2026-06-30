@@ -154,12 +154,12 @@ body {
   inset: 0 0 var(--swipebar-h) 0;   /* leave the bottom strip for the swipe bar */
   background: var(--platform-bg);
   touch-action: manipulation;
-  transform-origin: 50% 50%;
+  transform-origin: 50% 100%;   /* scale from the BOTTOM — game stays flush with the bar */
   transition: transform 0.34s var(--ease-snap);
 }
-/* Autoplay: the game sits slightly inset (a dark "footage frame" around it). Tapping
-   to take over removes game--autoplay → it scales back to full, like expanding to a
-   fuller screen. GPU transform (no iframe resize) so it stays smooth. */
+/* Autoplay: the game sits slightly inset (a dark "footage frame" around it), anchored
+   to the bottom bar. Tapping to take over removes game--autoplay → it expands back to
+   full (flush to the bar in both states). GPU transform (no iframe resize) — smooth. */
 .game--autoplay .game__slot { transform: scale(0.92); }
 .game__frame {
   width: 100%;
@@ -209,7 +209,7 @@ body {
 /* Reward badge (top-left): the 1–5 stars this mechanic awards on a win. */
 .game__reward {
   position: absolute;
-  top: 12px;
+  top: 6px;
   left: 14px;
   z-index: 6;
   display: flex;
@@ -223,8 +223,10 @@ body {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
   filter: drop-shadow(0 0 4px rgba(255, 200, 60, 0.5));
 }
-/* Reward badge is the autoplay/attract affordance — gone once the player takes over. */
-.game--manual .game__reward { opacity: 0; }
+/* Reward badge is the autoplay/attract affordance — gone once the player takes over,
+   and during the win star-credit (the stars are flying to the counter). */
+.game--manual .game__reward,
+.game--earned .game__reward { opacity: 0; }
 .game__reward { transition: opacity 0.2s ease-out; }
 
 .game__autoplay {
@@ -276,17 +278,17 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 46px;
-  height: 38px;
+  width: 100%;
+  height: 100%;           /* full height of the bottom panel */
   border: 0;
-  border-radius: 11px;
-  background: rgba(255, 255, 255, 0.13);
+  border-radius: 0;
+  background: transparent;
   color: rgba(255, 255, 255, 0.95);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
-.feed-bar__next:active { transform: scale(0.94); }
-.feed-bar__next-icon { font-size: 16px; line-height: 1; }
+.feed-bar__next:active { background: rgba(255, 255, 255, 0.06); }
+.feed-bar__next-icon { font-size: 18px; line-height: 1; }
 
 /* Slowly-blinking hint text, floating ABOVE the dark bar (the bar itself stays
    empty for future buttons). Purely visual. */
@@ -294,7 +296,7 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: calc(var(--swipebar-h) + 5px);   /* a touch closer to the dark bar (not flush) */
+  bottom: calc(var(--swipebar-h) + 10px);   /* floats just above the bottom bar */
   z-index: 4;
   text-align: center;
   pointer-events: none;
@@ -355,8 +357,8 @@ body {
   opacity: 0;
   /* Scale in lock-step with the shrunken game (.game__slot scale 0.92, same box +
      origin) so the corners, PLAY and timecode sit neatly at the edges of the smaller
-     mechanic — top corners drop, bottom corners rise, PLAY/timer follow. */
-  transform-origin: 50% 50%;
+     mechanic. Bottom-anchored, matching the slot (game stays flush with the bar). */
+  transform-origin: 50% 100%;
   transition: opacity 0.2s ease-out, transform 0.34s var(--ease-snap);
 }
 .game--autoplay .game__reel { opacity: 1; transform: scale(0.92); }
