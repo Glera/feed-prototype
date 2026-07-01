@@ -259,6 +259,70 @@ export class Feed {
     window.setInterval(this.pollPlayableAnalytics, ANALYTICS_POLL_MS);
     window.setInterval(this.pollAutoplayUi, 250);
     window.setInterval(this.tickReelTimecode, 1000);
+    this.initPerfTelemetry();
+  }
+
+  // ── Warm-cost telemetry ──────────────────────────────────────────────────
+  // Answers "what exactly does the warm hitch cost, and at which boot stage"
+  // on real devices, without devtools:
+  //  - long-task observer on the host thread (shared with same-origin iframes),
+  //    each task attributed to the warm window that was open when it ran;
+  //  - per-mechanic boot-stage timings pushed by shared/bootstrap.ts
+  //    ('boot_timings' messages: eval-done / mount / onInteractive).
+  // Always collected (cheap); rendered as an on-screen overlay with ?perf=1.
+  private bootTimingsLog = new Map<string, Record<string, unknown>>();
+  private longTaskLog: { at: number; dur: number; warmId: string | null; src: string }[] = [];
+  private perfOverlayEl: HTMLElement | null = null;
+  private perfDebug = new URLSearchParams(location.search).get('perf') === '1';
+
+  private initPerfTelemetry() {
+    try {
+      const obs = new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) {
+          if (e.duration < 50) continue;
+          const warmId = this.warmIndex !== null ? this.playables[this.warmIndex]?.id ?? null : null;
+          // TaskAttributionTiming (Chromium): which frame the task ran in —
+          // separates "warm iframe boot" from "host/current-mechanic work"
+          // that merely happened while a warm window was open.
+          const att = (e as { attribution?: { containerSrc?: string }[] }).attribution?.[0];
+          const src = att?.containerSrc ? (att.containerSrc.split('/').pop() ?? '').split('?')[0] : e.name;
+          const entry = { at: Math.round(e.startTime), dur: Math.round(e.duration), warmId, src };
+          this.longTaskLog.push(entry);
+          if (this.longTaskLog.length > 300) this.longTaskLog.shift();
+          if (warmId) console.warn(`[perf] ${entry.dur}ms long task during warm of ${warmId} (src: ${src})`);
+          this.updatePerfOverlay();
+        }
+      });
+      obs.observe({ entryTypes: ['longtask'] });
+    } catch { /* longtask API missing (old webview) — boot timings still flow */ }
+  }
+
+  private handleBootTimings(i: number, data: Record<string, unknown>) {
+    const id = this.playables[i]?.id ?? `#${i}`;
+    const merged = { ...(this.bootTimingsLog.get(id) ?? {}), ...(data.timings as Record<string, unknown>), stage: data.stage };
+    this.bootTimingsLog.set(id, merged);
+    console.log(`[perf] boot ${id} [${String(data.stage)}]`, merged);
+    this.updatePerfOverlay();
+  }
+
+  private updatePerfOverlay() {
+    if (!this.perfDebug) return;
+    if (!this.perfOverlayEl) {
+      const el = document.createElement('div');
+      el.style.cssText = 'position:fixed;left:4px;top:4px;z-index:99999;background:rgba(0,0,0,0.72);color:#9f9;font:10px/1.5 monospace;padding:6px 8px;pointer-events:none;white-space:pre;max-width:92vw;overflow:hidden;border-radius:6px;';
+      document.body.appendChild(el);
+      this.perfOverlayEl = el;
+    }
+    const warmTasks = this.longTaskLog.filter((t) => t.warmId);
+    const worst = warmTasks.reduce((m, t) => Math.max(m, t.dur), 0);
+    const lines: string[] = [
+      `long>50ms: ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`,
+    ];
+    for (const [id, t] of this.bootTimingsLog) {
+      const net = typeof t.responseEndAt === 'number' ? t.responseEndAt : '?';
+      lines.push(`${id}: net→${net} eval→${t.evalDoneAt ?? '?'} mount ${t.mountMs ?? '?'}ms inter ${t.onInteractiveMs ?? '—'}ms`);
+    }
+    this.perfOverlayEl.textContent = lines.slice(0, 14).join('\n');
   }
 
   // Camcorder-style running timecode on the video reel. Counts up while a mechanic
@@ -1739,6 +1803,11 @@ export class Feed {
   private onWindowMessage = (e: MessageEvent) => {
     const i = this.frameIndexForSource(e.source);
     if (i < 0) return;
+    const d = e.data as Record<string, unknown> | null;
+    if (d && typeof d === 'object' && d.source === 'playable' && d.type === 'boot_timings') {
+      this.handleBootTimings(i, d);
+      return;
+    }
     if (this.isPlayableReadyMessage(e.data)) {
       this.handlePlayableReady(i);
       return;
