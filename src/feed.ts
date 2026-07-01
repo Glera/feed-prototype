@@ -2320,7 +2320,6 @@ export class Feed {
     const total = REWARD_SCATTER_MS + REWARD_PAUSE_MS + REWARD_FLY_MS;
     const scatterOff = REWARD_SCATTER_MS / total;
     const holdOff = (REWARD_SCATTER_MS + REWARD_PAUSE_MS) / total;
-    const impactOff = 0.88;
     const xy = (x: number, y: number, scale = 1) =>
       `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0) scale(${scale})`;
     const approachDx = badgeX - startX;
@@ -2328,8 +2327,6 @@ export class Feed {
     const approachLen = Math.max(1, Math.hypot(approachDx, approachDy));
     const approachUx = approachDx / approachLen;
     const approachUy = approachDy / approachLen;
-    const tangentX = -approachUy;
-    const tangentY = approachUx;
     // Hit the level badge itself. The previous rim stop looked like the star
     // disappeared before touching the counter, especially on small screens.
     const stopBeforeCore = Math.min(badgeRadius * 0.16, flySz * 0.1);
@@ -2348,12 +2345,10 @@ export class Feed {
       const scatter = sz * 0.4 + Math.random() * sz * 0.4;
       const scX = startX + Math.cos(ang) * scatter;
       const scY = startY + Math.sin(ang) * scatter;
-      // Land over the level badge/counter. Multiple stars spread just a little so
-      // a fast series still reads as distinct impacts without missing the badge.
-      const lane = ci - (n - 1) / 2;
-      const rimSpread = lane * Math.min(5, flySz * 0.11);
-      const landX = badgeX - approachUx * stopBeforeCore + tangentX * rimSpread;
-      const landY = badgeY - approachUy * stopBeforeCore + tangentY * rimSpread;
+      // Land over the level badge/counter. All stars use the same hit point:
+      // spreading them sideways plus a post-impact hold read as a caterpillar.
+      const landX = badgeX - approachUx * stopBeforeCore;
+      const landY = badgeY - approachUy * stopBeforeCore;
 
       let impacted = false;
       const impact = () => {
@@ -2366,7 +2361,7 @@ export class Feed {
         el.remove();
       };
       if (!el.animate) {                              // ancient browser fallback
-        el.style.transform = xy(landX, landY, 0.88);
+        el.style.transform = xy(landX, landY, 1.02);
         el.style.opacity = '1';
         window.setTimeout(land, total + ci * REWARD_STAGGER_MS);
         continue;
@@ -2375,10 +2370,8 @@ export class Feed {
         { transform: xy(startX, startY), easing: 'cubic-bezier(0.215, 0.61, 0.355, 1)' },           // scatter: ease-out cubic
         { transform: xy(scX, scY), offset: scatterOff, easing: 'linear' },                          // hold
         { transform: xy(scX, scY), offset: holdOff, easing: 'cubic-bezier(0.55, 0.085, 0.68, 0.53)' }, // fly: ease-in quad
-        { transform: xy(landX, landY, 1.02), opacity: 1, offset: impactOff },
-        { transform: xy(landX, landY, 0.88), opacity: 1, offset: 1 },
+        { transform: xy(landX, landY, 1.02), opacity: 1 },
       ], { duration: total, delay: ci * REWARD_STAGGER_MS, fill: 'forwards' });
-      window.setTimeout(impact, ci * REWARD_STAGGER_MS + total * impactOff);
       anim.addEventListener('finish', land, { once: true });
     }
   }
