@@ -23,7 +23,7 @@ export const PLAYABLES: Playable[] = [
   { id: 'merge-timepress-v2-swipe' },
   { id: 'merge-timepress-no-orders-v1' },
   { id: 'merge-timepress-no-orders-v2' },
-  { id: 'merge-second-board-v1' },
+  { id: 'merge-second-board-v1-swipe' },
   { id: 'merge-second-board-v2' },
 ];
 
