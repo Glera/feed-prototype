@@ -19,11 +19,17 @@ function servePlayables(): Plugin {
         const url = (req.url || '').split('?')[0];
         const m = url.match(/^\/([\w.\-]+)\.html$/);
         if (m && m[1] !== 'index') {
-          const file = path.join(playablesDir, m[1], 'dist-swipe', 'index.html');
-          if (fs.existsSync(file)) {
-            res.setHeader('content-type', 'text/html; charset=utf-8');
-            fs.createReadStream(file).pipe(res);
-            return;
+          // Deploy artifacts are named `<base>-swipe.html`. The source dir is
+          // either that exact name (a dedicated `-swipe` fork dir) or the base
+          // dir with the `-swipe` stripped (built with SWIPE=1). Try both.
+          const candidates = [m[1], m[1].replace(/-swipe$/, '')];
+          for (const dir of candidates) {
+            const file = path.join(playablesDir, dir, 'dist-swipe', 'index.html');
+            if (fs.existsSync(file)) {
+              res.setHeader('content-type', 'text/html; charset=utf-8');
+              fs.createReadStream(file).pipe(res);
+              return;
+            }
           }
         }
         next();
