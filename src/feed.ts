@@ -47,10 +47,12 @@ const REWARD_SCATTER_MS = 240;
 const REWARD_PAUSE_MS = 140;
 const REWARD_FLY_MS = 380;
 // Per-star launch offset = the gap between successive ARRIVALS at the counter (all
-// stars share the same flight duration). Must be long enough that each star's full
-// reaction series — impact ember + counter bump (~420ms) + ring step (RING_STEP_MS)
-// — reads as a distinct hit before the next lands. 55ms piled them into one blur.
-const REWARD_STAGGER_MS = 340;
+// stars share the same flight duration). Tuned to the coin-into-piggy shower in
+// merge-second-board-v2 (~30ms there): a rapid POUR reads far livelier than the old
+// 340ms drip. The earlier 55ms "blur" wasn't the cadence — it was the weak uniform
+// scale-bump; now each arrival lands a distinct squash + radial splash + ring step,
+// so a fast pour reads as a satisfying stream, not a caterpillar.
+const REWARD_STAGGER_MS = 90;
 const RING_STEP_MS = 180;       // snappy ring growth per star impact (synced to the bump)
 
 type PlayableOutcome = 'won' | 'lost';
@@ -133,6 +135,7 @@ export class Feed {
   private storiesEl: HTMLElement | null = null;
   private storiesMomentumFrame: number | null = null;
   private levelBadgeEl: HTMLElement | null = null;
+  private levelBadgeSquash: Animation | null = null;   // in-flight counter squash (star-arrival reaction)
   private levelEl: HTMLElement | null = null;
   private levelProgressEl: HTMLElement | null = null;
   private heldLevelUpOverlay: HTMLElement | null = null;
@@ -2407,15 +2410,18 @@ export class Feed {
   // ("угольки") in the pins playable: hot orange embers with a glowing core that
   // pop outward (upward-biased), wiggle, and fade.
   private burstRewardCollectParticles(x: number, y: number, rimRadius: number = 17) {
-    for (let n = 0; n < 13; n++) {
+    for (let n = 0; n < 9; n++) {
       const p = document.createElement('div');
       p.className = 'ember';
       const size = 4 + Math.random() * 5;
-      // Upward-biased spray. Each spark STARTS at the badge rim (startR) and flies
-      // OUTWARD — never piled up on the counter centre (which read as a red disc).
-      const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.5;
+      // Radial splash (all directions), matching the coin-into-piggy burst in
+      // merge-second-board-v2 (`spawnBurst`, ~6 sparks radiating off the slot) —
+      // reads as the star "splashing" into the counter, not a one-way ember spray.
+      // Each spark STARTS at the badge rim (startR) and flies OUTWARD so nothing
+      // piles up on the counter centre (which read as a red disc).
+      const angle = Math.random() * Math.PI * 2;
       const startR = rimRadius + Math.random() * 6;
-      const endR = startR + 28 + Math.random() * 40;
+      const endR = startR + 24 + Math.random() * 34;
       const ux = Math.cos(angle), uy = Math.sin(angle);
       const wob = (Math.random() - 0.5) * 16;   // slight sideways wiggle
       p.style.left = `${x}px`;
@@ -2495,10 +2501,27 @@ export class Feed {
   private bumpLevelBadge() {
     const el = this.levelBadgeEl;
     if (!el) return;
-    el.classList.remove('hud__level--bump');
-    void el.offsetWidth;                 // restart the animation if it's already running
-    el.classList.add('hud__level--bump');
-    window.setTimeout(() => el.classList.remove('hud__level--bump'), 440);
+    if (!el.animate) {                   // ancient browser fallback — CSS scale-pop
+      el.classList.remove('hud__level--bump');
+      void el.offsetWidth;
+      el.classList.add('hud__level--bump');
+      window.setTimeout(() => el.classList.remove('hud__level--bump'), 440);
+      return;
+    }
+    // Anisotropic SQUASH — wide-and-flat sine pulse (sx=1+p, sy=1-p), matching
+    // the coin-into-piggy reaction in merge-second-board-v2 (COINBOX_SQUASH:
+    // intensity 0.16 over 220ms). Reads as the counter "absorbing" the star,
+    // not the generic uniform scale-pop the CSS --bump gives. Cancel any
+    // in-flight squash first so consecutive arrivals restart cleanly.
+    const P = 0.16, H = 0.707 * P;       // H = value at sine quarter-points
+    this.levelBadgeSquash?.cancel();
+    this.levelBadgeSquash = el.animate([
+      { transform: 'scale(1, 1)' },
+      { transform: `scale(${1 + H}, ${1 - H})`, offset: 0.25 },
+      { transform: `scale(${1 + P}, ${1 - P})`, offset: 0.5 },
+      { transform: `scale(${1 + H}, ${1 - H})`, offset: 0.75 },
+      { transform: 'scale(1, 1)' },
+    ], { duration: 220, easing: 'linear' });
   }
 
   private pulseLevelUp() {
