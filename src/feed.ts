@@ -46,7 +46,11 @@ const STARS_PER_LEVEL = 5;    // one won mechanic = one star; level up every 5 s
 const REWARD_SCATTER_MS = 240;
 const REWARD_PAUSE_MS = 140;
 const REWARD_FLY_MS = 380;
-const REWARD_STAGGER_MS = 55;   // per-star launch offset
+// Per-star launch offset = the gap between successive ARRIVALS at the counter (all
+// stars share the same flight duration). Must be long enough that each star's full
+// reaction series — impact ember + counter bump (~420ms) + ring step (RING_STEP_MS)
+// — reads as a distinct hit before the next lands. 55ms piled them into one blur.
+const REWARD_STAGGER_MS = 340;
 const RING_STEP_MS = 180;       // snappy ring growth per star impact (synced to the bump)
 
 type PlayableOutcome = 'won' | 'lost';
