@@ -2291,6 +2291,7 @@ export class Feed {
     const startY = src ? src.top - vp.top + src.height / 2 : vp.height * 0.46;
     const badgeX = badge ? badge.left - vp.left + badge.width / 2 : 40;
     const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
+    const badgeRadius = badge ? Math.min(badge.width, badge.height) / 2 : 28;
     const n = Math.max(1, count);
 
     // Level-up-style confetti rains down evenly across the whole screen.
@@ -2304,7 +2305,7 @@ export class Feed {
     const base = this.totalStars % spl;
     let landed = 0;
     const onLand = () => {
-      this.burstRewardCollectParticles(badgeX, badgeY);
+      this.burstRewardCollectParticles(badgeX, badgeY, Math.max(22, badgeRadius - 2));
       this.bumpLevelBadge();
       landed++;
       this.setLevelProgress(Math.min(1, (base + landed) / spl), true, RING_STEP_MS);
@@ -2319,7 +2320,17 @@ export class Feed {
     const total = REWARD_SCATTER_MS + REWARD_PAUSE_MS + REWARD_FLY_MS;
     const scatterOff = REWARD_SCATTER_MS / total;
     const holdOff = (REWARD_SCATTER_MS + REWARD_PAUSE_MS) / total;
-    const xy = (x: number, y: number) => `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0)`;
+    const impactOff = 0.9;
+    const xy = (x: number, y: number, scale = 1) =>
+      `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0) scale(${scale})`;
+    const approachDx = badgeX - startX;
+    const approachDy = badgeY - startY;
+    const approachLen = Math.max(1, Math.hypot(approachDx, approachDy));
+    const approachUx = approachDx / approachLen;
+    const approachUy = approachDy / approachLen;
+    const tangentX = -approachUy;
+    const tangentY = approachUx;
+    const stopBeforeCore = badgeRadius + flySz * 0.32;
     for (let ci = 0; ci < n; ci++) {
       const el = document.createElement('div');
       el.className = 'star-flight star-flight--collect';
@@ -2335,10 +2346,18 @@ export class Feed {
       const scatter = sz * 0.4 + Math.random() * sz * 0.4;
       const scX = startX + Math.cos(ang) * scatter;
       const scY = startY + Math.sin(ang) * scatter;
+      // Land at the near rim of the level badge, not on top of the level number.
+      // Multiple stars spread along that rim so a fast series reads as separate
+      // impacts instead of one static star pasted over the counter.
+      const lane = ci - (n - 1) / 2;
+      const rimSpread = lane * Math.min(11, flySz * 0.24);
+      const landX = badgeX - approachUx * stopBeforeCore + tangentX * rimSpread;
+      const landY = badgeY - approachUy * stopBeforeCore + tangentY * rimSpread;
 
       const land = () => { el.remove(); onLand(); };
       if (!el.animate) {                              // ancient browser fallback
-        el.style.transform = xy(badgeX, badgeY);
+        el.style.transform = xy(landX, landY, 0.18);
+        el.style.opacity = '0';
         window.setTimeout(land, total + ci * REWARD_STAGGER_MS);
         continue;
       }
@@ -2346,7 +2365,8 @@ export class Feed {
         { transform: xy(startX, startY), easing: 'cubic-bezier(0.215, 0.61, 0.355, 1)' },           // scatter: ease-out cubic
         { transform: xy(scX, scY), offset: scatterOff, easing: 'linear' },                          // hold
         { transform: xy(scX, scY), offset: holdOff, easing: 'cubic-bezier(0.55, 0.085, 0.68, 0.53)' }, // fly: ease-in quad
-        { transform: xy(badgeX, badgeY), offset: 1 },
+        { transform: xy(landX, landY, 0.82), opacity: 1, offset: impactOff },
+        { transform: xy(landX, landY, 0.18), opacity: 0, offset: 1 },
       ], { duration: total, delay: ci * REWARD_STAGGER_MS, fill: 'forwards' });
       anim.addEventListener('finish', land, { once: true });
     }
@@ -2386,7 +2406,7 @@ export class Feed {
   // Ember burst at the counter when the star lands — styled like the coal sparks
   // ("угольки") in the pins playable: hot orange embers with a glowing core that
   // pop outward (upward-biased), wiggle, and fade.
-  private burstRewardCollectParticles(x: number, y: number) {
+  private burstRewardCollectParticles(x: number, y: number, rimRadius: number = 17) {
     for (let n = 0; n < 13; n++) {
       const p = document.createElement('div');
       p.className = 'ember';
@@ -2394,7 +2414,7 @@ export class Feed {
       // Upward-biased spray. Each spark STARTS at the badge rim (startR) and flies
       // OUTWARD — never piled up on the counter centre (which read as a red disc).
       const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.5;
-      const startR = 17 + Math.random() * 6;
+      const startR = rimRadius + Math.random() * 6;
       const endR = startR + 28 + Math.random() * 40;
       const ux = Math.cos(angle), uy = Math.sin(angle);
       const wob = (Math.random() - 0.5) * 16;   // slight sideways wiggle

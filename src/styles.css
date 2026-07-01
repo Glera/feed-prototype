@@ -1064,9 +1064,9 @@ body {
 }
 
 .star-flight--collect {
-  z-index: 2600;
-  /* Scale around the true centre so the shrinking star lands dead-centre on the
-     player avatar (the flight keyframes target the badge centre). */
+  z-index: 1185; /* above game/collect cover, below HUD so it tucks into the level badge */
+  /* Scale around the true centre so the shrinking star can absorb into the
+     badge rim without sitting over the level number. */
   transform-origin: 50% 50%;
 }
 
