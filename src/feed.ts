@@ -41,7 +41,7 @@ const WARM_NEXT_CALM_FRAME_MS = 24;
 const WARM_NEXT_CALM_FRAMES = 8;
 const WARM_NEXT_IDLE_MIN_MS = 3;
 const LEVEL_PROGRESS_MS = 340;
-const STARS_PER_LEVEL = 15;   // a win drops 1–5 stars, so a level needs several wins
+const STARS_PER_LEVEL = 5;    // one won mechanic = one star; level up every 5 stars
 // Merge-coin-style star credit timing (scatter → pause → fly to the counter).
 const REWARD_SCATTER_MS = 240;
 const REWARD_PAUSE_MS = 140;
@@ -97,7 +97,7 @@ export class Feed {
   private slots: HTMLElement[] = [];
   private games: HTMLElement[] = [];
   private rewardEls: HTMLElement[] = [];
-  private rewardStars: number[] = [];   // current 1–5 reward per frame, re-rolled each appearance
+  private rewardStars: number[] = [];   // current reward per frame; swipe feed awards one star per win
   private gutters: HTMLElement[] = [];
   private stateEls: HTMLElement[] = [];
   private autoplayEls: HTMLElement[] = [];
@@ -300,8 +300,7 @@ export class Feed {
       label.textContent = p.id;
       game.appendChild(label);
 
-      // Reward badge (top-left): the 1–5 stars this mechanic awards on a win. Re-rolled
-      // (rollReward) each time the mechanic is (re)mounted, so a repeat shows a new count.
+      // Reward badge (top-left): the single star this mechanic awards on a win.
       const reward = document.createElement('div');
       reward.className = 'game__reward';
       game.appendChild(reward);
@@ -729,7 +728,7 @@ export class Feed {
 
   private mount(i: number) {
     if (this.frames.has(i)) return;
-    this.rollReward(i);                 // fresh random reward each appearance
+    this.rollReward(i);
     this.resetFrameReadiness(i);
     this.games[i].classList.add('game--loading');
     this.games[i].classList.remove('game--ready');
@@ -2069,15 +2068,15 @@ export class Feed {
     return btn;
   }
 
-  // Current star reward (1–5) for this frame's CURRENT appearance.
+  // Current star reward for this frame's CURRENT appearance.
   private rewardStarsFor(i: number): number {
     if (!this.rewardStars[i]) this.rollReward(i);
     return this.rewardStars[i];
   }
 
-  // Roll a fresh random 1–5 reward for this frame and refresh its top-left badge.
+  // One won mechanic awards exactly one star.
   private rollReward(i: number): void {
-    this.rewardStars[i] = 1 + Math.floor(Math.random() * 5);
+    this.rewardStars[i] = 1;
     const el = this.rewardEls[i];
     if (el) el.innerHTML = '<span class="game__reward-star">★</span>'.repeat(this.rewardStars[i]);
   }
@@ -2279,7 +2278,7 @@ export class Feed {
     return nextLevel > currentLevel;
   }
 
-  // Credit `count` stars (1–5) with the merge-coin effect: each star SCATTERS out from
+  // Credit `count` stars with the merge-coin effect: each star SCATTERS out from
   // the win star, holds, then FLIES to the level counter (staggered). Each landing bumps
   // the counter + bursts embers; onDone fires after the last lands.
   private playRewardStarCollect(source: HTMLElement | null, count: number, onDone: () => void) {
@@ -2513,7 +2512,7 @@ export class Feed {
   private finishStarReward(i: number): boolean {
     const prev = this.totalStars;
     const prevLevel = Math.floor(prev / this.starsPerLevel) + 1;
-    this.totalStars = prev + this.rewardStarsFor(i);   // 1–5 stars per win
+    this.totalStars = prev + this.rewardStarsFor(i);
     const nextLevel = Math.floor(this.totalStars / this.starsPerLevel) + 1;
 
     if (nextLevel > prevLevel) {

@@ -217,7 +217,7 @@ body {
 }
 .game__label--show { opacity: 1; }
 
-/* Reward badge (top-left): the 1–5 stars this mechanic awards on a win. Hidden until
+/* Reward badge (top-left): the single star this mechanic awards on a win. Hidden until
    the live mechanic/autoplay is up (not during init), like the reel chrome. */
 .game__reward {
   position: absolute;
