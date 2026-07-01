@@ -1065,8 +1065,7 @@ body {
 
 .star-flight--collect {
   z-index: 2660; /* above HUD/counter and collect particles so the impact reads clearly */
-  /* Scale around the true centre so the shrinking star can absorb into the
-     badge rim without sitting over the level number. */
+  /* Scale around the true centre so the collect hit lands over the level badge. */
   transform-origin: 50% 50%;
 }
 
