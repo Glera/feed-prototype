@@ -2074,9 +2074,9 @@ export class Feed {
     return this.rewardStars[i];
   }
 
-  // One won mechanic awards exactly one star.
+  // A won mechanic awards a RANDOM 1–5 stars (re-rolled fresh each appearance).
   private rollReward(i: number): void {
-    this.rewardStars[i] = 1;
+    this.rewardStars[i] = 1 + Math.floor(Math.random() * 5);
     const el = this.rewardEls[i];
     if (el) el.innerHTML = '<span class="game__reward-star">★</span>'.repeat(this.rewardStars[i]);
   }
@@ -2321,14 +2321,11 @@ export class Feed {
     const holdOff = (REWARD_SCATTER_MS + REWARD_PAUSE_MS) / total;
     const xy = (x: number, y: number, scale = 1) =>
       `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0) scale(${scale})`;
-    const approachDx = badgeX - startX;
-    const approachDy = badgeY - startY;
-    const approachLen = Math.max(1, Math.hypot(approachDx, approachDy));
-    const approachUx = approachDx / approachLen;
-    const approachUy = approachDy / approachLen;
-    // Hit the level badge itself. The previous rim stop looked like the star
-    // disappeared before touching the counter, especially on small screens.
-    const stopBeforeCore = Math.min(badgeRadius * 0.16, flySz * 0.1);
+    // EXACT counter point for every star — same target, no per-star spread, so the
+    // series reads as clean repeated hits on the counter (like the merge-coin credit),
+    // not a caterpillar. Removal is immediate on arrival (see `land` below).
+    const landX = badgeX;
+    const landY = badgeY;
     for (let ci = 0; ci < n; ci++) {
       const el = document.createElement('div');
       el.className = 'star-flight star-flight--collect';
@@ -2344,10 +2341,6 @@ export class Feed {
       const scatter = sz * 0.4 + Math.random() * sz * 0.4;
       const scX = startX + Math.cos(ang) * scatter;
       const scY = startY + Math.sin(ang) * scatter;
-      // Land over the level badge/counter. All stars use the same hit point:
-      // spreading them sideways plus a post-impact hold read as a caterpillar.
-      const landX = badgeX - approachUx * stopBeforeCore;
-      const landY = badgeY - approachUy * stopBeforeCore;
 
       let impacted = false;
       const impact = () => {
