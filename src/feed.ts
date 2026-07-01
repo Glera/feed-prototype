@@ -872,9 +872,14 @@ export class Feed {
 
   private canRevealFrame(i: number): boolean {
     if (!this.shouldPauseFrame(i)) return true;
-    // A warm or incoming page is paused on purpose, but it is safe to remove the
-    // spinner while it is off-screen/settling so the eventual swipe is seamless.
-    return this.warmIndex === i || this.liveHold.has(i);
+    // The ON-SCREEN frame must always drop its spinner, even when it's paused/
+    // frozen — this is the fix for the backward-swipe "stuck on a dark preloader"
+    // bug: swiping back to a mechanic already earned/failed this cycle re-mounts
+    // it, but `shouldPauseFrame` is true for those frames, so the spinner never
+    // cleared. A paused frame just shows its frozen content — always better than
+    // an endless spinner. (Warm/incoming pages are also safe to de-spinner while
+    // off-screen so the eventual swipe is seamless.)
+    return i === this.realIndex() || this.warmIndex === i || this.liveHold.has(i);
   }
 
   private playableApi(i: number): PlayableHostApi | null {
