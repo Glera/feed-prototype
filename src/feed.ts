@@ -386,18 +386,20 @@ export class Feed {
   // paths are unavailable. Tap-to-select-all; close button dismisses.
   private showPerfReportSheet(text: string) {
     const wrap = document.createElement('div');
-    wrap.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,0.88);display:flex;flex-direction:column;padding:12px;gap:8px;';
+    // Safe-area padding + controls at the BOTTOM — the top edge hides under
+    // the notch/status bar where taps don't register.
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,0.88);display:flex;flex-direction:column;gap:8px;padding:calc(env(safe-area-inset-top, 0px) + 12px) 12px calc(env(safe-area-inset-bottom, 0px) + 12px);';
     const close = document.createElement('button');
     close.textContent = 'close';
-    close.style.cssText = 'align-self:flex-end;background:#c33;border:0;border-radius:4px;color:#fff;font:bold 13px monospace;padding:6px 14px;';
+    close.style.cssText = 'align-self:flex-start;background:#c33;border:0;border-radius:6px;color:#fff;font:bold 14px monospace;padding:10px 22px;';
     close.addEventListener('click', () => wrap.remove());
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.readOnly = true;
     ta.style.cssText = 'flex:1;background:#111;color:#9f9;font:11px/1.4 monospace;border:1px solid #444;border-radius:6px;padding:8px;white-space:pre;resize:none;';
     ta.addEventListener('focus', () => ta.select());
-    wrap.appendChild(close);
     wrap.appendChild(ta);
+    wrap.appendChild(close);
     document.body.appendChild(wrap);
     ta.focus();
     ta.select();
@@ -421,17 +423,18 @@ export class Feed {
     if (!this.perfDebug) return;
     if (!this.perfOverlayEl) {
       const el = document.createElement('div');
-      // pointer-events:none on the panel so it never eats game taps; the copy
-      // button re-enables them for itself only.
+      // pointer-events:none on the panel so it never eats game taps. The copy
+      // button lives at the BOTTOM-left as its own fixed element — the top of
+      // the screen sits under the notch/status bar where taps don't land.
       el.style.cssText = 'position:fixed;left:4px;top:4px;z-index:99999;background:rgba(0,0,0,0.72);color:#9f9;font:10px/1.5 monospace;padding:6px 8px;pointer-events:none;white-space:pre-wrap;overflow-wrap:anywhere;max-width:92vw;overflow:hidden;border-radius:6px;';
       const btn = document.createElement('button');
       btn.textContent = 'copy';
-      btn.style.cssText = 'pointer-events:auto;display:block;margin:0 0 4px;background:#1c4;border:0;border-radius:4px;color:#fff;font:bold 11px monospace;padding:3px 10px;';
+      btn.style.cssText = 'position:fixed;left:8px;bottom:calc(env(safe-area-inset-bottom, 0px) + 72px);z-index:99999;pointer-events:auto;background:#1c4;border:0;border-radius:6px;color:#fff;font:bold 13px monospace;padding:8px 16px;box-shadow:0 2px 8px rgba(0,0,0,0.4);';
       btn.addEventListener('click', () => this.copyPerfReport(btn));
       const txt = document.createElement('div');
-      el.appendChild(btn);
       el.appendChild(txt);
       document.body.appendChild(el);
+      document.body.appendChild(btn);
       this.perfOverlayEl = el;
       this.perfOverlayTextEl = txt;
     }
