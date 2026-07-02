@@ -1,5 +1,8 @@
 import { PLAYABLES, playableUrl, type Playable } from './playables';
 
+// Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
+declare const __PLATFORM_VERSION__: string;
+
 /**
  * Infinite vertical feed pager (Instagram-Reels / TikTok style) over real playables.
  *
@@ -454,6 +457,16 @@ export class Feed {
     next.addEventListener('pointerdown', (e) => e.stopPropagation());
     next.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(); });
     bar.appendChild(next);
+    // Platform build stamp, bottom-left of the bar — so it's clear which platform
+    // build is live (mechanics carry their own badge in their bottom-left corner).
+    const ver = document.createElement('div');
+    ver.className = 'feed-bar__version';
+    const stamp = (typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev').slice(5);  // "MM-DD HH:MM"
+    ver.textContent = `platform · ${stamp}`;
+    ver.style.cssText = 'position:absolute;left:10px;bottom:calc(env(safe-area-inset-bottom,0px) + 6px);' +
+      "font:600 10px/1.2 -apple-system,system-ui,sans-serif;color:rgba(255,255,255,0.62);" +
+      'letter-spacing:0.2px;pointer-events:none;white-space:nowrap;';
+    bar.appendChild(ver);
     this.feedEl.appendChild(bar);
   }
 
@@ -1770,10 +1783,19 @@ export class Feed {
           this.collectReward(rewardIndex, null);
           this.animateLevelUpPageIn();
         } else {
-          // INSTANT swipe: start the slide to the next game NOW and credit the stars
-          // in parallel (idempotent, never lost) — the gesture must not wait for the
-          // star-collect animation. No freeze/cover; the counter just bumps as we go.
-          this.creditPendingRewardImmediate(rewardIndex);
+          // INSTANT swipe: start the slide to the next game NOW, and fly the earned
+          // stars into the counter IN PARALLEL. playRewardStarCollect animates CLONES
+          // on the fixed viewport layer (not the sliding page), so the flight plays
+          // out fully even as the won page leaves — gesture reacts immediately, and
+          // the star-collect animation still runs. Credit lands with the stars
+          // (idempotent — never lost). No freeze/cover.
+          const state = this.stateEls[rewardIndex];
+          const units = state ? Array.from(state.querySelectorAll<HTMLElement>('.reward__star-unit')) : [];
+          this.stopRewardSparks(rewardIndex);
+          this.playRewardStarCollect(units, () => this.creditPendingRewardImmediate(rewardIndex));
+          // Hide the row on the departing page so only the flying clones show (else the
+          // still-visible row rides the slide away before its clones launch).
+          units.forEach((u) => { u.style.visibility = 'hidden'; });
           this.slideToNext(rewardIndex, commitBasePos + 1);
         }
         return;

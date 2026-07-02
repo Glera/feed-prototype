@@ -44,6 +44,11 @@ function servePlayables(): Plugin {
 export default defineConfig({
   base: './',
   plugins: [servePlayables(), viteSingleFile()],
+  define: {
+    // Build stamp shown bottom-left on the feed bar so it's clear which platform
+    // build is live. "YYYY-MM-DD HH:MM" (UTC), sliced to "MM-DD HH:MM" for display.
+    __PLATFORM_VERSION__: JSON.stringify(new Date().toISOString().slice(0, 16).replace('T', ' ')),
+  },
   build: {
     target: 'es2018',
     cssCodeSplit: false,
