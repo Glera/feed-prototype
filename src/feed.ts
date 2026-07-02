@@ -2790,7 +2790,7 @@ export class Feed {
 
       const launch = () => {
         if (!unit.animate) {
-          unit.style.transform = `translate3d(${toX}px, ${toY}px, 0) scale(1, 1)`;
+          unit.style.transform = `translate3d(${toX}px, ${toY}px, 0) scale(0.5, 0.5)`;
           window.setTimeout(land, REWARD_BOUNCE_MS);
           return;
         }
@@ -2798,8 +2798,11 @@ export class Feed {
           { transform: 'translate3d(0,0,0) scale(1,1)', easing: 'cubic-bezier(0.3,0,0.5,1)' },
           { transform: 'translate3d(0,0,0) scale(1.34,0.66)', offset: 0.15, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },        // squash
           { transform: `translate3d(0,${-jump}px,0) scale(0.78,1.26)`, offset: 0.30, easing: 'cubic-bezier(0.33,0,0.3,1)' },  // jump — stretch tall
-          { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, offset: 0.44, easing: 'cubic-bezier(0.4,0,0.3,1)' },         // settle back to ORIGINAL size at the apex
-          { transform: `translate3d(${toX}px,${toY}px,0) scale(1,1)`, opacity: 1 },                                          // fly to the counter at 100% (no stretch)
+          // settle back to ORIGINAL size at the apex, then ACCELERATE into the counter
+          // (ease-IN, no trailing slow-down) so it lands at full speed and is removed
+          // crisply on impact — and shrinks to HALF size over the flight.
+          { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, offset: 0.44, easing: 'cubic-bezier(0.55,0.055,0.675,0.19)' },
+          { transform: `translate3d(${toX}px,${toY}px,0) scale(0.5,0.5)`, opacity: 1 },
         ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' });
         anim.addEventListener('finish', land, { once: true });
       };
