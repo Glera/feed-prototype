@@ -901,6 +901,31 @@ body {
   100% { transform: translateY(-11px); opacity: 0; }
 }
 
+/* Big green "restart this level" CTA on the win screen (stub for future
+   per-mechanic levels). Prominent, sits between the stars and the round actions.
+   Only a click on it restarts; tap-elsewhere / swipe still go to the next game. */
+.reward__replay-level {
+  z-index: 3;
+  margin-top: -4px;
+  padding: 14px 34px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #62d46e 0%, #33b24a 100%);
+  box-shadow: 0 6px 0 #1f8a38, 0 12px 24px rgba(40, 180, 74, 0.42);
+  color: #fff;
+  font-size: 19px;
+  font-weight: 900;
+  letter-spacing: 0.3px;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: transform 0.06s ease, box-shadow 0.06s ease;
+}
+.reward__replay-level:active {
+  transform: translateY(4px);
+  box-shadow: 0 2px 0 #1f8a38, 0 6px 14px rgba(40, 180, 74, 0.42);
+}
+
 .reward__star {
   width: 128px;
   height: 128px;

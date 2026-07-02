@@ -2075,6 +2075,37 @@ export class Feed {
     const reward = state.querySelector('.reward');
     const toast = reward?.querySelector('.reward__toast') ?? null;
     reward?.insertBefore(hint, toast);
+
+    // Big green "+1 уровень" CTA — restarts THIS level (stub for future per-mechanic
+    // levels). Only a CLICK on the button restarts; a tap elsewhere / a swipe still
+    // advance to the next game (so we stopPropagation to keep the gesture off the
+    // swipe surface). Bank the earned stars first so the recent exit-crediting isn't
+    // bypassed on this path either.
+    const replayLevel = document.createElement('button');
+    replayLevel.type = 'button';
+    replayLevel.className = 'reward__replay-level';
+    replayLevel.textContent = '+1 уровень';
+    const stop = (e: Event) => e.stopPropagation();
+    replayLevel.addEventListener('pointerdown', stop);
+    replayLevel.addEventListener('pointerup', stop);
+    replayLevel.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.creditPendingRewardImmediate(i);   // don't lose the stars earned this win
+      // Restart the level IN PLACE for manual play — instant (no preloader flash,
+      // no intro drop, since the player is already past the first view).
+      this.manualRuns.add(i);
+      const swipe = this.playableApi(i)?.swipe;
+      if (swipe?.hasRestart) {
+        try { swipe.restart({ instant: true }); } catch { /* cross-origin */ }
+      } else {
+        this.reloadFrame(i);
+      }
+      this.updateMechanicState(i);            // reward claimed → hide the win overlay
+      this.applyActiveStates();
+    });
+    const actions = reward?.querySelector('.reward__actions') ?? null;
+    reward?.insertBefore(replayLevel, actions);
+
     this.startRewardSparks(i, row);
   }
 
