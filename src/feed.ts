@@ -1784,10 +1784,10 @@ export class Feed {
           this.animateLevelUpPageIn();
         } else {
           // INSTANT swipe: start the slide to the next game NOW, and fly the earned
-          // stars into the counter IN PARALLEL. playRewardStarCollect animates CLONES
-          // on the fixed viewport layer (not the sliding page), so the flight plays
-          // out fully even as the won page leaves — gesture reacts immediately, and
-          // the star-collect animation still runs. Credit lands with the stars
+          // stars into the counter IN PARALLEL (flyRewardStarsInPlace lifts the real
+          // stars onto the fixed viewport layer, not the sliding page, so the flight
+          // plays out fully even as the won page leaves — gesture reacts immediately,
+          // the collect animation still runs). Credit lands with the stars
           // (idempotent — never lost). No freeze/cover.
           const state = this.stateEls[rewardIndex];
           const units = state ? Array.from(state.querySelectorAll<HTMLElement>('.reward__star-unit')) : [];
@@ -2116,7 +2116,7 @@ export class Feed {
 
   private renderRewardState(i: number, state: HTMLElement) {
     // Show as many stars as were earned this win, lined up in a ROW — they peel
-    // off one-by-one on tap (see collectReward → playRewardStarCollect).
+    // off one-by-one on tap (see flyRewardStarsInPlace).
     const row = this.buildRewardStarRow(this.rewardStarsFor(i));
     this.renderResultState(i, state, row);
     // Readable affordance — placed directly UNDER the action buttons (which sit under
@@ -2494,7 +2494,9 @@ export class Feed {
       }
     };
 
-    this.playRewardStarCollect(units, afterCollect);
+    // Reuse the SAME star elements (no clones / no disappear-reappear) here too —
+    // the level-up screen owns the transition, but the collect flight is identical.
+    this.flyRewardStarsInPlace(units, afterCollect);
     return true;
   }
 
@@ -2504,88 +2506,12 @@ export class Feed {
     return nextLevel > currentLevel;
   }
 
-  // Peel the earned stars off the win-screen ROW one-by-one and BOUNCE each to the
-  // level counter: squash (вжалась с расширением) → jump (прыжок) → fly (полет) →
-  // impact at the counter (counter squash) with simultaneous removal + particles.
-  // No scatter/decay phase — each star flies straight from its row slot. Runs on
-  // the compositor (WAAPI) so a main-thread spike can't stutter it.
-  private playRewardStarCollect(units: HTMLElement[], onDone: () => void) {
-    const vp = this.viewport.getBoundingClientRect();
-    const badge = this.levelBadgeEl?.getBoundingClientRect();
-    const badgeX = badge ? badge.left - vp.left + badge.width / 2 : 40;
-    const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
-    const badgeRadius = badge ? Math.min(badge.width, badge.height) / 2 : 28;
-    const n = units.length;
-
-    // Level-up-style confetti rains down evenly across the whole screen.
-    this.burstStarConfetti();
-
-    if (n === 0) { onDone(); return; }
-
-    // Ring grows one star's worth per IMPACT. `need` is THIS level's requirement
-    // (5,6,7…10); clamp at 1 — a level-up mid-batch is owned by finishStarReward.
-    const level = this.levelForStars(this.totalStars);
-    const need = this.starsForLevel(level);
-    const base = this.starsIntoLevel(this.totalStars);
-    let landed = 0;
-    const onLand = () => {
-      this.burstRewardCollectParticles(badgeX, badgeY, Math.max(22, badgeRadius - 2));
-      this.bumpLevelBadge();                                   // counter "absorb" squash
-      landed++;
-      this.setLevelProgress(Math.min(1, (base + landed) / need), true, RING_STEP_MS);
-      if (landed >= n) onDone();
-    };
-
-    units.forEach((unit, k) => {
-      const r = unit.getBoundingClientRect();
-      const sx = r.left - vp.left + r.width / 2;
-      const sy = r.top - vp.top + r.height / 2;
-      const flySz = Math.max(34, Math.round(Math.max(r.width, r.height)));
-      const T = (x: number, y: number, sX = 1, sY = 1) =>
-        `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0) scale(${sX}, ${sY})`;
-
-      const el = document.createElement('div');
-      el.className = 'star-flight star-flight--collect';
-      el.textContent = '★';
-      el.style.width = `${flySz}px`;
-      el.style.height = `${flySz}px`;
-      el.style.fontSize = `${Math.round(flySz * 0.92)}px`;
-      el.style.transformOrigin = '50% 100%';   // squash/leap anchored to the base
-      el.style.transform = T(sx, sy);
-      el.style.visibility = 'hidden';           // shown when it's this star's turn
-      el.style.willChange = 'transform';
-      this.viewport.appendChild(el);
-
-      const jump = flySz * 0.55;
-      let done = false;
-      const land = () => { if (done) return; done = true; onLand(); el.remove(); };
-
-      const launch = () => {
-        unit.style.visibility = 'hidden';       // the row star "срывается"
-        el.style.visibility = 'visible';
-        if (!el.animate) {                      // ancient-browser fallback
-          el.style.transform = T(badgeX, badgeY, 0.92, 0.92);
-          window.setTimeout(land, REWARD_BOUNCE_MS);
-          return;
-        }
-        const anim = el.animate([
-          { transform: T(sx, sy, 1, 1), easing: 'cubic-bezier(0.3,0,0.5,1)' },                              // rest on the row
-          { transform: T(sx, sy, 1.34, 0.66), offset: 0.17, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },        // squash — вжалась с расширением
-          { transform: T(sx, sy - jump, 0.78, 1.26), offset: 0.36, easing: 'cubic-bezier(0.45,0,0.7,0.5)' },// jump + stretch — прыжок
-          { transform: T(badgeX, badgeY, 0.9, 0.9), opacity: 1 },                                           // fly to counter — полет
-        ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' });
-        anim.addEventListener('finish', land, { once: true });
-      };
-      window.setTimeout(launch, k * REWARD_PEEL_STAGGER_MS);
-    });
-  }
-
-  // Same as playRewardStarCollect but reuses the ACTUAL star elements instead of
-  // clones: it lifts each real `.reward__star-unit` onto the fixed viewport, pinned
-  // exactly where it sat (no clone → no visible disappear/appear), where it waits
-  // and then hops to the counter one-by-one. Used on the win-screen SWIPE, where the
-  // won page slides away — the lifted stars stay put on the fixed layer and animate
-  // independently of the slide.
+  // Fly the earned stars into the level counter: lift each REAL `.reward__star-unit`
+  // onto the fixed viewport, pinned exactly where it sat (no clone → no visible
+  // disappear/appear), where it waits and then hops to the counter one-by-one
+  // (squash → jump → fly, WAAPI/compositor). The ring grows one star's worth per
+  // impact. Used by BOTH the win-screen swipe (won page slides away — the lifted
+  // stars animate independently on the fixed layer) and the level-up collect.
   private flyRewardStarsInPlace(units: HTMLElement[], onDone: () => void) {
     const vp = this.viewport.getBoundingClientRect();
     const badge = this.levelBadgeEl?.getBoundingClientRect();
@@ -2844,8 +2770,8 @@ export class Feed {
       return true;
     } else {
       this.updateHud(true);
-      // No bump here — the single counter pulse fires in playRewardStarCollect's
-      // finish (exactly when the star arrives/is removed), so it isn't duplicated.
+      // No bump here — the single counter pulse fires in flyRewardStarsInPlace's
+      // onLand (exactly when the star arrives/is removed), so it isn't duplicated.
       return false;
     }
   }
