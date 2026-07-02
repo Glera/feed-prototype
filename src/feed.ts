@@ -2062,6 +2062,36 @@ export class Feed {
     this.applyActiveStates();
   }
 
+  // "+1 уровень": bank the current win's stars, then restart the level IN PLACE for
+  // a fresh manual run. Resets the win-cycle so COMPLETING the replayed level earns
+  // AND credits a new reward — otherwise `earnedThisCycle` short-circuits handleWin
+  // (no new reward shows) and the unchanged in-place `runId` makes `completedRunIds`
+  // swallow the replayed completion.
+  private restartLevelInPlace(i: number) {
+    this.creditPendingRewardImmediate(i);      // don't lose the stars earned this win (idempotent)
+    this.earnedThisCycle.delete(i);
+    this.failedThisCycle.delete(i);
+    this.claimedStarRewards.delete(i);
+    this.rewardStars[i] = 0;                    // re-roll a fresh reward on the next win
+    this.manualRuns.add(i);
+    const swipe = this.playableApi(i)?.swipe;
+    if (swipe?.hasRestart) {
+      // In-place restart keeps the frame → give it a fresh run id so the next
+      // completion isn't deduped away by completedRunIds.
+      const frame = this.frames.get(i);
+      if (frame) {
+        const oldRun = frame.dataset.runId;
+        if (oldRun) this.completedRunIds.delete(oldRun);
+        frame.dataset.runId = String(++this.runSeq);
+      }
+      try { swipe.restart({ instant: true }); } catch { /* cross-origin */ }
+    } else {
+      this.reloadFrame(i);                      // reload assigns its own fresh run id
+    }
+    this.updateMechanicState(i);                // reward claimed → hide the win overlay
+    this.applyActiveStates();
+  }
+
   private renderRewardState(i: number, state: HTMLElement) {
     // Show as many stars as were earned this win, lined up in a ROW — they peel
     // off one-by-one on tap (see collectReward → playRewardStarCollect).
@@ -2096,18 +2126,7 @@ export class Feed {
     replayLevel.addEventListener('pointerup', stop);
     replayLevel.addEventListener('click', (e) => {
       e.stopPropagation();
-      this.creditPendingRewardImmediate(i);   // don't lose the stars earned this win
-      // Restart the level IN PLACE for manual play — instant (no preloader flash,
-      // no intro drop, since the player is already past the first view).
-      this.manualRuns.add(i);
-      const swipe = this.playableApi(i)?.swipe;
-      if (swipe?.hasRestart) {
-        try { swipe.restart({ instant: true }); } catch { /* cross-origin */ }
-      } else {
-        this.reloadFrame(i);
-      }
-      this.updateMechanicState(i);            // reward claimed → hide the win overlay
-      this.applyActiveStates();
+      this.restartLevelInPlace(i);            // credit this win + fresh re-earnable replay
     });
     const actions = reward?.querySelector('.reward__actions') ?? null;
     reward?.insertBefore(replayLevel, actions);
