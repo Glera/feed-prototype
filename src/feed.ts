@@ -269,10 +269,16 @@ export class Feed {
   private bootTimingsLog = new Map<string, Record<string, unknown>>();
   private longTaskLog: { at: number; dur: number; warmId: string | null; src: string }[] = [];
   private perfOverlayEl: HTMLElement | null = null;
+  private perfOverlayTextEl: HTMLElement | null = null;
   private perfDebug = new URLSearchParams(location.search).get('perf') === '1';
+  // WebKit has no Long Tasks API — on iOS the counter would read as a
+  // reassuring 0 forever. Track support so the overlay says "n/a" instead.
+  private longTaskSupported = false;
 
   private initPerfTelemetry() {
     try {
+      this.longTaskSupported =
+        (PerformanceObserver as unknown as { supportedEntryTypes?: string[] }).supportedEntryTypes?.includes('longtask') ?? false;
       const obs = new PerformanceObserver((list) => {
         for (const e of list.getEntries()) {
           if (e.duration < 50) continue;
@@ -301,24 +307,113 @@ export class Feed {
     this.updatePerfOverlay();
   }
 
+  // Full untruncated report — what the overlay's copy button puts on the
+  // clipboard (the overlay itself clips long lines on narrow screens).
+  private perfReport(): string {
+    const warmTasks = this.longTaskLog.filter((t) => t.warmId);
+    const worst = warmTasks.reduce((m, t) => Math.max(m, t.dur), 0);
+    const lines: string[] = [
+      `[perf] ${new Date().toISOString()}`,
+      navigator.userAgent,
+      this.longTaskSupported
+        ? `long>50ms: ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`
+        : 'long tasks: n/a (no Long Tasks API — WebKit/iOS)',
+      '',
+      '── boot timings per mechanic ──',
+    ];
+    for (const [id, t] of this.bootTimingsLog) lines.push(`${id}: ${JSON.stringify(t)}`);
+    if (this.longTaskLog.length) {
+      lines.push('', '── long tasks (>50ms) ──');
+      for (const t of this.longTaskLog) {
+        lines.push(`at ${t.at}ms: ${t.dur}ms src=${t.src}${t.warmId ? ` DURING WARM of ${t.warmId}` : ''}`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  private copyPerfReport(btn: HTMLElement) {
+    const text = this.perfReport();
+    const done = (ok: boolean) => {
+      btn.textContent = ok ? 'copied ✓' : 'copy';
+      window.setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+      // Clipboard blocked (Telegram/older webviews) — show the report in a
+      // selectable textarea so it can be copied by hand. Never dead-ends.
+      if (!ok) this.showPerfReportSheet(text);
+    };
+    // Clipboard API needs a secure context + user gesture (we're in one — this
+    // is a tap handler). Legacy execCommand fallback for older webviews.
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(() => done(true), () => done(this.copyViaTextarea(text)));
+    } else {
+      done(this.copyViaTextarea(text));
+    }
+  }
+
+  // Fullscreen selectable report — manual copy fallback when both clipboard
+  // paths are unavailable. Tap-to-select-all; close button dismisses.
+  private showPerfReportSheet(text: string) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,0.88);display:flex;flex-direction:column;padding:12px;gap:8px;';
+    const close = document.createElement('button');
+    close.textContent = 'close';
+    close.style.cssText = 'align-self:flex-end;background:#c33;border:0;border-radius:4px;color:#fff;font:bold 13px monospace;padding:6px 14px;';
+    close.addEventListener('click', () => wrap.remove());
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.readOnly = true;
+    ta.style.cssText = 'flex:1;background:#111;color:#9f9;font:11px/1.4 monospace;border:1px solid #444;border-radius:6px;padding:8px;white-space:pre;resize:none;';
+    ta.addEventListener('focus', () => ta.select());
+    wrap.appendChild(close);
+    wrap.appendChild(ta);
+    document.body.appendChild(wrap);
+    ta.focus();
+    ta.select();
+  }
+
+  private copyViaTextarea(text: string): boolean {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch { return false; }
+  }
+
   private updatePerfOverlay() {
     if (!this.perfDebug) return;
     if (!this.perfOverlayEl) {
       const el = document.createElement('div');
-      el.style.cssText = 'position:fixed;left:4px;top:4px;z-index:99999;background:rgba(0,0,0,0.72);color:#9f9;font:10px/1.5 monospace;padding:6px 8px;pointer-events:none;white-space:pre;max-width:92vw;overflow:hidden;border-radius:6px;';
+      // pointer-events:none on the panel so it never eats game taps; the copy
+      // button re-enables them for itself only.
+      el.style.cssText = 'position:fixed;left:4px;top:4px;z-index:99999;background:rgba(0,0,0,0.72);color:#9f9;font:10px/1.5 monospace;padding:6px 8px;pointer-events:none;white-space:pre-wrap;overflow-wrap:anywhere;max-width:92vw;overflow:hidden;border-radius:6px;';
+      const btn = document.createElement('button');
+      btn.textContent = 'copy';
+      btn.style.cssText = 'pointer-events:auto;display:block;margin:0 0 4px;background:#1c4;border:0;border-radius:4px;color:#fff;font:bold 11px monospace;padding:3px 10px;';
+      btn.addEventListener('click', () => this.copyPerfReport(btn));
+      const txt = document.createElement('div');
+      el.appendChild(btn);
+      el.appendChild(txt);
       document.body.appendChild(el);
       this.perfOverlayEl = el;
+      this.perfOverlayTextEl = txt;
     }
     const warmTasks = this.longTaskLog.filter((t) => t.warmId);
     const worst = warmTasks.reduce((m, t) => Math.max(m, t.dur), 0);
     const lines: string[] = [
-      `long>50ms: ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`,
+      this.longTaskSupported
+        ? `long>50ms: ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`
+        : 'long tasks: n/a (WebKit) — стадии ниже, longtask мерить на Android',
     ];
     for (const [id, t] of this.bootTimingsLog) {
       const net = typeof t.responseEndAt === 'number' ? t.responseEndAt : '?';
       lines.push(`${id}: net→${net} eval→${t.evalDoneAt ?? '?'} mount ${t.mountMs ?? '?'}ms inter ${t.onInteractiveMs ?? '—'}ms`);
     }
-    this.perfOverlayEl.textContent = lines.slice(0, 14).join('\n');
+    if (this.perfOverlayTextEl) this.perfOverlayTextEl.textContent = lines.slice(0, 14).join('\n');
   }
 
   // Camcorder-style running timecode on the video reel. Counts up while a mechanic
@@ -2884,10 +2979,14 @@ export class Feed {
     }
     this.updateLive();
     this.applyActiveStates();
+    // Clear the level-up page (→ state 'idle') BEFORE scheduling the warm. Otherwise
+    // desiredWarmIndex() short-circuits on `levelUpPageState !== 'idle'` and the next
+    // mechanic never gets pre-warmed — it cold-loads (dark preloader) on the next
+    // swipe. That's the "level-up breaks the next mechanic's warming" bug.
+    if (leavingLevelUp) this.removeLevelUpPage();
     this.scheduleWarmNext();
     this.prefetchReserve();
     this.pumpPrefetchQueue();
-    if (leavingLevelUp) this.removeLevelUpPage();
   }
 
   // ── Paging ───────────────────────────────────────────────────────────────
