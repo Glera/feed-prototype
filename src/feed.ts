@@ -62,7 +62,7 @@ type SwipeApi = {
   openEditor: () => void;
   closeEditor: () => void;
   isEditorOpen: () => boolean;
-  restart: () => void;
+  restart: (opts?: { instant?: boolean }) => void;
 };
 type PlayableHostApi = {
   swipe?: SwipeApi;                  // uniform swipe-platform API (preferred)
@@ -1044,7 +1044,9 @@ export class Feed {
     if (this.restartOnTakeover) {
       const swipe = this.playableApi(i)?.swipe;
       if (swipe?.hasRestart) {
-        try { swipe.restart(); } catch { /* cross-origin */ }
+        // instant: skip the first-time intro entrance (e.g. generator drop-in) —
+        // the player already watched it during autoplay, so form the field ready.
+        try { swipe.restart({ instant: true }); } catch { /* cross-origin */ }
       } else {
         this.reloadFrame(i);
       }
