@@ -279,6 +279,11 @@ export class Feed {
     try {
       this.longTaskSupported =
         (PerformanceObserver as unknown as { supportedEntryTypes?: string[] }).supportedEntryTypes?.includes('longtask') ?? false;
+      // WebKit fallback: no Long Tasks API on iOS, but a main-thread stall is
+      // still observable as a gap between consecutive host rAF callbacks. No
+      // frame attribution — correlate the gap timestamps with the warm window
+      // and the mechanics' boot_timings stages instead.
+      if (!this.longTaskSupported) this.initFrameGapSampler();
       const obs = new PerformanceObserver((list) => {
         for (const e of list.getEntries()) {
           if (e.duration < 50) continue;
@@ -299,6 +304,34 @@ export class Feed {
     } catch { /* longtask API missing (old webview) — boot timings still flow */ }
   }
 
+  // rAF frame-gap sampler — WebKit's substitute for the long-task observer.
+  // A gap ≥100ms between consecutive host rAF callbacks (~6 dropped frames at
+  // 60Hz) means the shared main thread stalled: by a warm iframe boot, the
+  // current mechanic, or the host itself. Entries share longTaskLog with
+  // src='frame-gap'. Gaps spanning a hidden period are discarded (rAF stops
+  // while hidden — that's not a stall).
+  private lastRafT = 0;
+  private initFrameGapSampler() {
+    const FRAME_GAP_MS = 100;
+    const tick = (now: number) => {
+      if (this.lastRafT && !document.hidden) {
+        const gap = now - this.lastRafT;
+        if (gap >= FRAME_GAP_MS) {
+          const warmId = this.warmIndex !== null ? this.playables[this.warmIndex]?.id ?? null : null;
+          const entry = { at: Math.round(now - gap), dur: Math.round(gap), warmId, src: 'frame-gap' };
+          this.longTaskLog.push(entry);
+          if (this.longTaskLog.length > 300) this.longTaskLog.shift();
+          if (warmId) console.warn(`[perf] ${entry.dur}ms frame gap during warm of ${warmId}`);
+          this.updatePerfOverlay();
+        }
+      }
+      this.lastRafT = now;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    document.addEventListener('visibilitychange', () => { this.lastRafT = 0; });
+  }
+
   private handleBootTimings(i: number, data: Record<string, unknown>) {
     const id = this.playables[i]?.id ?? `#${i}`;
     const merged = { ...(this.bootTimingsLog.get(id) ?? {}), ...(data.timings as Record<string, unknown>), stage: data.stage };
@@ -317,7 +350,7 @@ export class Feed {
       navigator.userAgent,
       this.longTaskSupported
         ? `long>50ms: ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`
-        : 'long tasks: n/a (no Long Tasks API — WebKit/iOS)',
+        : `frame-gaps≥100ms (rAF fallback, no Long Tasks API): ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`,
       '',
       '── boot timings per mechanic ──',
     ];
@@ -407,7 +440,7 @@ export class Feed {
     const lines: string[] = [
       this.longTaskSupported
         ? `long>50ms: ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`
-        : 'long tasks: n/a (WebKit) — стадии ниже, longtask мерить на Android',
+        : `gaps≥100ms: ${this.longTaskLog.length} | warm: ${warmTasks.length} | worst: ${worst}ms (rAF)`,
     ];
     for (const [id, t] of this.bootTimingsLog) {
       const net = typeof t.responseEndAt === 'number' ? t.responseEndAt : '?';
