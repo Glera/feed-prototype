@@ -1792,10 +1792,10 @@ export class Feed {
           const state = this.stateEls[rewardIndex];
           const units = state ? Array.from(state.querySelectorAll<HTMLElement>('.reward__star-unit')) : [];
           this.stopRewardSparks(rewardIndex);
-          this.playRewardStarCollect(units, () => this.creditPendingRewardImmediate(rewardIndex));
-          // Hide the row on the departing page so only the flying clones show (else the
-          // still-visible row rides the slide away before its clones launch).
-          units.forEach((u) => { u.style.visibility = 'hidden'; });
+          // Lift the SAME star elements onto the fixed layer (pinned in place) and hop
+          // them to the counter one-by-one — no clones, so nothing visibly disappears
+          // /reappears. They animate independently while the won page slides away.
+          this.flyRewardStarsInPlace(units, () => this.creditPendingRewardImmediate(rewardIndex));
           this.slideToNext(rewardIndex, commitBasePos + 1);
         }
         return;
@@ -2573,6 +2573,80 @@ export class Feed {
           { transform: T(sx, sy, 1.34, 0.66), offset: 0.17, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },        // squash — вжалась с расширением
           { transform: T(sx, sy - jump, 0.78, 1.26), offset: 0.36, easing: 'cubic-bezier(0.45,0,0.7,0.5)' },// jump + stretch — прыжок
           { transform: T(badgeX, badgeY, 0.9, 0.9), opacity: 1 },                                           // fly to counter — полет
+        ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' });
+        anim.addEventListener('finish', land, { once: true });
+      };
+      window.setTimeout(launch, k * REWARD_PEEL_STAGGER_MS);
+    });
+  }
+
+  // Same as playRewardStarCollect but reuses the ACTUAL star elements instead of
+  // clones: it lifts each real `.reward__star-unit` onto the fixed viewport, pinned
+  // exactly where it sat (no clone → no visible disappear/appear), where it waits
+  // and then hops to the counter one-by-one. Used on the win-screen SWIPE, where the
+  // won page slides away — the lifted stars stay put on the fixed layer and animate
+  // independently of the slide.
+  private flyRewardStarsInPlace(units: HTMLElement[], onDone: () => void) {
+    const vp = this.viewport.getBoundingClientRect();
+    const badge = this.levelBadgeEl?.getBoundingClientRect();
+    const badgeX = badge ? badge.left - vp.left + badge.width / 2 : 40;
+    const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
+    const badgeRadius = badge ? Math.min(badge.width, badge.height) / 2 : 28;
+    const n = units.length;
+    this.burstStarConfetti();
+    if (n === 0) { onDone(); return; }
+
+    const level = this.levelForStars(this.totalStars);
+    const need = this.starsForLevel(level);
+    const base = this.starsIntoLevel(this.totalStars);
+    let landed = 0;
+    const onLand = () => {
+      this.burstRewardCollectParticles(badgeX, badgeY, Math.max(22, badgeRadius - 2));
+      this.bumpLevelBadge();
+      landed++;
+      this.setLevelProgress(Math.min(1, (base + landed) / need), true, RING_STEP_MS);
+      if (landed >= n) onDone();
+    };
+
+    // Capture every star's rect BEFORE lifting any — reparenting empties the flex row
+    // and would reflow the rest.
+    const starts = units.map((u) => {
+      const r = u.getBoundingClientRect();
+      return { left: r.left - vp.left, top: r.top - vp.top, w: r.width, h: r.height };
+    });
+
+    units.forEach((unit, k) => {
+      const s = starts[k];
+      // Pin the SAME element on the viewport at its exact spot; keep its natural size.
+      unit.style.position = 'absolute';
+      unit.style.left = `${s.left}px`;
+      unit.style.top = `${s.top}px`;
+      unit.style.margin = '0';
+      unit.style.zIndex = '2660';               // above the sliding pages + HUD (see .star-flight--collect)
+      unit.style.pointerEvents = 'none';
+      unit.style.transformOrigin = '50% 100%';   // squash/leap anchored to the base
+      unit.style.willChange = 'transform';
+      unit.style.transform = 'none';             // sits in place until its turn
+      this.viewport.appendChild(unit);
+
+      // Offset (from the pinned spot) that lands the star's CENTRE on the badge centre.
+      const toX = badgeX - s.left - s.w / 2;
+      const toY = badgeY - s.top - s.h / 2;
+      const jump = Math.max(s.w, s.h) * 0.55;
+      let done = false;
+      const land = () => { if (done) return; done = true; onLand(); unit.remove(); };
+
+      const launch = () => {
+        if (!unit.animate) {
+          unit.style.transform = `translate3d(${toX}px, ${toY}px, 0) scale(0.9, 0.9)`;
+          window.setTimeout(land, REWARD_BOUNCE_MS);
+          return;
+        }
+        const anim = unit.animate([
+          { transform: 'translate3d(0,0,0) scale(1,1)', easing: 'cubic-bezier(0.3,0,0.5,1)' },
+          { transform: 'translate3d(0,0,0) scale(1.34,0.66)', offset: 0.17, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },       // squash
+          { transform: `translate3d(0,${-jump}px,0) scale(0.78,1.26)`, offset: 0.36, easing: 'cubic-bezier(0.45,0,0.7,0.5)' }, // jump
+          { transform: `translate3d(${toX}px,${toY}px,0) scale(0.9,0.9)`, opacity: 1 },                                     // fly to counter
         ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' });
         anim.addEventListener('finish', land, { once: true });
       };
