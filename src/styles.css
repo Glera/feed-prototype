@@ -864,18 +864,41 @@ body {
 }
 
 /* Win-screen affordance — sits in the reward grid flow, directly under the action
-   buttons (which are under the star). Centred by the grid's justify-items: center. */
+   buttons (which are under the star). Centred by the grid's justify-items: center.
+   A soft-swipe chevron rises above the blinking label to cue the swipe gesture. */
 .reward__hint {
   z-index: 3;
   margin-top: -8px;        /* tighten the 22px grid gap a touch under the buttons */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
   text-align: center;
+  pointer-events: none;
+}
+.reward__hint-text {
   font-size: 13px;
   font-weight: 800;
   letter-spacing: 0.2px;
   color: rgba(255, 255, 255, 0.95);
   text-shadow: 0 2px 10px rgba(0, 0, 0, 0.65);
-  pointer-events: none;
   animation: swipehint-blink 2.4s ease-in-out infinite;
+}
+/* The soft-swipe gesture: a chevron that drifts gently upward and fades, on a
+   loop — reads as "swipe up (softly) for the next game", right by the stars. */
+.reward__swipe-cue {
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.95);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.55);
+  animation: soft-swipe-rise 1.5s ease-in-out infinite;
+}
+@keyframes soft-swipe-rise {
+  0%   { transform: translateY(9px);   opacity: 0; }
+  25%  { opacity: 0.95; }
+  70%  { opacity: 0.55; }
+  100% { transform: translateY(-11px); opacity: 0; }
 }
 
 .reward__star {

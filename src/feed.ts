@@ -1189,9 +1189,27 @@ export class Feed {
   private advanceToNext() {
     if (this.dragging) return;
     const base = Math.round(this.pos);
+    // The ✕ and the bottom-bar ▲ leave the win screen WITHOUT the collect gesture,
+    // so credit any earned-but-uncollected stars here — otherwise they'd be lost.
+    this.creditPendingRewardImmediate(this.indexForPos(base));
     this.unlockAudioForCurrentAndNext(this.indexForPos(base));
     this.releaseHeldLevelUp();
     this.goTo(base + 1);
+  }
+
+  // Bank a pending, uncollected reward the moment the win screen is left by a path
+  // that skips the fly-to-counter collect (the ✕ or the bottom-bar ▲). Stars are
+  // earned by SEEING the win screen, not only by the explicit collect — so no win
+  // ever loses its stars. Idempotent and mutually exclusive with the collect path:
+  // `claimedStarRewards`/`pendingStarRewards` gate both, and a collect in flight
+  // (`collectingRewardIndex`) owns the credit itself.
+  private creditPendingRewardImmediate(i: number): void {
+    if (this.collectingRewardIndex === i) return;
+    if (!this.pendingStarRewards.has(i) || this.claimedStarRewards.has(i)) return;
+    this.pendingStarRewards.delete(i);
+    this.claimedStarRewards.add(i);
+    this.totalStars += this.rewardStarsFor(i);
+    this.updateHud(true);   // reflect the new total on the level counter (no level-up ceremony)
   }
 
   private shouldShowAutoplayPreview(i: number, isCurrent: boolean, manual: boolean): boolean {
@@ -2043,9 +2061,15 @@ export class Feed {
     this.renderResultState(i, state, row);
     // Readable affordance — placed directly UNDER the action buttons (which sit under
     // the star row), in the reward grid flow. Both a tap and a swipe collect + advance.
+    // Win-screen affordance = a SOFT-SWIPE gesture cue (a gently rising chevron —
+    // "swipe up for the next game") above the blinking label. The chevron animation
+    // was lost when the per-page swipe gutter became a fixed static bottom bar; this
+    // restores the soft-swipe hint right by the stars.
     const hint = document.createElement('div');
     hint.className = 'reward__hint';
-    hint.textContent = 'tap or swipe for next game';
+    hint.innerHTML =
+      '<span class="reward__swipe-cue" aria-hidden="true">⌃</span>' +
+      '<span class="reward__hint-text">tap or swipe for next game</span>';
     const reward = state.querySelector('.reward');
     const toast = reward?.querySelector('.reward__toast') ?? null;
     reward?.insertBefore(hint, toast);
