@@ -446,18 +446,23 @@ body {
   text-shadow: 0 1px 5px rgba(0, 0, 0, 0.65);
 }
 
-/* Subtle static scanlines — pure CSS, no animation (the "video signal" feel). */
+/* Subtle static scanlines — pure CSS, no animation (the "video signal" feel).
+   NO mix-blend-mode: over the animating game a full-screen blend forces the GPU
+   to re-composite this whole layer every frame for the entire autoplay demo
+   (same battery/heat cost as the backdrop-filter deliberately avoided elsewhere).
+   Plain alpha compositing lets the browser cache this as a static layer. Over the
+   already-dimmed game the darkening is visually identical; alpha nudged 0.06→0.08
+   to match the old multiply darkness. */
 .game__reel-scan {
   position: absolute;
   inset: 0;
   background: repeating-linear-gradient(
     to bottom,
-    rgba(0, 0, 0, 0.06) 0,
-    rgba(0, 0, 0, 0.06) 1px,
+    rgba(0, 0, 0, 0.08) 0,
+    rgba(0, 0, 0, 0.08) 1px,
     transparent 1px,
     transparent 3px
   );
-  mix-blend-mode: multiply;
 }
 
 /* Level-up affordance — blinking, same spot/style as the win-screen hint. */
