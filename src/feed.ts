@@ -2789,8 +2789,12 @@ export class Feed {
       const land = () => { if (done) return; done = true; onLand(); unit.remove(); };
 
       const launch = () => {
+        // The transform-origin is bottom-center (50% 100%) for the squash/jump, so
+        // scaling to 0.5 pulls the star's CENTRE down by s.h/4. Lift the final Y by
+        // that much so the shrunken star's centre lands on the counter centre.
+        const landY = toY - s.h * 0.25;
         if (!unit.animate) {
-          unit.style.transform = `translate3d(${toX}px, ${toY}px, 0) scale(0.5, 0.5)`;
+          unit.style.transform = `translate3d(${toX}px, ${landY}px, 0) scale(0.5, 0.5)`;
           window.setTimeout(land, REWARD_BOUNCE_MS);
           return;
         }
@@ -2802,7 +2806,7 @@ export class Feed {
           // (ease-IN, no trailing slow-down) so it lands at full speed and is removed
           // crisply on impact — and shrinks to HALF size over the flight.
           { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, offset: 0.44, easing: 'cubic-bezier(0.55,0.055,0.675,0.19)' },
-          { transform: `translate3d(${toX}px,${toY}px,0) scale(0.5,0.5)`, opacity: 1 },
+          { transform: `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`, opacity: 1 },
         ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' });
         anim.addEventListener('finish', land, { once: true });
       };
