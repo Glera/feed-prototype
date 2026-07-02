@@ -33,13 +33,20 @@ const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of dis
 const LIVE_AHEAD = 0;              // explicit warm-next scheduling below owns ahead iframe lifetime
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
 // Byte-prefetch depth (html + payload.js into the HTTP cache; NO iframe, no
-// main-thread cost, no JS-heap cost). Re-enabled for fast flicking now that
-// the pipeline is: current playing → next warmed (one iframe) → next+1/+2
-// bytes local. The old phone-heating problem came from prefetching while the
-// boot itself also hammered the main thread; fetches are serialized, idle-
-// gated, and every byte gets used anyway in an infinite no-repeat feed.
-// Escape hatch: ?prefetch=off.
-const RESERVE_AHEAD = 2;
+// main-thread cost, no JS-heap cost). Reels-style: pull content as far ahead
+// as the network can afford — in an infinite no-repeat feed every prefetched
+// byte gets used, the only waste is the tail when the user quits. Depth is
+// ADAPTIVE so a slow/metered connection isn't smothered by background bytes
+// (Network Information API — Android Chrome; iOS lacks it and gets the fast
+// default). Fetches are serialized, idle-gated and priority:'low' so they
+// never compete with the warm iframe's own load. Escape hatch: ?prefetch=off.
+function reserveAheadDepth(): number {
+  const c = (navigator as { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+  if (c?.saveData) return 1;                                  // user asked to save data — respect it
+  if (c?.effectiveType === 'slow-2g' || c?.effectiveType === '2g') return 1;
+  if (c?.effectiveType === '3g') return 2;
+  return 4;                                                   // 4g / wifi / unknown (iOS)
+}
 const INITIAL_BATCH = 1;           // get the first mechanic visible; warm-next starts after it settles
 const PRELOADER_TIMEOUT_MS = 15000;
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
@@ -1714,7 +1721,7 @@ export class Feed {
   private prefetchReserve() {
     if (!this.prefetchEnabled) return;
     const base = this.realIndex();
-    for (let d = 1; d <= RESERVE_AHEAD; d++) {
+    for (let d = 1; d <= reserveAheadDepth(); d++) {
       const j = ((base + d) % this.N + this.N) % this.N;
       this.enqueuePrefetch(j);
     }
@@ -1751,9 +1758,12 @@ export class Feed {
       // payload.js is param-less and referenced relatively by the html — fetch
       // it too, it's the part V8 stream-compiles at boot.
       const id = this.playables[i].id;
+      // priority:'low' (Chromium fetch-priority hint; ignored elsewhere) keeps
+      // background bytes from competing with the warm iframe's own load.
+      const lowPriority = { mode: 'no-cors', priority: 'low' } as RequestInit;
       Promise.allSettled([
-        fetch(playableUrl(id, { hostPaused: true, auto: true }), { mode: 'no-cors' }),
-        fetch(`${playableUrl(id).split('?')[0].replace(/\.html$/, '')}.payload.js`, { mode: 'no-cors' }),
+        fetch(playableUrl(id, { hostPaused: true, auto: true }), lowPriority),
+        fetch(`${playableUrl(id).split('?')[0].replace(/\.html$/, '')}.payload.js`, lowPriority),
       ])
         .then(() => this.markReady(i))
         .finally(() => {
