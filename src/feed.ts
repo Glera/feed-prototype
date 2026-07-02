@@ -32,16 +32,31 @@ const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of dis
 
 const LIVE_AHEAD = 0;              // explicit warm-next scheduling below owns ahead iframe lifetime
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
-const RESERVE_AHEAD = 0;           // byte-prefetching big HTMLs heated phones without preparing iframes
+// Byte-prefetch depth (html + payload.js into the HTTP cache; NO iframe, no
+// main-thread cost, no JS-heap cost). Re-enabled for fast flicking now that
+// the pipeline is: current playing → next warmed (one iframe) → next+1/+2
+// bytes local. The old phone-heating problem came from prefetching while the
+// boot itself also hammered the main thread; fetches are serialized, idle-
+// gated, and every byte gets used anyway in an infinite no-repeat feed.
+// Escape hatch: ?prefetch=off.
+const RESERVE_AHEAD = 2;
 const INITIAL_BATCH = 1;           // get the first mechanic visible; warm-next starts after it settles
 const PRELOADER_TIMEOUT_MS = 15000;
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
 const FRAME_READY_FALLBACK_MS = 900;
 const FRAME_REVEAL_DELAY_MS = 90;
-const WARM_NEXT_DELAY_MS = 900;    // let the current game paint/play before parsing the next bundle
-const WARM_NEXT_IDLE_TIMEOUT_MS = 1800;
+// 150ms, was 900: the wait existed to shield the running demo from the warm
+// boot hitch. The hitch is gone (quality-bench cached, compile streamed off-
+// thread, assets inert, spine + first frame deferred out of mount) — warm now
+// starts right after the slide settles so fast flicking still lands on a
+// prepared mechanic. The small delay + calm-frame gate below only avoid
+// competing with the settle frame itself.
+const WARM_NEXT_DELAY_MS = 150;
+const WARM_NEXT_IDLE_TIMEOUT_MS = 600;
 const WARM_NEXT_CALM_FRAME_MS = 24;
-const WARM_NEXT_CALM_FRAMES = 8;
+// 3 calm frames, was 8 — the warm boot no longer produces a hitch worth
+// hiding; the gate now only keeps the warm off the settle frame itself.
+const WARM_NEXT_CALM_FRAMES = 3;
 const WARM_NEXT_IDLE_MIN_MS = 3;
 const LEVEL_PROGRESS_MS = 340;
 const STARS_PER_LEVEL = 5;    // level-1 base; higher levels need more (starsForLevel)
@@ -637,6 +652,12 @@ export class Feed {
       "font:600 10px/1.2 -apple-system,system-ui,sans-serif;color:rgba(255,255,255,0.62);" +
       'letter-spacing:0.2px;pointer-events:none;white-space:nowrap;';
     bar.appendChild(ver);
+    // Make the bar itself a paging swipe surface. On Android a swipe that STARTS
+    // over the bottom bar (thumb from the bottom) otherwise fell through to the
+    // browser → URL-bar collapse → the feed reflows (bar "grows") and the first
+    // swipe is consumed. attachSwipeSurface skips the button (tap still advances),
+    // and .feed-bar has touch-action:none (styles.css) so the browser never scrolls.
+    this.attachSwipeSurface(bar);
     this.feedEl.appendChild(bar);
   }
 
@@ -1688,7 +1709,10 @@ export class Feed {
   }
 
   // ── Prefetch reserve (bytes only) ──────────────────────────────────────────
+  private prefetchEnabled = (new URLSearchParams(location.search).get('prefetch') || 'on') !== 'off';
+
   private prefetchReserve() {
+    if (!this.prefetchEnabled) return;
     const base = this.realIndex();
     for (let d = 1; d <= RESERVE_AHEAD; d++) {
       const j = ((base + d) % this.N + this.N) % this.N;
@@ -1722,9 +1746,16 @@ export class Feed {
         this.pumpPrefetchQueue();
         return;
       }
-      fetch(playableUrl(this.playables[i].id, { hostPaused: true, auto: true }), { mode: 'no-cors' })
+      // The html URL must match the future warm-mount iframe src BYTE-FOR-BYTE
+      // (query params included) or the HTTP cache misses. The blob-boot
+      // payload.js is param-less and referenced relatively by the html — fetch
+      // it too, it's the part V8 stream-compiles at boot.
+      const id = this.playables[i].id;
+      Promise.allSettled([
+        fetch(playableUrl(id, { hostPaused: true, auto: true }), { mode: 'no-cors' }),
+        fetch(`${playableUrl(id).split('?')[0].replace(/\.html$/, '')}.payload.js`, { mode: 'no-cors' }),
+      ])
         .then(() => this.markReady(i))
-        .catch(() => this.markReady(i))
         .finally(() => {
           this.prefetching = false;
           this.pumpPrefetchQueue();
@@ -2315,7 +2346,9 @@ export class Feed {
   // AND credits a new reward — otherwise `earnedThisCycle` short-circuits handleWin
   // (no new reward shows) and the unchanged in-place `runId` makes `completedRunIds`
   // swallow the replayed completion.
-  private restartLevelInPlace(i: number) {
+  // public (not private) so noUnusedLocals tolerates it while its only call
+  // site stays commented out — see the "+1 уровень" note below.
+  public restartLevelInPlace(i: number) {
     this.creditPendingRewardImmediate(i);      // don't lose the stars earned this win (idempotent)
     this.earnedThisCycle.delete(i);
     this.failedThisCycle.delete(i);
@@ -2360,24 +2393,21 @@ export class Feed {
     const toast = reward?.querySelector('.reward__toast') ?? null;
     reward?.insertBefore(hint, toast);
 
-    // Big green "+1 уровень" CTA — restarts THIS level (stub for future per-mechanic
-    // levels). Only a CLICK on the button restarts; a tap elsewhere / a swipe still
-    // advance to the next game (so we stopPropagation to keep the gesture off the
-    // swipe surface). Bank the earned stars first so the recent exit-crediting isn't
-    // bypassed on this path either.
-    const replayLevel = document.createElement('button');
-    replayLevel.type = 'button';
-    replayLevel.className = 'reward__replay-level';
-    replayLevel.textContent = '+1 уровень';
-    const stop = (e: Event) => e.stopPropagation();
-    replayLevel.addEventListener('pointerdown', stop);
-    replayLevel.addEventListener('pointerup', stop);
-    replayLevel.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.restartLevelInPlace(i);            // credit this win + fresh re-earnable replay
-    });
-    const actions = reward?.querySelector('.reward__actions') ?? null;
-    reward?.insertBefore(replayLevel, actions);
+    // "+1 уровень" CTA temporarily disabled (commented out per request). Kept the
+    // code + restartLevelInPlace() intact for when it's re-enabled.
+    // const replayLevel = document.createElement('button');
+    // replayLevel.type = 'button';
+    // replayLevel.className = 'reward__replay-level';
+    // replayLevel.textContent = '+1 уровень';
+    // const stop = (e: Event) => e.stopPropagation();
+    // replayLevel.addEventListener('pointerdown', stop);
+    // replayLevel.addEventListener('pointerup', stop);
+    // replayLevel.addEventListener('click', (e) => {
+    //   e.stopPropagation();
+    //   this.restartLevelInPlace(i);
+    // });
+    // const actions = reward?.querySelector('.reward__actions') ?? null;
+    // reward?.insertBefore(replayLevel, actions);
 
     this.startRewardSparks(i, row);
   }
@@ -2799,13 +2829,13 @@ export class Feed {
           return;
         }
         const anim = unit.animate([
-          { transform: 'translate3d(0,0,0) scale(1,1)', easing: 'cubic-bezier(0.3,0,0.5,1)' },
-          { transform: 'translate3d(0,0,0) scale(1.34,0.66)', offset: 0.15, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },        // squash
-          { transform: `translate3d(0,${-jump}px,0) scale(0.78,1.26)`, offset: 0.30, easing: 'cubic-bezier(0.33,0,0.3,1)' },  // jump — stretch tall
+          { transform: 'translate3d(0,0,0) scale(1,1)', easing: 'cubic-bezier(0.4,0,0.6,1)' },
+          { transform: 'translate3d(0,0,0) scale(1.34,0.66)', offset: 0.26, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },        // squash — longer wind-up before the jump
+          { transform: `translate3d(0,${-jump}px,0) scale(0.78,1.26)`, offset: 0.40, easing: 'cubic-bezier(0.33,0,0.3,1)' },  // jump — stretch tall
           // settle back to ORIGINAL size at the apex, then ACCELERATE into the counter
           // (ease-IN, no trailing slow-down) so it lands at full speed and is removed
           // crisply on impact — and shrinks to HALF size over the flight.
-          { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, offset: 0.44, easing: 'cubic-bezier(0.55,0.055,0.675,0.19)' },
+          { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, offset: 0.52, easing: 'cubic-bezier(0.55,0.055,0.675,0.19)' },
           { transform: `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`, opacity: 1 },
         ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' });
         anim.addEventListener('finish', land, { once: true });
