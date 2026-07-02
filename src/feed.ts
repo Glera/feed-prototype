@@ -114,6 +114,11 @@ export class Feed {
   private settlingTargetIndex: number | null = null;
   private resetCycleAfterSettle = false;
   private warmIndex: number | null = null;
+  // ── Warm-up debugging (open with ?warm=1 to log to console; call window.__feedWarm()
+  //    anytime for a live snapshot: is the next mechanic pre-warmed, and if not why). ──
+  private warmDbg = new URLSearchParams(location.search).get('warm') === '1';
+  private warmEvents: string[] = [];
+  private warmCalmMax = 0;   // most consecutive "calm" frames the low-impact scheduler has seen
   private warmTimer: number | null = null;
   private warmIdleCancel: (() => void) | null = null;
   private frameLoaded = new Set<number>();
@@ -256,6 +261,10 @@ export class Feed {
     window.setInterval(this.pollAutoplayUi, 250);
     window.setInterval(this.tickReelTimecode, 1000);
     this.initPerfTelemetry();
+    // Debug hook: window.__feedWarm() → live snapshot of the next-mechanic warm
+    // state (is it pre-warmed? if not, why — blocked, or calm window starved?).
+    // Also open the feed with ?warm=1 to stream the warm lifecycle to the console.
+    (window as unknown as { __feedWarm?: () => unknown }).__feedWarm = () => this.warmSnapshot();
   }
 
   // ── Warm-cost telemetry ──────────────────────────────────────────────────
@@ -332,9 +341,32 @@ export class Feed {
     document.addEventListener('visibilitychange', () => { this.lastRafT = 0; });
   }
 
+  // Host-clock warm timeline per playable id: when the iframe was appended,
+  // when its load event fired, when it was revealed. Same clock as the
+  // frame-gap/long-task log, so a stall lands on a concrete interval.
+  private warmTimeline = new Map<string, Record<string, number>>();
+
+  private markWarmTimeline(i: number, key: 'appendAt' | 'loadAt' | 'revealAt') {
+    const id = this.playables[i]?.id;
+    if (!id) return;
+    const t = this.warmTimeline.get(id) ?? {};
+    t[key] = Math.round(performance.now());
+    this.warmTimeline.set(id, t);
+  }
+
   private handleBootTimings(i: number, data: Record<string, unknown>) {
     const id = this.playables[i]?.id ?? `#${i}`;
-    const merged = { ...(this.bootTimingsLog.get(id) ?? {}), ...(data.timings as Record<string, unknown>), stage: data.stage };
+    const timings = { ...(data.timings as Record<string, number>) };
+    // Convert iframe-clock stage timestamps (fields ending in "At") into the
+    // HOST clock via the difference of the two timeOrigins — puts boot stages
+    // and the frame-gap log on one axis.
+    if (typeof timings.timeOrigin === 'number' && timings.timeOrigin > 0 && performance.timeOrigin) {
+      const offset = timings.timeOrigin - performance.timeOrigin;
+      for (const [k, v] of Object.entries(timings)) {
+        if (k.endsWith('At') && typeof v === 'number') timings[`host_${k}`] = Math.round(v + offset);
+      }
+    }
+    const merged = { ...(this.bootTimingsLog.get(id) ?? {}), ...timings, stage: data.stage as never };
     this.bootTimingsLog.set(id, merged);
     console.log(`[perf] boot ${id} [${String(data.stage)}]`, merged);
     this.updatePerfOverlay();
@@ -1061,6 +1093,7 @@ export class Feed {
       if (this.frames.get(i) !== frame) return;
       if (!this.frameLoaded.has(i) || !this.frameReady.has(i) || !this.canRevealFrame(i)) return;
       this.frameRevealed.add(i);
+      this.wlog(`#${i} revealed (ready)${i === this.warmIndex ? ' — this is the pre-warmed next mechanic ✓' : ''}`);
       this.games[i].classList.remove('game--loading');
       this.games[i].classList.add('game--ready');
       this.markReady(i);
@@ -1236,11 +1269,58 @@ export class Feed {
     }
   }
 
+  // ── Warm-up diagnostics ──────────────────────────────────────────────────
+  private wlog(msg: string) {
+    const line = `[warm +${Math.round(performance.now())}ms] ${msg}`;
+    this.warmEvents.push(line);
+    if (this.warmEvents.length > 400) this.warmEvents.shift();
+    if (this.warmDbg) console.log(line);
+  }
+  // Human-readable reason desiredWarmIndex() would refuse to warm (empty = allowed).
+  private warmBlockReason(): string {
+    if (!this.warmNextEnabled) return 'warmNextEnabled=false';
+    if (this.N < 2) return 'only one mechanic';
+    if (document.hidden) return 'document.hidden (tab/app backgrounded)';
+    if (this.overlayOpen) return 'overlayOpen (story/editor up)';
+    if (this.isGestureBusy()) return 'gestureBusy (dragging/settling)';
+    if (this.levelUpPageState !== 'idle') return `levelUp active (${this.levelUpPageState})`;
+    const cur = this.realIndex();
+    if (!this.frameRevealed.has(cur)) return `current #${cur} not revealed yet`;
+    const next = (cur + 1) % this.N;
+    if (next === cur) return 'next === current';
+    if (this.earnedThisCycle.has(next)) return `next #${next} already earned this cycle`;
+    if (this.failedThisCycle.has(next)) return `next #${next} already failed this cycle`;
+    return '';
+  }
+  // Live snapshot — exposed as window.__feedWarm() (see constructor). Answers
+  // "is the next mechanic pre-warmed, and if not, why".
+  private warmSnapshot() {
+    const cur = this.realIndex();
+    const next = this.N > 1 ? (cur + 1) % this.N : -1;
+    const reason = this.warmBlockReason();
+    return {
+      current: cur,
+      next,
+      nextIsWarmed: this.warmIndex === next && this.frameRevealed.has(next),
+      warmIndex: this.warmIndex,
+      nextMounted: this.frames.has(next),
+      nextRevealed: this.frameRevealed.has(next),
+      blockedNow: reason || '(not blocked — warm is allowed right now)',
+      calmFramesSeenMax: this.warmCalmMax,
+      calmFramesNeeded: WARM_NEXT_CALM_FRAMES,
+      diagnosis: this.warmCalmMax < WARM_NEXT_CALM_FRAMES
+        ? `the current mechanic never yielded ${WARM_NEXT_CALM_FRAMES} calm frames (≤${WARM_NEXT_CALM_FRAME_MS}ms) in a row → warm is STARVED (no idle window)`
+        : 'a calm window was reached at least once',
+      recentEvents: this.warmEvents.slice(-50),
+    };
+  }
+
   private scheduleWarmNext() {
     this.clearWarmTimer();
     const next = this.desiredWarmIndex();
-    if (next === null) return;
-    if (this.warmIndex === next && this.frames.has(next)) return;
+    if (next === null) { this.wlog(`schedule blocked: ${this.warmBlockReason()}`); return; }
+    if (this.warmIndex === next && this.frames.has(next)) { this.wlog(`already warm: #${next}`); return; }
+    this.wlog(`scheduled → will try to warm #${next} once the page goes calm`);
     this.warmTimer = window.setTimeout(() => {
       this.warmTimer = null;
       this.warmIdleCancel = this.scheduleLowImpactTask(() => {
@@ -1252,9 +1332,11 @@ export class Feed {
 
   private startWarmNext(expected: number) {
     if (this.desiredWarmIndex() !== expected) {
+      this.wlog(`warm of #${expected} aborted (state changed): ${this.warmBlockReason()}`);
       this.scheduleWarmNext();
       return;
     }
+    this.wlog(`START warming #${expected} (calm window opened; max calm frames seen=${this.warmCalmMax})`);
     this.warmIndex = expected;
     this.setAutoplayUi(expected, true, true);
     this.updateLive();
@@ -1684,6 +1766,7 @@ export class Feed {
       lastFrameT = now;
       if (!document.hidden && !this.isGestureBusy() && dt <= WARM_NEXT_CALM_FRAME_MS) calmFrames++;
       else calmFrames = 0;
+      if (calmFrames > this.warmCalmMax) this.warmCalmMax = calmFrames;   // warm diagnostics
       if (calmFrames >= WARM_NEXT_CALM_FRAMES) {
         scheduleIdle();
         return;
@@ -1691,6 +1774,7 @@ export class Feed {
       // If the page never becomes calm, do not force heavy iframe parsing. It is
       // better to try again later than to jank the current game.
       if (now - calmWindowStartedAt > timeout * 2) {
+        this.wlog(`calm gate stuck: max ${this.warmCalmMax}/${WARM_NEXT_CALM_FRAMES} calm frames — current mechanic too busy, retrying`);
         fallbackTimer = window.setTimeout(() => {
           fallbackTimer = 0;
           calmFrames = 0;
@@ -3015,6 +3099,9 @@ export class Feed {
     }
     this.updateLive();
     this.applyActiveStates();
+    // Warm diagnostics: was the mechanic we just landed on already pre-warmed?
+    this.wlog(`arrived at #${this.realIndex()} → ${this.frameRevealed.has(this.realIndex()) ? 'WARM ✓ (no preloader)' : 'COLD ✗ (shows preloader now)'}`);
+    this.warmCalmMax = 0;   // reset the calm-window tracker for the new current mechanic
     // Clear the level-up page (→ state 'idle') BEFORE scheduling the warm. Otherwise
     // desiredWarmIndex() short-circuits on `levelUpPageState !== 'idle'` and the next
     // mechanic never gets pre-warmed — it cold-loads (dark preloader) on the next
