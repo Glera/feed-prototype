@@ -41,18 +41,13 @@ const WARM_NEXT_CALM_FRAME_MS = 24;
 const WARM_NEXT_CALM_FRAMES = 8;
 const WARM_NEXT_IDLE_MIN_MS = 3;
 const LEVEL_PROGRESS_MS = 340;
-const STARS_PER_LEVEL = 5;    // one won mechanic = one star; level up every 5 stars
-// Merge-coin-style star credit timing (scatter → pause → fly to the counter).
-const REWARD_SCATTER_MS = 240;
-const REWARD_PAUSE_MS = 140;
-const REWARD_FLY_MS = 380;
-// Per-star launch offset = the gap between successive ARRIVALS at the counter (all
-// stars share the same flight duration). Tuned to the coin-into-piggy shower in
-// merge-second-board-v2 (~30ms there): a rapid POUR reads far livelier than the old
-// 340ms drip. The earlier 55ms "blur" wasn't the cadence — it was the weak uniform
-// scale-bump; now each arrival lands a distinct squash + radial splash + ring step,
-// so a fast pour reads as a satisfying stream, not a caterpillar.
-const REWARD_STAGGER_MS = 90;
+const STARS_PER_LEVEL = 5;    // level-1 base; higher levels need more (starsForLevel)
+// Reward-star collect: the N earned stars line up in a row on the win screen, then
+// on tap each peels off IN TURN and bounces to the counter — squash (вжалась с
+// расширением) → jump (прыжок) → fly (полет) → impact + particles + removal. No
+// scatter/decay phase; each star flies straight from its row slot.
+const REWARD_BOUNCE_MS = 620;        // per-star: squash + jump + fly to the counter
+const REWARD_PEEL_STAGGER_MS = 155;  // gap between successive peel-offs (reads one-by-one)
 const RING_STEP_MS = 180;       // snappy ring growth per star impact (synced to the bump)
 
 type PlayableOutcome = 'won' | 'lost';
@@ -87,7 +82,6 @@ export class Feed {
   private feedEl: HTMLElement;
   private playables: Playable[];
   private N: number;
-  private starsPerLevel: number;
 
   private pageH = 0;
   private pos = 0;                  // continuous ring position (settles to an integer)
@@ -217,7 +211,6 @@ export class Feed {
     this.feedEl = feedEl;
     this.playables = playables;
     this.N = playables.length;
-    this.starsPerLevel = STARS_PER_LEVEL;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     this.mountHud();
@@ -724,7 +717,7 @@ export class Feed {
   }
 
   private previewRewardLevel(): number {
-    return Math.floor((this.totalStars + this.rewardStarsFor(this.realIndex())) / this.starsPerLevel) + 1;
+    return this.levelForStars(this.totalStars + this.rewardStarsFor(this.realIndex()));
   }
 
   private levelUpMarkup(level: number): string {
@@ -2044,31 +2037,59 @@ export class Feed {
   }
 
   private renderRewardState(i: number, state: HTMLElement) {
-    const icon = this.renderResultState(i, state, '★', 'reward__star');
+    // Show as many stars as were earned this win, lined up in a ROW — they peel
+    // off one-by-one on tap (see collectReward → playRewardStarCollect).
+    const row = this.buildRewardStarRow(this.rewardStarsFor(i));
+    this.renderResultState(i, state, row);
     // Readable affordance — placed directly UNDER the action buttons (which sit under
-    // the star), in the reward grid flow. Both a tap and a swipe collect + advance.
+    // the star row), in the reward grid flow. Both a tap and a swipe collect + advance.
     const hint = document.createElement('div');
     hint.className = 'reward__hint';
     hint.textContent = 'tap or swipe for next game';
     const reward = state.querySelector('.reward');
     const toast = reward?.querySelector('.reward__toast') ?? null;
     reward?.insertBefore(hint, toast);
-    this.startRewardSparks(i, icon);
+    this.startRewardSparks(i, row);
+  }
+
+  // A centred flex row of `n` gold stars that cascade in ("выстроиться друг за
+  // другом"). Styled inline so styles.css is untouched. Each `.reward__star-unit`
+  // is measured at collect time for its fly-from position.
+  private buildRewardStarRow(n: number): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'reward__stars';
+    row.style.cssText = 'display:flex;align-items:flex-end;justify-content:center;gap:clamp(2px,1.4vw,8px);pointer-events:none;';
+    const unitPx = n >= 7 ? 46 : n >= 5 ? 54 : 64;   // fit up to 10 across the panel
+    for (let k = 0; k < n; k++) {
+      const u = document.createElement('span');
+      u.className = 'reward__star-unit';
+      u.textContent = '★';
+      u.style.cssText =
+        `display:inline-block;font-size:${unitPx}px;line-height:1;color:#ffd85a;` +
+        'transform-origin:50% 100%;will-change:transform;' +
+        'filter:drop-shadow(0 8px 16px rgba(255,147,42,0.34));' +
+        'text-shadow:0 3px 0 #8d4a12, 0 0 14px rgba(255,221,89,0.5), 0 0 26px rgba(255,105,28,0.22);';
+      // Cascade drop-in — each star lands a beat after the previous.
+      if (u.animate) u.animate([
+        { transform: 'translateY(-46px) scale(0.35)', opacity: 0 },
+        { transform: 'translateY(7px) scale(1.1)', opacity: 1, offset: 0.72 },
+        { transform: 'translateY(0) scale(1)', opacity: 1 },
+      ], { duration: 460, delay: k * 95, easing: 'cubic-bezier(0.2,0.8,0.3,1.3)', fill: 'backwards' });
+      row.appendChild(u);
+    }
+    return row;
   }
 
   private renderFailedState(i: number, state: HTMLElement) {
     // On a loss: no big centre icon — just the 4 action buttons.
-    this.renderResultState(i, state, '↻', 'reward__star reward__star--retry', false);
+    this.renderResultState(i, state, null);
   }
 
-  private renderResultState(i: number, state: HTMLElement, iconText: string, iconClass: string, centerIcon: boolean = true): HTMLElement {
+  private renderResultState(i: number, state: HTMLElement, centerEl: HTMLElement | null): void {
     const reward = document.createElement('div');
     reward.className = 'reward';
 
-    const icon = document.createElement('div');
-    icon.className = iconClass;
-    icon.textContent = iconText;
-    if (centerIcon) reward.appendChild(icon);
+    if (centerEl) reward.appendChild(centerEl);
 
     const actions = document.createElement('div');
     actions.className = 'reward__actions';
@@ -2130,8 +2151,6 @@ export class Feed {
     // No separate swipe hint here — the permanent swipe bar shows below this overlay
     // (the overlay is inset above it) in the exact same spot, already reading
     // "swipe for next mechanic", and a swipe on it collects the reward.
-
-    return icon;
   }
 
   private rewardButton(icon: string, label: string, extraClass: string): HTMLButtonElement {
@@ -2300,11 +2319,10 @@ export class Feed {
     this.stopRewardSparks(i);
 
     const state = this.stateEls[i];
-    const source = state?.querySelector<HTMLElement>('.reward__star') ?? null;
+    const units = state ? Array.from(state.querySelectorAll<HTMLElement>('.reward__star-unit')) : [];
     const reward = state?.querySelector<HTMLElement>('.reward') ?? null;
     state?.classList.add('game__state--collecting');
     reward?.classList.add('reward--collecting');
-    if (source) source.style.visibility = 'hidden';
 
     const afterCollect = () => {
       this.collectingRewardIndex = null;
@@ -2349,104 +2367,90 @@ export class Feed {
       }
     };
 
-    this.playRewardStarCollect(source, this.rewardStarsFor(i), afterCollect);
+    this.playRewardStarCollect(units, afterCollect);
     return true;
   }
 
   private rewardWouldLevelUp(): boolean {
-    const currentLevel = Math.floor(this.totalStars / this.starsPerLevel) + 1;
-    const nextLevel = Math.floor((this.totalStars + this.rewardStarsFor(this.realIndex())) / this.starsPerLevel) + 1;
+    const currentLevel = this.levelForStars(this.totalStars);
+    const nextLevel = this.levelForStars(this.totalStars + this.rewardStarsFor(this.realIndex()));
     return nextLevel > currentLevel;
   }
 
-  // Credit `count` stars with the merge-coin effect: each star SCATTERS out from
-  // the win star, holds, then FLIES to the level counter (staggered). Each landing bumps
-  // the counter + bursts embers; onDone fires after the last lands.
-  private playRewardStarCollect(source: HTMLElement | null, count: number, onDone: () => void) {
+  // Peel the earned stars off the win-screen ROW one-by-one and BOUNCE each to the
+  // level counter: squash (вжалась с расширением) → jump (прыжок) → fly (полет) →
+  // impact at the counter (counter squash) with simultaneous removal + particles.
+  // No scatter/decay phase — each star flies straight from its row slot. Runs on
+  // the compositor (WAAPI) so a main-thread spike can't stutter it.
+  private playRewardStarCollect(units: HTMLElement[], onDone: () => void) {
     const vp = this.viewport.getBoundingClientRect();
-    const src = source?.getBoundingClientRect();
     const badge = this.levelBadgeEl?.getBoundingClientRect();
-    const sz = src ? Math.max(src.width, src.height) : 128;
-    const startX = src ? src.left - vp.left + src.width / 2 : vp.width / 2;
-    const startY = src ? src.top - vp.top + src.height / 2 : vp.height * 0.46;
     const badgeX = badge ? badge.left - vp.left + badge.width / 2 : 40;
     const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
     const badgeRadius = badge ? Math.min(badge.width, badge.height) / 2 : 28;
-    const n = Math.max(1, count);
+    const n = units.length;
 
     // Level-up-style confetti rains down evenly across the whole screen.
     this.burstStarConfetti();
 
-    const flySz = Math.max(34, Math.round(sz * 0.42));
-    // Ring grows one star's worth per IMPACT (synced to the bump), capped at full on
-    // the level-up star. totalStars isn't credited until finishStarReward (after the
-    // last land), so `base` stays the pre-batch progress for the whole flight.
-    const spl = this.starsPerLevel;
-    const base = this.totalStars % spl;
+    if (n === 0) { onDone(); return; }
+
+    // Ring grows one star's worth per IMPACT. `need` is THIS level's requirement
+    // (5,6,7…10); clamp at 1 — a level-up mid-batch is owned by finishStarReward.
+    const level = this.levelForStars(this.totalStars);
+    const need = this.starsForLevel(level);
+    const base = this.starsIntoLevel(this.totalStars);
     let landed = 0;
     const onLand = () => {
       this.burstRewardCollectParticles(badgeX, badgeY, Math.max(22, badgeRadius - 2));
-      this.bumpLevelBadge();
+      this.bumpLevelBadge();                                   // counter "absorb" squash
       landed++;
-      this.setLevelProgress(Math.min(1, (base + landed) / spl), true, RING_STEP_MS);
+      this.setLevelProgress(Math.min(1, (base + landed) / need), true, RING_STEP_MS);
       if (landed >= n) onDone();
     };
 
-    // Each star flies on a single Web Animations API timeline — phase 1 scatter
-    // (ease-out cubic), phase 2 hold, phase 3 fly to the counter (ease-in quad). WAAPI
-    // runs on the COMPOSITOR, so a main-thread spike (confetti/ember DOM bursts, the
-    // arriving iframe) can't make the motion stutter — that's what the old rAF loop did.
-    // Constant size throughout (the coins don't scale) — that's what reads smooth.
-    const total = REWARD_SCATTER_MS + REWARD_PAUSE_MS + REWARD_FLY_MS;
-    const scatterOff = REWARD_SCATTER_MS / total;
-    const holdOff = (REWARD_SCATTER_MS + REWARD_PAUSE_MS) / total;
-    const xy = (x: number, y: number, scale = 1) =>
-      `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0) scale(${scale})`;
-    // EXACT counter point for every star — same target, no per-star spread, so the
-    // series reads as clean repeated hits on the counter (like the merge-coin credit),
-    // not a caterpillar. Removal is immediate on arrival (see `land` below).
-    const landX = badgeX;
-    const landY = badgeY;
-    for (let ci = 0; ci < n; ci++) {
+    units.forEach((unit, k) => {
+      const r = unit.getBoundingClientRect();
+      const sx = r.left - vp.left + r.width / 2;
+      const sy = r.top - vp.top + r.height / 2;
+      const flySz = Math.max(34, Math.round(Math.max(r.width, r.height)));
+      const T = (x: number, y: number, sX = 1, sY = 1) =>
+        `translate3d(${x - flySz / 2}px, ${y - flySz / 2}px, 0) scale(${sX}, ${sY})`;
+
       const el = document.createElement('div');
       el.className = 'star-flight star-flight--collect';
       el.textContent = '★';
       el.style.width = `${flySz}px`;
       el.style.height = `${flySz}px`;
       el.style.fontSize = `${Math.round(flySz * 0.92)}px`;
-      el.style.transform = xy(startX, startY);
+      el.style.transformOrigin = '50% 100%';   // squash/leap anchored to the base
+      el.style.transform = T(sx, sy);
+      el.style.visibility = 'hidden';           // shown when it's this star's turn
       el.style.willChange = 'transform';
       this.viewport.appendChild(el);
 
-      const ang = Math.random() * Math.PI * 2;
-      const scatter = sz * 0.4 + Math.random() * sz * 0.4;
-      const scX = startX + Math.cos(ang) * scatter;
-      const scY = startY + Math.sin(ang) * scatter;
+      const jump = flySz * 0.55;
+      let done = false;
+      const land = () => { if (done) return; done = true; onLand(); el.remove(); };
 
-      let impacted = false;
-      const impact = () => {
-        if (impacted) return;
-        impacted = true;
-        onLand();
+      const launch = () => {
+        unit.style.visibility = 'hidden';       // the row star "срывается"
+        el.style.visibility = 'visible';
+        if (!el.animate) {                      // ancient-browser fallback
+          el.style.transform = T(badgeX, badgeY, 0.92, 0.92);
+          window.setTimeout(land, REWARD_BOUNCE_MS);
+          return;
+        }
+        const anim = el.animate([
+          { transform: T(sx, sy, 1, 1), easing: 'cubic-bezier(0.3,0,0.5,1)' },                              // rest on the row
+          { transform: T(sx, sy, 1.34, 0.66), offset: 0.17, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },        // squash — вжалась с расширением
+          { transform: T(sx, sy - jump, 0.78, 1.26), offset: 0.36, easing: 'cubic-bezier(0.45,0,0.7,0.5)' },// jump + stretch — прыжок
+          { transform: T(badgeX, badgeY, 0.9, 0.9), opacity: 1 },                                           // fly to counter — полет
+        ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' });
+        anim.addEventListener('finish', land, { once: true });
       };
-      const land = () => {
-        impact();
-        el.remove();
-      };
-      if (!el.animate) {                              // ancient browser fallback
-        el.style.transform = xy(landX, landY, 1.02);
-        el.style.opacity = '1';
-        window.setTimeout(land, total + ci * REWARD_STAGGER_MS);
-        continue;
-      }
-      const anim = el.animate([
-        { transform: xy(startX, startY), easing: 'cubic-bezier(0.215, 0.61, 0.355, 1)' },           // scatter: ease-out cubic
-        { transform: xy(scX, scY), offset: scatterOff, easing: 'linear' },                          // hold
-        { transform: xy(scX, scY), offset: holdOff, easing: 'cubic-bezier(0.55, 0.085, 0.68, 0.53)' }, // fly: ease-in quad
-        { transform: xy(landX, landY, 1.02), opacity: 1 },
-      ], { duration: total, delay: ci * REWARD_STAGGER_MS, fill: 'forwards' });
-      anim.addEventListener('finish', land, { once: true });
-    }
+      window.setTimeout(launch, k * REWARD_PEEL_STAGGER_MS);
+    });
   }
 
   // Level-up-style confetti: a one-shot burst that rains down evenly across the
@@ -2552,9 +2556,26 @@ export class Feed {
     return from === this.N - 1 && to === 0;
   }
 
+  // Stars required to CLEAR a given level: L1=5, L2=6, L3=7 … +1 per level,
+  // capped at 10 from L6 on. (Reward per win is 1–5, so a single reward crosses
+  // at most one boundary — the level-up path stays single-shot.)
+  private starsForLevel(level: number): number { return Math.min(STARS_PER_LEVEL + (level - 1), 10); }
+  // Current level for a cumulative star total (walks the rising thresholds).
+  private levelForStars(total: number): number {
+    let level = 1, rem = Math.max(0, Math.floor(total));
+    while (rem >= this.starsForLevel(level)) { rem -= this.starsForLevel(level); level++; }
+    return level;
+  }
+  // Stars accumulated WITHIN the current level (the ring's numerator).
+  private starsIntoLevel(total: number): number {
+    let level = 1, rem = Math.max(0, Math.floor(total));
+    while (rem >= this.starsForLevel(level)) { rem -= this.starsForLevel(level); level++; }
+    return rem;
+  }
+
   private updateHud(animate: boolean = true) {
-    const level = Math.floor(this.totalStars / this.starsPerLevel) + 1;
-    const progress = (this.totalStars % this.starsPerLevel) / this.starsPerLevel;
+    const level = this.levelForStars(this.totalStars);
+    const progress = this.starsIntoLevel(this.totalStars) / this.starsForLevel(level);
     if (this.levelEl) this.levelEl.textContent = String(level);
     this.setLevelProgress(progress, animate);
   }
@@ -2605,9 +2626,9 @@ export class Feed {
 
   private finishStarReward(i: number): boolean {
     const prev = this.totalStars;
-    const prevLevel = Math.floor(prev / this.starsPerLevel) + 1;
+    const prevLevel = this.levelForStars(prev);
     this.totalStars = prev + this.rewardStarsFor(i);
-    const nextLevel = Math.floor(this.totalStars / this.starsPerLevel) + 1;
+    const nextLevel = this.levelForStars(this.totalStars);
 
     if (nextLevel > prevLevel) {
       this.setLevelProgress(1, true);
