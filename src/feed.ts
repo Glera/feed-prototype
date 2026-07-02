@@ -386,7 +386,14 @@ export class Feed {
       '',
       '── boot timings per mechanic ──',
     ];
-    for (const [id, t] of this.bootTimingsLog) lines.push(`${id}: ${JSON.stringify(t)}`);
+    for (const [id, t] of this.bootTimingsLog) {
+      lines.push(`${id}: ${JSON.stringify(t)}`);
+      // Host-clock warm timeline — directly comparable with the long-task /
+      // frame-gap timestamps above. host_* fields inside the JSON are the
+      // iframe's own boot stages converted to the same clock.
+      const wt = this.warmTimeline.get(id);
+      if (wt) lines.push(`  host timeline: append@${wt.appendAt ?? '?'} load@${wt.loadAt ?? '?'} reveal@${wt.revealAt ?? '?'}`);
+    }
     if (this.longTaskLog.length) {
       lines.push('', '── long tasks (>50ms) ──');
       for (const t of this.longTaskLog) {
@@ -980,6 +987,7 @@ export class Feed {
     frame.setAttribute('allow', 'autoplay');
     frame.addEventListener('load', () => {
       if (this.frames.get(i) !== frame) return;
+      this.markWarmTimeline(i, 'loadAt');
       this.disableFrameDoubleTapZoom(frame);
       this.frameLoaded.add(i);
       this.setFramePaused(i, this.shouldPauseFrame(i));
@@ -993,6 +1001,8 @@ export class Feed {
       hostPaused: this.shouldPauseFrame(i),
       auto: !this.manualRuns.has(i),
     });
+    this.warmTimeline.delete(this.playables[i].id);   // fresh run — drop the previous mount's marks
+    this.markWarmTimeline(i, 'appendAt');
     this.slots[i].appendChild(frame);
   }
 
@@ -1093,6 +1103,7 @@ export class Feed {
       if (this.frames.get(i) !== frame) return;
       if (!this.frameLoaded.has(i) || !this.frameReady.has(i) || !this.canRevealFrame(i)) return;
       this.frameRevealed.add(i);
+      this.markWarmTimeline(i, 'revealAt');
       this.wlog(`#${i} revealed (ready)${i === this.warmIndex ? ' — this is the pre-warmed next mechanic ✓' : ''}`);
       this.games[i].classList.remove('game--loading');
       this.games[i].classList.add('game--ready');
