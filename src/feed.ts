@@ -50,7 +50,7 @@ const STARS_PER_LEVEL = 5;    // level-1 base; higher levels need more (starsFor
 // расширением) → jump (прыжок) → fly (полет) → impact + particles + removal. No
 // scatter/decay phase; each star flies straight from its row slot.
 const REWARD_BOUNCE_MS = 620;        // per-star: squash + jump + fly to the counter
-const REWARD_PEEL_STAGGER_MS = 155;  // gap between successive peel-offs (reads one-by-one)
+const REWARD_PEEL_STAGGER_MS = 78;   // gap between successive peel-offs (halved from 155 — faster credit)
 const RING_STEP_MS = 180;       // snappy ring growth per star impact (synced to the bump)
 
 type PlayableOutcome = 'won' | 'lost';
