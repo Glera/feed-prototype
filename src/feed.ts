@@ -1764,12 +1764,18 @@ export class Feed {
       if ((step > 0 || tapToAdvance) && rewardIndex !== null) {
         const willShowLevelUp = this.levelUpPageState === 'entering' && this.levelUpPageEl !== null;
         this.unlockAudioForCurrentAndNext(fromIndex);
-        // Non-level-up: DON'T advance now. The opaque cover holds over the won screen
-        // for the whole star flight; the feed advances only once the star lands
-        // (afterCollect), under the cover, so the next mechanic never peeks through and
-        // its autoplay starts exactly once.
-        this.collectReward(rewardIndex, willShowLevelUp ? null : commitBasePos + 1);
-        if (willShowLevelUp) this.animateLevelUpPageIn();
+        if (willShowLevelUp) {
+          // Level-up path owns its own transition (the level-up page animates in
+          // immediately); collectReward credits + reveals it in the background.
+          this.collectReward(rewardIndex, null);
+          this.animateLevelUpPageIn();
+        } else {
+          // INSTANT swipe: start the slide to the next game NOW and credit the stars
+          // in parallel (idempotent, never lost) — the gesture must not wait for the
+          // star-collect animation. No freeze/cover; the counter just bumps as we go.
+          this.creditPendingRewardImmediate(rewardIndex);
+          this.slideToNext(rewardIndex, commitBasePos + 1);
+        }
         return;
       }
       this.removeLevelUpPage();
@@ -2367,6 +2373,29 @@ export class Feed {
       { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.18)`, opacity: 0 },
     ], { duration, easing: 'cubic-bezier(0.14, 0.72, 0.28, 1)', fill: 'forwards' });
     anim.addEventListener('finish', () => spark.remove(), { once: true });
+  }
+
+  // Paired slide to the next mechanic: the won page slides OUT (carrying its dark
+  // overlay) while the next slides IN. Both iframes are hidden during the slide
+  // (game--leaving / game--arriving) to avoid compositing judder; the incoming
+  // autoplay starts once it has arrived. Runs IMMEDIATELY — the star credit is a
+  // parallel background op, so it never gates this transition.
+  private slideToNext(leavingIdx: number, advanceToPos: number) {
+    this.holdNextAutoplay = true;
+    const arrivingIdx = this.indexForPos(advanceToPos);
+    this.games[arrivingIdx]?.classList.add('game--arriving');
+    this.games[leavingIdx]?.classList.add('game--leaving');
+    this.goTo(advanceToPos);
+    window.setTimeout(() => {
+      this.games[arrivingIdx]?.classList.remove('game--arriving');
+      this.games[leavingIdx]?.classList.remove('game--leaving');
+      this.updateMechanicState(leavingIdx);   // reward claimed → tear down the won overlay
+    }, 430);
+    window.setTimeout(() => {
+      this.holdNextAutoplay = false;
+      this.ensureFrameAutoPlay(this.realIndex());
+      this.pollAutoplayUi();
+    }, 720);
   }
 
   private collectReward(i: number, advanceToPos: number | null = null) {
