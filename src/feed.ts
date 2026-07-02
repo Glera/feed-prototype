@@ -641,14 +641,34 @@ export class Feed {
   private mountFeedBar() {
     const bar = document.createElement('div');
     bar.className = 'feed-bar';
-    const next = document.createElement('button');
-    next.className = 'feed-bar__next';
-    next.type = 'button';
-    next.setAttribute('aria-label', 'Next mechanic');
-    next.innerHTML = '<span class="feed-bar__next-icon">▲</span>';
-    next.addEventListener('pointerdown', (e) => e.stopPropagation());
-    next.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(); });
-    bar.appendChild(next);
+    // Cosmetic tab switcher (no functionality yet): a row of simple line-drawn
+    // geometric icons. Tapping one makes it active — a soft translucent pill
+    // slides under it. Paging is via swipe (attachSwipeSurface below); these
+    // icons don't page. Shapes kept elementary on purpose.
+    const SWITCH_SHAPES: [string, string][] = [
+      ['circle',   '<circle cx="12" cy="12" r="8"/>'],
+      ['square',   '<rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/>'],
+      ['triangle', '<path d="M12 3.5 L20.5 19 L3.5 19 Z"/>'],
+      ['diamond',  '<path d="M12 3 L21 12 L12 21 L3 12 Z"/>'],
+    ];
+    const switcher = document.createElement('div');
+    switcher.className = 'feed-bar__switch';
+    switcher.setAttribute('role', 'tablist');
+    SWITCH_SHAPES.forEach(([name, inner], idx) => {
+      const icon = document.createElement('button');
+      icon.type = 'button';
+      icon.className = 'feed-bar__icon' + (idx === 0 ? ' feed-bar__icon--active' : '');
+      icon.setAttribute('aria-label', name);
+      icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${inner}</svg>`;
+      icon.addEventListener('pointerdown', (e) => e.stopPropagation());
+      icon.addEventListener('click', (e) => {
+        e.stopPropagation();
+        switcher.querySelectorAll('.feed-bar__icon--active').forEach((el) => el.classList.remove('feed-bar__icon--active'));
+        icon.classList.add('feed-bar__icon--active');
+      });
+      switcher.appendChild(icon);
+    });
+    bar.appendChild(switcher);
     // Platform build stamp, bottom-left of the bar — so it's clear which platform
     // build is live (mechanics carry their own badge in their bottom-left corner).
     const ver = document.createElement('div');
@@ -852,7 +872,16 @@ export class Feed {
 
       if (shouldTouchDom) {
         const transition = animate && !wrapped ? 'transform 0.36s var(--ease-snap)' : 'none';
-        const transform = `translate3d(0, ${delta * this.pageH}px, 0)`;
+        // PEEK: keep the NEXT page 56px inside the viewport, hidden under the
+        // opaque fixed feed bar (58px + safe-area). An iframe fully outside
+        // the viewport is render-throttled by Chromium — its layer is never
+        // rasterised, so a swipe used to reveal a BLACK rectangle until the
+        // browser finished the first full paint mid-slide, defeating
+        // warm-paint entirely. A deeper peek also pre-rasterises enough tiles
+        // that the slide doesn't checkerboard. Scales in with delta so
+        // dragging never sees a jump.
+        const peek = 56 * Math.min(Math.max(delta, 0), 1);
+        const transform = `translate3d(0, ${delta * this.pageH - peek}px, 0)`;
         const zIndex = String(1000 - Math.round(Math.abs(delta) * 10));
         const visible = near;
         const inViewport = delta > -0.98 && delta < 0.98;
