@@ -184,17 +184,16 @@ body {
   pointer-events: auto;
 }
 
-/* During the post-reward arrival slide, hide the (possibly warmed/ready) iframe so a
-   heavy iframe layer isn't composited+moved mid-slide (judder). The page slides as a
-   dark box; the iframe fades in once arrived (game--arriving removed). */
-.game--arriving .game__frame,
+/* The ARRIVING frame slides in VISIBLE: warm-paint parks a composed start
+   screen on its canvas and the rAF gate keeps the frame static during the
+   slide, so the browser composites a frozen layer (cheap — same as any
+   scroll) instead of the live-booting iframe that used to judder here. Only
+   the LEAVING page stays hidden — it carries its dark win overlay, which is
+   the panel that visibly drives away. */
 .game--leaving .game__frame {
   opacity: 0 !important;
   visibility: hidden;
 }
-/* dark placeholder behind the hidden frame — arriving slides in, leaving (the won page,
-   carrying its dark win overlay) slides out, so neither composites a live iframe layer. */
-.game--arriving::before,
 .game--leaving::before { opacity: 1; }
 
 .game__label {
@@ -295,27 +294,55 @@ body {
      ("bar grows") and ate the first swipe. Taps on the centered button still work. */
   touch-action: none;
 }
-.feed-bar__next {
-  /* Absolutely fill the panel height (top:0/bottom:0) — bulletproof vs <button> flex
-     quirks. Centred horizontally; width unchanged. */
+/* Cosmetic icon tab-switcher, centred in the visible bar (above the safe-area
+   home-indicator zone). Purely a stylish control — no paging behaviour. */
+.feed-bar__switch {
   position: absolute;
   top: 0;
-  bottom: 0;   /* fill the FULL panel height, safe-area included */
+  bottom: var(--safe-bottom);   /* centre within the visible bar, not the home-indicator strip */
   left: 50%;
   transform: translateX(-50%);
-  width: var(--bar-reserve);   /* square: width == panel height (button fills top:0→bottom:0) */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.feed-bar__icon {
+  position: relative;
+  width: 46px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
+  margin: 0;
   border: 0;
-  border-radius: 0;
-  background: rgba(255, 255, 255, 0.13);
-  color: rgba(255, 255, 255, 0.95);
+  border-radius: 13px;
+  background: transparent;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: background 180ms var(--ease-snap), box-shadow 180ms var(--ease-snap);
 }
-.feed-bar__next:active { background: rgba(255, 255, 255, 0.22); }
-.feed-bar__next-icon { font-size: 18px; line-height: 1; }
+.feed-bar__icon svg {
+  width: 24px;
+  height: 24px;
+  display: block;
+  overflow: visible;
+}
+.feed-bar__icon svg * {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.5);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 180ms var(--ease-snap);
+}
+/* Active tab: soft translucent pill + subtle ring, brighter stroke. */
+.feed-bar__icon--active {
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+.feed-bar__icon--active svg * { stroke: rgba(255, 255, 255, 0.96); }
+.feed-bar__icon:active { background: rgba(255, 255, 255, 0.18); }
 
 /* Slowly-blinking hint text, floating ABOVE the dark bar (the bar itself stays
    empty for future buttons). Purely visual. */
