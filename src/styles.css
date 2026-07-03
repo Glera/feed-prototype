@@ -245,6 +245,10 @@ body {
   -webkit-user-select: none;
 }
 .game--live .game__poster { opacity: 0; }
+/* Live-ride pages (warm frame painted its start screen): the REAL iframe is
+   what parks in the viewport and rides in — keep the in-slot poster out of
+   its way. */
+.game--warmlive .game__poster { opacity: 0; }
 
 /* The ARRIVING frame slides in VISIBLE: warm-paint parks a composed start
    screen on its canvas and the rAF gate keeps the frame static during the

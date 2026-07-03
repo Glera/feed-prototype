@@ -30,6 +30,12 @@ const TAP_SLOP_PX = 8;             // micro movement still counts as a tap
 const MIN_SWIPE_INTENT_PX = 8;     // velocity alone cannot turn a tiny wiggle into a swipe
 const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of distance
 
+// Mechanics whose warm frame does NOT paint a start screen (their scene is
+// DOM built only on un-pause) — they ride the baked poster, not the live
+// iframe. Shrink this list by fixing their staged boot to build the scene at
+// mount.
+const LiveRideExcluded = new Set(['pins-v1-swipe', 'merge-second-board-v1-swipe', 'merge-second-board-v2-swipe']);
+
 const LIVE_AHEAD = 0;              // explicit warm-next scheduling below owns ahead iframe lifetime
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
 // Byte-prefetch depth (html + payload.js into the HTTP cache; NO iframe, no
@@ -228,6 +234,24 @@ export class Feed {
   // arrival (mechanic mounts on advance).
   private warmNextEnabled =
     (new URLSearchParams(location.search).get('warm') || 'idle') !== 'off';
+  // LIVE RIDE experiment (default OFF, ?livein=1 to test): the warm NEXT page
+  // parks at translateY(0) INSIDE the viewport, hidden under the opaque
+  // current page — the browser renders+rasterises the live iframe there, and
+  // the raster CAN survive the teleport to the normal offset when a slide
+  // starts, riding the REAL mechanic in. Measured to be FLAKY though: during
+  // a ~500ms finger drag the page sits off-screen long enough for the render
+  // throttler to drop the iframe raster again (one recording rode, the next
+  // arrived black), so the stable poster ride stays the default. The robust
+  // successor is a live canvas SNAPSHOT into the host ride layer.
+  private liveInEnabled = new URLSearchParams(location.search).get('livein') === '1';
+
+  /** True when the arriving page can ride LIVE: feature on, its warm frame
+   *  revealed, and its start screen actually painted while warm (DOM-scene
+   *  mechanics build theirs only on un-pause — they ride the poster). */
+  private liveRideOk(i: number): boolean {
+    return this.liveInEnabled && i >= 0 && this.frameRevealed.has(i)
+      && !LiveRideExcluded.has(this.playables[i]?.id ?? '');
+  }
 
   private dragging = false;
   private startY = 0;
@@ -899,7 +923,16 @@ export class Feed {
         // that the slide doesn't checkerboard. Scales in with delta so
         // dragging never sees a jump.
         const peek = 56 * Math.min(Math.max(delta, 0), 1);
-        const transform = `translate3d(0, ${delta * this.pageH - peek}px, 0)`;
+        // Live ride: while nothing moves, the ready NEXT page parks at 0 in
+        // the viewport (under the current page — its z is lower), so its live
+        // iframe stays rendered+rasterised; any gesture/slide recomputes the
+        // normal offset on the next render() (an instant, invisible teleport
+        // that the raster survives).
+        const parkedInViewport = !this.dragging && this.settlingTargetIndex === null
+          && delta > 0.5 && delta < 1.5 && this.liveRideOk(i);
+        const transform = parkedInViewport
+          ? 'translate3d(0, 0, 0)'
+          : `translate3d(0, ${delta * this.pageH - peek}px, 0)`;
         const zIndex = String(1000 - Math.round(Math.abs(delta) * 10));
         const visible = near;
         const inViewport = delta > -0.98 && delta < 0.98;
@@ -1092,6 +1125,10 @@ export class Feed {
    *  park under the pages otherwise. Called at the end of every render(). */
   private driveIncoming(animate: boolean) {
     if (!this.incomingEl) return;
+    // The live iframe rides instead whenever the warm frame actually painted
+    // its start screen; the poster remains the fallback for DOM-scene
+    // mechanics and for fast flicks onto a not-yet-ready frame.
+    if (this.liveRideOk(this.incomingIndex)) return;
     const i = this.incomingIndex;
     const delta = i >= 0 ? this.pageDelta[i] : undefined;
     const riding = i >= 0 && this.incomingPosterOk && delta !== undefined && (
@@ -1581,6 +1618,10 @@ export class Feed {
       if (isCurrent && !paused && this.frameRevealed.has(i)) {
         this.games[i]?.classList.add('game--live');
       }
+      // Live-ride pages show their real iframe: the in-slot poster (z above
+      // the frame) must not cover it — neither while parked in the viewport
+      // nor during the ride. Reverts automatically after remount.
+      this.games[i]?.classList.toggle('game--warmlive', this.liveRideOk(i));
 
       const playable = isCurrent && !paused && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
       // Manual play hides the blinking hint (the close × takes over as the affordance).
@@ -3327,6 +3368,18 @@ export class Feed {
       this.settlingTargetIndex = targetIndex;
       this.stopRewardSparks(fromIndex);
       if (this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycleAfterSettle = true;
+      // Live-ride teleport for PROGRAMMATIC advances (▲ button / post-win):
+      // the parked-in-viewport page sits at translateY(0) already — animating
+      // "to 0" would show no ride. Recompute it at its normal off-screen
+      // offset first (settlingTargetIndex is set, so the park override is off)
+      // and force the style flush; the animated pass below then rides it in.
+      if (!instant) {
+        const savedPos = this.pos;
+        this.pos = fromPos;
+        this.render(false);
+        void this.feedEl.offsetHeight;
+        this.pos = savedPos;
+      }
     }
     this.pos = targetPos;
     this.render(!instant);
