@@ -192,10 +192,12 @@ body {
    win/fail overlays (z:5). The 120ms fade delay lets the live frame composite
    underneath before the poster lifts. */
 .game__poster {
+  /* Lives INSIDE .game__slot — same box as the iframe, and inherits the
+     autoplay footage-frame scale, so poster and mechanic always match. */
   position: absolute;
-  inset: 0 0 var(--bar-reserve) 0;
+  inset: 0;
   width: 100%;
-  height: calc(100% - var(--bar-reserve));
+  height: 100%;
   object-fit: cover;
   object-position: center;
   z-index: 3;

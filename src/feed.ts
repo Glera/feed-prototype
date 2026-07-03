@@ -561,7 +561,10 @@ export class Feed {
       poster.draggable = false;
       poster.src = `${playableUrl(p.id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
       poster.addEventListener('error', () => poster.remove(), { once: true });
-      game.appendChild(poster);
+      // INSIDE the slot: the poster then shares the iframe's exact box AND the
+      // autoplay "footage frame" scale (.game--autoplay .game__slot 0.92), so
+      // it never reads bigger than the mechanic it stands in for.
+      slot.appendChild(poster);
 
       const spinner = document.createElement('div');
       spinner.className = 'game__spinner';
