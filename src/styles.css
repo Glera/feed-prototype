@@ -193,6 +193,13 @@ body {
   touch-action: manipulation;
   transform-origin: 50% 50%;   /* scale from the CENTRE — autoplay frame gaps on ALL sides */
   transition: transform 0.34s var(--ease-snap);
+  /* Above the dark loading cover (.game::before, z:3; the slot wins the tie by
+     DOM order): the slot's transform makes it an atomic stacking context, so
+     without this the cover painted OVER the in-slot poster — a poster that had
+     just ridden in vanished into the dark preloader (flicker). With the slot on
+     top, a loading mechanic keeps its poster; the spinner (z:4) still turns
+     above it, and posterless slots show the same platform-bg as the cover. */
+  z-index: 3;
 }
 /* Autoplay: the game sits slightly inset (a dark "footage frame" around it), anchored
    to the bottom bar. Tapping to take over removes game--autoplay → it expands back to
