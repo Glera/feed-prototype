@@ -184,6 +184,29 @@ body {
   pointer-events: auto;
 }
 
+/* Start-screen poster — host-document pixels that ride the swipe. Neither
+   Chromium nor WebKit rasterises an off-screen iframe's layer (Telegram
+   webviews included), so the arriving page used to be a dark box no matter
+   what the warm frame had painted; this image is part of the always-rendered
+   host document. Above the iframe (z:3), below the autoplay dim (z:4) and
+   win/fail overlays (z:5). The 120ms fade delay lets the live frame composite
+   underneath before the poster lifts. */
+.game__poster {
+  position: absolute;
+  inset: 0 0 var(--bar-reserve) 0;
+  width: 100%;
+  height: calc(100% - var(--bar-reserve));
+  object-fit: cover;
+  object-position: center;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 220ms ease-out 120ms;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.game--live .game__poster { opacity: 0; }
+
 /* The ARRIVING frame slides in VISIBLE: warm-paint parks a composed start
    screen on its canvas and the rAF gate keeps the frame static during the
    slide, so the browser composites a frozen layer (cheap — same as any

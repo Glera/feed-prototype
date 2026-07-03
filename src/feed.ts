@@ -550,6 +550,19 @@ export class Feed {
       slot.className = 'game__slot';
       game.appendChild(slot);
 
+      // Start-screen poster — HOST-document pixels shown while this page is
+      // not live yet, so the swipe carries a real start screen even though
+      // both Chromium and WebKit refuse to rasterise an off-screen iframe's
+      // layer (Telegram webviews included). Hidden one-way via .game--live
+      // once the mechanic is current + revealed + un-paused; re-shown on
+      // remount (resetFrameReadiness).
+      const poster = document.createElement('img');
+      poster.className = 'game__poster';
+      poster.draggable = false;
+      poster.src = `${playableUrl(p.id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
+      poster.addEventListener('error', () => poster.remove(), { once: true });
+      game.appendChild(poster);
+
       const spinner = document.createElement('div');
       spinner.className = 'game__spinner';
       game.appendChild(spinner);
@@ -1125,6 +1138,9 @@ export class Feed {
     const revealTimer = this.frameRevealTimers.get(i);
     if (revealTimer) window.clearTimeout(revealTimer);
     this.frameRevealTimers.delete(i);
+    // Fresh mount → the start-screen poster fronts the page again until this
+    // run goes live (see the .game--live toggle in pollAutoplayUi).
+    this.games[i]?.classList.remove('game--live');
   }
 
   private queueFrameReadyFallback(i: number, frame: HTMLIFrameElement) {
@@ -1472,6 +1488,14 @@ export class Feed {
       // the bar's button now). Shown during autoplay/attract; hidden in manual play.
       const txt = this.swipebarTextEls[i];
       if (txt && txt.textContent !== 'tap to play or swipe') txt.textContent = 'tap to play or swipe';
+
+      // Poster lifecycle: ONE-WAY hide once the mechanic is genuinely live on
+      // screen (current + revealed + un-paused). Never re-shown mid-run — a
+      // poster snapping over a live leaving frame would flash; remount
+      // (resetFrameReadiness) restores it for the next cycle.
+      if (isCurrent && !paused && this.frameRevealed.has(i)) {
+        this.games[i]?.classList.add('game--live');
+      }
 
       const playable = isCurrent && !paused && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i);
       // Manual play hides the blinking hint (the close × takes over as the affordance).
