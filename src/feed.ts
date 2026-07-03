@@ -1069,14 +1069,22 @@ export class Feed {
     this.incomingIndex = next;
     this.incomingPosterOk = false;
     this.incomingImg.src = `${playableUrl(this.playables[next].id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
-    const pageR = this.pageEls[next]?.getBoundingClientRect();
-    const slot = this.games[next]?.querySelector<HTMLElement>('.game__slot');
-    if (pageR && slot) {
-      const r = slot.getBoundingClientRect();
-      this.incomingImg.style.top = `${r.top - pageR.top}px`;
-      this.incomingImg.style.left = `${r.left - pageR.left}px`;
-      this.incomingImg.style.width = `${r.width}px`;
-      this.incomingImg.style.height = `${r.height}px`;
+    const game = this.games[next];
+    const slot = game?.querySelector<HTMLElement>('.game__slot');
+    if (game && slot) {
+      // UNSCALED layout box via offset* (transforms don't affect it), then
+      // replicate the autoplay footage-frame scale explicitly — an arriving
+      // page is always in autoplay-preview, but its game--autoplay class may
+      // land AFTER this measurement, so reading getBoundingClientRect here
+      // raced it and the poster rode in 8% larger than the mechanic
+      // (.game--autoplay .game__slot { transform: scale(0.92) } — keep in
+      // sync with styles.css).
+      this.incomingImg.style.top = `${game.offsetTop + slot.offsetTop}px`;
+      this.incomingImg.style.left = `${game.offsetLeft + slot.offsetLeft}px`;
+      this.incomingImg.style.width = `${slot.offsetWidth}px`;
+      this.incomingImg.style.height = `${slot.offsetHeight}px`;
+      this.incomingImg.style.transform = 'scale(0.92)';
+      this.incomingImg.style.transformOrigin = '50% 50%';
     }
   }
 
