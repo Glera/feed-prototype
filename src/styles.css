@@ -110,6 +110,36 @@ body {
   will-change: transform;
 }
 
+/* Viewport-resident incoming poster — the layer that makes the NEXT mechanic
+   visibly RIDE in. It permanently sits at translateY(0) INSIDE the viewport
+   (rasterised — unlike anything parked off-screen, which browsers rasterise
+   too late for a 360ms slide), hidden under the opaque current page at rest
+   (z:1). During a drag/slide the host raises it to z:1010 and mirrors the
+   arriving page's transform — the existing raster rides from the first frame.
+   Looks identical to the arriving page (same bg + the mechanic's poster in
+   the slot box), and hands off seamlessly to the page's own in-slot poster
+   at settle. */
+.incoming-poster {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+  background: var(--platform-bg);
+  contain: layout paint;
+  will-change: transform;
+}
+.incoming-poster img {
+  position: absolute;
+  object-fit: cover;
+  object-position: center;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* ── Mini-game container ───────────────────────────────────────────────────
    Fills the page below the stories rail. All in-game gestures live here and
    must NOT page the feed. */

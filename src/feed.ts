@@ -243,10 +243,12 @@ export class Feed {
     this.N = playables.length;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
+    this.buildIncoming();
     this.mountHud();
     this.mountFeedBar();
     this.measure();
     this.render(false);
+    this.updateIncomingPoster();
     this.updateMechanicStates();
     this.updateHud(false);
     this.mountPreloader();
@@ -932,6 +934,7 @@ export class Feed {
       }
       this.pageDelta[i] = delta;
     }
+    this.driveIncoming(animate);
     this.renderLevelUpPage(animate);
   }
 
@@ -1025,6 +1028,77 @@ export class Feed {
     this.levelUpPageEl.remove();
     this.levelUpPageEl = null;
     this.levelUpPageState = 'idle';
+  }
+
+  // ── Incoming-poster ride ────────────────────────────────────────────────
+  // The only way to show the next mechanic RIDING in: browsers rasterise
+  // lazily outside the viewport — iframe layers AND host page layers alike —
+  // so anything parked at translateY(pageH) arrives as an empty rectangle no
+  // matter what it contains (measured frame-by-frame; will-change doesn't
+  // extend the tile interest area far enough). This layer PERMANENTLY lives
+  // at translateY(0) inside the viewport, hidden UNDER the opaque current
+  // page (z:1), so its raster always exists. On slide/drag it teleports to
+  // the arriving page's offset (raster survives transform changes) and
+  // mirrors the page's transform/transition ABOVE the pages (z:1010, under
+  // the feed bar). At settle it parks back under the arrived page, whose
+  // in-slot poster shows the identical pixels — seamless handoff.
+  private incomingEl!: HTMLElement;
+  private incomingImg!: HTMLImageElement;
+  private incomingIndex = -1;
+  private incomingPosterOk = false;
+
+  private buildIncoming() {
+    const el = document.createElement('div');
+    el.className = 'incoming-poster';
+    const img = document.createElement('img');
+    img.draggable = false;
+    img.addEventListener('load', () => { this.incomingPosterOk = true; });
+    img.addEventListener('error', () => { this.incomingPosterOk = false; });
+    el.appendChild(img);
+    this.feedEl.appendChild(el);
+    this.incomingEl = el;
+    this.incomingImg = img;
+  }
+
+  /** Point the resident layer at the NEXT mechanic's poster and copy the
+   *  arriving page's slot box (page-local, includes the autoplay 0.92 scale). */
+  private updateIncomingPoster() {
+    if (!this.incomingEl) return;
+    const next = (this.realIndex() + 1) % this.N;
+    if (next === this.incomingIndex) return;
+    this.incomingIndex = next;
+    this.incomingPosterOk = false;
+    this.incomingImg.src = `${playableUrl(this.playables[next].id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
+    const pageR = this.pageEls[next]?.getBoundingClientRect();
+    const slot = this.games[next]?.querySelector<HTMLElement>('.game__slot');
+    if (pageR && slot) {
+      const r = slot.getBoundingClientRect();
+      this.incomingImg.style.top = `${r.top - pageR.top}px`;
+      this.incomingImg.style.left = `${r.left - pageR.left}px`;
+      this.incomingImg.style.width = `${r.width}px`;
+      this.incomingImg.style.height = `${r.height}px`;
+    }
+  }
+
+  /** Mirror the arriving page's motion during a drag or an animated slide;
+   *  park under the pages otherwise. Called at the end of every render(). */
+  private driveIncoming(animate: boolean) {
+    if (!this.incomingEl) return;
+    const i = this.incomingIndex;
+    const delta = i >= 0 ? this.pageDelta[i] : undefined;
+    const riding = i >= 0 && this.incomingPosterOk && delta !== undefined && (
+      (this.dragging && delta > 0.001 && delta < 1.2) ||
+      (animate && this.settlingTargetIndex === i)
+    );
+    if (riding) {
+      this.incomingEl.style.zIndex = '1010';
+      this.incomingEl.style.transition = this.pageTransitionState[i] || 'none';
+      this.incomingEl.style.transform = this.pageTransformState[i] || 'translate3d(0, 0, 0)';
+    } else if (!this.dragging && this.settlingTargetIndex === null) {
+      this.incomingEl.style.zIndex = '1';
+      this.incomingEl.style.transition = 'none';
+      this.incomingEl.style.transform = 'translate3d(0, 0, 0)';
+    }
   }
 
   // ── Live window (instantiate neighbours, tear down the far ones) ───────────
@@ -3225,6 +3299,10 @@ export class Feed {
     this.scheduleWarmNext();
     this.prefetchReserve();
     this.pumpPrefetchQueue();
+    // Arrived: re-park the resident poster layer under the new current page
+    // (render(false) above already reset transform/z) and repoint it at the
+    // NEW next mechanic for the following swipe.
+    this.updateIncomingPoster();
   }
 
   // ── Paging ───────────────────────────────────────────────────────────────
@@ -3273,6 +3351,10 @@ export class Feed {
   private onResize = () => {
     this.measure();
     this.render(false);
+    // Slot geometry changed with the viewport — re-measure the resident
+    // poster layer's box (force by resetting the identity guard).
+    this.incomingIndex = -1;
+    this.updateIncomingPoster();
   };
 }
 
