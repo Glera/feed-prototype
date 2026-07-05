@@ -1102,6 +1102,10 @@ export class Feed {
     this.incomingIndex = next;
     this.incomingPosterOk = false;
     this.incomingImg.src = `${playableUrl(this.playables[next].id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
+    // Live snapshot of the new warm frame: wait ~1.5s of poll ticks past the
+    // reveal (warm-paint + image decode settle), then a few attempts.
+    this.snapDelayTicks = 6;
+    this.snapTriesLeft = 8;
     const game = this.games[next];
     const slot = game?.querySelector<HTMLElement>('.game__slot');
     if (game && slot) {
@@ -1119,6 +1123,74 @@ export class Feed {
       this.incomingImg.style.transform = 'scale(0.92)';
       this.incomingImg.style.transformOrigin = '50% 50%';
     }
+  }
+
+  // ── Live snapshot ──────────────────────────────────────────────────────
+  // The baked poster.jpg never quite matches the mechanic (captured at a
+  // different aspect, random board layouts, live particles). A warm mechanic
+  // is PAUSED though — its pixels are frozen after warm-paint — so ONE
+  // same-origin composite of its canvases/videos/images into a slot-sized
+  // canvas is pixel-faithful until arrival. The JPEG encode happens off the
+  // main thread (toBlob); the blob URL replaces BOTH the ride image and the
+  // warm page's in-slot poster, so ride → arrival → live all show the same
+  // pixels. Falls back to the baked poster when the composite comes up blank
+  // (DOM-scene mechanics are skipped up front).
+  private snapUrl: string | null = null;
+  private snapTriesLeft = 0;
+  private snapDelayTicks = 0;   // poll ticks to wait after reveal before the first attempt (warm-paint must finish)
+
+  private captureIncomingSnapshot(): boolean {
+    const i = this.incomingIndex;
+    if (i < 0 || !this.frameRevealed.has(i)) return false;
+    if (LiveRideExcluded.has(this.playables[i]?.id ?? '')) return false;
+    const frame = this.frames.get(i);
+    const win = frame?.contentWindow as (Window & typeof globalThis) | null;
+    const doc = win?.document;
+    const slot = this.games[i]?.querySelector<HTMLElement>('.game__slot');
+    if (!win || !doc || !slot) return false;
+    try {
+      const w = slot.offsetWidth, h = slot.offsetHeight;
+      const scale = Math.min(2, window.devicePixelRatio || 1);
+      const cnv = document.createElement('canvas');
+      cnv.width = Math.round(w * scale);
+      cnv.height = Math.round(h * scale);
+      const ctx = cnv.getContext('2d');
+      if (!ctx || !cnv.width || !cnv.height) return false;
+      // The iframe fills the slot — map iframe-viewport rects straight in.
+      const iw = win.innerWidth || w, ih = win.innerHeight || h;
+      const sx = cnv.width / iw, sy = cnv.height / ih;
+      // CSS body background first (some mechanics rely on it under the canvas).
+      const bg = win.getComputedStyle(doc.body).backgroundColor;
+      if (bg && bg !== 'rgba(0, 0, 0, 0)') { ctx.fillStyle = bg; ctx.fillRect(0, 0, cnv.width, cnv.height); }
+      let drew = false;
+      // Document order approximates the mechanics' visual stacking (base
+      // canvas → DOM sprites like the generator → sparkle overlays).
+      for (const el of doc.querySelectorAll<HTMLElement>('canvas, video, img')) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8 || r.bottom < 0 || r.top > ih) continue;
+        const cs = win.getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+        try {
+          ctx.drawImage(el as HTMLCanvasElement, r.left * sx, r.top * sy, r.width * sx, r.height * sy);
+          drew = true;
+        } catch { /* tainted/broken element — skip it */ }
+      }
+      if (!drew) return false;
+      // Blank guard: a not-yet-painted warm frame composes to nothing.
+      const d = ctx.getImageData(0, 0, cnv.width, Math.min(cnv.height, 240)).data;
+      let nonBlank = false;
+      for (let p = 3; p < d.length; p += 1600) if (d[p] > 0) { nonBlank = true; break; }
+      if (!nonBlank) return false;
+      cnv.toBlob((blob) => {
+        if (!blob || i !== this.incomingIndex) return;
+        if (this.snapUrl) URL.revokeObjectURL(this.snapUrl);
+        this.snapUrl = URL.createObjectURL(blob);
+        this.incomingImg.src = this.snapUrl;
+        const slotPoster = this.games[i]?.querySelector<HTMLImageElement>('.game__poster');
+        if (slotPoster) slotPoster.src = this.snapUrl;
+      }, 'image/jpeg', 0.85);
+      return true;
+    } catch { return false; }
   }
 
   /** Mirror the arriving page's motion during a drag or an animated slide;
@@ -1261,8 +1333,14 @@ export class Feed {
     if (revealTimer) window.clearTimeout(revealTimer);
     this.frameRevealTimers.delete(i);
     // Fresh mount → the start-screen poster fronts the page again until this
-    // run goes live (see the .game--live toggle in pollAutoplayUi).
+    // run goes live (see the .game--live toggle in pollAutoplayUi), and it
+    // must be the BAKED poster — a stale live snapshot from the previous run
+    // would show an outdated board.
     this.games[i]?.classList.remove('game--live');
+    const poster = this.games[i]?.querySelector<HTMLImageElement>('.game__poster');
+    if (poster && poster.src.startsWith('blob:')) {
+      poster.src = `${playableUrl(this.playables[i].id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
+    }
   }
 
   private queueFrameReadyFallback(i: number, frame: HTMLIFrameElement) {
@@ -1570,6 +1648,16 @@ export class Feed {
   private pollAutoplayUi = () => {
     if (document.hidden) return;
     if (this.isGestureBusy()) return;
+    // Live-snapshot the warm frame once it's revealed and had time to finish
+    // its warm-paint (frozen after that — one capture is faithful until
+    // arrival). Cheap: a few drawImage calls; JPEG encode is async (toBlob).
+    if (this.incomingIndex >= 0 && this.frameRevealed.has(this.incomingIndex) && this.snapTriesLeft > 0) {
+      if (this.snapDelayTicks > 0) this.snapDelayTicks--;
+      else {
+        this.snapTriesLeft--;
+        if (this.captureIncomingSnapshot()) this.snapTriesLeft = 0;
+      }
+    }
     const indices = new Set<number>(this.autoplayUiActive);
     indices.add(this.realIndex());
     if (this.warmIndex !== null) indices.add(this.warmIndex);
