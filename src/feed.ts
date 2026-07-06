@@ -889,6 +889,18 @@ export class Feed {
       });
       switcher.appendChild(icon);
     });
+    // Debug button — right of the four switcher icons. Opens the diag panel
+    // (initData/session, event log, pending stars, flush, reset). TEST phase.
+    const dbg = document.createElement('button');
+    dbg.type = 'button';
+    dbg.className = 'feed-bar__icon';
+    dbg.setAttribute('aria-label', 'Debug');
+    dbg.textContent = '🐞';
+    dbg.style.fontSize = '17px';
+    dbg.style.opacity = '0.65';
+    dbg.addEventListener('pointerdown', (e) => e.stopPropagation());
+    dbg.addEventListener('click', (e) => { e.stopPropagation(); void import('./debug').then((m) => m.mountDebugPanel()); });
+    switcher.appendChild(dbg);
     bar.appendChild(switcher);
     // Platform build stamp, bottom-left of the bar — so it's clear which platform
     // build is live (mechanics carry their own badge in their bottom-left corner).
