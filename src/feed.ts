@@ -1,5 +1,5 @@
 import { PLAYABLES, playableUrl, type Playable } from './playables';
-import { apiSession, apiPostResult, variantIdForMechanic } from './api';
+import { apiSession, apiMe, apiPostResult, variantIdForMechanic } from './api';
 import { track } from './telemetry';
 import { getStartParam } from './telegram';
 
@@ -368,11 +368,37 @@ export class Feed {
   // apiSession returns null → we keep the existing in-memory behaviour).
   private async bootServer(): Promise<void> {
     track('session_start', { entry: getStartParam() ? 'challenge' : 'direct', start_param: getStartParam() });
-    const s = await apiSession();
-    if (!s) return;
-    this.totalStars = s.balance;
+    // Retry with backoff: a free Render instance that spun down takes 30–60s to
+    // cold-start (plus startup migrations). A single await would time out → null →
+    // the balance never seeds → the tester sees exactly the "stars gone after
+    // reopen" bug the DoD checks. Retry across that window.
+    const delays = [0, 2000, 5000, 10000];
+    for (const d of delays) {
+      if (d) await new Promise((r) => setTimeout(r, d));
+      const s = await apiSession();
+      if (s) { this.applyServerBalance(s.balance); return; }
+    }
+    // Still nothing — re-sync when the app next comes to the foreground (Telegram
+    // may resume the page without a full reload; the backend is warm by then).
+    const onVisible = () => { if (!document.hidden) { document.removeEventListener('visibilitychange', onVisible); void this.syncBalance(); } };
+    document.addEventListener('visibilitychange', onVisible);
+  }
+
+  // Apply a server balance WITHOUT clobbering optimistic local progress: if the
+  // player won during a slow /session, totalStars already reflects it and the
+  // server will catch up on the next /me — so take the max (never flicker back).
+  private applyServerBalance(balance: number): void {
+    const next = Math.max(this.totalStars, balance);
+    if (next === this.totalStars) return;
+    this.totalStars = next;
     this.updateHud(false);
     this.renderLevelUpPage(false);
+  }
+
+  // Re-pull the balance (e.g. after returning to the foreground). Cheap GET /me.
+  private async syncBalance(): Promise<void> {
+    const m = await apiMe();
+    if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);
   }
 
   // Persist a manual win to the server (idempotent by run_id) — the ledger is the

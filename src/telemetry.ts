@@ -53,7 +53,10 @@ function flush(): void {
   try {
     fetch(EVENTS_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // text/plain is a CORS-simple content type → NO preflight (the backend
+      // parses the body regardless of type). Avoids a per-flush OPTIONS RTT and,
+      // crucially, keeps the terminal beacon (below) from needing a cached one.
+      headers: { 'Content-Type': 'text/plain' },
       body,
       keepalive: true,
     }).catch(() => { /* drop — telemetry is best-effort */ });
@@ -68,16 +71,19 @@ function beaconFlush(): void {
   if (queue.length === 0) return;
   const events = queue;
   queue = [];
+  const payload = JSON.stringify({ events, init_data: getInitData() });
   try {
-    const blob = new Blob([JSON.stringify({ events, init_data: getInitData() })], { type: 'application/json' });
+    // text/plain Blob → CORS-simple → sendBeacon fires WITHOUT a preflight (a
+    // cross-origin application/json beacon needs a cached preflight that a short
+    // session may never have warmed). Backend parses the body regardless of type.
+    const blob = new Blob([payload], { type: 'text/plain' });
     if (navigator.sendBeacon && navigator.sendBeacon(EVENTS_URL, blob)) return;
   } catch {
     /* fall through */
   }
-  // Fallback if sendBeacon unavailable/failed.
   try {
-    fetch(EVENTS_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ events, init_data: getInitData() }), keepalive: true }).catch(() => {});
+    fetch(EVENTS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain' },
+      body: payload, keepalive: true }).catch(() => {});
   } catch { /* noop */ }
 }
 

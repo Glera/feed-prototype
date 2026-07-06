@@ -31,6 +31,26 @@ async function post<T>(path: string, body?: unknown): Promise<T | null> {
   }
 }
 
+async function get<T>(path: string): Promise<T | null> {
+  try {
+    const r = await fetch(`${API_BASE}${path}`, { headers: headers() });
+    if (!r.ok) return null;
+    return (await r.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+export interface MeResp {
+  user: ({ id: number; ref_code: string | null } & Record<string, unknown>) | null;
+  balance: number;
+  needs_session?: boolean;
+}
+
+export function apiMe(): Promise<MeResp | null> {
+  return get<MeResp>('/api/me');
+}
+
 export interface SessionResp {
   user: { id: number; ref_code: string | null } & Record<string, unknown>;
   ref_code: string | null;
@@ -58,6 +78,26 @@ export interface ResultIn {
 
 export function apiPostResult(payload: ResultIn): Promise<ResultResp | null> {
   return post<ResultResp>('/api/results', payload);
+}
+
+/** On-device diagnostics (open with ?diag=1). Surfaces exactly why persistence
+ *  might fail: no Telegram, empty initData, auth 401 (BOT_TOKEN mismatch), etc. */
+export async function apiDiagnose(): Promise<Record<string, unknown>> {
+  const init = getInitData();
+  const out: Record<string, unknown> = {
+    hasTelegram: !!(window as any).Telegram?.WebApp,
+    initDataLen: init ? init.length : 0,
+    hasSignature: !!init && init.includes('signature='),
+    apiBase: API_BASE,
+  };
+  try {
+    const r = await fetch(`${API_BASE}/api/session`, { method: 'POST', headers: headers() });
+    out.sessionStatus = r.status;
+    out.sessionBody = (await r.text()).slice(0, 400);
+  } catch (e) {
+    out.sessionError = String(e);
+  }
+  return out;
 }
 
 /**
