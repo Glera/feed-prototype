@@ -1,5 +1,6 @@
 import { PLAYABLES, playableUrl, type Playable } from './playables';
-import { apiSession, apiMe, apiPostResult, variantIdForMechanic } from './api';
+import { apiSession, apiMe, variantIdForMechanic } from './api';
+import { queueResult, flushResults } from './outbox';
 import { track } from './telemetry';
 import { getStartParam } from './telegram';
 
@@ -92,6 +93,7 @@ function reserveAheadDepth(): number {
 }
 const INITIAL_BATCH = 1;           // get the first mechanic visible; warm-next starts after it settles
 const PRELOADER_TIMEOUT_MS = 15000;
+const SERVER_SEED_CAP_MS = 2500;   // max the preloader waits for the first /session
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
 const FRAME_READY_FALLBACK_MS = 900;
 const FRAME_REVEAL_DELAY_MS = 90;
@@ -202,6 +204,9 @@ export class Feed {
   private shownAt = 0;
   private firstInputLogged = false;
   private preloaderMountedAt = 0;
+  // Preloader waits for BOTH the first mechanic AND the first server seed (capped).
+  private mechanicsReady = false;
+  private awaitingServerSeed = true;
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
   private pendingStarRewards = new Set<number>();
@@ -368,37 +373,51 @@ export class Feed {
   // apiSession returns null → we keep the existing in-memory behaviour).
   private async bootServer(): Promise<void> {
     track('session_start', { entry: getStartParam() ? 'challenge' : 'direct', start_param: getStartParam() });
-    // Retry with backoff: a free Render instance that spun down takes 30–60s to
-    // cold-start (plus startup migrations). A single await would time out → null →
-    // the balance never seeds → the tester sees exactly the "stars gone after
-    // reopen" bug the DoD checks. Retry across that window.
-    const delays = [0, 2000, 5000, 10000];
+    // Re-sync + flush pending wins whenever the app returns to the foreground
+    // (Telegram may resume without a reload; the backend is warm by then).
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) void this.onForeground(); });
+    // Let the preloader wait for the first seed, but only briefly — a cold/offline
+    // backend must NOT hang the whole feed. After the cap, proceed; the retry loop
+    // + outbox reconcile in the background.
+    const cap = window.setTimeout(() => this.settleServerSeed(), SERVER_SEED_CAP_MS);
+    await this.bootSync();
+    window.clearTimeout(cap);
+    this.settleServerSeed();
+  }
+
+  // /session with backoff to survive a cold free Render instance (30–60s wake),
+  // then flush any wins that a previous session couldn't persist (outbox).
+  private async bootSync(): Promise<void> {
+    const delays = [0, 2000, 5000, 10000, 15000];
     for (const d of delays) {
       if (d) await new Promise((r) => setTimeout(r, d));
       const s = await apiSession();
-      if (s) { this.applyServerBalance(s.balance); return; }
+      if (!s) continue;
+      this.applyServerBalance(s.balance);
+      const b = await flushResults();
+      if (b != null) this.applyServerBalance(b);
+      return;
     }
-    // Still nothing — re-sync when the app next comes to the foreground (Telegram
-    // may resume the page without a full reload; the backend is warm by then).
-    const onVisible = () => { if (!document.hidden) { document.removeEventListener('visibilitychange', onVisible); void this.syncBalance(); } };
-    document.addEventListener('visibilitychange', onVisible);
+    // Backend never answered in the window — onForeground() will retry.
+  }
+
+  // Foreground: push wins queued while away/offline, then re-read the balance.
+  private async onForeground(): Promise<void> {
+    const b = await flushResults();
+    if (b != null) this.applyServerBalance(b);
+    const m = await apiMe();
+    if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);
   }
 
   // Apply a server balance WITHOUT clobbering optimistic local progress: if the
   // player won during a slow /session, totalStars already reflects it and the
-  // server will catch up on the next /me — so take the max (never flicker back).
+  // server catches up next sync — so take the max (never flicker back).
   private applyServerBalance(balance: number): void {
     const next = Math.max(this.totalStars, balance);
     if (next === this.totalStars) return;
     this.totalStars = next;
     this.updateHud(false);
     this.renderLevelUpPage(false);
-  }
-
-  // Re-pull the balance (e.g. after returning to the foreground). Cheap GET /me.
-  private async syncBalance(): Promise<void> {
-    const m = await apiMe();
-    if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);
   }
 
   // Persist a manual win to the server (idempotent by run_id) — the ledger is the
@@ -411,7 +430,9 @@ export class Feed {
     // so the server balance matches the on-screen counter across reopen. Reading
     // rewardStarsFor here rolls it once; handleWin shows the same value.
     const stars = this.rewardStarsFor(i);
-    void apiPostResult({
+    // Durable: queue to localStorage + retry until the server confirms (survives
+    // cold backend / reload). Idempotent by run_id server-side.
+    queueResult({
       mechanic_id: mechanicId,
       variant_id: variantIdForMechanic(mechanicId),
       run_id: runId,
@@ -2234,7 +2255,20 @@ export class Feed {
     const frac = this.ready.size / this.initialTarget;
     if (this.preloaderFillEl) this.preloaderFillEl.style.width = `${Math.round(frac * 100)}%`;
     if (this.preloaderProgressEl) this.preloaderProgressEl.textContent = `${this.ready.size} / ${this.initialTarget}`;
-    if (this.ready.size >= this.initialTarget) this.finishPreloader();
+    if (this.ready.size >= this.initialTarget) { this.mechanicsReady = true; this.maybeDismissPreloader(); }
+  }
+
+  // Dismiss only when BOTH the first mechanic is ready AND the first server seed
+  // has settled (or its short cap elapsed) — so the balance is on the HUD before
+  // the feed shows, without ever hanging on a cold/offline backend.
+  private maybeDismissPreloader(): void {
+    if (this.mechanicsReady && !this.awaitingServerSeed) this.finishPreloader();
+  }
+
+  private settleServerSeed(): void {
+    if (!this.awaitingServerSeed) return;
+    this.awaitingServerSeed = false;
+    this.maybeDismissPreloader();
   }
 
   private finishPreloader() {

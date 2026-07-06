@@ -20,13 +20,5 @@ createFeed(viewport, feedEl);
 // right on screen (no desktop console in Telegram).
 const startParam = (window as any).Telegram?.WebApp?.initDataUnsafe?.start_param;
 if (new URLSearchParams(location.search).get('diag') === '1' || startParam === 'diag') {
-  import('./api').then(({ apiDiagnose }) => apiDiagnose()).then((d) => {
-    const pre = document.createElement('pre');
-    pre.style.cssText =
-      'position:fixed;inset:0 0 auto 0;z-index:99999;margin:0;background:#000;color:#3f6;' +
-      'font:12px/1.5 ui-monospace,monospace;padding:14px;white-space:pre-wrap;word-break:break-all;';
-    pre.textContent = 'SWIPE DIAG\n' + JSON.stringify(d, null, 2) + '\n\n(tap to dismiss)';
-    pre.addEventListener('click', () => pre.remove());
-    document.body.appendChild(pre);
-  });
+  import('./debug').then((m) => m.mountDebugPanel());
 }

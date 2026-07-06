@@ -51,6 +51,11 @@ export function apiMe(): Promise<MeResp | null> {
   return get<MeResp>('/api/me');
 }
 
+/** Reset the caller's own progress (balance → 0). Auth-gated server-side. */
+export function apiReset(): Promise<{ ok: boolean; balance: number } | null> {
+  return post<{ ok: boolean; balance: number }>('/api/reset');
+}
+
 export interface SessionResp {
   user: { id: number; ref_code: string | null } & Record<string, unknown>;
   ref_code: string | null;

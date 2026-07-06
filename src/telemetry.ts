@@ -28,18 +28,24 @@ const sessionId: string =
 let queue: Ev[] = [];
 let timer: number | null = null;
 
+// Ring buffer of emitted events for the on-device debug panel (not the network
+// queue — this survives flushes so the log stays visible).
+const LOG_CAP = 100;
+const log: { t: string; name: string; props?: Record<string, unknown> }[] = [];
+
 export function sessionIdOf(): string {
   return sessionId;
 }
 
+export function getEventLog(): { t: string; name: string; props?: Record<string, unknown> }[] {
+  return log;
+}
+
 export function track(name: string, props?: Record<string, unknown>, runId?: string): void {
-  queue.push({
-    session_id: sessionId,
-    name,
-    props,
-    client_ts: new Date().toISOString(),
-    run_id: runId,
-  });
+  const client_ts = new Date().toISOString();
+  queue.push({ session_id: sessionId, name, props, client_ts, run_id: runId });
+  log.push({ t: client_ts.slice(11, 19), name, props: runId ? { ...props, run_id: runId } : props });
+  if (log.length > LOG_CAP) log.shift();
   if (timer == null) timer = window.setTimeout(flush, FLUSH_MS);
 }
 
