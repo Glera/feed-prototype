@@ -1102,9 +1102,12 @@ export class Feed {
     this.incomingIndex = next;
     this.incomingPosterOk = false;
     this.incomingImg.src = `${playableUrl(this.playables[next].id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
-    // Live snapshot of the new warm frame: wait ~1.5s of poll ticks past the
-    // reveal (warm-paint + image decode settle), then a few attempts.
-    this.snapDelayTicks = 6;
+    // Live snapshot of the new warm frame: wait ~3.2s of poll ticks past the
+    // reveal — the warm-paint window now runs 2.6s so the mechanic's INTRO
+    // finishes painting while parked (a snapshot taken mid-intro rode in a
+    // half-arrived layout and the arrival visibly jumped) — then a few
+    // attempts.
+    this.snapDelayTicks = 13;
     this.snapTriesLeft = 8;
     const game = this.games[next];
     const slot = game?.querySelector<HTMLElement>('.game__slot');
