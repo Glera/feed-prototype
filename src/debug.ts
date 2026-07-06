@@ -4,7 +4,7 @@
  * pending-results outbox or reset your own server state. QA tool; no-op unless
  * explicitly opened.
  */
-import { apiDiagnose, apiReset } from './api';
+import { apiDiagnose, apiReset, apiSeedChallenge } from './api';
 import { getEventLog } from './telemetry';
 import { pendingCount, pendingStars, starsEverQueued, flushResults, clearOutbox } from './outbox';
 
@@ -78,9 +78,18 @@ export async function mountDebugPanel(): Promise<void> {
     setTimeout(() => { b.textContent = '📋 Copy log'; }, 1500);
   });
 
+  const seedBtn = mkBtn('⚡ Seed test challenge', async (b) => {
+    b.textContent = 'seeding…';
+    const r = await apiSeedChallenge();
+    (window as unknown as { __feedRefreshRail?: () => void }).__feedRefreshRail?.();
+    b.textContent = r ? `от ${r.from} · ${(r.beat_ms / 1000).toFixed(1)}s ✓` : 'seed failed';
+    setTimeout(() => { b.textContent = '⚡ Seed test challenge'; }, 2000);
+  });
+
   btns.append(
     mkBtn('↻ Refresh', () => { void refreshHead(); refreshLog(); }),
     copyBtn,
+    seedBtn,
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),
     resetBtn,
     mkBtn('✕ Close', () => { clearInterval(iv); wrap.remove(); }),

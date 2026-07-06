@@ -1,8 +1,8 @@
 import { PLAYABLES, playableUrl, type Playable } from './playables';
 import {
   apiSession, apiMe, variantIdForMechanic,
-  apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge,
-  type ChallengeView,
+  apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge, apiChallengeInbox,
+  type ChallengeView, type ChallengeInboxItem,
 } from './api';
 import { queueResult, flushResults } from './outbox';
 import { track } from './telemetry';
@@ -244,6 +244,7 @@ export class Feed {
   // of the challenged mechanic. challengePillEl is the "send a challenge" CTA.
   private manualStartMs = new Map<number, number>();
   private activeChallenge: ChallengeView | null = null;
+  private inboxChallenges: ChallengeInboxItem[] = [];   // top-rail: friends' challenges to play
   private challengeCompleted = false;
   private challengeIntroShown = false;
   private challengePillEl: HTMLElement | null = null;
@@ -386,6 +387,8 @@ export class Feed {
     // state (is it pre-warmed? if not, why — blocked, or calm window starved?).
     // Also open the feed with ?warm=1 to stream the warm lifecycle to the console.
     (window as unknown as { __feedWarm?: () => unknown }).__feedWarm = () => this.warmSnapshot();
+    // Debug-panel hook: after seeding a test challenge, refresh the rail in place.
+    (window as unknown as { __feedRefreshRail?: () => void }).__feedRefreshRail = () => { void this.refreshChallengeRail(); };
     this.bootServer();
   }
 
@@ -420,6 +423,7 @@ export class Feed {
       if (s.backend_version) { this.backendVersion = s.backend_version; this.renderVersionLabel(); }
       const b = await flushResults();
       if (b != null) this.applyServerBalance(b);
+      void this.refreshChallengeRail();
       return;
     }
     // Backend never answered in the window — onForeground() will retry.
@@ -431,6 +435,7 @@ export class Feed {
     if (b != null) this.applyServerBalance(b);
     const m = await apiMe();
     if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);
+    void this.refreshChallengeRail();
   }
 
   // Bottom-bar version: platform build always; backend git SHA appended once the
@@ -623,6 +628,48 @@ export class Feed {
       requestAnimationFrame(() => scrim.classList.add('challenge-ov--in'));
     };
     return { body, actions, show, close };
+  }
+
+  // ── Challenge inbox rail (top of feed) ───────────────────────────────────
+  private async refreshChallengeRail(): Promise<void> {
+    if (!getInitData()) return;   // no identity → no inbox
+    this.inboxChallenges = await apiChallengeInbox();
+    this.renderChallengeRail();
+  }
+
+  private renderChallengeRail(): void {
+    const rail = this.storiesEl;
+    if (!rail) return;
+    rail.querySelectorAll('.story[data-challenge]').forEach((el) => el.remove());
+    const me = rail.querySelector('.story--me');
+    const frag = document.createDocumentFragment();
+    for (const ch of this.inboxChallenges) {
+      const name = ch.challenger.first_name || ch.challenger.username || 'Друг';
+      const initial = (name.trim()[0] || '?').toUpperCase();
+      const secs = (ch.challenger_value / 1000).toFixed(1);
+      const el = document.createElement('div');
+      el.className = 'story';
+      el.dataset.challenge = ch.id;
+      el.innerHTML =
+        `<div class="story__avatar story__avatar--challenge${ch.played ? ' story__avatar--viewed' : ''}">` +
+          `<span>${this.esc(initial)}</span><i class="story__bolt" aria-hidden="true">⚡</i></div>` +
+        `<div class="story__name">${this.esc(name)}</div>` +
+        `<div class="story__time">${secs}s</div>`;
+      frag.appendChild(el);
+    }
+    if (me && me.nextSibling) rail.insertBefore(frag, me.nextSibling);
+    else rail.appendChild(frag);
+    this.hudEl?.classList.toggle('hud--stories-can-right', rail.scrollWidth > rail.clientWidth + 1);
+  }
+
+  // Tap an inbox card → play that challenge. Reload with ?c=<id> so we reuse the
+  // exact deep-link landing path (reorder feed to the mechanic + intro + complete).
+  private playChallengeFromRail(id: string | undefined): void {
+    if (!id) return;
+    track('challenge_open', { challenge_id: id, source: 'rail' });
+    const u = new URL(location.href);
+    u.searchParams.set('c', id);
+    location.href = u.toString();
   }
 
   // The on-screen unit changed (a swipe settled, or the first unit revealed).
@@ -1097,10 +1144,11 @@ export class Feed {
 
   private mountHud() {
     const hud = document.createElement('div');
-    const friendStories = this.friends.map((f, idx) => this.friendStoryMarkup(f, idx)).join('');
+    // The rail is the challenge inbox (filled by refreshChallengeRail after
+    // /session): friends' challenges to play. "You" leads; cards follow.
     hud.className = 'hud';
     hud.innerHTML =
-      '<div class="stories" aria-label="Friends">' +
+      '<div class="stories" aria-label="Challenges">' +
         '<div class="story story--me">' +
           '<div class="hud__level" aria-label="Level progress">' +
             '<div class="hud__level-ring"></div>' +
@@ -1109,7 +1157,6 @@ export class Feed {
           '</div>' +
           '<div class="story__name">You</div>' +
         '</div>' +
-        friendStories +
       '</div>';
     this.viewport.appendChild(hud);
     this.hudEl = hud;
@@ -1121,15 +1168,6 @@ export class Feed {
     if (stories) this.attachStoryScroller(stories);
   }
 
-  private friendStoryMarkup(f: { name: string; initial: string; tone: string }, idx: number): string {
-    const viewed = this.viewedFriends.has(idx) ? ' story__avatar--viewed' : '';
-    return (
-      `<div class="story" data-friend="${idx}">` +
-        `<div class="story__avatar story__avatar--${f.tone}${viewed}"><span>${f.initial}</span></div>` +
-        `<div class="story__name">${f.name}</div>` +
-      `</div>`
-    );
-  }
 
   private attachStoryScroller(scroller: HTMLElement) {
     let tracking = false;
@@ -1187,6 +1225,8 @@ export class Feed {
       if (!wasTap) return;
       const t = e.target as HTMLElement | null;
       if (t?.closest?.('.hud__level-plus')) { this.openEditor(); return; }
+      const chEl = t?.closest?.('.story[data-challenge]') as HTMLElement | null;
+      if (chEl) { this.playChallengeFromRail(chEl.dataset.challenge); return; }
       const storyEl = t?.closest?.('.story[data-friend]') as HTMLElement | null;
       if (storyEl) this.openStory(Number(storyEl.dataset.friend));
     };

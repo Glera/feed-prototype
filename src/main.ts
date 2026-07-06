@@ -19,7 +19,9 @@ const feedEl = document.getElementById('feed')!;
 // the await entirely (getStartParam is sync) → no added boot latency.
 async function boot(): Promise<void> {
   let challenge: ChallengeView | null = null;
-  const sp = getStartParam();
+  // Telegram deep-link start_param OR ?c=<id> (set when tapping an inbox card, which
+  // reloads — reusing the same landing path).
+  const sp = getStartParam() || new URLSearchParams(location.search).get('c');
   if (isChallengeParam(sp)) {
     challenge = await apiGetChallenge(sp!);   // null if offline / not found → boots normally
   }

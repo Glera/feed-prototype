@@ -1601,3 +1601,16 @@ body {
   font: 800 15px/1 system-ui, sans-serif;
 }
 .challenge-ov__btn--ghost { background: transparent; border: 1px solid #2c3852; color: #a9b8d4; }
+
+/* Challenge inbox cards in the top rail (W2). Distinct from friend stories: a
+   ⚡ badge + "beat this time" sublabel. Flat layers only (no runtime glow). */
+.story__avatar--challenge span { background: linear-gradient(145deg, #6ea8ff, #3f78e0); }
+.story__bolt {
+  position: absolute; z-index: 2; right: -1px; bottom: -1px;
+  width: 20px; height: 20px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 11px; font-style: normal;
+  background: #0b1220; border: 1.5px solid #3f78e0;
+}
+.story__time {
+  font: 800 11px/1 system-ui, sans-serif; color: #8fb4ff; letter-spacing: 0.2px;
+}

@@ -56,6 +56,11 @@ export function apiReset(): Promise<{ ok: boolean; balance: number } | null> {
   return post<{ ok: boolean; balance: number }>('/api/reset');
 }
 
+/** TEST: seed a fake incoming challenge into my inbox rail (dev/QA only). */
+export function apiSeedChallenge(): Promise<{ ok: boolean; from: string; beat_ms: number } | null> {
+  return post<{ ok: boolean; from: string; beat_ms: number }>('/api/seed-challenge');
+}
+
 export interface SessionResp {
   user: { id: number; ref_code: string | null } & Record<string, unknown>;
   ref_code: string | null;
@@ -138,6 +143,21 @@ export function apiAcceptChallenge(id: string): Promise<ChallengeView | null> {
 /** Recipient finishes → beat? + two-sided reward. `metric_value` = their solve time (ms). */
 export function apiCompleteChallenge(id: string, metricValue: number): Promise<ChallengeComplete | null> {
   return post<ChallengeComplete>(`/api/challenges/${encodeURIComponent(id)}/complete`, { metric_value: metricValue });
+}
+
+export interface ChallengeInboxItem {
+  id: string;
+  mechanic_id: string;
+  metric_key: string;
+  challenger_value: number;
+  challenger: ChallengeChallenger;
+  played: boolean;
+}
+
+/** Incoming challenges to play (top-of-feed rail): friends' challenges I haven't beaten. */
+export async function apiChallengeInbox(): Promise<ChallengeInboxItem[]> {
+  const r = await get<{ box: string; items: ChallengeInboxItem[] }>('/api/challenges?box=in');
+  return r?.items ?? [];
 }
 
 /** On-device diagnostics (open with ?diag=1). Surfaces exactly why persistence
