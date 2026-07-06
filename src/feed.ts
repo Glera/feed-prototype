@@ -197,6 +197,11 @@ export class Feed {
   private frameRevealTimers = new Map<number, number>();
 
   private totalStars = 0;
+  // Telemetry (D3) state: which unit is on-screen, since when, and per-show guards.
+  private shownIndex = -1;
+  private shownAt = 0;
+  private firstInputLogged = false;
+  private preloaderMountedAt = 0;
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
   private pendingStarRewards = new Set<number>();
@@ -382,6 +387,36 @@ export class Feed {
       run_id: runId,
       metric_key: 'win',
       metric_value: 1,
+    });
+  }
+
+  // The on-screen unit changed (a swipe settled, or the first unit revealed).
+  // Emits swipe_away for the unit we're leaving, then unit_shown for the new one.
+  // unit_shown fires ONLY here (a REVEALED, on-screen unit) — never for a warmed
+  // off-screen frame — so it stays an honest denominator (D3).
+  private markUnitShown(cur: number): void {
+    if (cur === this.shownIndex || cur < 0) return;
+    const prev = this.shownIndex;
+    if (prev >= 0) {
+      const state = this.earnedThisCycle.has(prev) ? 'won'
+        : this.failedThisCycle.has(prev) ? 'lost'
+        : this.manualRuns.has(prev) ? 'playing' : 'autoplay';
+      track('swipe_away', {
+        mechanic_id: this.playables[prev]?.id,
+        played: this.manualRuns.has(prev),
+        state,
+        ms_since_shown: Math.round(performance.now() - this.shownAt),
+      });
+    }
+    this.shownIndex = cur;
+    this.shownAt = performance.now();
+    this.firstInputLogged = false;
+    const id = this.playables[cur]?.id;
+    track('unit_shown', {
+      mechanic_id: id,
+      variant_id: id ? variantIdForMechanic(id) : null,
+      feed_pos: cur,
+      mode: this.manualRuns.has(cur) ? 'playing' : 'auto',
     });
   }
 
@@ -1379,7 +1414,10 @@ export class Feed {
       this.markReady(i);
       this.ensureFrameAutoPlay(i);
       this.applyPendingEditor(i);
-      if (i === this.realIndex()) this.scheduleWarmNext();
+      if (i === this.realIndex()) {
+        this.scheduleWarmNext();
+        this.markUnitShown(i);   // revealed while current (first load / cold arrival)
+      }
     }, FRAME_REVEAL_DELAY_MS);
     this.frameRevealTimers.set(i, timer);
   }
@@ -1485,6 +1523,14 @@ export class Feed {
 
   private enterManualMode(i: number) {
     if (i < 0 || i >= this.N) return;
+    if (!this.manualRuns.has(i)) {
+      // First transition autoplay → manual for this unit = a takeover.
+      track('takeover', {
+        mechanic_id: this.playables[i]?.id,
+        ms_since_shown: Math.round(performance.now() - this.shownAt),
+        ab_arm: null,   // W3: auto vs tap-to-start arm
+      });
+    }
     this.manualRuns.add(i);
     this.stopFrameAutoPlay(i);
     this.setAutoplayUi(i, false);
@@ -1728,7 +1774,12 @@ export class Feed {
     if (!this.pendingStarRewards.has(i) || this.claimedStarRewards.has(i)) return;
     this.pendingStarRewards.delete(i);
     this.claimedStarRewards.add(i);
-    this.totalStars += this.rewardStarsFor(i);
+    const stars = this.rewardStarsFor(i);
+    const levelBefore = this.levelForStars(this.totalStars);
+    this.totalStars += stars;
+    const levelAfter = this.levelForStars(this.totalStars);
+    track('reward_collected', { mechanic_id: this.playables[i]?.id, stars });
+    if (levelAfter > levelBefore) track('level_up', { level: levelAfter });
     this.updateHud(true);   // reflect the new total on the level counter (no level-up ceremony)
   }
 
@@ -2140,6 +2191,7 @@ export class Feed {
       '<div class="preloader__progress">0 / ' + this.initialTarget + '</div>';
     this.viewport.appendChild(el);
     this.preloaderEl = el;
+    this.preloaderMountedAt = performance.now();
     this.preloaderFillEl = el.querySelector('.preloader__fill');
     this.preloaderProgressEl = el.querySelector('.preloader__progress');
     window.setTimeout(() => this.finishPreloader(), PRELOADER_TIMEOUT_MS);
@@ -2157,6 +2209,8 @@ export class Feed {
   private finishPreloader() {
     if (this.preloaderDone) return;
     this.preloaderDone = true;
+    // D3 guard metric: how long the first-load preloader was visible (p95 < 0.5s).
+    track('loader_visible', { ms: Math.round(performance.now() - this.preloaderMountedAt) });
     const el = this.preloaderEl;
     if (!el) return;
     el.classList.add('preloader--hidden');
@@ -2399,6 +2453,14 @@ export class Feed {
   private onHostGesture = (playableId?: string) => {
     const i = playableId ? this.playables.findIndex((p) => p.id === playableId) : this.realIndex();
     const idx = i >= 0 ? i : this.realIndex();
+    // First in-iframe user input on the current unit (fires before takeover below).
+    if (idx === this.shownIndex && !this.firstInputLogged) {
+      this.firstInputLogged = true;
+      track('first_input', {
+        mechanic_id: this.playables[idx]?.id,
+        ms_since_shown: Math.round(performance.now() - this.shownAt),
+      });
+    }
     this.unlockAudioForCurrentAndNext(idx);
     this.enterManualMode(idx);
     this.revealLabel(idx);
@@ -3443,6 +3505,9 @@ export class Feed {
     // (render(false) above already reset transform/z) and repoint it at the
     // NEW next mechanic for the following swipe.
     this.updateIncomingPoster();
+    // Telemetry: we left the previous unit and are now showing this one (only if
+    // it's revealed — a cold-arriving frame emits unit_shown from tryRevealFrame).
+    if (this.frameRevealed.has(this.realIndex())) this.markUnitShown(this.realIndex());
   }
 
   // ── Paging ───────────────────────────────────────────────────────────────
