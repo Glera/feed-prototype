@@ -407,12 +407,17 @@ export class Feed {
   private reportResult(i: number, runId: string): void {
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return;
+    // Persist the SAME star count the reward row grants locally (rollReward = 1–5),
+    // so the server balance matches the on-screen counter across reopen. Reading
+    // rewardStarsFor here rolls it once; handleWin shows the same value.
+    const stars = this.rewardStarsFor(i);
     void apiPostResult({
       mechanic_id: mechanicId,
       variant_id: variantIdForMechanic(mechanicId),
       run_id: runId,
       metric_key: 'win',
       metric_value: 1,
+      stars,
     });
   }
 

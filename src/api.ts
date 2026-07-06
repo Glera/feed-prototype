@@ -74,6 +74,7 @@ export interface ResultIn {
   run_id: string;
   metric_key: string;
   metric_value: number;
+  stars?: number;   // stars this win grants (client reward roll 1–5); server clamps
 }
 
 export function apiPostResult(payload: ResultIn): Promise<ResultResp | null> {
