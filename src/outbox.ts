@@ -8,6 +8,18 @@
 import { apiPostResult, type ResultIn } from './api';
 
 const KEY = 'swipe_pending_results_v1';
+const EVER_KEY = 'swipe_stars_ever_v1';   // lifetime stars ever queued (diagnostic; not cleared on flush)
+
+/** Total stars ever enqueued on this device — compare vs server balance to see if
+ *  wins are being lost (localStorage cleared) vs merely pending. */
+export function starsEverQueued(): number {
+  try { return Number(localStorage.getItem(EVER_KEY) || '0') || 0; } catch { return 0; }
+}
+
+/** Sum of stars still waiting to be confirmed by the server. */
+export function pendingStars(): number {
+  return load().reduce((s, r) => s + (r.stars ?? 1), 0);
+}
 
 function load(): ResultIn[] {
   try {
@@ -32,6 +44,7 @@ export function queueResult(r: ResultIn): void {
   if (!q.some((x) => x.run_id === r.run_id)) {
     q.push(r);
     save(q);
+    try { localStorage.setItem(EVER_KEY, String(starsEverQueued() + (r.stars ?? 1))); } catch { /* noop */ }
   }
   void flushResults();
 }

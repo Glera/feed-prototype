@@ -6,7 +6,7 @@
  */
 import { apiDiagnose, apiReset } from './api';
 import { getEventLog } from './telemetry';
-import { pendingCount, flushResults, clearOutbox } from './outbox';
+import { pendingCount, pendingStars, starsEverQueued, flushResults, clearOutbox } from './outbox';
 
 export async function mountDebugPanel(): Promise<void> {
   const wrap = document.createElement('div');
@@ -33,7 +33,18 @@ export async function mountDebugPanel(): Promise<void> {
 
   async function refreshHead(): Promise<void> {
     const d = await apiDiagnose();
-    head.textContent = 'SWIPE DIAG\n' + JSON.stringify({ ...d, pending_results: pendingCount() }, null, 1);
+    // stars_ever_queued (local lifetime) vs server balance vs pending tells us
+    // where stars go: ever==server → all delivered; ever>server+pending → lost
+    // (localStorage cleared); pending>0 → not yet flushed.
+    let serverBalance: unknown = '?';
+    try { serverBalance = JSON.parse(String(d.sessionBody)).balance; } catch { /* not json */ }
+    head.textContent = 'SWIPE DIAG\n' + JSON.stringify({
+      ...d,
+      server_balance: serverBalance,
+      stars_ever_queued: starsEverQueued(),
+      pending_results: pendingCount(),
+      pending_stars: pendingStars(),
+    }, null, 1);
   }
   function refreshLog(): void {
     const l = getEventLog();
@@ -51,8 +62,25 @@ export async function mountDebugPanel(): Promise<void> {
     location.reload();
   });
 
+  const copyBtn = mkBtn('📋 Copy log', async (b) => {
+    const text = `${head.textContent}\n\n--- events ---\n${logEl.textContent}`;
+    let ok = false;
+    try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); ok = true; } } catch { /* blocked */ }
+    if (!ok) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.cssText = 'position:fixed;top:-9999px;opacity:0;';
+        document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
+        ok = document.execCommand('copy'); document.body.removeChild(ta);
+      } catch { ok = false; }
+    }
+    b.textContent = ok ? 'Copied ✓' : 'Copy failed';
+    setTimeout(() => { b.textContent = '📋 Copy log'; }, 1500);
+  });
+
   btns.append(
     mkBtn('↻ Refresh', () => { void refreshHead(); refreshLog(); }),
+    copyBtn,
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),
     resetBtn,
     mkBtn('✕ Close', () => { clearInterval(iv); wrap.remove(); }),
