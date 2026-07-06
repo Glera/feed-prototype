@@ -1558,3 +1558,46 @@ body {
   background: linear-gradient(180deg, #45d68c, #2fae6e); color: #06120c; font-weight: 800; font-size: 15px;
   opacity: 0.5;
 }
+
+/* ── Challenge loop (W2) ─────────────────────────────────────────────────────
+   Sender CTA pill (after a win) + centered result/intro modal. No runtime glow —
+   plain flat layers only (Android perf constraint: baked images, never live blur/
+   box-shadow spread animations). */
+.challenge-pill {
+  position: absolute; left: 50%; bottom: calc(var(--bar-reserve) + 14px);
+  transform: translate(-50%, 12px); z-index: 1400;
+  padding: 11px 20px; border: 0; border-radius: 999px;
+  background: linear-gradient(180deg, #6ea8ff, #3f78e0); color: #06122a;
+  font: 800 14px/1 system-ui, -apple-system, sans-serif; letter-spacing: 0.2px;
+  opacity: 0; transition: opacity 0.22s ease, transform 0.22s ease;
+  white-space: nowrap;
+}
+.challenge-pill--in { opacity: 1; transform: translate(-50%, 0); }
+.challenge-pill:disabled { opacity: 0.75; }
+
+.challenge-ov {
+  position: absolute; inset: 0; z-index: 2700;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(4, 6, 12, 0.72);
+  opacity: 0; transition: opacity 0.2s ease;
+}
+.challenge-ov--in { opacity: 1; }
+.challenge-ov__card {
+  width: 100%; max-width: 320px; box-sizing: border-box;
+  padding: 26px 22px 20px; border-radius: 22px; text-align: center;
+  background: linear-gradient(180deg, #141b2b, #0d1220); border: 1px solid #26314a;
+  transform: scale(0.94); transition: transform 0.2s ease;
+}
+.challenge-ov--in .challenge-ov__card { transform: scale(1); }
+.challenge-ov__emoji { font-size: 46px; line-height: 1; margin-bottom: 10px; }
+.challenge-ov__title { color: #eaf1ff; font: 800 19px/1.25 system-ui, sans-serif; }
+.challenge-ov__sub { color: #9fb0cc; font: 500 15px/1.4 system-ui, sans-serif; margin-top: 8px; }
+.challenge-ov__sub b { color: #eaf1ff; }
+.challenge-ov__stars { color: #ffd15c; font: 800 20px/1 system-ui, sans-serif; margin-top: 14px; }
+.challenge-ov__actions { display: flex; flex-direction: column; gap: 9px; margin-top: 20px; }
+.challenge-ov__btn {
+  height: 48px; border: 0; border-radius: 12px;
+  background: linear-gradient(180deg, #6ea8ff, #3f78e0); color: #06122a;
+  font: 800 15px/1 system-ui, sans-serif;
+}
+.challenge-ov__btn--ghost { background: transparent; border: 1px solid #2c3852; color: #a9b8d4; }

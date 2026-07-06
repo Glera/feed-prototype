@@ -44,6 +44,26 @@ export function getStartParam(): string | null {
   }
 }
 
+/** A challenge deep-link start_param is a plain uuid (with or without dashes). */
+export function isChallengeParam(p: string | null): boolean {
+  if (!p) return false;
+  return /^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$/.test(p);
+}
+
+/** Open the Telegram share sheet for a challenge. Inside Telegram uses
+ *  openTelegramLink (native chooser); falls back to a new tab elsewhere. */
+export function shareChallenge(shareUrl: string, deepLink: string, text: string): void {
+  const link = deepLink
+    ? `https://t.me/share/url?url=${encodeURIComponent(deepLink)}&text=${encodeURIComponent(text)}`
+    : shareUrl;
+  if (!link) return;
+  const tg: AnyTG | undefined = (window as any).Telegram?.WebApp;
+  try {
+    if (tg && typeof tg.openTelegramLink === 'function') { tg.openTelegramLink(link); return; }
+  } catch { /* fall through */ }
+  try { window.open(link, '_blank'); } catch { /* blocked */ }
+}
+
 function setVars(top: number, bottom: number, left: number, right: number): void {
   const root = document.documentElement;
   const px = (n: number) => `${Math.max(0, Math.round(n || 0))}px`;

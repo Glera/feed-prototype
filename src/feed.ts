@@ -1,8 +1,12 @@
 import { PLAYABLES, playableUrl, type Playable } from './playables';
-import { apiSession, apiMe, variantIdForMechanic } from './api';
+import {
+  apiSession, apiMe, variantIdForMechanic,
+  apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge,
+  type ChallengeView,
+} from './api';
 import { queueResult, flushResults } from './outbox';
 import { track } from './telemetry';
-import { getStartParam } from './telegram';
+import { getStartParam, shareChallenge, getInitData } from './telegram';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
@@ -235,6 +239,14 @@ export class Feed {
   private levelUpPageBasePos = 0;
   private confettiTimer: number | null = null;
   private manualRuns = new Set<number>();
+  // Challenge (W2). Solve time = takeover → win, per unit. activeChallenge is set
+  // when arriving via a deep-link; its completion is armed on the first manual win
+  // of the challenged mechanic. challengePillEl is the "send a challenge" CTA.
+  private manualStartMs = new Map<number, number>();
+  private activeChallenge: ChallengeView | null = null;
+  private challengeCompleted = false;
+  private challengeIntroShown = false;
+  private challengePillEl: HTMLElement | null = null;
   private pendingEditorLaunch = new Set<number>();
   private rewardSparkTimers = new Map<number, number>();
   private autoplayUiActive = new Set<number>();
@@ -320,11 +332,12 @@ export class Feed {
   private lastT = 0;
   private velocity = 0;
 
-  constructor(viewport: HTMLElement, feedEl: HTMLElement, playables: Playable[]) {
+  constructor(viewport: HTMLElement, feedEl: HTMLElement, playables: Playable[], challenge: ChallengeView | null = null) {
     this.viewport = viewport;
     this.feedEl = feedEl;
     this.playables = playables;
     this.N = playables.length;
+    this.activeChallenge = challenge;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     this.buildIncoming();
@@ -444,7 +457,7 @@ export class Feed {
   // Persist a manual win to the server (idempotent by run_id) — the ledger is the
   // source of truth for balance across sessions. Fire-and-forget; the local
   // counter already reflects the win optimistically.
-  private reportResult(i: number, runId: string): void {
+  private reportResult(i: number, runId: string, solveMs: number): void {
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return;
     // Persist the SAME star count the reward row grants locally (rollReward = 1–5),
@@ -452,15 +465,164 @@ export class Feed {
     // rewardStarsFor here rolls it once; handleWin shows the same value.
     const stars = this.rewardStarsFor(i);
     // Durable: queue to localStorage + retry until the server confirms (survives
-    // cold backend / reload). Idempotent by run_id server-side.
+    // cold backend / reload). Idempotent by run_id server-side. Metric = solve time
+    // (ms), lower is better — the same number that decides a challenge.
     queueResult({
       mechanic_id: mechanicId,
       variant_id: variantIdForMechanic(mechanicId),
       run_id: runId,
-      metric_key: 'win',
-      metric_value: 1,
+      metric_key: 'time_ms',
+      metric_value: solveMs,
       stars,
     });
+  }
+
+  // Solve time for this unit's current manual run (takeover → now), ms. Falls back
+  // to time-since-shown if we somehow missed the takeover mark.
+  private solveMsFor(i: number): number {
+    const start = this.manualStartMs.get(i) ?? this.shownAt;
+    return Math.max(1, Math.round(performance.now() - start));
+  }
+
+  // ── Challenge loop (W2) ──────────────────────────────────────────────────
+  // A manual win either COMPLETES the active challenge (recipient, on the
+  // challenged mechanic) or OFFERS to start one (sender). All social calls no-op
+  // gracefully outside Telegram (no initData → api returns null).
+  private onManualWinChallenge(i: number, solveMs: number): void {
+    const mechanicId = this.playables[i]?.id;
+    if (!mechanicId) return;
+    const ch = this.activeChallenge;
+    if (ch && !this.challengeCompleted && ch.mechanic_id === mechanicId) {
+      this.challengeCompleted = true;
+      void this.completeActiveChallenge(solveMs);
+      return;
+    }
+    this.showChallengePill(mechanicId, solveMs);
+  }
+
+  private async completeActiveChallenge(solveMs: number): Promise<void> {
+    const ch = this.activeChallenge!;
+    const res = await apiCompleteChallenge(ch.id, solveMs);
+    track('challenge_complete', { challenge_id: ch.id, time_ms: solveMs, beat: res?.beat ?? null });
+    if (res && typeof res.balance === 'number') this.applyServerBalance(res.balance);
+    this.showChallengeResult(ch, solveMs, res?.beat ?? (solveMs < ch.challenger_value), res?.stars_awarded ?? 0);
+  }
+
+  private async doCreateChallenge(mechanicId: string, solveMs: number): Promise<void> {
+    const res = await apiCreateChallenge({
+      mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId), challenger_value: solveMs,
+    });
+    track('share_tap', { mechanic_id: mechanicId, time_ms: solveMs, ok: !!res });
+    if (!res) return;
+    const secs = (solveMs / 1000).toFixed(1);
+    shareChallenge(res.share_url, res.deep_link, `Обгонишь меня? Я прошёл за ${secs}s ⚡`);
+  }
+
+  private dismissChallengePill(): void {
+    const el = this.challengePillEl;
+    if (!el) return;
+    this.challengePillEl = null;
+    el.classList.remove('challenge-pill--in');
+    el.addEventListener('transitionend', () => el.remove(), { once: true });
+    window.setTimeout(() => el.remove(), 400);   // fallback if no transition
+  }
+
+  // Bottom-center CTA after a win: "⚡ Бросить вызов" with the run's time. Tap →
+  // create + share; auto-dismisses on the next swipe (markUnitShown) or after 8s.
+  private showChallengePill(mechanicId: string, solveMs: number): void {
+    if (!getInitData()) return;   // no Telegram identity → sharing can't work
+    this.dismissChallengePill();
+    const secs = (solveMs / 1000).toFixed(1);
+    const pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'challenge-pill';
+    pill.textContent = `⚡ Бросить вызов · ${secs}s`;
+    pill.addEventListener('pointerdown', (e) => e.stopPropagation());
+    pill.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pill.disabled = true;
+      pill.textContent = '⚡ Отправляю…';
+      void this.doCreateChallenge(mechanicId, solveMs).finally(() => this.dismissChallengePill());
+    });
+    this.viewport.appendChild(pill);
+    this.challengePillEl = pill;
+    requestAnimationFrame(() => pill.classList.add('challenge-pill--in'));
+    window.setTimeout(() => { if (this.challengePillEl === pill) this.dismissChallengePill(); }, 8000);
+  }
+
+  private maybeShowChallengeIntro(): void {
+    const ch = this.activeChallenge;
+    if (!ch || this.challengeIntroShown) return;
+    this.challengeIntroShown = true;
+    track('challenge_open', { challenge_id: ch.id, mechanic_id: ch.mechanic_id });
+    void apiAcceptChallenge(ch.id);   // register the attempt + friend edge (best-effort)
+
+    const name = ch.challenger.first_name || ch.challenger.username || 'Друг';
+    const secs = (ch.challenger_value / 1000).toFixed(1);
+    const card = this.buildChallengeOverlay();
+    card.body.innerHTML =
+      `<div class="challenge-ov__emoji">⚡</div>` +
+      `<div class="challenge-ov__title">${this.esc(name)} бросает вызов</div>` +
+      `<div class="challenge-ov__sub">Пройди быстрее <b>${secs}s</b></div>`;
+    const go = this.overlayButton('Принять', () => card.close());
+    card.actions.appendChild(go);
+    card.show();
+  }
+
+  private showChallengeResult(ch: ChallengeView, solveMs: number, beat: boolean, stars: number): void {
+    const name = ch.challenger.first_name || ch.challenger.username || 'соперника';
+    const you = (solveMs / 1000).toFixed(1);
+    const them = (ch.challenger_value / 1000).toFixed(1);
+    const card = this.buildChallengeOverlay();
+    card.body.innerHTML =
+      `<div class="challenge-ov__emoji">${beat ? '🏆' : '⏱️'}</div>` +
+      `<div class="challenge-ov__title">${beat ? `Ты обогнал ${this.esc(name)}!` : `${this.esc(name)} пока быстрее`}</div>` +
+      `<div class="challenge-ov__sub">Ты: <b>${you}s</b> · ${this.esc(name)}: <b>${them}s</b></div>` +
+      (stars > 0 ? `<div class="challenge-ov__stars">+${stars} ⭐</div>` : '');
+    const again = this.overlayButton('Ответный вызов ⚡', () => {
+      card.close();
+      void this.doCreateChallenge(ch.mechanic_id, solveMs);
+    });
+    const close = this.overlayButton('Играть дальше', () => card.close(), true);
+    card.actions.append(again, close);
+    card.show();
+  }
+
+  private esc(s: string): string {
+    return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+  }
+
+  private overlayButton(label: string, onClick: () => void, ghost = false): HTMLButtonElement {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'challenge-ov__btn' + (ghost ? ' challenge-ov__btn--ghost' : '');
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  // A centered modal card (independent DOM, above the feed). Fade+scale in; no
+  // runtime glow — plain layers only (Android perf constraint).
+  private buildChallengeOverlay(): { body: HTMLElement; actions: HTMLElement; show: () => void; close: () => void } {
+    const scrim = document.createElement('div');
+    scrim.className = 'challenge-ov';
+    const card = document.createElement('div');
+    card.className = 'challenge-ov__card';
+    const body = document.createElement('div');
+    const actions = document.createElement('div');
+    actions.className = 'challenge-ov__actions';
+    card.append(body, actions);
+    scrim.appendChild(card);
+    const close = () => {
+      scrim.classList.remove('challenge-ov--in');
+      scrim.addEventListener('transitionend', () => scrim.remove(), { once: true });
+      window.setTimeout(() => scrim.remove(), 400);
+    };
+    const show = () => {
+      this.viewport.appendChild(scrim);
+      requestAnimationFrame(() => scrim.classList.add('challenge-ov--in'));
+    };
+    return { body, actions, show, close };
   }
 
   // The on-screen unit changed (a swipe settled, or the first unit revealed).
@@ -481,6 +643,7 @@ export class Feed {
         ms_since_shown: Math.round(performance.now() - this.shownAt),
       });
     }
+    this.dismissChallengePill();
     this.shownIndex = cur;
     this.shownAt = performance.now();
     this.firstInputLogged = false;
@@ -1615,6 +1778,9 @@ export class Feed {
         ms_since_shown: Math.round(performance.now() - this.shownAt),
         ab_arm: null,   // W3: auto vs tap-to-start arm
       });
+      // Start the solve-time clock on the first takeover of this unit (the win
+      // metric — "how fast you solved it", lower is better).
+      this.manualStartMs.set(i, performance.now());
     }
     this.manualRuns.add(i);
     this.stopFrameAutoPlay(i);
@@ -2313,6 +2479,7 @@ export class Feed {
     if (!el) return;
     el.classList.add('preloader--hidden');
     el.addEventListener('transitionend', () => el.remove(), { once: true });
+    this.maybeShowChallengeIntro();
   }
 
   // ── Overlay pointer handling ─────────────────────────────────────────────
@@ -2676,9 +2843,11 @@ export class Feed {
     this.completedRunIds.add(runId);
     const mechanicId = this.playables[i]?.id;
     if (outcome === 'won') {
-      track('win', { mechanic_id: mechanicId, mode: 'manual' }, runId);
-      this.reportResult(i, runId);
+      const solveMs = this.solveMsFor(i);
+      track('win', { mechanic_id: mechanicId, mode: 'manual', time_ms: solveMs }, runId);
+      this.reportResult(i, runId, solveMs);
       this.handleWin(i);
+      this.onManualWinChallenge(i, solveMs);
     } else {
       track('lose', { mechanic_id: mechanicId, mode: 'manual' }, runId);
       this.handleLoss(i);
@@ -2774,6 +2943,7 @@ export class Feed {
 
   private replayManual(i: number) {
     this.manualRuns.add(i);
+    this.manualStartMs.set(i, performance.now());   // fresh solve-time clock
     this.pendingEditorLaunch.delete(i);
     this.failedThisCycle.delete(i);
     this.updateMechanicState(i);
@@ -2795,6 +2965,7 @@ export class Feed {
     this.claimedStarRewards.delete(i);
     this.rewardStars[i] = 0;                    // re-roll a fresh reward on the next win
     this.manualRuns.add(i);
+    this.manualStartMs.set(i, performance.now());   // fresh solve-time clock
     const swipe = this.playableApi(i)?.swipe;
     if (swipe?.hasRestart) {
       // In-place restart keeps the frame → give it a fresh run id so the next
@@ -3673,6 +3844,16 @@ export class Feed {
   };
 }
 
-export function createFeed(viewport: HTMLElement, feedEl: HTMLElement) {
-  return new Feed(viewport, feedEl, PLAYABLES);
+export function createFeed(viewport: HTMLElement, feedEl: HTMLElement, challenge: ChallengeView | null = null) {
+  let order = PLAYABLES;
+  let ch = challenge;
+  // Arriving via a challenge deep-link: put the challenged mechanic first so the
+  // recipient lands right on it (no runtime pager surgery). If it isn't in the
+  // feed, ignore the challenge and boot normally.
+  if (ch) {
+    const idx = PLAYABLES.findIndex((p) => p.id === ch!.mechanic_id);
+    if (idx > 0) order = [PLAYABLES[idx], ...PLAYABLES.slice(0, idx), ...PLAYABLES.slice(idx + 1)];
+    else if (idx < 0) ch = null;
+  }
+  return new Feed(viewport, feedEl, order, ch);
 }

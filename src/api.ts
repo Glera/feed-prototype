@@ -87,6 +87,59 @@ export function apiPostResult(payload: ResultIn): Promise<ResultResp | null> {
   return post<ResultResp>('/api/results', payload);
 }
 
+// ── Challenges (W2) ─────────────────────────────────────────────────────────
+// "Beat my time?" — metric is solve time (ms), lower is better (server-authoritative).
+
+export interface ChallengeChallenger {
+  id: number;
+  first_name: string | null;
+  username: string | null;
+}
+
+export interface ChallengeView {
+  id: string;
+  mechanic_id: string;
+  variant_id: string;
+  metric_key: string;
+  challenger_value: number;   // time (ms) to beat
+  status: string;
+  challenger: ChallengeChallenger;
+}
+
+export interface ChallengeCreated {
+  challenge_id: string;
+  deep_link: string;          // t.me/<bot>?startapp=<id> (empty if BOT_USERNAME unset)
+  share_url: string;          // t.me/share/url?... fallback
+}
+
+export interface ChallengeComplete {
+  beat: boolean;
+  stars_awarded: number;
+  balance: number;
+}
+
+/** Challenger records their run → a shareable challenge. `challenger_value` = solve time (ms). */
+export function apiCreateChallenge(payload: {
+  mechanic_id: string; variant_id: string; metric_key?: string; challenger_value: number;
+}): Promise<ChallengeCreated | null> {
+  return post<ChallengeCreated>('/api/challenges', { metric_key: 'time_ms', ...payload });
+}
+
+/** Read a challenge to play it (deep-link landing). */
+export function apiGetChallenge(id: string): Promise<ChallengeView | null> {
+  return get<ChallengeView>(`/api/challenges/${encodeURIComponent(id)}`);
+}
+
+/** Recipient opens the challenge (creates an attempt + mutual friend edge). */
+export function apiAcceptChallenge(id: string): Promise<ChallengeView | null> {
+  return post<ChallengeView>(`/api/challenges/${encodeURIComponent(id)}/accept`);
+}
+
+/** Recipient finishes → beat? + two-sided reward. `metric_value` = their solve time (ms). */
+export function apiCompleteChallenge(id: string, metricValue: number): Promise<ChallengeComplete | null> {
+  return post<ChallengeComplete>(`/api/challenges/${encodeURIComponent(id)}/complete`, { metric_value: metricValue });
+}
+
 /** On-device diagnostics (open with ?diag=1). Surfaces exactly why persistence
  *  might fail: no Telegram, empty initData, auth 401 (BOT_TOKEN mismatch), etc. */
 export async function apiDiagnose(): Promise<Record<string, unknown>> {

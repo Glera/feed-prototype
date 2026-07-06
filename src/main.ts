@@ -1,7 +1,8 @@
 import './styles.css';
 import { createFeed } from './feed';
-import { initTelegram } from './telegram';
+import { initTelegram, getStartParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
+import { apiGetChallenge, type ChallengeView } from './api';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
@@ -13,7 +14,18 @@ initTelemetry();
 const viewport = document.getElementById('viewport')!;
 const feedEl = document.getElementById('feed')!;
 
-createFeed(viewport, feedEl);
+// If launched from a challenge deep-link (start_param = challenge id), fetch it
+// first so the feed can open on the challenged mechanic. Normal launches skip
+// the await entirely (getStartParam is sync) → no added boot latency.
+async function boot(): Promise<void> {
+  let challenge: ChallengeView | null = null;
+  const sp = getStartParam();
+  if (isChallengeParam(sp)) {
+    challenge = await apiGetChallenge(sp!);   // null if offline / not found → boots normally
+  }
+  createFeed(viewport, feedEl, challenge);
+}
+void boot();
 
 // On-device backend diagnostics: ?diag=1, or open in Telegram via
 // t.me/<bot>?startapp=diag (start_param='diag') — shows initData + /session status
