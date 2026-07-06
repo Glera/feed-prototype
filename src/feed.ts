@@ -3793,7 +3793,7 @@ export class Feed {
       this.settlingTargetIndex = targetIndex;
       this.stopRewardSparks(fromIndex);
       if (this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycleAfterSettle = true;
-      // Live-ride teleport for PROGRAMMATIC advances (▲ button / post-win):
+      // Live-ride teleport for PROGRAMMATIC advances (× / ▲ button / post-win):
       // the parked-in-viewport page sits at translateY(0) already — animating
       // "to 0" would show no ride. Recompute it at its normal off-screen
       // offset first (settlingTargetIndex is set, so the park override is off)
@@ -3802,6 +3802,22 @@ export class Feed {
         const savedPos = this.pos;
         this.pos = fromPos;
         this.render(false);
+        // The resident COVER layer is parked at translateY(0) too (in-viewport,
+        // hidden under the opaque current page). A gesture ride works because
+        // dragging mirrors the arriving page's offset frame by frame, so the
+        // layer has a flushed off-screen position before the settle animation.
+        // A programmatic slide has no drag phase: the ride target ≈ the parked
+        // spot, so the cover POPPED to the final position at z:1010 instantly,
+        // covering the pages while they animated underneath (visible snap on
+        // the × path; post-win the reward flyover masked it). Teleport it to
+        // the arriving page's off-screen offset first; the flush below commits
+        // it, and the animated pass rides it in like a swipe.
+        if (this.incomingIndex === targetIndex && this.incomingEl) {
+          this.incomingEl.style.transition = 'none';
+          this.incomingEl.style.transform =
+            this.pageTransformState[targetIndex] || `translate3d(0, ${this.pageH}px, 0)`;
+          this.incomingEl.style.zIndex = '1010';
+        }
         void this.feedEl.offsetHeight;
         this.pos = savedPos;
       }
