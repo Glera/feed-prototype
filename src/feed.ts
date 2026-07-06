@@ -94,6 +94,14 @@ function reserveAheadDepth(): number {
 const INITIAL_BATCH = 1;           // get the first mechanic visible; warm-next starts after it settles
 const PRELOADER_TIMEOUT_MS = 15000;
 const SERVER_SEED_CAP_MS = 2500;   // max the preloader waits for the first /session
+
+// Globally-unique run id per playthrough. MUST be unique across sessions/reloads:
+// it's the /results idempotency key (lw:{run_id}); a per-session counter (1,2,3…)
+// collides on reload and the ledger silently dedupes the new session's wins.
+function runUid(): string {
+  try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch { /* older webview */ }
+  return `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
 const FRAME_READY_FALLBACK_MS = 900;
 const FRAME_REVEAL_DELAY_MS = 90;
@@ -178,7 +186,6 @@ export class Feed {
   private labelEls: HTMLElement[] = [];
   private labelTimers = new Map<number, number>();
   private frames = new Map<number, HTMLIFrameElement>();
-  private runSeq = 0;
   private completedRunIds = new Set<string>();
   private liveHold = new Set<number>();
   private settlingTargetIndex: number | null = null;
@@ -1348,7 +1355,7 @@ export class Feed {
     this.games[i].classList.remove('game--ready');
     const frame = document.createElement('iframe');
     frame.className = 'game__frame';
-    frame.dataset.runId = String(++this.runSeq);
+    frame.dataset.runId = runUid();
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('title', this.playables[i].id);
     frame.setAttribute('allow', 'autoplay');
@@ -2784,7 +2791,7 @@ export class Feed {
       if (frame) {
         const oldRun = frame.dataset.runId;
         if (oldRun) this.completedRunIds.delete(oldRun);
-        frame.dataset.runId = String(++this.runSeq);
+        frame.dataset.runId = runUid();
       }
       try { swipe.restart({ instant: true }); } catch { /* cross-origin */ }
     } else {
