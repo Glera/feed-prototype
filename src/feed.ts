@@ -30,11 +30,14 @@ const TAP_SLOP_PX = 8;             // micro movement still counts as a tap
 const MIN_SWIPE_INTENT_PX = 8;     // velocity alone cannot turn a tiny wiggle into a swipe
 const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of distance
 
-// Mechanics whose warm frame does NOT paint a start screen (their scene is
-// DOM built only on un-pause) — they ride the baked poster, not the live
-// iframe. Shrink this list by fixing their staged boot to build the scene at
-// mount.
-const LiveRideExcluded = new Set(['pins-v1-swipe', 'merge-second-board-v1-swipe', 'merge-second-board-v2-swipe']);
+// Mechanics whose warm frame does NOT paint a start screen — they would ride
+// the baked poster instead of the live snapshot. Empty since warm-paint's
+// timer-drive: pins paints via its bg video, second-board v1/v2 compose their
+// scene (bg + board canvas + character imgs) during the warm-paint window.
+// Their DOM intro dialogs are not part of the snapshot — same as every other
+// mechanic, the dialog arrives with its own fade. The snapshot blank-guard
+// still falls back to the baked poster if a warm frame composes to nothing.
+const LiveRideExcluded = new Set<string>([]);
 
 const LIVE_AHEAD = 0;              // explicit warm-next scheduling below owns ahead iframe lifetime
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
@@ -71,6 +74,9 @@ const WARM_NEXT_CALM_FRAME_MS = 24;
 // hiding; the gate now only keeps the warm off the settle frame itself.
 const WARM_NEXT_CALM_FRAMES = 3;
 const WARM_NEXT_IDLE_MIN_MS = 3;
+// A busy 60fps mechanic can starve the calm gate forever; after this many
+// stuck rounds the low-impact task runs anyway (see scheduleLowImpactTask).
+const STUCK_ROUNDS_MAX = 3;
 const LEVEL_PROGRESS_MS = 340;
 const STARS_PER_LEVEL = 5;    // level-1 base; higher levels need more (starsForLevel)
 // Reward-star collect: the N earned stars line up in a row on the win screen, then
@@ -1166,13 +1172,39 @@ export class Feed {
       const bg = win.getComputedStyle(doc.body).backgroundColor;
       if (bg && bg !== 'rgba(0, 0, 0, 0)') { ctx.fillStyle = bg; ctx.fillRect(0, 0, cnv.width, cnv.height); }
       let drew = false;
-      // Document order approximates the mechanics' visual stacking (base
-      // canvas → DOM sprites like the generator → sparkle overlays).
+      // Drawable elements stack by the Z-INDEX OF THEIR TOP-LEVEL LAYER (the
+      // ancestor that is a direct child of the bootstrap root), not document
+      // order — e.g. second-board appends its bg photo (z:0) AFTER the board
+      // canvas (z:1), and its intro-dialog portrait img lives inside a z:60
+      // overlay. Walking the ancestor chain also multiplies opacity, so an
+      // img inside a faded-out container is skipped (its own computed opacity
+      // would read 1 — opacity does not inherit). DOM-only widget parts
+      // (dialog panel divs, text) can't be drawn; they arrive with their own
+      // fade, while the portrait img rides at its true position and stacking.
+      const sceneRoot = doc.getElementById('playable-root') ?? doc.body;
+      const layers: Array<{ el: HTMLElement; rect: DOMRect; z: number }> = [];
       for (const el of doc.querySelectorAll<HTMLElement>('canvas, video, img')) {
         const r = el.getBoundingClientRect();
         if (r.width < 8 || r.height < 8 || r.bottom < 0 || r.top > ih) continue;
-        const cs = win.getComputedStyle(el);
-        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.05) continue;
+        let node: HTMLElement | null = el;
+        let top: HTMLElement = el;
+        let effOpacity = 1;
+        let hidden = false;
+        while (node && node !== sceneRoot && node !== doc.body) {
+          const cs = win.getComputedStyle(node);
+          if (cs.display === 'none' || cs.visibility === 'hidden') { hidden = true; break; }
+          effOpacity *= parseFloat(cs.opacity);
+          top = node;
+          node = node.parentElement;
+        }
+        if (hidden || !node || effOpacity < 0.05) continue;
+        const tcs = win.getComputedStyle(top);
+        const z = tcs.position !== 'static' ? (parseInt(tcs.zIndex, 10) || 0) : 0;
+        layers.push({ el, rect: r, z });
+      }
+      // Stable sort keeps document order for the z-auto/equal-z majority.
+      layers.sort((a, b) => a.z - b.z);
+      for (const { el, rect: r } of layers) {
         try {
           ctx.drawImage(el as HTMLCanvasElement, r.left * sx, r.top * sy, r.width * sx, r.height * sy);
           drew = true;
@@ -2063,6 +2095,7 @@ export class Feed {
     let fallbackTimer = 0;
     let idleId = 0;
     let calmFrames = 0;
+    let stuckRounds = 0;
     let lastFrameT = performance.now();
     let calmWindowStartedAt = lastFrameT;
     const requestIdleCallback = (window as any).requestIdleCallback as
@@ -2093,9 +2126,18 @@ export class Feed {
         scheduleIdle();
         return;
       }
-      // If the page never becomes calm, do not force heavy iframe parsing. It is
-      // better to try again later than to jank the current game.
+      // If the page never becomes calm, retry — but only a few rounds. A
+      // mechanic rendering at full frame budget (autoplay demo) never yields
+      // an idle window at all, and indefinite starvation is worse than the
+      // warm task itself: staged boot + payload streaming cut the warm cost
+      // to ~100-180ms worst-case, while an un-warmed fast swipe boots from
+      // the network in plain sight. Force the task after STUCK_ROUNDS_MAX.
       if (now - calmWindowStartedAt > timeout * 2) {
+        if (++stuckRounds >= STUCK_ROUNDS_MAX) {
+          this.wlog(`calm gate starved ${stuckRounds} rounds — forcing the task (warm is cheap post staged-boot)`);
+          run();
+          return;
+        }
         this.wlog(`calm gate stuck: max ${this.warmCalmMax}/${WARM_NEXT_CALM_FRAMES} calm frames — current mechanic too busy, retrying`);
         fallbackTimer = window.setTimeout(() => {
           fallbackTimer = 0;
