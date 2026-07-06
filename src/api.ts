@@ -61,6 +61,7 @@ export interface SessionResp {
   ref_code: string | null;
   balance: number;
   is_new: boolean;
+  backend_version?: string;
 }
 
 export interface ResultResp {

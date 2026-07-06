@@ -207,6 +207,9 @@ export class Feed {
   // Preloader waits for BOTH the first mechanic AND the first server seed (capped).
   private mechanicsReady = false;
   private awaitingServerSeed = true;
+  // Bottom-bar version label: platform (build) + backend (git SHA, after auth).
+  private versionEl: HTMLElement | null = null;
+  private backendVersion: string | null = null;
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
   private pendingStarRewards = new Set<number>();
@@ -394,6 +397,7 @@ export class Feed {
       const s = await apiSession();
       if (!s) continue;
       this.applyServerBalance(s.balance);
+      if (s.backend_version) { this.backendVersion = s.backend_version; this.renderVersionLabel(); }
       const b = await flushResults();
       if (b != null) this.applyServerBalance(b);
       return;
@@ -407,6 +411,16 @@ export class Feed {
     if (b != null) this.applyServerBalance(b);
     const m = await apiMe();
     if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);
+  }
+
+  // Bottom-bar version: platform build always; backend git SHA appended once the
+  // caller is authenticated (from /session) — so you can see when the backend is
+  // live with your latest push before testing changes.
+  private renderVersionLabel(): void {
+    if (!this.versionEl) return;
+    const stamp = (typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev').slice(5);
+    const api = this.backendVersion ? ` · api ${this.backendVersion}` : '';
+    this.versionEl.textContent = `platform · ${stamp}${api}`;
   }
 
   // Apply a server balance WITHOUT clobbering optimistic local progress: if the
@@ -873,12 +887,12 @@ export class Feed {
     // build is live (mechanics carry their own badge in their bottom-left corner).
     const ver = document.createElement('div');
     ver.className = 'feed-bar__version';
-    const stamp = (typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev').slice(5);  // "MM-DD HH:MM"
-    ver.textContent = `platform · ${stamp}`;
     ver.style.cssText = 'position:absolute;left:10px;bottom:calc(env(safe-area-inset-bottom,0px) + 6px);' +
       "font:600 10px/1.2 -apple-system,system-ui,sans-serif;color:rgba(255,255,255,0.62);" +
       'letter-spacing:0.2px;pointer-events:none;white-space:nowrap;';
     bar.appendChild(ver);
+    this.versionEl = ver;
+    this.renderVersionLabel();
     // Make the bar itself a paging swipe surface. On Android a swipe that STARTS
     // over the bottom bar (thumb from the bottom) otherwise fell through to the
     // browser → URL-bar collapse → the feed reflows (bar "grows") and the first
