@@ -18,6 +18,32 @@
 
 type AnyTG = any;
 
+/** Raw Telegram initData for the `Authorization: tma <initData>` header. Null
+ *  outside Telegram (normal browser / AppLovin) — callers then no-op the social
+ *  features. `?initData=` query override is a DEV convenience for testing the
+ *  backend from a plain browser. */
+export function getInitData(): string | null {
+  try {
+    const d = (window as any).Telegram?.WebApp?.initData;
+    if (typeof d === 'string' && d.length > 0) return d;
+    const q = new URLSearchParams(location.search).get('initData');
+    return q && q.length > 0 ? q : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Telegram launch start_param (deep-link payload), e.g. a challenge id. Null
+ *  outside Telegram. Tags session entry source (direct|challenge|referral). */
+export function getStartParam(): string | null {
+  try {
+    const p = (window as any).Telegram?.WebApp?.initDataUnsafe?.start_param;
+    return typeof p === 'string' && p.length > 0 ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 function setVars(top: number, bottom: number, left: number, right: number): void {
   const root = document.documentElement;
   const px = (n: number) => `${Math.max(0, Math.round(n || 0))}px`;

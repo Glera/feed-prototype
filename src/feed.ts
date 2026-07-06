@@ -1,4 +1,7 @@
 import { PLAYABLES, playableUrl, type Playable } from './playables';
+import { apiSession, apiPostResult, variantIdForMechanic } from './api';
+import { track } from './telemetry';
+import { getStartParam } from './telegram';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
@@ -350,6 +353,36 @@ export class Feed {
     // state (is it pre-warmed? if not, why — blocked, or calm window starved?).
     // Also open the feed with ?warm=1 to stream the warm lifecycle to the console.
     (window as unknown as { __feedWarm?: () => unknown }).__feedWarm = () => this.warmSnapshot();
+    this.bootServer();
+  }
+
+  // ── Backend (W1): identity + server-side star balance + telemetry ──────────
+  // Seeds totalStars from the server so the counter survives close/reopen. The
+  // in-memory flow still owns the counter DURING a session (optimistic); each win
+  // is persisted via /results (idempotent). No-op outside Telegram (no initData →
+  // apiSession returns null → we keep the existing in-memory behaviour).
+  private async bootServer(): Promise<void> {
+    track('session_start', { entry: getStartParam() ? 'challenge' : 'direct', start_param: getStartParam() });
+    const s = await apiSession();
+    if (!s) return;
+    this.totalStars = s.balance;
+    this.updateHud(false);
+    this.renderLevelUpPage(false);
+  }
+
+  // Persist a manual win to the server (idempotent by run_id) — the ledger is the
+  // source of truth for balance across sessions. Fire-and-forget; the local
+  // counter already reflects the win optimistically.
+  private reportResult(i: number, runId: string): void {
+    const mechanicId = this.playables[i]?.id;
+    if (!mechanicId) return;
+    void apiPostResult({
+      mechanic_id: mechanicId,
+      variant_id: variantIdForMechanic(mechanicId),
+      run_id: runId,
+      metric_key: 'win',
+      metric_value: 1,
+    });
   }
 
   // ── Warm-cost telemetry ──────────────────────────────────────────────────
@@ -2481,8 +2514,15 @@ export class Feed {
 
     if (this.completedRunIds.has(runId)) return;
     this.completedRunIds.add(runId);
-    if (outcome === 'won') this.handleWin(i);
-    else this.handleLoss(i);
+    const mechanicId = this.playables[i]?.id;
+    if (outcome === 'won') {
+      track('win', { mechanic_id: mechanicId, mode: 'manual' }, runId);
+      this.reportResult(i, runId);
+      this.handleWin(i);
+    } else {
+      track('lose', { mechanic_id: mechanicId, mode: 'manual' }, runId);
+      this.handleLoss(i);
+    }
   }
 
   // Restart an autoplaying mechanic so the demo loops on win/loss. A short beat lets
