@@ -30,14 +30,45 @@ const TAP_SLOP_PX = 8;             // micro movement still counts as a tap
 const MIN_SWIPE_INTENT_PX = 8;     // velocity alone cannot turn a tiny wiggle into a swipe
 const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of distance
 
-// Mechanics whose warm frame does NOT paint a start screen — they would ride
-// the baked poster instead of the live snapshot. Empty since warm-paint's
-// timer-drive: pins paints via its bg video, second-board v1/v2 compose their
-// scene (bg + board canvas + character imgs) during the warm-paint window.
-// Their DOM intro dialogs are not part of the snapshot — same as every other
-// mechanic, the dialog arrives with its own fade. The snapshot blank-guard
-// still falls back to the baked poster if a warm frame composes to nothing.
+// Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
+// liveRideOk). Empty: every warm frame paints a start screen since
+// warm-paint's timer-drive.
 const LiveRideExcluded = new Set<string>([]);
+
+// ── Ride cover ──────────────────────────────────────────────────────────────
+// The image that RIDES IN on the arriving page (and fronts a loading slot):
+// the mechanic's designed cover art `<id>.cover.jpg` when it ships one, else
+// this standard platform card. On arrival the cover fades out (game--live)
+// and the live mechanic takes over — deliberately a CARD → GAME reveal, not a
+// pixel-faithful continuation: it is guaranteed smooth (a static host-document
+// <img> rides; nothing is captured or encoded in the background) and reads as
+// intentional design. Replaced the live-canvas-snapshot pipeline, whose
+// per-second composites taxed the shared main thread and whose fidelity
+// depended on each mechanic's warm paint.
+const RIDE_PLACEHOLDER_SRC = 'data:image/svg+xml,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 375 620">'
+  // Bright enough to read through the autoplay dim veil that covers the
+  // arriving page — a darker card composited under the dim looked like the
+  // old "arrived black" bug.
+  + '<defs>'
+  + '<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">'
+  + '<stop offset="0" stop-color="#35496f"/><stop offset="0.55" stop-color="#243352"/><stop offset="1" stop-color="#141c31"/>'
+  + '</linearGradient>'
+  + '<radialGradient id="glow" cx="0.5" cy="0.42" r="0.65">'
+  + '<stop offset="0" stop-color="#6f8dff" stop-opacity="0.30"/><stop offset="1" stop-color="#6f8dff" stop-opacity="0"/>'
+  + '</radialGradient>'
+  + '</defs>'
+  + '<rect width="375" height="620" fill="url(#bg)"/>'
+  + '<rect width="375" height="620" fill="url(#glow)"/>'
+  + '<circle cx="187.5" cy="260" r="46" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3"/>'
+  + '<path d="M175 238 L210 260 L175 282 Z" fill="#ffffff" fill-opacity="0.4"/>'
+  + '</svg>'
+);
+
+/** The mechanic's cover-art URL — resolves next to its html like the payload. */
+function coverSrc(id: string): string {
+  return playableUrl(id).split('?')[0].replace(/\.html$/, '.cover.jpg');
+}
 
 const LIVE_AHEAD = 0;              // explicit warm-next scheduling below owns ahead iframe lifetime
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
@@ -591,8 +622,9 @@ export class Feed {
       const poster = document.createElement('img');
       poster.className = 'game__poster';
       poster.draggable = false;
-      poster.src = `${playableUrl(p.id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
-      poster.addEventListener('error', () => poster.remove(), { once: true });
+      poster.src = coverSrc(p.id);
+      // No cover art shipped → the standard platform card (data URI, can't fail).
+      poster.addEventListener('error', () => { poster.src = RIDE_PLACEHOLDER_SRC; }, { once: true });
       // INSIDE the slot: the poster then shares the iframe's exact box AND the
       // autoplay "footage frame" scale (.game--autoplay .game__slot 0.92), so
       // it never reads bigger than the mechanic it stands in for.
@@ -1092,7 +1124,12 @@ export class Feed {
     const img = document.createElement('img');
     img.draggable = false;
     img.addEventListener('load', () => { this.incomingPosterOk = true; });
-    img.addEventListener('error', () => { this.incomingPosterOk = false; });
+    // No cover art → the standard platform card (data URI — its own load
+    // event re-arms incomingPosterOk, so the ride is never disabled).
+    img.addEventListener('error', () => {
+      this.incomingPosterOk = false;
+      if (img.src !== RIDE_PLACEHOLDER_SRC) img.src = RIDE_PLACEHOLDER_SRC;
+    });
     el.appendChild(img);
     this.feedEl.appendChild(el);
     this.incomingEl = el;
@@ -1107,14 +1144,7 @@ export class Feed {
     if (next === this.incomingIndex) return;
     this.incomingIndex = next;
     this.incomingPosterOk = false;
-    this.incomingImg.src = `${playableUrl(this.playables[next].id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
-    // Live snapshot of the new warm frame: wait ~3.2s of poll ticks past the
-    // reveal — the warm-paint window now runs 2.6s so the mechanic's INTRO
-    // finishes painting while parked (a snapshot taken mid-intro rode in a
-    // half-arrived layout and the arrival visibly jumped) — then a few
-    // attempts.
-    this.snapDelayTicks = 13;
-    this.snapTriesLeft = 8;
+    this.incomingImg.src = coverSrc(this.playables[next].id);
     const game = this.games[next];
     const slot = game?.querySelector<HTMLElement>('.game__slot');
     if (game && slot) {
@@ -1134,107 +1164,11 @@ export class Feed {
     }
   }
 
-  // ── Live snapshot ──────────────────────────────────────────────────────
-  // The baked poster.jpg never quite matches the mechanic (captured at a
-  // different aspect, random board layouts, live particles). A warm mechanic
-  // is PAUSED though — its pixels are frozen after warm-paint — so ONE
-  // same-origin composite of its canvases/videos/images into a slot-sized
-  // canvas is pixel-faithful until arrival. The JPEG encode happens off the
-  // main thread (toBlob); the blob URL replaces BOTH the ride image and the
-  // warm page's in-slot poster, so ride → arrival → live all show the same
-  // pixels. Falls back to the baked poster when the composite comes up blank
-  // (DOM-scene mechanics are skipped up front).
-  private snapUrl: string | null = null;
-  private snapTriesLeft = 0;
-  private snapDelayTicks = 0;   // poll ticks to wait after reveal before the first attempt (warm-paint must finish)
-
-  private captureIncomingSnapshot(): boolean {
-    const i = this.incomingIndex;
-    if (i < 0 || !this.frameRevealed.has(i)) return false;
-    if (LiveRideExcluded.has(this.playables[i]?.id ?? '')) return false;
-    const frame = this.frames.get(i);
-    const win = frame?.contentWindow as (Window & typeof globalThis) | null;
-    const doc = win?.document;
-    const slot = this.games[i]?.querySelector<HTMLElement>('.game__slot');
-    if (!win || !doc || !slot) return false;
-    try {
-      const w = slot.offsetWidth, h = slot.offsetHeight;
-      const scale = Math.min(2, window.devicePixelRatio || 1);
-      const cnv = document.createElement('canvas');
-      cnv.width = Math.round(w * scale);
-      cnv.height = Math.round(h * scale);
-      const ctx = cnv.getContext('2d');
-      if (!ctx || !cnv.width || !cnv.height) return false;
-      // The iframe fills the slot — map iframe-viewport rects straight in.
-      const iw = win.innerWidth || w, ih = win.innerHeight || h;
-      const sx = cnv.width / iw, sy = cnv.height / ih;
-      // CSS body background first (some mechanics rely on it under the canvas).
-      const bg = win.getComputedStyle(doc.body).backgroundColor;
-      if (bg && bg !== 'rgba(0, 0, 0, 0)') { ctx.fillStyle = bg; ctx.fillRect(0, 0, cnv.width, cnv.height); }
-      let drew = false;
-      // Drawable elements stack by the Z-INDEX OF THEIR TOP-LEVEL LAYER (the
-      // ancestor that is a direct child of the bootstrap root), not document
-      // order — e.g. second-board appends its bg photo (z:0) AFTER the board
-      // canvas (z:1), and its intro-dialog portrait img lives inside a z:60
-      // overlay. Walking the ancestor chain also multiplies opacity, so an
-      // img inside a faded-out container is skipped (its own computed opacity
-      // would read 1 — opacity does not inherit). DOM-only widget parts
-      // (dialog panel divs, text) can't be drawn; they arrive with their own
-      // fade, while the portrait img rides at its true position and stacking.
-      const sceneRoot = doc.getElementById('playable-root') ?? doc.body;
-      const layers: Array<{ el: HTMLElement; rect: DOMRect; z: number }> = [];
-      for (const el of doc.querySelectorAll<HTMLElement>('canvas, video, img')) {
-        const r = el.getBoundingClientRect();
-        if (r.width < 8 || r.height < 8 || r.bottom < 0 || r.top > ih) continue;
-        let node: HTMLElement | null = el;
-        let top: HTMLElement = el;
-        let effOpacity = 1;
-        let hidden = false;
-        while (node && node !== sceneRoot && node !== doc.body) {
-          const cs = win.getComputedStyle(node);
-          if (cs.display === 'none' || cs.visibility === 'hidden') { hidden = true; break; }
-          effOpacity *= parseFloat(cs.opacity);
-          top = node;
-          node = node.parentElement;
-        }
-        if (hidden || !node || effOpacity < 0.05) continue;
-        const tcs = win.getComputedStyle(top);
-        const z = tcs.position !== 'static' ? (parseInt(tcs.zIndex, 10) || 0) : 0;
-        layers.push({ el, rect: r, z });
-      }
-      // Stable sort keeps document order for the z-auto/equal-z majority.
-      layers.sort((a, b) => a.z - b.z);
-      for (const { el, rect: r } of layers) {
-        try {
-          ctx.drawImage(el as HTMLCanvasElement, r.left * sx, r.top * sy, r.width * sx, r.height * sy);
-          drew = true;
-        } catch { /* tainted/broken element — skip it */ }
-      }
-      if (!drew) return false;
-      // Blank guard: a not-yet-painted warm frame composes to nothing.
-      const d = ctx.getImageData(0, 0, cnv.width, Math.min(cnv.height, 240)).data;
-      let nonBlank = false;
-      for (let p = 3; p < d.length; p += 1600) if (d[p] > 0) { nonBlank = true; break; }
-      if (!nonBlank) return false;
-      cnv.toBlob((blob) => {
-        if (!blob || i !== this.incomingIndex) return;
-        if (this.snapUrl) URL.revokeObjectURL(this.snapUrl);
-        this.snapUrl = URL.createObjectURL(blob);
-        this.incomingImg.src = this.snapUrl;
-        const slotPoster = this.games[i]?.querySelector<HTMLImageElement>('.game__poster');
-        if (slotPoster) slotPoster.src = this.snapUrl;
-      }, 'image/jpeg', 0.85);
-      return true;
-    } catch { return false; }
-  }
-
   /** Mirror the arriving page's motion during a drag or an animated slide;
    *  park under the pages otherwise. Called at the end of every render(). */
   private driveIncoming(animate: boolean) {
     if (!this.incomingEl) return;
-    // The live iframe rides instead whenever the warm frame actually painted
-    // its start screen; the poster remains the fallback for DOM-scene
-    // mechanics and for fast flicks onto a not-yet-ready frame.
+    // Under ?livein=1 the live iframe rides instead of the cover.
     if (this.liveRideOk(this.incomingIndex)) return;
     const i = this.incomingIndex;
     const delta = i >= 0 ? this.pageDelta[i] : undefined;
@@ -1367,15 +1301,9 @@ export class Feed {
     const revealTimer = this.frameRevealTimers.get(i);
     if (revealTimer) window.clearTimeout(revealTimer);
     this.frameRevealTimers.delete(i);
-    // Fresh mount → the start-screen poster fronts the page again until this
-    // run goes live (see the .game--live toggle in pollAutoplayUi), and it
-    // must be the BAKED poster — a stale live snapshot from the previous run
-    // would show an outdated board.
+    // Fresh mount → the cover fronts the page again until this run goes live
+    // (see the .game--live toggle in pollAutoplayUi).
     this.games[i]?.classList.remove('game--live');
-    const poster = this.games[i]?.querySelector<HTMLImageElement>('.game__poster');
-    if (poster && poster.src.startsWith('blob:')) {
-      poster.src = `${playableUrl(this.playables[i].id).split('?')[0].replace(/\.html$/, '')}.poster.jpg`;
-    }
   }
 
   private queueFrameReadyFallback(i: number, frame: HTMLIFrameElement) {
@@ -1683,16 +1611,6 @@ export class Feed {
   private pollAutoplayUi = () => {
     if (document.hidden) return;
     if (this.isGestureBusy()) return;
-    // Live-snapshot the warm frame once it's revealed and had time to finish
-    // its warm-paint (frozen after that — one capture is faithful until
-    // arrival). Cheap: a few drawImage calls; JPEG encode is async (toBlob).
-    if (this.incomingIndex >= 0 && this.frameRevealed.has(this.incomingIndex) && this.snapTriesLeft > 0) {
-      if (this.snapDelayTicks > 0) this.snapDelayTicks--;
-      else {
-        this.snapTriesLeft--;
-        if (this.captureIncomingSnapshot()) this.snapTriesLeft = 0;
-      }
-    }
     const indices = new Set<number>(this.autoplayUiActive);
     indices.add(this.realIndex());
     if (this.warmIndex !== null) indices.add(this.warmIndex);
