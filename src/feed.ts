@@ -257,6 +257,7 @@ export class Feed {
   private seriesTransitionEl: HTMLElement | null = null;
   private chestSparkTimer: number | null = null;
   private seriesWinShown = new Set<number>();   // series-end win screen is up on this unit
+  private lastSolveMs = 0;                        // most recent manual solve time (result readout + challenge)
   private pendingSeriesParams = new Map<number, string>();   // encoded ?series= for the next mount of index i
   private challengeIntroShown = false;
   private challengePillEl: HTMLElement | null = null;
@@ -705,6 +706,7 @@ export class Feed {
   private handleSeriesWin(i: number, runId: string, solveMs: number): void {
     if (!this.series || this.series.index !== i) return;
     this.series.done += 1;
+    this.lastSolveMs = solveMs;   // shown on the series win screen + used for the challenge
     // Persist the run for time/telemetry but grant NO stars per level (series pays
     // out only at the chest).
     this.reportResult(i, runId, solveMs, 0);
@@ -863,6 +865,8 @@ export class Feed {
       e.stopPropagation();
       if (remaining <= 0) return;
       remaining -= 1;
+      // Haptic tick on every tap (Telegram Mini App; no-op elsewhere).
+      try { (window as unknown as { Telegram?: { WebApp?: { HapticFeedback?: { impactOccurred: (s: string) => void } } } }).Telegram?.WebApp?.HapticFeedback?.impactOccurred('medium'); } catch { /* noop */ }
       // Elastic squash→stretch bounce (like a merged item) + a confetti spray.
       chestBtn.classList.remove('chest-ov__chest--squish');
       void chestBtn.offsetWidth;               // restart the animation
@@ -961,7 +965,7 @@ export class Feed {
 
     const toX = badgeX - cx;
     const toY = badgeY - cy;
-    const jump = px * 0.55;
+    const jump = px * 2.2;   // pop out of the chest a couple of its own heights before flying
     const landY = toY - px * 0.25;
     let done = false;
     const land = () => {
@@ -1026,6 +1030,39 @@ export class Feed {
     // the existing reward swipe (attachRewardSwipe → onUp) engages.
     state.replaceChildren();
     this.renderResultState(i, state, null);
+
+    const reward = state.querySelector('.reward');
+    const actions = reward?.querySelector('.reward__actions') ?? null;
+    const toast = reward?.querySelector('.reward__toast') ?? null;
+    const mechanicId = this.playables[i]?.id ?? '';
+
+    // Result readout above the buttons (for now: the last level's solve time).
+    if (reward && this.lastSolveMs > 0) {
+      const res = document.createElement('div');
+      res.className = 'reward__result';
+      res.textContent = `Время: ${(this.lastSolveMs / 1000).toFixed(1)}s`;
+      reward.insertBefore(res, actions);
+    }
+    // "Бросить вызов" action alongside the standard win buttons.
+    if (actions) {
+      const challenge = this.rewardButton('⚡', 'Вызов', 'reward__action--challenge');
+      challenge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        challenge.classList.add('reward__action--liked');
+        void this.doCreateChallenge(mechanicId, this.lastSolveMs || 5000);
+      });
+      actions.appendChild(challenge);
+    }
+    // Restore the "tap or swipe for next game" hint (same as a normal win screen).
+    if (reward) {
+      const hint = document.createElement('div');
+      hint.className = 'reward__hint';
+      hint.innerHTML =
+        '<span class="reward__swipe-cue" aria-hidden="true">⌃</span>' +
+        '<span class="reward__hint-text">tap or swipe for next game</span>';
+      reward.insertBefore(hint, toast);
+    }
+
     state.classList.add('game__state--earned');
     state.classList.remove('game__state--failed');
     state.hidden = false;
