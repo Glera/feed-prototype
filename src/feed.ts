@@ -256,7 +256,7 @@ export class Feed {
   private chestEl: HTMLElement | null = null;
   private seriesTransitionEl: HTMLElement | null = null;
   private chestSparkTimer: number | null = null;
-  private lastSeriesSolveMs = 0;
+  private seriesWinShown = new Set<number>();   // series-end win screen is up on this unit
   private challengeIntroShown = false;
   private challengePillEl: HTMLElement | null = null;
   private pendingEditorLaunch = new Set<number>();
@@ -704,7 +704,6 @@ export class Feed {
   private handleSeriesWin(i: number, runId: string, solveMs: number): void {
     if (!this.series || this.series.index !== i) return;
     this.series.done += 1;
-    this.lastSeriesSolveMs = solveMs;
     // Persist the run for time/telemetry but grant NO stars per level (series pays
     // out only at the chest).
     this.reportResult(i, runId, solveMs, 0);
@@ -826,6 +825,13 @@ export class Feed {
     let paid = false;
     track('series_complete', { mechanic_id: this.playables[i]?.id, reward: this.series.reward });
 
+    // The chest flies IN from the slot-row chest icon and scales up to centre; the
+    // slot panel fades out as it launches.
+    const slotChest = this.seriesRowEl?.querySelector<HTMLElement>('.series-chest');
+    const fromRect = slotChest?.getBoundingClientRect() ?? null;
+    if (this.seriesRowEl) this.seriesRowEl.classList.remove('series-row--in');   // fade the panel
+    window.setTimeout(() => this.removeSeriesRow(), 260);
+
     const scrim = document.createElement('div');
     scrim.className = 'chest-ov';
     scrim.innerHTML =
@@ -834,9 +840,19 @@ export class Feed {
     this.viewport.appendChild(scrim);
     this.chestEl = scrim;
     const chestBtn = scrim.querySelector<HTMLButtonElement>('.chest-ov__chest')!;
-    requestAnimationFrame(() => scrim.classList.add('chest-ov--in'));
-    // Idle sparks flickering out from under the chest (same look as the old reward
-    // star sparks).
+    requestAnimationFrame(() => {
+      scrim.classList.add('chest-ov--in');
+      if (fromRect && chestBtn.animate) {
+        const to = chestBtn.getBoundingClientRect();
+        const dx = (fromRect.left + fromRect.width / 2) - (to.left + to.width / 2);
+        const dy = (fromRect.top + fromRect.height / 2) - (to.top + to.height / 2);
+        const s = Math.max(0.12, fromRect.width / to.width);   // start at the slot icon's size
+        chestBtn.animate([
+          { transform: `translate(${dx}px, ${dy}px) scale(${s})`, opacity: 0.7 },
+          { transform: 'translate(0,0) scale(1)', opacity: 1 },
+        ], { duration: 480, easing: 'cubic-bezier(0.2,1.3,0.4,1)', fill: 'backwards' });
+      }
+    });
     this.startChestSparks(chestBtn);
 
     const onTap = (e: Event) => {
@@ -848,13 +864,17 @@ export class Feed {
       void chestBtn.offsetWidth;               // restart the animation
       chestBtn.classList.add('chest-ov__chest--squish');
       this.burstStarConfetti();
-      this.flyStarToHud(chestBtn);
+      // Pop a real ★ star out of the chest with the OLD reward animation (2-phase
+      // squash→jump then fly, impact + splash on the counter, no fade-out).
+      const r = chestBtn.getBoundingClientRect();
+      const vp = this.viewport.getBoundingClientRect();
+      this.flyOneStar(r.left - vp.left + r.width / 2, r.top - vp.top + r.height * 0.34);
       if (remaining <= 0 && !paid) {
         paid = true;
-        // Persist the whole-series reward now (idempotent), then hand off to the
-        // player-choice panel after the last star lands.
         this.persistSeriesReward(i);
-        window.setTimeout(() => this.showSeriesEndPanel(i), 720);
+        // After the last star lands, hand off to the REAL win screen (old buttons +
+        // swipe), not a bespoke panel.
+        window.setTimeout(() => this.showSeriesWinScreen(i), 720);
       }
     };
     chestBtn.addEventListener('click', onTap);
@@ -903,29 +923,66 @@ export class Feed {
       .addEventListener('finish', () => spark.remove(), { once: true });
   }
 
-  // Star pops out of the chest with an elastic bounce, then arcs to the HUD counter,
-  // crediting +1 on arrival. Same gold ★ art as the old reward row.
-  private flyStarToHud(fromEl: HTMLElement): void {
-    const target = this.levelBadgeEl ?? this.hudEl;
-    const star = document.createElement('span');
-    star.className = 'chest-star';
-    star.textContent = '★';
-    const from = fromEl.getBoundingClientRect();
-    const to = (target ?? document.body).getBoundingClientRect();
-    const x0 = from.left + from.width / 2, y0 = from.top + from.height * 0.4;
-    const x1 = to.left + to.width / 2, y1 = to.top + to.height / 2;
-    star.style.left = `${x0 - 18}px`;
-    star.style.top = `${y0 - 18}px`;
-    this.viewport.appendChild(star);
-    const credit = () => { star.remove(); this.totalStars += 1; this.updateHud(true); };
-    if (!star.animate) { star.style.transform = `translate(${x1 - x0}px, ${y1 - y0}px)`; window.setTimeout(credit, 500); return; }
-    star.animate([
-      { transform: 'translate(0,0) scale(0.3)', opacity: 0 },
-      { transform: 'translate(0,-34px) scale(1.35)', opacity: 1, offset: 0.28 },
-      { transform: 'translate(0,-24px) scale(1.05)', opacity: 1, offset: 0.44 },
-      { transform: `translate(${x1 - x0}px, ${y1 - y0}px) scale(0.5)`, opacity: 0.15 },
-    ], { duration: 720, easing: 'cubic-bezier(0.3,0.9,0.3,1)', fill: 'forwards' })
-      .addEventListener('finish', credit, { once: true });
+  // A single gold ★ star unit — identical art to the reward row (buildRewardStarRow).
+  private makeStarUnit(px: number): HTMLElement {
+    const u = document.createElement('span');
+    u.className = 'reward__star-unit';
+    u.textContent = '★';
+    u.style.cssText =
+      `display:inline-block;font-size:${px}px;line-height:1;color:#ffd85a;` +
+      'transform-origin:50% 100%;will-change:transform;' +
+      'filter:drop-shadow(0 8px 16px rgba(255,147,42,0.34));' +
+      'text-shadow:0 3px 0 #8d4a12, 0 0 14px rgba(255,221,89,0.5), 0 0 26px rgba(255,105,28,0.22);';
+    return u;
+  }
+
+  // Pop one ★ from (cx,cy) to the HUD counter using the SAME 2-phase motion as the
+  // old reward collect: squash → jump → accelerate into the counter (no fade), then
+  // impact splash (burstRewardCollectParticles) + badge bump + ring step + credit.
+  private flyOneStar(cx: number, cy: number): void {
+    const vp = this.viewport.getBoundingClientRect();
+    const badge = this.levelBadgeEl?.getBoundingClientRect();
+    const badgeX = badge ? badge.left - vp.left + badge.width / 2 : 40;
+    const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
+    const badgeRadius = badge ? Math.min(badge.width, badge.height) / 2 : 28;
+    const px = 54;
+    const unit = this.makeStarUnit(px);
+    unit.style.position = 'absolute';
+    unit.style.left = `${cx - px / 2}px`;
+    unit.style.top = `${cy - px / 2}px`;
+    unit.style.margin = '0';
+    unit.style.zIndex = '2720';
+    unit.style.pointerEvents = 'none';
+    this.viewport.appendChild(unit);
+
+    const toX = badgeX - cx;
+    const toY = badgeY - cy;
+    const jump = px * 0.55;
+    const landY = toY - px * 0.25;
+    let done = false;
+    const land = () => {
+      if (done) return; done = true;
+      unit.remove();
+      this.burstRewardCollectParticles(badgeX, badgeY, Math.max(22, badgeRadius - 2));   // splash
+      this.bumpLevelBadge();
+      this.totalStars += 1;
+      this.updateHud(false);
+      const lvl = this.levelForStars(this.totalStars);
+      this.setLevelProgress(this.starsIntoLevel(this.totalStars) / this.starsForLevel(lvl), true, RING_STEP_MS);
+    };
+    if (!unit.animate) {
+      unit.style.transform = `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`;
+      window.setTimeout(land, REWARD_BOUNCE_MS);
+      return;
+    }
+    unit.animate([
+      { transform: 'translate3d(0,0,0) scale(1,1)', easing: 'cubic-bezier(0.4,0,0.6,1)' },
+      { transform: 'translate3d(0,0,0) scale(1.34,0.66)', offset: 0.26, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },       // squash
+      { transform: `translate3d(0,${-jump}px,0) scale(0.78,1.26)`, offset: 0.40, easing: 'cubic-bezier(0.33,0,0.3,1)' }, // jump
+      { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, offset: 0.52, easing: 'cubic-bezier(0.55,0.055,0.675,0.19)' },
+      { transform: `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`, opacity: 1 },   // accelerate in, NO fade
+    ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' })
+      .addEventListener('finish', land, { once: true });
   }
 
   private persistSeriesReward(i: number): void {
@@ -939,47 +996,43 @@ export class Feed {
     }
   }
 
-  // After the chest empties: replace it with a player-choice panel — like / share /
-  // challenge / swipe on. The series stays "settled" (paging unblocked) and is
-  // cleared when the player swipes to the next mechanic (markUnitShown) or hits ×.
-  private showSeriesEndPanel(i: number): void {
+  // After the chest empties: show the REAL win screen — the same reward overlay a
+  // normal win uses (Replay / Like / Post / Edit buttons + toast + the reward swipe),
+  // just with NO star row to collect (the stars already flew from the chest). This
+  // restores the original look AND the tap-OR-swipe advance. The series is cleared
+  // when the player leaves (markUnitShown / ×).
+  private showSeriesWinScreen(i: number): void {
+    // Fade the chest overlay out.
     this.stopChestSparks();
-    // Remove the chest but keep the scrim as the panel host.
-    const scrim = this.chestEl;
-    const mechanicId = this.playables[i]?.id ?? '';
-    if (!scrim) return;
-    scrim.innerHTML =
-      '<div class="series-end__title">Серия пройдена! 🎉</div>' +
-      '<div class="series-end__actions">' +
-        '<button type="button" class="series-end__btn" data-act="like">❤️<span>Лайк</span></button>' +
-        '<button type="button" class="series-end__btn" data-act="share">↗<span>Поделиться</span></button>' +
-        '<button type="button" class="series-end__btn" data-act="challenge">⚡<span>Вызов</span></button>' +
-      '</div>' +
-      '<button type="button" class="series-end__swipe">Свайп вверх — следующая механика ▲</button>';
-    scrim.querySelectorAll<HTMLButtonElement>('.series-end__btn').forEach((b) => {
-      b.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const act = b.dataset.act;
-        if (act === 'like') { b.classList.toggle('series-end__btn--on'); track('like_tap', { mechanic_id: mechanicId }); }
-        else if (act === 'share' || act === 'challenge') {
-          b.disabled = true;
-          void this.doCreateChallenge(mechanicId, this.lastSeriesSolveMs || 5000);
-        }
-      });
-    });
-    // A tap on the hint advances too (belt-and-braces if the swipe surface under a
-    // just-won mechanic is finicky).
-    scrim.querySelector('.series-end__swipe')?.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(); });
-    // Panel no longer blocks the feed swipe: scrim is click-through (CSS), only its
-    // buttons take taps → a swipe pages to the next mechanic.
-    scrim.classList.add('chest-ov--panel');
-    if (this.series) this.series.playing = false;
+    const chest = this.chestEl;
+    if (chest) {
+      this.chestEl = null;
+      chest.classList.remove('chest-ov--in');
+      chest.addEventListener('transitionend', () => chest.remove(), { once: true });
+      window.setTimeout(() => chest.remove(), 400);
+    }
+    const state = this.stateEls[i];
+    if (!state) { this.clearSeriesUi(); this.series = null; this.advanceToNext(); return; }
+    if (this.series) this.series.playing = false;   // unblock the feed swipe
+    this.seriesWinShown.add(i);                      // guard updateMechanicState from wiping it
+    this.earnedThisCycle.add(i);
+    this.claimedStarRewards.add(i);
+    this.pendingStarRewards.delete(i);               // nothing left to collect
+    // Render the real win overlay directly (no star-row center), mark it earned so
+    // the existing reward swipe (attachRewardSwipe → onUp) engages.
+    state.replaceChildren();
+    this.renderResultState(i, state, null);
+    state.classList.add('game__state--earned');
+    state.classList.remove('game__state--failed');
+    state.hidden = false;
+    this.games[i]?.classList.add('game--earned');
   }
 
   // × (or any exit) mid-series: break it, no reward.
   private breakSeries(): void {
     if (!this.series) return;
     track('series_abandon', { mechanic_id: this.playables[this.series.index]?.id, done: this.series.done });
+    this.seriesWinShown.delete(this.series.index);
     this.clearSeriesUi();
     this.series = null;
   }
@@ -1043,7 +1096,7 @@ export class Feed {
     }
     this.dismissChallengePill();
     // Left the series' mechanic (swiped to another unit) → tear the series down.
-    if (this.series && cur !== this.series.index) { this.clearSeriesUi(); this.series = null; }
+    if (this.series && cur !== this.series.index) { this.seriesWinShown.delete(this.series.index); this.clearSeriesUi(); this.series = null; }
     this.shownIndex = cur;
     this.shownAt = performance.now();
     this.firstInputLogged = false;
@@ -3327,6 +3380,9 @@ export class Feed {
     const game = this.games[i];
     const state = this.stateEls[i];
     if (!game || !state) return;
+    // The series-end win screen is rendered directly (0-star, real buttons) — don't
+    // let the normal state machine hide/re-render over it.
+    if (this.seriesWinShown.has(i)) return;
 
     const earned = this.earnedThisCycle.has(i);
     const failed = this.failedThisCycle.has(i);
