@@ -722,21 +722,17 @@ export class Feed {
     this.failedThisCycle.delete(i);
     this.claimedStarRewards.delete(i);
     this.pendingStarRewards.delete(i);
-    this.manualRuns.add(i);
+    this.manualRuns.add(i);   // reload then boots with auto:false → straight into manual
     this.manualStartMs.set(i, performance.now());
-    const frame = this.frames.get(i);
-    if (frame) {
-      const old = frame.dataset.runId;
-      if (old) this.completedRunIds.delete(old);
-      frame.dataset.runId = runUid();
-    }
-    const params = this.seriesParamsFor(this.playables[i]?.id ?? '', this.series ? this.series.done + 1 : 1);
-    const swipe = this.playableApi(i)?.swipe;
-    if (swipe?.hasRestart) {
-      try { swipe.restart({ instant: true, ...(params ? { params } : {}) } as { instant?: boolean }); } catch { /* cross-origin */ }
-    } else {
-      this.reloadFrame(i);
-    }
+    // Reload the iframe for the next series level rather than swipe.restart():
+    // restart() from a COMPLETED/endcard state leaves several mechanics stuck on
+    // their win screen ("You're a pro!" / like+restart buttons) and never returns
+    // to a playable round. A fresh iframe (auto:false, since manualRuns.has(i)) boots
+    // directly into manual play — clean and mechanic-agnostic.
+    // Params computed here for the future; mechanics don't consume them yet (they
+    // replay identically), so nothing to pass on reload until that lands per-playable.
+    void this.seriesParamsFor(this.playables[i]?.id ?? '', (this.series?.done ?? 0) + 1);
+    this.reloadFrame(i);      // assigns its own fresh run id
     this.updateMechanicState(i);
     this.applyActiveStates();
   }
