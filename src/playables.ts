@@ -29,13 +29,16 @@ export const PLAYABLES: Playable[] = [
 
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
  *  override the host with `?base=…` for local development. */
-export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: boolean } = {}): string {
+export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: boolean; series?: string } = {}): string {
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
   const url = `${base}${id}.html`;
   const params = new URLSearchParams();
   if (options.hostPaused) params.set('hostPaused', '1');
   if (options.auto !== undefined) params.set('auto', options.auto ? '1' : '0');
+  // Series difficulty/economy overrides for this level (JSON, url-encoded). The
+  // mechanic reads `?series=` at boot and applies them (shared/series.ts).
+  if (options.series) params.set('series', options.series);
   const query = params.toString();
   return query ? `${url}?${query}` : url;
 }

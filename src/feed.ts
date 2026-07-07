@@ -257,6 +257,7 @@ export class Feed {
   private seriesTransitionEl: HTMLElement | null = null;
   private chestSparkTimer: number | null = null;
   private seriesWinShown = new Set<number>();   // series-end win screen is up on this unit
+  private pendingSeriesParams = new Map<number, string>();   // encoded ?series= for the next mount of index i
   private challengeIntroShown = false;
   private challengePillEl: HTMLElement | null = null;
   private pendingEditorLaunch = new Set<number>();
@@ -779,9 +780,12 @@ export class Feed {
     // their win screen ("You're a pro!" / like+restart buttons) and never returns
     // to a playable round. A fresh iframe (auto:false, since manualRuns.has(i)) boots
     // directly into manual play — clean and mechanic-agnostic.
-    // Params computed here for the future; mechanics don't consume them yet (they
-    // replay identically), so nothing to pass on reload until that lands per-playable.
-    void this.seriesParamsFor(this.playables[i]?.id ?? '', (this.series?.done ?? 0) + 1);
+    // Compute this level's difficulty/economy overrides and hand them to the fresh
+    // frame via ?series= (mount reads pendingSeriesParams). Mechanics that don't
+    // vary return null → no query → identical replay.
+    const params = this.seriesParamsFor(this.playables[i]?.id ?? '', (this.series?.done ?? 0) + 1);
+    if (params) this.pendingSeriesParams.set(i, encodeURIComponent(JSON.stringify(params)));
+    else this.pendingSeriesParams.delete(i);
     this.reloadFrame(i);      // assigns its own fresh run id
     this.updateMechanicState(i);
     this.applyActiveStates();
@@ -1992,9 +1996,12 @@ export class Feed {
       this.applyPendingEditor(i);
     });
     this.frames.set(i, frame);
+    const seriesParam = this.pendingSeriesParams.get(i);
+    this.pendingSeriesParams.delete(i);   // one-shot: consumed by this mount
     frame.src = playableUrl(this.playables[i].id, {
       hostPaused: this.shouldPauseFrame(i),
       auto: !this.manualRuns.has(i),
+      series: seriesParam,
     });
     this.warmTimeline.delete(this.playables[i].id);   // fresh run — drop the previous mount's marks
     this.markWarmTimeline(i, 'appendAt');
