@@ -254,6 +254,9 @@ export class Feed {
   private series: { index: number; done: number; reward: number; playing: boolean } | null = null;
   private seriesRowEl: HTMLElement | null = null;
   private chestEl: HTMLElement | null = null;
+  private seriesTransitionEl: HTMLElement | null = null;
+  private chestSparkTimer: number | null = null;
+  private lastSeriesSolveMs = 0;
   private challengeIntroShown = false;
   private challengePillEl: HTMLElement | null = null;
   private pendingEditorLaunch = new Set<number>();
@@ -701,18 +704,66 @@ export class Feed {
   private handleSeriesWin(i: number, runId: string, solveMs: number): void {
     if (!this.series || this.series.index !== i) return;
     this.series.done += 1;
+    this.lastSeriesSolveMs = solveMs;
     // Persist the run for time/telemetry but grant NO stars per level (series pays
     // out only at the chest).
     this.reportResult(i, runId, solveMs, 0);
     track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
     this.renderSeriesRow();
     this.manualRuns.delete(i);
-    if (this.series.done >= this.SERIES_LEN) { this.series.playing = false; this.beginChest(i); return; }
-    // Brief beat so the mechanic's win reads + the slot check animates, then
-    // auto-relaunch the SAME mechanic (next level, manual, varied params).
+    // Keep `playing` true through the chest so a stray swipe can't page away
+    // mid-ceremony; it's cleared when the end-panel appears.
+    if (this.series.done >= this.SERIES_LEN) { this.beginChest(i); return; }
+    // Smooth transition: cover the reboot (which would otherwise flash the mechanic's
+    // own intro/swipe text) with a short congratulation, then reveal the next level
+    // once its fresh iframe is ready.
+    this.showSeriesTransition(this.series.done);
     window.setTimeout(() => {
-      if (this.series && this.series.index === i && this.series.playing) this.advanceSeriesInPlace(i);
-    }, 750);
+      if (!this.series || this.series.index !== i || !this.series.playing) return;
+      this.advanceSeriesInPlace(i);
+      this.awaitSeriesLevelReady(i);
+    }, 480);
+  }
+
+  // Congratulation overlay that masks the between-levels reload. Sits below the slot
+  // row so series progress stays visible.
+  private showSeriesTransition(doneLevel: number): void {
+    const praise = ['Отлично!', 'Класс!', 'Так держать!', 'Огонь!', 'Мастерски!'][Math.min(doneLevel - 1, 4)] || 'Класс!';
+    if (!this.seriesTransitionEl) {
+      const el = document.createElement('div');
+      el.className = 'series-transition';
+      this.viewport.appendChild(el);
+      this.seriesTransitionEl = el;
+    }
+    this.seriesTransitionEl.innerHTML =
+      `<div class="series-transition__praise">${praise}</div>` +
+      `<div class="series-transition__sub">Уровень ${doneLevel} из ${this.SERIES_LEN} пройден</div>` +
+      `<div class="series-transition__next">Готовим следующий…</div>`;
+    requestAnimationFrame(() => this.seriesTransitionEl?.classList.add('series-transition--in'));
+  }
+
+  // Keep the transition up until the reloaded level is revealed (min read time, hard
+  // cap so it can never stick).
+  private awaitSeriesLevelReady(i: number): void {
+    const shownAt = performance.now();
+    const MIN_MS = 850, MAX_MS = 6000;
+    const tick = () => {
+      if (!this.series || this.series.index !== i) { this.hideSeriesTransition(); return; }
+      const elapsed = performance.now() - shownAt;
+      const ready = this.frameRevealed.has(i);
+      if ((ready && elapsed >= MIN_MS) || elapsed >= MAX_MS) { this.hideSeriesTransition(); return; }
+      window.setTimeout(tick, 120);
+    };
+    window.setTimeout(tick, MIN_MS);
+  }
+
+  private hideSeriesTransition(): void {
+    const el = this.seriesTransitionEl;
+    if (!el) return;
+    this.seriesTransitionEl = null;
+    el.classList.remove('series-transition--in');
+    el.addEventListener('transitionend', () => el.remove(), { once: true });
+    window.setTimeout(() => el.remove(), 500);
   }
 
   // Relaunch the current mechanic in place for the next series level: fresh run id,
@@ -772,6 +823,7 @@ export class Feed {
     if (!this.series) return;
     this.series.reward = 3 + Math.floor(Math.random() * 7);   // 3..9 (D4)
     let remaining = this.series.reward;
+    let paid = false;
     track('series_complete', { mechanic_id: this.playables[i]?.id, reward: this.series.reward });
 
     const scrim = document.createElement('div');
@@ -783,63 +835,145 @@ export class Feed {
     this.chestEl = scrim;
     const chestBtn = scrim.querySelector<HTMLButtonElement>('.chest-ov__chest')!;
     requestAnimationFrame(() => scrim.classList.add('chest-ov--in'));
+    // Idle sparks flickering out from under the chest (same look as the old reward
+    // star sparks).
+    this.startChestSparks(chestBtn);
 
     const onTap = (e: Event) => {
       e.stopPropagation();
       if (remaining <= 0) return;
       remaining -= 1;
-      chestBtn.classList.remove('chest-ov__chest--bump');
-      void chestBtn.offsetWidth;               // restart the bump animation
-      chestBtn.classList.add('chest-ov__chest--bump');
+      // Elastic squash→stretch bounce (like a merged item) + a confetti spray.
+      chestBtn.classList.remove('chest-ov__chest--squish');
+      void chestBtn.offsetWidth;               // restart the animation
+      chestBtn.classList.add('chest-ov__chest--squish');
+      this.burstStarConfetti();
       this.flyStarToHud(chestBtn);
-      if (remaining <= 0) {
-        chestBtn.classList.add('chest-ov__chest--empty');
-        // Let the last star land before moving on.
-        window.setTimeout(() => this.finishSeries(i), 650);
+      if (remaining <= 0 && !paid) {
+        paid = true;
+        // Persist the whole-series reward now (idempotent), then hand off to the
+        // player-choice panel after the last star lands.
+        this.persistSeriesReward(i);
+        window.setTimeout(() => this.showSeriesEndPanel(i), 720);
       }
     };
     chestBtn.addEventListener('click', onTap);
   }
 
-  // Fly one star from `fromEl` to the HUD level badge, crediting +1 on arrival.
-  private flyStarToHud(fromEl: HTMLElement): void {
-    const target = this.levelBadgeEl ?? this.hudEl;
-    const star = document.createElement('div');
-    star.className = 'chest-star';
-    star.textContent = '⭐';
-    const from = fromEl.getBoundingClientRect();
-    const to = (target ?? document.body).getBoundingClientRect();
-    const x0 = from.left + from.width / 2, y0 = from.top + from.height / 2;
-    const x1 = to.left + to.width / 2, y1 = to.top + to.height / 2;
-    star.style.left = `${x0}px`;
-    star.style.top = `${y0}px`;
-    this.viewport.appendChild(star);
-    requestAnimationFrame(() => {
-      star.style.transform = `translate(${x1 - x0}px, ${y1 - y0}px) scale(0.5)`;
-      star.style.opacity = '0.2';
-    });
-    window.setTimeout(() => {
-      star.remove();
-      this.totalStars += 1;
-      this.updateHud(true);
-    }, 520);
+  private startChestSparks(anchor: HTMLElement): void {
+    this.stopChestSparks();
+    const emit = (count: number) => {
+      if (!anchor.isConnected) { this.stopChestSparks(); return; }
+      const r = anchor.getBoundingClientRect();
+      const vp = this.viewport.getBoundingClientRect();
+      const cx = r.left - vp.left + r.width / 2;
+      const cy = r.top - vp.top + r.height * 0.72;   // from UNDER the chest
+      for (let n = 0; n < count; n++) this.spawnChestSpark(cx, cy, r.width);
+    };
+    emit(14);
+    this.chestSparkTimer = window.setInterval(() => emit(2 + Math.floor(Math.random() * 3)), 260);
   }
 
-  private finishSeries(i: number): void {
+  private stopChestSparks(): void {
+    if (this.chestSparkTimer) window.clearInterval(this.chestSparkTimer);
+    this.chestSparkTimer = null;
+  }
+
+  private spawnChestSpark(cx: number, cy: number, size: number): void {
+    const spark = document.createElement('div');
+    spark.className = 'reward__spark';
+    const angle = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.7;
+    const radius = size * (0.14 + Math.random() * 0.2);
+    const x = cx + Math.cos(angle) * radius, y = cy + Math.sin(angle) * radius;
+    const px = 7 + Math.random() * 8;
+    const dist = 46 + Math.random() * 64;
+    const dx = Math.cos(angle) * dist + (Math.random() - 0.5) * 24;
+    const dy = Math.sin(angle) * dist - 16 - Math.random() * 26;
+    spark.style.cssText = `left:${x}px;top:${y}px;width:${px}px;height:${px}px;z-index:2710;`;
+    const r = Math.random();
+    spark.style.background = r < 0.5 ? '#ffe27a' : (r < 0.8 ? '#ffac3a' : '#fff6d4');
+    this.viewport.appendChild(spark);
+    const duration = 520 + Math.random() * 360;
+    if (!spark.animate) { window.setTimeout(() => spark.remove(), duration); return; }
+    spark.animate([
+      { transform: 'translate(-50%, -50%) scale(0.45)', opacity: 0 },
+      { transform: 'translate(-50%, -50%) scale(1)', opacity: 0.95, offset: 0.18 },
+      { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.18)`, opacity: 0 },
+    ], { duration, easing: 'cubic-bezier(0.14,0.72,0.28,1)', fill: 'forwards' })
+      .addEventListener('finish', () => spark.remove(), { once: true });
+  }
+
+  // Star pops out of the chest with an elastic bounce, then arcs to the HUD counter,
+  // crediting +1 on arrival. Same gold ★ art as the old reward row.
+  private flyStarToHud(fromEl: HTMLElement): void {
+    const target = this.levelBadgeEl ?? this.hudEl;
+    const star = document.createElement('span');
+    star.className = 'chest-star';
+    star.textContent = '★';
+    const from = fromEl.getBoundingClientRect();
+    const to = (target ?? document.body).getBoundingClientRect();
+    const x0 = from.left + from.width / 2, y0 = from.top + from.height * 0.4;
+    const x1 = to.left + to.width / 2, y1 = to.top + to.height / 2;
+    star.style.left = `${x0 - 18}px`;
+    star.style.top = `${y0 - 18}px`;
+    this.viewport.appendChild(star);
+    const credit = () => { star.remove(); this.totalStars += 1; this.updateHud(true); };
+    if (!star.animate) { star.style.transform = `translate(${x1 - x0}px, ${y1 - y0}px)`; window.setTimeout(credit, 500); return; }
+    star.animate([
+      { transform: 'translate(0,0) scale(0.3)', opacity: 0 },
+      { transform: 'translate(0,-34px) scale(1.35)', opacity: 1, offset: 0.28 },
+      { transform: 'translate(0,-24px) scale(1.05)', opacity: 1, offset: 0.44 },
+      { transform: `translate(${x1 - x0}px, ${y1 - y0}px) scale(0.5)`, opacity: 0.15 },
+    ], { duration: 720, easing: 'cubic-bezier(0.3,0.9,0.3,1)', fill: 'forwards' })
+      .addEventListener('finish', credit, { once: true });
+  }
+
+  private persistSeriesReward(i: number): void {
     const reward = this.series?.reward ?? 0;
-    if (reward > 0) {
-      // Persist the whole-series reward (idempotent by a unique run id).
-      const mechanicId = this.playables[i]?.id;
-      if (mechanicId) {
-        queueResult({
-          mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId),
-          run_id: `series-${runUid()}`, metric_key: 'series', metric_value: this.SERIES_LEN, stars: reward,
-        });
-      }
+    const mechanicId = this.playables[i]?.id;
+    if (reward > 0 && mechanicId) {
+      queueResult({
+        mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId),
+        run_id: `series-${runUid()}`, metric_key: 'series', metric_value: this.SERIES_LEN, stars: reward,
+      });
     }
-    this.clearSeriesUi();
-    this.series = null;
-    this.advanceToNext();   // programmatic swipe to the next mechanic in the queue
+  }
+
+  // After the chest empties: replace it with a player-choice panel — like / share /
+  // challenge / swipe on. The series stays "settled" (paging unblocked) and is
+  // cleared when the player swipes to the next mechanic (markUnitShown) or hits ×.
+  private showSeriesEndPanel(i: number): void {
+    this.stopChestSparks();
+    // Remove the chest but keep the scrim as the panel host.
+    const scrim = this.chestEl;
+    const mechanicId = this.playables[i]?.id ?? '';
+    if (!scrim) return;
+    scrim.innerHTML =
+      '<div class="series-end__title">Серия пройдена! 🎉</div>' +
+      '<div class="series-end__actions">' +
+        '<button type="button" class="series-end__btn" data-act="like">❤️<span>Лайк</span></button>' +
+        '<button type="button" class="series-end__btn" data-act="share">↗<span>Поделиться</span></button>' +
+        '<button type="button" class="series-end__btn" data-act="challenge">⚡<span>Вызов</span></button>' +
+      '</div>' +
+      '<button type="button" class="series-end__swipe">Свайп вверх — следующая механика ▲</button>';
+    scrim.querySelectorAll<HTMLButtonElement>('.series-end__btn').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const act = b.dataset.act;
+        if (act === 'like') { b.classList.toggle('series-end__btn--on'); track('like_tap', { mechanic_id: mechanicId }); }
+        else if (act === 'share' || act === 'challenge') {
+          b.disabled = true;
+          void this.doCreateChallenge(mechanicId, this.lastSeriesSolveMs || 5000);
+        }
+      });
+    });
+    // A tap on the hint advances too (belt-and-braces if the swipe surface under a
+    // just-won mechanic is finicky).
+    scrim.querySelector('.series-end__swipe')?.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(); });
+    // Panel no longer blocks the feed swipe: scrim is click-through (CSS), only its
+    // buttons take taps → a swipe pages to the next mechanic.
+    scrim.classList.add('chest-ov--panel');
+    if (this.series) this.series.playing = false;
   }
 
   // × (or any exit) mid-series: break it, no reward.
@@ -851,6 +985,8 @@ export class Feed {
   }
 
   private clearSeriesUi(): void {
+    this.stopChestSparks();
+    this.hideSeriesTransition();
     this.removeSeriesRow();
     const chest = this.chestEl;
     if (chest) {
@@ -906,6 +1042,8 @@ export class Feed {
       });
     }
     this.dismissChallengePill();
+    // Left the series' mechanic (swiped to another unit) → tear the series down.
+    if (this.series && cur !== this.series.index) { this.clearSeriesUi(); this.series = null; }
     this.shownIndex = cur;
     this.shownAt = performance.now();
     this.firstInputLogged = false;

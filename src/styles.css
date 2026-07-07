@@ -1653,13 +1653,54 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 .chest-ov--in .chest-ov__chest { transform: scale(1); }
-.chest-ov__chest--bump { animation: chest-bump 0.18s ease; }
-.chest-ov__chest--empty { opacity: 0.5; }
-@keyframes chest-bump { 0% { transform: scale(1); } 45% { transform: scale(1.14); } 100% { transform: scale(1); } }
-
-.chest-star {
-  position: fixed; z-index: 2720; font-size: 30px; line-height: 1;
-  transform: translate(0,0); pointer-events: none;
-  transition: transform 0.5s cubic-bezier(0.4,0,0.2,1), opacity 0.5s ease;
-  will-change: transform, opacity;
+/* Elastic squash→stretch on tap, like a merged item settling. */
+.chest-ov__chest--squish { animation: chest-squish 0.34s cubic-bezier(0.22,1.4,0.4,1); }
+@keyframes chest-squish {
+  0%   { transform: scale(1, 1); }
+  22%  { transform: scale(1.22, 0.8) translateY(6px); }   /* squash down */
+  50%  { transform: scale(0.86, 1.24) translateY(-14px); } /* stretch up (jump) */
+  74%  { transform: scale(1.08, 0.94) translateY(0); }
+  100% { transform: scale(1, 1) translateY(0); }
 }
+
+/* Flying reward star — same gold ★ art as the old reward row. */
+.chest-star {
+  position: fixed; z-index: 2720; width: 36px; height: 36px;
+  font-size: 36px; line-height: 1; text-align: center; color: #ffd85a;
+  pointer-events: none; will-change: transform, opacity;
+  text-shadow: 0 3px 0 #8d4a12, 0 0 14px rgba(255,221,89,0.5), 0 0 26px rgba(255,105,28,0.22);
+  filter: drop-shadow(0 8px 16px rgba(255,147,42,0.34));
+}
+
+/* Between-levels congratulation (masks the reload). Below the slot row (1300). */
+.series-transition {
+  position: absolute; inset: 0; z-index: 1260;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  background: rgba(6, 9, 16, 0.92); text-align: center;
+  opacity: 0; transition: opacity 0.24s ease;
+}
+.series-transition--in { opacity: 1; }
+.series-transition__praise { color: #ffe27a; font: 900 34px/1.1 system-ui, sans-serif; }
+.series-transition__sub { color: #eaf1ff; font: 700 16px/1.3 system-ui, sans-serif; }
+.series-transition__next { color: #7d90b0; font: 500 13px/1.3 system-ui, sans-serif; margin-top: 6px; }
+
+/* Post-chest player-choice panel (reuses the chest scrim). Click-through so a
+   swipe pages to the next mechanic; only the controls take taps. */
+.chest-ov--panel { pointer-events: none; gap: 22px; }
+.chest-ov--panel > * { pointer-events: auto; }
+.series-end__title { color: #eaf1ff; font: 900 24px/1.2 system-ui, sans-serif; }
+.series-end__actions { display: flex; gap: 14px; }
+.series-end__btn {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  width: 78px; padding: 12px 0; border: 0; border-radius: 14px;
+  background: rgba(255,255,255,0.08); color: #eaf1ff; font-size: 24px;
+}
+.series-end__btn span { font: 700 12px/1 system-ui, sans-serif; color: #a9b8d4; }
+.series-end__btn--on { background: rgba(255,79,139,0.24); }
+.series-end__btn:disabled { opacity: 0.6; }
+.series-end__swipe {
+  margin-top: 4px; padding: 10px 18px; border: 0; border-radius: 999px;
+  background: transparent; color: #8fb4ff; font: 700 14px/1 system-ui, sans-serif;
+  animation: series-swipe-pulse 1.4s ease-in-out infinite;
+}
+@keyframes series-swipe-pulse { 0%,100% { opacity: 0.6; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
