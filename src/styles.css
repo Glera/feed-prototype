@@ -1684,3 +1684,10 @@ body {
 .series-transition__sub { color: #eaf1ff; font: 700 16px/1.3 system-ui, sans-serif; }
 .series-transition__next { color: #7d90b0; font: 500 13px/1.3 system-ui, sans-serif; margin-top: 6px; }
 
+
+/* Series win-screen "Бросить вызов" action — tinted so it reads as the challenge CTA. */
+.reward__action--challenge {
+  background: linear-gradient(180deg, #6ea8ff, #3f78e0);
+  border-color: rgba(255,255,255,0.28);
+  color: #08122a;
+}

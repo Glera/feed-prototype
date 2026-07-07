@@ -660,15 +660,13 @@ export class Feed {
     for (const ch of this.inboxChallenges) {
       const name = ch.challenger.first_name || ch.challenger.username || 'Друг';
       const initial = (name.trim()[0] || '?').toUpperCase();
-      const secs = (ch.challenger_value / 1000).toFixed(1);
       const el = document.createElement('div');
       el.className = 'story';
       el.dataset.challenge = ch.id;
       el.innerHTML =
         `<div class="story__avatar story__avatar--challenge${ch.played ? ' story__avatar--viewed' : ''}">` +
           `<span>${this.esc(initial)}</span><i class="story__bolt" aria-hidden="true">⚡</i></div>` +
-        `<div class="story__name">${this.esc(name)}</div>` +
-        `<div class="story__time">${secs}s</div>`;
+        `<div class="story__name">${this.esc(name)}</div>`;
       frag.appendChild(el);
     }
     if (me && me.nextSibling) rail.insertBefore(frag, me.nextSibling);
@@ -1095,21 +1093,24 @@ export class Feed {
   // object to hand the mechanic on relaunch, or null = no variation (replay the
   // same level). Mechanic-side consumption of `params` is a per-playable follow-up;
   // until then every mechanic replays identically (safe).
-  private seriesParamsFor(mechanicId: string, _level: number): Record<string, unknown> | null {
+  private seriesParamsFor(mechanicId: string, level: number): Record<string, unknown> | null {
     const base = mechanicId.replace(/-swipe$/, '');
-    const rint = (lo: number, hi: number) => lo + Math.floor(Math.random() * (hi - lo + 1));
+    // Monotonic ramp across the series: level 1 → lo … level SERIES_LEN → hi. Makes
+    // the difference between levels obvious (vs. random, which can look the same).
+    const L = Math.max(1, Math.min(level, this.SERIES_LEN));
+    const ramp = (lo: number, hi: number) => Math.round(lo + (hi - lo) * (L - 1) / Math.max(1, this.SERIES_LEN - 1));
     switch (base) {
       case 'merge-locked-v1':
-        // 1–5 orders; each order's item level ±1 from current.
-        return { orders: rint(1, 5), itemLevelDelta: rint(-1, 1) };
+        // orders ramp 1→5; item level nudges up with the series.
+        return { orders: ramp(1, 5), itemLevelDelta: ramp(0, 1) };
       case 'marble-sort':
-        // 4–16 rectangles under the conveyor.
-        return { rects: rint(4, 16) };
+        // rectangles under the conveyor ramp 4→16 (levels 1-5: 4,7,10,13,16).
+        return { rects: ramp(4, 16) };
       case 'merge-timepress-v1':
       case 'merge-timepress-v2':
-        // 3–6 orders, order difficulty (item level) ±1; generator item count must
-        // be sized to the orders (mechanic-side).
-        return { orders: rint(3, 6), itemLevelDelta: rint(-1, 1) };
+        // orders ramp 3→6; difficulty nudges up. Generator item count sized to the
+        // orders (mechanic-side).
+        return { orders: ramp(3, 6), itemLevelDelta: ramp(0, 1) };
       default:
         // pins-v1, merge-timepress-no-orders-v1/v2, merge-second-board-v1/v2:
         // no variation yet (duplicate the level).
