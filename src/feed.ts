@@ -246,6 +246,14 @@ export class Feed {
   private activeChallenge: ChallengeView | null = null;
   private inboxChallenges: ChallengeInboxItem[] = [];   // top-rail: friends' challenges to play
   private challengeCompleted = false;
+  // Series (W2): taking over a mechanic starts a 5-level run of the SAME mechanic
+  // (varied params — identity until per-playable ranges land). Levels are manual,
+  // no autoplay between them; only the × exits (breaks the series). Stars are paid
+  // ONLY on completing the whole series, via the chest ceremony.
+  private readonly SERIES_LEN = 5;
+  private series: { index: number; done: number; reward: number; playing: boolean } | null = null;
+  private seriesRowEl: HTMLElement | null = null;
+  private chestEl: HTMLElement | null = null;
   private challengeIntroShown = false;
   private challengePillEl: HTMLElement | null = null;
   private pendingEditorLaunch = new Set<number>();
@@ -462,13 +470,14 @@ export class Feed {
   // Persist a manual win to the server (idempotent by run_id) — the ledger is the
   // source of truth for balance across sessions. Fire-and-forget; the local
   // counter already reflects the win optimistically.
-  private reportResult(i: number, runId: string, solveMs: number): void {
+  private reportResult(i: number, runId: string, solveMs: number, starsOverride?: number): void {
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return;
     // Persist the SAME star count the reward row grants locally (rollReward = 1–5),
     // so the server balance matches the on-screen counter across reopen. Reading
-    // rewardStarsFor here rolls it once; handleWin shows the same value.
-    const stars = this.rewardStarsFor(i);
+    // rewardStarsFor here rolls it once; handleWin shows the same value. During a
+    // series, per-level wins grant 0 (the chest pays out the whole series).
+    const stars = starsOverride ?? this.rewardStarsFor(i);
     // Durable: queue to localStorage + retry until the server confirms (survives
     // cold backend / reload). Idempotent by run_id server-side. Metric = solve time
     // (ms), lower is better — the same number that decides a challenge.
@@ -670,6 +679,216 @@ export class Feed {
     const u = new URL(location.href);
     u.searchParams.set('c', id);
     location.href = u.toString();
+  }
+
+  // ── Series (W2) ──────────────────────────────────────────────────────────
+  // Every mechanic runs as a 5-level series once taken over. Levels are manual,
+  // auto-advance in place (no autoplay between), stars only from the end chest.
+  private seriesEnabled(i: number): boolean {
+    // Challenge play is a one-shot "beat the time" — never a series.
+    if (this.activeChallenge && this.playables[i]?.id === this.activeChallenge.mechanic_id) return false;
+    return !!this.playables[i];
+  }
+
+  // First takeover of a mechanic starts its series (level 1 in progress).
+  private maybeStartSeries(i: number): void {
+    if (this.series || !this.seriesEnabled(i)) return;
+    this.series = { index: i, done: 0, reward: 0, playing: true };
+    track('series_start', { mechanic_id: this.playables[i]?.id });
+    this.renderSeriesRow();
+  }
+
+  private handleSeriesWin(i: number, runId: string, solveMs: number): void {
+    if (!this.series || this.series.index !== i) return;
+    this.series.done += 1;
+    // Persist the run for time/telemetry but grant NO stars per level (series pays
+    // out only at the chest).
+    this.reportResult(i, runId, solveMs, 0);
+    track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
+    this.renderSeriesRow();
+    this.manualRuns.delete(i);
+    if (this.series.done >= this.SERIES_LEN) { this.series.playing = false; this.beginChest(i); return; }
+    // Brief beat so the mechanic's win reads + the slot check animates, then
+    // auto-relaunch the SAME mechanic (next level, manual, varied params).
+    window.setTimeout(() => {
+      if (this.series && this.series.index === i && this.series.playing) this.advanceSeriesInPlace(i);
+    }, 750);
+  }
+
+  // Relaunch the current mechanic in place for the next series level: fresh run id,
+  // manual (no autoplay), varied params (identity for no-variation mechanics).
+  private advanceSeriesInPlace(i: number): void {
+    this.earnedThisCycle.delete(i);
+    this.failedThisCycle.delete(i);
+    this.claimedStarRewards.delete(i);
+    this.pendingStarRewards.delete(i);
+    this.manualRuns.add(i);
+    this.manualStartMs.set(i, performance.now());
+    const frame = this.frames.get(i);
+    if (frame) {
+      const old = frame.dataset.runId;
+      if (old) this.completedRunIds.delete(old);
+      frame.dataset.runId = runUid();
+    }
+    const params = this.seriesParamsFor(this.playables[i]?.id ?? '', this.series ? this.series.done + 1 : 1);
+    const swipe = this.playableApi(i)?.swipe;
+    if (swipe?.hasRestart) {
+      try { swipe.restart({ instant: true, ...(params ? { params } : {}) } as { instant?: boolean }); } catch { /* cross-origin */ }
+    } else {
+      this.reloadFrame(i);
+    }
+    this.updateMechanicState(i);
+    this.applyActiveStates();
+  }
+
+  // ── Series slot row (5 slots + chest) ────────────────────────────────────
+  private renderSeriesRow(): void {
+    if (!this.series) { this.removeSeriesRow(); return; }
+    if (!this.seriesRowEl) {
+      const el = document.createElement('div');
+      el.className = 'series-row';
+      this.viewport.appendChild(el);
+      this.seriesRowEl = el;
+    }
+    const { done } = this.series;
+    let html = '';
+    for (let s = 0; s < this.SERIES_LEN; s++) {
+      const state = s < done ? 'done' : s === done ? 'current' : 'todo';
+      html += `<div class="series-slot series-slot--${state}">${s < done ? '✓' : s + 1}</div>`;
+    }
+    html += `<div class="series-chest${done >= this.SERIES_LEN ? ' series-chest--ready' : ''}">🎁</div>`;
+    this.seriesRowEl.innerHTML = html;
+    requestAnimationFrame(() => this.seriesRowEl?.classList.add('series-row--in'));
+  }
+
+  private removeSeriesRow(): void {
+    const el = this.seriesRowEl;
+    if (!el) return;
+    this.seriesRowEl = null;
+    el.classList.remove('series-row--in');
+    el.addEventListener('transitionend', () => el.remove(), { once: true });
+    window.setTimeout(() => el.remove(), 400);
+  }
+
+  // ── Chest ceremony: big chest → tap to spit stars → each flies to the HUD →
+  //    after the last, advance to the next mechanic. ─────────────────────────
+  private beginChest(i: number): void {
+    if (!this.series) return;
+    this.series.reward = 3 + Math.floor(Math.random() * 7);   // 3..9 (D4)
+    let remaining = this.series.reward;
+    track('series_complete', { mechanic_id: this.playables[i]?.id, reward: this.series.reward });
+
+    const scrim = document.createElement('div');
+    scrim.className = 'chest-ov';
+    scrim.innerHTML =
+      '<div class="chest-ov__hint">Тапай сундук!</div>' +
+      '<button type="button" class="chest-ov__chest" aria-label="Open chest">🎁</button>';
+    this.viewport.appendChild(scrim);
+    this.chestEl = scrim;
+    const chestBtn = scrim.querySelector<HTMLButtonElement>('.chest-ov__chest')!;
+    requestAnimationFrame(() => scrim.classList.add('chest-ov--in'));
+
+    const onTap = (e: Event) => {
+      e.stopPropagation();
+      if (remaining <= 0) return;
+      remaining -= 1;
+      chestBtn.classList.remove('chest-ov__chest--bump');
+      void chestBtn.offsetWidth;               // restart the bump animation
+      chestBtn.classList.add('chest-ov__chest--bump');
+      this.flyStarToHud(chestBtn);
+      if (remaining <= 0) {
+        chestBtn.classList.add('chest-ov__chest--empty');
+        // Let the last star land before moving on.
+        window.setTimeout(() => this.finishSeries(i), 650);
+      }
+    };
+    chestBtn.addEventListener('click', onTap);
+  }
+
+  // Fly one star from `fromEl` to the HUD level badge, crediting +1 on arrival.
+  private flyStarToHud(fromEl: HTMLElement): void {
+    const target = this.levelBadgeEl ?? this.hudEl;
+    const star = document.createElement('div');
+    star.className = 'chest-star';
+    star.textContent = '⭐';
+    const from = fromEl.getBoundingClientRect();
+    const to = (target ?? document.body).getBoundingClientRect();
+    const x0 = from.left + from.width / 2, y0 = from.top + from.height / 2;
+    const x1 = to.left + to.width / 2, y1 = to.top + to.height / 2;
+    star.style.left = `${x0}px`;
+    star.style.top = `${y0}px`;
+    this.viewport.appendChild(star);
+    requestAnimationFrame(() => {
+      star.style.transform = `translate(${x1 - x0}px, ${y1 - y0}px) scale(0.5)`;
+      star.style.opacity = '0.2';
+    });
+    window.setTimeout(() => {
+      star.remove();
+      this.totalStars += 1;
+      this.updateHud(true);
+    }, 520);
+  }
+
+  private finishSeries(i: number): void {
+    const reward = this.series?.reward ?? 0;
+    if (reward > 0) {
+      // Persist the whole-series reward (idempotent by a unique run id).
+      const mechanicId = this.playables[i]?.id;
+      if (mechanicId) {
+        queueResult({
+          mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId),
+          run_id: `series-${runUid()}`, metric_key: 'series', metric_value: this.SERIES_LEN, stars: reward,
+        });
+      }
+    }
+    this.clearSeriesUi();
+    this.series = null;
+    this.advanceToNext();   // programmatic swipe to the next mechanic in the queue
+  }
+
+  // × (or any exit) mid-series: break it, no reward.
+  private breakSeries(): void {
+    if (!this.series) return;
+    track('series_abandon', { mechanic_id: this.playables[this.series.index]?.id, done: this.series.done });
+    this.clearSeriesUi();
+    this.series = null;
+  }
+
+  private clearSeriesUi(): void {
+    this.removeSeriesRow();
+    const chest = this.chestEl;
+    if (chest) {
+      this.chestEl = null;
+      chest.classList.remove('chest-ov--in');
+      chest.addEventListener('transitionend', () => chest.remove(), { once: true });
+      window.setTimeout(() => chest.remove(), 400);
+    }
+  }
+
+  // Per-mechanic series param variation (ranges from the design). Returns a params
+  // object to hand the mechanic on relaunch, or null = no variation (replay the
+  // same level). Mechanic-side consumption of `params` is a per-playable follow-up;
+  // until then every mechanic replays identically (safe).
+  private seriesParamsFor(mechanicId: string, _level: number): Record<string, unknown> | null {
+    const base = mechanicId.replace(/-swipe$/, '');
+    const rint = (lo: number, hi: number) => lo + Math.floor(Math.random() * (hi - lo + 1));
+    switch (base) {
+      case 'merge-locked-v1':
+        // 1–5 orders; each order's item level ±1 from current.
+        return { orders: rint(1, 5), itemLevelDelta: rint(-1, 1) };
+      case 'marble-sort':
+        // 4–16 rectangles under the conveyor.
+        return { rects: rint(4, 16) };
+      case 'merge-timepress-v1':
+      case 'merge-timepress-v2':
+        // 3–6 orders, order difficulty (item level) ±1; generator item count must
+        // be sized to the orders (mechanic-side).
+        return { orders: rint(3, 6), itemLevelDelta: rint(-1, 1) };
+      default:
+        // pins-v1, merge-timepress-no-orders-v1/v2, merge-second-board-v1/v2:
+        // no variation yet (duplicate the level).
+        return null;
+    }
   }
 
   // The on-screen unit changed (a swipe settled, or the first unit revealed).
@@ -1821,6 +2040,9 @@ export class Feed {
       // Start the solve-time clock on the first takeover of this unit (the win
       // metric — "how fast you solved it", lower is better).
       this.manualStartMs.set(i, performance.now());
+      // Taking over a mechanic begins its 5-level series (unless this is a
+      // one-shot challenge play).
+      this.maybeStartSeries(i);
     }
     this.manualRuns.add(i);
     this.stopFrameAutoPlay(i);
@@ -2045,6 +2267,9 @@ export class Feed {
   // Advance forward one mechanic (the close × and any "skip" affordance use this).
   private advanceToNext() {
     if (this.dragging) return;
+    // Leaving a mechanic mid-series (× / bar) breaks the series, no reward. If the
+    // series just finished, finishSeries() already cleared it → this is a no-op.
+    this.breakSeries();
     const base = Math.round(this.pos);
     // The ✕ and the bottom-bar ▲ leave the win screen WITHOUT the collect gesture,
     // so credit any earned-but-uncollected stars here — otherwise they'd be lost.
@@ -2712,6 +2937,12 @@ export class Feed {
       this.goTo(commitBasePos + 1);
       return;
     }
+    // During an in-progress series, a swipe never pages away — only the × exits
+    // (breaks the series). Snap back in place.
+    if (this.series && this.series.playing && step !== 0) {
+      this.goTo(commitBasePos);
+      return;
+    }
     if (step !== 0 && autoplayTapIndex !== null) {
       this.prepareAutoplayNavigationTarget(this.indexForPos(commitBasePos + step));
     }
@@ -2885,9 +3116,15 @@ export class Feed {
     if (outcome === 'won') {
       const solveMs = this.solveMsFor(i);
       track('win', { mechanic_id: mechanicId, mode: 'manual', time_ms: solveMs }, runId);
-      this.reportResult(i, runId, solveMs);
-      this.handleWin(i);
-      this.onManualWinChallenge(i, solveMs);
+      // Series owns the win: no per-level reward or challenge pill — it advances the
+      // series (and pays out only at the chest).
+      if (this.series && this.series.index === i) {
+        this.handleSeriesWin(i, runId, solveMs);
+      } else {
+        this.reportResult(i, runId, solveMs);
+        this.handleWin(i);
+        this.onManualWinChallenge(i, solveMs);
+      }
     } else {
       track('lose', { mechanic_id: mechanicId, mode: 'manual' }, runId);
       this.handleLoss(i);
