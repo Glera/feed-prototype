@@ -17,7 +17,7 @@ export interface Playable {
 
 export const PLAYABLES: Playable[] = [
   { id: 'merge-locked-v1-swipe' },
-  { id: 'pins-v1-swipe' },
+  { id: 'pins-swipe' },
   { id: 'marble-sort-swipe' },
   { id: 'merge-timepress-v1-swipe' },
   { id: 'merge-timepress-v2-swipe' },
@@ -29,7 +29,7 @@ export const PLAYABLES: Playable[] = [
 
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
  *  override the host with `?base=…` for local development. */
-export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: boolean; series?: string } = {}): string {
+export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: boolean; series?: string; level?: number } = {}): string {
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
   const url = `${base}${id}.html`;
@@ -39,6 +39,9 @@ export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: 
   // Series difficulty/economy overrides for this level (JSON, url-encoded). The
   // mechanic reads `?series=` at boot and applies them (shared/series.ts).
   if (options.series) params.set('series', options.series);
+  // Which built-in LEVEL the mechanic should load (e.g. pins series: level 1, 2…).
+  // The mechanic reads `?level=` at boot (main.ts currentLevelIdx).
+  if (options.level != null) params.set('level', String(options.level));
   const query = params.toString();
   return query ? `${url}?${query}` : url;
 }

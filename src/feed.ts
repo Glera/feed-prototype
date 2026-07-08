@@ -246,19 +246,23 @@ export class Feed {
   private activeChallenge: ChallengeView | null = null;
   private inboxChallenges: ChallengeInboxItem[] = [];   // top-rail: friends' challenges to play
   private challengeCompleted = false;
-  // Series (W2): taking over a mechanic starts a 5-level run of the SAME mechanic
-  // (varied params — identity until per-playable ranges land). Levels are manual,
-  // no autoplay between them; only the × exits (breaks the series). Stars are paid
-  // ONLY on completing the whole series, via the chest ceremony.
-  private readonly SERIES_LEN = 5;
+  // Series (W2): taking over a mechanic starts a multi-level run. Most mechanics run
+  // 5 levels of the SAME level with varied params; pins runs its 2 real authored
+  // levels (level 1 → level 2). Length is per-mechanic (seriesLenFor). Levels are
+  // manual, no autoplay between them; only the × exits. Stars are paid ONLY on
+  // completing the whole series, via the chest ceremony. A LOSS on any level restarts
+  // the series from level 1 (handleSeriesFail).
+  private readonly SERIES_LEN = 5;   // default length (mechanics without an override)
   private series: { index: number; done: number; reward: number; playing: boolean } | null = null;
   private seriesRowEl: HTMLElement | null = null;
   private chestEl: HTMLElement | null = null;
   private seriesTransitionEl: HTMLElement | null = null;
   private chestSparkTimer: number | null = null;
   private seriesWinShown = new Set<number>();   // series-end win screen is up on this unit
+  private seriesLevelUpPending: number | null = null;   // level to celebrate on the first swipe off the series win screen (null = no level-up)
   private lastSolveMs = 0;                        // most recent manual solve time (result readout + challenge)
   private pendingSeriesParams = new Map<number, string>();   // encoded ?series= for the next mount of index i
+  private pendingLevels = new Map<number, number>();          // ?level= for the next mount of index i (pins series)
   private challengeIntroShown = false;
   private challengePillEl: HTMLElement | null = null;
   private pendingEditorLaunch = new Set<number>();
@@ -548,7 +552,9 @@ export class Feed {
 
   // Bottom-center CTA after a win: "⚡ Бросить вызов" with the run's time. Tap →
   // create + share; auto-dismisses on the next swipe (markUnitShown) or after 8s.
-  private showChallengePill(mechanicId: string, solveMs: number): void {
+  // `persist` keeps it up (no auto-timeout) — used by the series win screen, where
+  // the pill IS the win-screen challenge CTA and must live as long as the screen.
+  private showChallengePill(mechanicId: string, solveMs: number, persist = false): void {
     if (!getInitData()) return;   // no Telegram identity → sharing can't work
     this.dismissChallengePill();
     const secs = (solveMs / 1000).toFixed(1);
@@ -566,7 +572,7 @@ export class Feed {
     this.viewport.appendChild(pill);
     this.challengePillEl = pill;
     requestAnimationFrame(() => pill.classList.add('challenge-pill--in'));
-    window.setTimeout(() => { if (this.challengePillEl === pill) this.dismissChallengePill(); }, 8000);
+    if (!persist) window.setTimeout(() => { if (this.challengePillEl === pill) this.dismissChallengePill(); }, 8000);
   }
 
   private maybeShowChallengeIntro(): void {
@@ -693,6 +699,29 @@ export class Feed {
     return !!this.playables[i];
   }
 
+  // Per-mechanic series length. pins runs its 2 real authored levels; everything
+  // else keeps the default 5-level (param-varied) run. Add mechanics here as they
+  // get real multi-level content.
+  private seriesLenFor(mechanicId: string): number {
+    const base = (mechanicId || '').replace(/-swipe$/, '');
+    if (base === 'pins' || base.startsWith('pins-')) return 2;
+    return this.SERIES_LEN;
+  }
+
+  // Length of the CURRENT series (based on the mechanic being played).
+  private seriesLen(): number {
+    return this.seriesLenFor(this.playables[this.series?.index ?? -1]?.id ?? '');
+  }
+
+  // Which built-in game LEVEL to load for a given 1-based series level. pins maps
+  // series level N → game level N (level 1 tube, level 2 authored). Mechanics that
+  // vary by PARAMS (not levels) return null → no ?level= override.
+  private seriesGameLevel(mechanicId: string, seriesLevel: number): number | null {
+    const base = (mechanicId || '').replace(/-swipe$/, '');
+    if (base === 'pins' || base.startsWith('pins-')) return seriesLevel;
+    return null;
+  }
+
   // First takeover of a mechanic starts its series (level 1 in progress).
   private maybeStartSeries(i: number): void {
     if (this.series || !this.seriesEnabled(i)) return;
@@ -713,7 +742,7 @@ export class Feed {
     this.manualRuns.delete(i);
     // Keep `playing` true through the chest so a stray swipe can't page away
     // mid-ceremony; it's cleared when the end-panel appears.
-    if (this.series.done >= this.SERIES_LEN) { this.beginChest(i); return; }
+    if (this.series.done >= this.seriesLen()) { this.beginChest(i); return; }
     // Smooth transition: cover the reboot (which would otherwise flash the mechanic's
     // own intro/swipe text) with a short congratulation, then reveal the next level
     // once its fresh iframe is ready.
@@ -737,7 +766,7 @@ export class Feed {
     }
     this.seriesTransitionEl.innerHTML =
       `<div class="series-transition__praise">${praise}</div>` +
-      `<div class="series-transition__sub">Уровень ${doneLevel} из ${this.SERIES_LEN} пройден</div>` +
+      `<div class="series-transition__sub">Уровень ${doneLevel} из ${this.seriesLen()} пройден</div>` +
       `<div class="series-transition__next">Готовим следующий…</div>`;
     requestAnimationFrame(() => this.seriesTransitionEl?.classList.add('series-transition--in'));
   }
@@ -783,9 +812,16 @@ export class Feed {
     // Compute this level's difficulty/economy overrides and hand them to the fresh
     // frame via ?series= (mount reads pendingSeriesParams). Mechanics that don't
     // vary return null → no query → identical replay.
-    const params = this.seriesParamsFor(this.playables[i]?.id ?? '', (this.series?.done ?? 0) + 1);
+    const nextSeriesLevel = (this.series?.done ?? 0) + 1;
+    const mechId = this.playables[i]?.id ?? '';
+    const params = this.seriesParamsFor(mechId, nextSeriesLevel);
     if (params) this.pendingSeriesParams.set(i, encodeURIComponent(JSON.stringify(params)));
     else this.pendingSeriesParams.delete(i);
+    // pins (and future level-based mechanics) load the REAL next level via ?level=;
+    // param-varied mechanics return null and just replay the same level.
+    const gameLevel = this.seriesGameLevel(mechId, nextSeriesLevel);
+    if (gameLevel != null) this.pendingLevels.set(i, gameLevel);
+    else this.pendingLevels.delete(i);
     this.reloadFrame(i);      // assigns its own fresh run id
     this.updateMechanicState(i);
     this.applyActiveStates();
@@ -801,12 +837,13 @@ export class Feed {
       this.seriesRowEl = el;
     }
     const { done } = this.series;
+    const len = this.seriesLen();
     let html = '';
-    for (let s = 0; s < this.SERIES_LEN; s++) {
+    for (let s = 0; s < len; s++) {
       const state = s < done ? 'done' : s === done ? 'current' : 'todo';
       html += `<div class="series-slot series-slot--${state}">${s < done ? '✓' : s + 1}</div>`;
     }
-    html += `<div class="series-chest${done >= this.SERIES_LEN ? ' series-chest--ready' : ''}">🎁</div>`;
+    html += `<div class="series-chest${done >= len ? ' series-chest--ready' : ''}">🎁</div>`;
     this.seriesRowEl.innerHTML = html;
     requestAnimationFrame(() => this.seriesRowEl?.classList.add('series-row--in'));
   }
@@ -828,6 +865,12 @@ export class Feed {
     let remaining = this.series.reward;
     let paid = false;
     track('series_complete', { mechanic_id: this.playables[i]?.id, reward: this.series.reward });
+    // Does the chest payout cross a level threshold? Capture it now (before the
+    // stars fly and nudge totalStars) so the level-up ceremony can ride in when
+    // the player swipes off the series win screen (see onDown/onUp reward path).
+    const levelBefore = this.levelForStars(this.totalStars);
+    const levelAfter = this.levelForStars(this.totalStars + this.series.reward);
+    this.seriesLevelUpPending = levelAfter > levelBefore ? levelAfter : null;
 
     // The chest flies IN from the slot-row chest icon and scales up to centre; the
     // slot panel fades out as it launches.
@@ -997,7 +1040,7 @@ export class Feed {
     if (reward > 0 && mechanicId) {
       queueResult({
         mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId),
-        run_id: `series-${runUid()}`, metric_key: 'series', metric_value: this.SERIES_LEN, stars: reward,
+        run_id: `series-${runUid()}`, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
       });
     }
   }
@@ -1041,16 +1084,6 @@ export class Feed {
       res.textContent = `Время: ${(this.lastSolveMs / 1000).toFixed(1)}s`;
       reward.insertBefore(res, actions);
     }
-    // "Бросить вызов" action alongside the standard win buttons.
-    if (actions) {
-      const challenge = this.rewardButton('⚡', 'Вызов', 'reward__action--challenge');
-      challenge.addEventListener('click', (e) => {
-        e.stopPropagation();
-        challenge.classList.add('reward__action--liked');
-        void this.doCreateChallenge(mechanicId, this.lastSolveMs || 5000);
-      });
-      actions.appendChild(challenge);
-    }
     // Restore the "tap or swipe for next game" hint (same as a normal win screen).
     if (reward) {
       const hint = document.createElement('div');
@@ -1065,6 +1098,12 @@ export class Feed {
     state.classList.remove('game__state--failed');
     state.hidden = false;
     this.games[i]?.classList.add('game--earned');
+
+    // Challenge CTA as a standalone bottom-center pill (NOT an in-row reward
+    // action) — same style/placement as the post-win pill, so it reads as a
+    // distinct call-to-action. Persistent while the win screen is up; cleared
+    // when the player leaves the unit (markUnitShown → dismissChallengePill).
+    this.showChallengePill(mechanicId, this.lastSolveMs || 5000, true);
   }
 
   // × (or any exit) mid-series: break it, no reward.
@@ -1077,6 +1116,8 @@ export class Feed {
   }
 
   private clearSeriesUi(): void {
+    this.seriesLevelUpPending = null;
+    this.dismissChallengePill();
     this.stopChestSparks();
     this.hideSeriesTransition();
     this.removeSeriesRow();
@@ -1095,10 +1136,11 @@ export class Feed {
   // until then every mechanic replays identically (safe).
   private seriesParamsFor(mechanicId: string, level: number): Record<string, unknown> | null {
     const base = mechanicId.replace(/-swipe$/, '');
-    // Monotonic ramp across the series: level 1 → lo … level SERIES_LEN → hi. Makes
-    // the difference between levels obvious (vs. random, which can look the same).
-    const L = Math.max(1, Math.min(level, this.SERIES_LEN));
-    const ramp = (lo: number, hi: number) => Math.round(lo + (hi - lo) * (L - 1) / Math.max(1, this.SERIES_LEN - 1));
+    // Monotonic ramp across the series: level 1 → lo … last level → hi. Makes the
+    // difference between levels obvious (vs. random, which can look the same).
+    const len = this.seriesLenFor(mechanicId);
+    const L = Math.max(1, Math.min(level, len));
+    const ramp = (lo: number, hi: number) => Math.round(lo + (hi - lo) * (L - 1) / Math.max(1, len - 1));
     switch (base) {
       case 'merge-locked-v1':
         // orders ramp 1→5; item level nudges up with the series.
@@ -2036,10 +2078,13 @@ export class Feed {
     this.frames.set(i, frame);
     const seriesParam = this.pendingSeriesParams.get(i);
     this.pendingSeriesParams.delete(i);   // one-shot: consumed by this mount
+    const levelParam = this.pendingLevels.get(i);
+    this.pendingLevels.delete(i);         // one-shot
     frame.src = playableUrl(this.playables[i].id, {
       hostPaused: this.shouldPauseFrame(i),
       auto: !this.manualRuns.has(i),
       series: seriesParam,
+      level: levelParam,
     });
     this.warmTimeline.delete(this.playables[i].id);   // fresh run — drop the previous mount's marks
     this.markWarmTimeline(i, 'appendAt');
@@ -3049,6 +3094,15 @@ export class Feed {
     if (mode === 'reward' && rewardIndex !== null && this.rewardWouldLevelUp()) {
       this.prepareLevelUpPage(this.previewRewardLevel(), Math.round(this.basePos));
     }
+    // Series win screen: the chest already paid out (no stars to collect), but if
+    // that payout leveled the player up, ride the level-up ceremony in on this
+    // swipe — reuse the reward drag (page held, level-up page prepared, null index).
+    if (mode === 'feed' && this.seriesLevelUpPending !== null && this.seriesWinShown.has(current)) {
+      this.dragMode = 'reward';
+      this.rewardDragIndex = null;
+      this.dragAllowsBack = false;
+      this.prepareLevelUpPage(this.seriesLevelUpPending, Math.round(this.basePos));
+    }
     if (mode === 'feed' || mode === 'reward') this.render(false);
     surface.setPointerCapture(e.pointerId);
   }
@@ -3120,6 +3174,18 @@ export class Feed {
       // After a win, advance by a swipe-up OR a plain tap anywhere (except buttons,
       // which stop the gesture before it starts) — both collect and move on.
       const tapToAdvance = step === 0 && !movedPastTap;
+      // Series win: no stars to collect (the chest paid out), so just ride the
+      // level-up ceremony page in. A further swipe/tap on it advances to the next
+      // game (mode 'levelup'). The pill is done — dismiss it as the ceremony opens.
+      const seriesLevelUpEntering =
+        rewardIndex === null && this.levelUpPageState === 'entering' && this.levelUpPageEl !== null;
+      if ((step > 0 || tapToAdvance) && seriesLevelUpEntering) {
+        this.seriesLevelUpPending = null;
+        this.dismissChallengePill();
+        this.unlockAudioForCurrentAndNext(fromIndex);
+        this.animateLevelUpPageIn();
+        return;
+      }
       if ((step > 0 || tapToAdvance) && rewardIndex !== null) {
         const willShowLevelUp = this.levelUpPageState === 'entering' && this.levelUpPageEl !== null;
         this.unlockAudioForCurrentAndNext(fromIndex);
@@ -3359,8 +3425,44 @@ export class Feed {
       }
     } else {
       track('lose', { mechanic_id: mechanicId, mode: 'manual' }, runId);
-      this.handleLoss(i);
+      // In a series, a loss on ANY level restarts the whole series from level 1
+      // (with a "so close, try again" beat). Outside a series, the normal loss state.
+      if (this.series && this.series.index === i) this.handleSeriesFail(i);
+      else this.handleLoss(i);
     }
+  }
+
+  // Series loss: reset to level 1 and replay the whole run, masked by a short
+  // "so close" congratulation so the reboot doesn't flash the mechanic's intro.
+  private handleSeriesFail(i: number): void {
+    if (!this.series || this.series.index !== i) { this.handleLoss(i); return; }
+    track('series_fail', { mechanic_id: this.playables[i]?.id, level: this.series.done + 1 });
+    this.series.done = 0;             // back to the start of the series
+    this.series.playing = true;
+    this.renderSeriesRow();
+    this.manualRuns.delete(i);
+    this.showSeriesRetry();
+    window.setTimeout(() => {
+      if (!this.series || this.series.index !== i || !this.series.playing) return;
+      this.advanceSeriesInPlace(i);   // done=0 → relaunches at series level 1
+      this.awaitSeriesLevelReady(i);
+    }, 700);
+  }
+
+  // "So close — try again" overlay shown when a series run is lost (reuses the
+  // between-levels transition styling).
+  private showSeriesRetry(): void {
+    if (!this.seriesTransitionEl) {
+      const el = document.createElement('div');
+      el.className = 'series-transition';
+      this.viewport.appendChild(el);
+      this.seriesTransitionEl = el;
+    }
+    this.seriesTransitionEl.innerHTML =
+      `<div class="series-transition__praise">Почти получилось!</div>` +
+      `<div class="series-transition__sub">Это было близко — попробуй ещё раз!</div>` +
+      `<div class="series-transition__next">Начинаем серию заново…</div>`;
+    requestAnimationFrame(() => this.seriesTransitionEl?.classList.add('series-transition--in'));
   }
 
   // Restart an autoplaying mechanic so the demo loops on win/loss. A short beat lets
