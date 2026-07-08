@@ -17,6 +17,20 @@
 declare const __PLATFORM_VERSION__: string;
 const BUILD_TAG = (typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev').replace(/[^0-9]/g, '') || 'dev';
 
+// Per-mechanic cache-bust version = the content hash of each mechanic's shipped
+// bundle, published by export-swipe.sh into versions.json and loaded at boot
+// (setMechanicVersions, fetched no-store). A mechanic's iframe URL changes ONLY
+// when ITS bundle changes, so unchanged mechanics stay cached across deploys, and
+// a changed one busts even inside a stale-cached feed (the manifest is always
+// fetched fresh). Falls back to the feed build tag for anything not in the map.
+let MECH_VERSIONS: Record<string, string> = {};
+export function setMechanicVersions(m: Record<string, string> | null | undefined): void {
+  if (m && typeof m === 'object') MECH_VERSIONS = m;
+}
+function mechanicVersion(id: string): string {
+  return MECH_VERSIONS[id] || BUILD_TAG;
+}
+
 export interface Playable {
   id: string;
 }
@@ -48,9 +62,9 @@ export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: 
   // Which built-in LEVEL the mechanic should load (e.g. pins series: level 1, 2…).
   // The mechanic reads `?level=` at boot (main.ts currentLevelIdx).
   if (options.level != null) params.set('level', String(options.level));
-  // Cache-bust: a redeploy bumps __PLATFORM_VERSION__, so every mechanic URL
-  // changes and the WebView refetches the sibling HTML (mechanics ignore `v`).
-  params.set('v', BUILD_TAG);
+  // Cache-bust: per-mechanic content hash (falls back to the feed build tag) so
+  // the WebView refetches a mechanic's sibling HTML exactly when its bundle changed.
+  params.set('v', mechanicVersion(id));
   const query = params.toString();
   return query ? `${url}?${query}` : url;
 }

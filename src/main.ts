@@ -1,5 +1,6 @@
 import './styles.css';
 import { createFeed } from './feed';
+import { setMechanicVersions } from './playables';
 import { initTelegram, getStartParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
 import { apiGetChallenge, type ChallengeView } from './api';
@@ -18,6 +19,14 @@ const feedEl = document.getElementById('feed')!;
 // first so the feed can open on the challenged mechanic. Normal launches skip
 // the await entirely (getStartParam is sync) → no added boot latency.
 async function boot(): Promise<void> {
+  // Per-mechanic cache-bust manifest (content hashes, written by export-swipe.sh).
+  // Fetched no-store + cb so even a stale-cached feed pulls the CURRENT versions →
+  // a changed mechanic's iframe URL busts without needing a full app cache clear.
+  try {
+    const r = await fetch(`./versions.json?cb=${Date.now()}`, { cache: 'no-store' });
+    if (r.ok) setMechanicVersions(await r.json());
+  } catch { /* missing/offline → fall back to the feed build tag */ }
+
   let challenge: ChallengeView | null = null;
   // Telegram deep-link start_param OR ?c=<id> (set when tapping an inbox card, which
   // reloads — reusing the same landing path).
