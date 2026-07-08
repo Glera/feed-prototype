@@ -594,6 +594,11 @@ body {
   pointer-events: none;
 }
 
+/* During the series chest ceremony: lift the whole HUD above the chest scrim
+   (z 2700) so the stars fly into a BRIGHT counter, not a dimmed one. Stays below
+   the flying star (2720) + collect splash (2725) so those still render on top. */
+.hud--chest-lift { z-index: 2705; }
+
 .hud::before,
 .hud::after {
   content: '';

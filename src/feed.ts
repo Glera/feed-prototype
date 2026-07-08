@@ -872,6 +872,11 @@ export class Feed {
     const levelBefore = this.levelForStars(this.totalStars);
     const levelAfter = this.levelForStars(this.totalStars + this.series.reward);
     this.seriesLevelUpPending = levelAfter > levelBefore ? levelAfter : null;
+    // Lift the HUD (the counter the stars fly into) above the chest scrim so the
+    // arrival lands on a bright counter, not a dimmed one. Cleared when the scrim
+    // goes (showSeriesWinScreen / clearSeriesUi). The whole HUD moves because it's
+    // the stacking-context root — a child's z-index can't escape it.
+    this.hudEl?.classList.add('hud--chest-lift');
 
     // The chest flies IN from the slot-row chest icon and scales up to centre; the
     // slot panel fades out as it launches.
@@ -1025,12 +1030,17 @@ export class Feed {
       window.setTimeout(land, REWARD_SHOT_MS);
       return;
     }
-    // NO squash windup — the star pops straight up out of the chest the instant it's
-    // tapped, then shoots to the counter decelerating in (both segments expo ease-out).
+    // Phase 1 — pop up: the star LAUNCHES compressed (squashed wide), straightens
+    // back to its true proportions on the way up, then at the apex does a quick
+    // squash→stretch "push-off" (a bounce in place). Phase 2 — it ACCELERATES from
+    // the apex straight into the counter and is removed on impact (land() bursts the
+    // splash). No deceleration, never at rest on the counter.
     unit.animate([
-      { transform: 'translate3d(0,0,0) scale(1,1)', opacity: 1, easing: 'cubic-bezier(0.16,1,0.3,1)' },
-      { transform: `translate3d(0,${-jump}px,0) scale(0.86,1.16)`, opacity: 1, offset: 0.34, easing: 'cubic-bezier(0.16,1,0.3,1)' },  // jump apex (slight stretch)
-      { transform: `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`, opacity: 1 },   // shoot to the counter, decelerate in
+      { transform: 'translate3d(0,0,0) scale(1.35,0.68)', opacity: 1, offset: 0,    easing: 'cubic-bezier(0.2,0.75,0.35,1)' },   // launch, compressed
+      { transform: `translate3d(0,${-jump * 0.82}px,0) scale(1,1)`, opacity: 1, offset: 0.24, easing: 'cubic-bezier(0.4,0,0.6,1)' }, // straighten out rising
+      { transform: `translate3d(0,${-jump}px,0) scale(1.18,0.82)`, opacity: 1, offset: 0.34, easing: 'cubic-bezier(0.3,0,0.3,1)' },  // apex: compress (anticipation)
+      { transform: `translate3d(0,${-jump}px,0) scale(0.82,1.22)`, opacity: 1, offset: 0.42, easing: 'cubic-bezier(0.6,0,1,0.45)' }, // apex: push off (stretch) → accelerate
+      { transform: `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`, opacity: 1, offset: 1 },   // slam into the counter (ease-in, fastest at impact)
     ], { duration: REWARD_SHOT_MS, fill: 'forwards' })
       .addEventListener('finish', land, { once: true });
   }
@@ -1053,6 +1063,7 @@ export class Feed {
   // when the player leaves (markUnitShown / ×).
   private showSeriesWinScreen(i: number): void {
     // Fade the chest overlay out.
+    this.hudEl?.classList.remove('hud--chest-lift');   // scrim gone → drop the HUD lift
     this.stopChestSparks();
     const chest = this.chestEl;
     if (chest) {
@@ -1119,6 +1130,7 @@ export class Feed {
   private clearSeriesUi(): void {
     this.seriesLevelUpPending = null;
     this.dismissChallengePill();
+    this.hudEl?.classList.remove('hud--chest-lift');
     this.stopChestSparks();
     this.hideSeriesTransition();
     this.removeSeriesRow();
@@ -4123,6 +4135,7 @@ export class Feed {
       p.style.top = `${y}px`;
       p.style.width = `${size}px`;
       p.style.height = `${size}px`;
+      p.style.zIndex = '2725';   // above the chest scrim (2700) so the collect splash isn't dimmed
       this.viewport.appendChild(p);
 
       const at = (r: number) => `translate(calc(-50% + ${ux * r + wob}px), calc(-50% + ${uy * r}px))`;
