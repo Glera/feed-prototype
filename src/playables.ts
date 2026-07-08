@@ -11,6 +11,12 @@
  * `?base=https://<your-render-host>/` to point the iframes at the deployed
  * bundles while developing the feed shell locally.
  */
+// Build stamp baked by vite (same value as the version badge). Used to
+// cache-bust mechanic iframe URLs so a redeploy is picked up even by WebViews
+// (Telegram) that cache same-origin siblings by URL and ignore Cache-Control.
+declare const __PLATFORM_VERSION__: string;
+const BUILD_TAG = (typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev').replace(/[^0-9]/g, '') || 'dev';
+
 export interface Playable {
   id: string;
 }
@@ -42,6 +48,9 @@ export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: 
   // Which built-in LEVEL the mechanic should load (e.g. pins series: level 1, 2…).
   // The mechanic reads `?level=` at boot (main.ts currentLevelIdx).
   if (options.level != null) params.set('level', String(options.level));
+  // Cache-bust: a redeploy bumps __PLATFORM_VERSION__, so every mechanic URL
+  // changes and the WebView refetches the sibling HTML (mechanics ignore `v`).
+  params.set('v', BUILD_TAG);
   const query = params.toString();
   return query ? `${url}?${query}` : url;
 }

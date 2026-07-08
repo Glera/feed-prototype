@@ -132,6 +132,7 @@ const STARS_PER_LEVEL = 5;    // level-1 base; higher levels need more (starsFor
 // расширением) → jump (прыжок) → fly (полет) → impact + particles + removal. No
 // scatter/decay phase; each star flies straight from its row slot.
 const REWARD_BOUNCE_MS = 620;        // per-star: squash + jump + fly to the counter
+const REWARD_SHOT_MS = 460;          // chest star: instant launch (no squash) → decelerate into the counter
 const REWARD_PEEL_STAGGER_MS = 78;   // gap between successive peel-offs (halved from 155 — faster credit)
 const RING_STEP_MS = 180;       // snappy ring growth per star impact (synced to the bump)
 
@@ -1006,7 +1007,6 @@ export class Feed {
 
     const toX = badgeX - cx;
     const toY = badgeY - cy;
-    const jump = px * 2.2;   // pop out of the chest a couple of its own heights before flying
     const landY = toY - px * 0.25;
     let done = false;
     const land = () => {
@@ -1021,16 +1021,15 @@ export class Feed {
     };
     if (!unit.animate) {
       unit.style.transform = `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`;
-      window.setTimeout(land, REWARD_BOUNCE_MS);
+      window.setTimeout(land, REWARD_SHOT_MS);
       return;
     }
+    // Instant "shot": no squash/jump — the star leaves at max speed the moment the
+    // chest is tapped and decelerates into the counter (expo ease-out).
     unit.animate([
-      { transform: 'translate3d(0,0,0) scale(1,1)', easing: 'cubic-bezier(0.4,0,0.6,1)' },
-      { transform: 'translate3d(0,0,0) scale(1.34,0.66)', offset: 0.26, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },       // squash
-      { transform: `translate3d(0,${-jump}px,0) scale(0.78,1.26)`, offset: 0.40, easing: 'cubic-bezier(0.33,0,0.3,1)' }, // jump
-      { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, offset: 0.52, easing: 'cubic-bezier(0.55,0.055,0.675,0.19)' },
-      { transform: `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`, opacity: 1 },   // accelerate in, NO fade
-    ], { duration: REWARD_BOUNCE_MS, fill: 'forwards' })
+      { transform: 'translate3d(0,0,0) scale(1,1)', opacity: 1 },
+      { transform: `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`, opacity: 1 },
+    ], { duration: REWARD_SHOT_MS, easing: 'cubic-bezier(0.16,1,0.3,1)', fill: 'forwards' })
       .addEventListener('finish', land, { once: true });
   }
 
