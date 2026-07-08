@@ -182,6 +182,13 @@ export class Feed {
 
   private slots: HTMLElement[] = [];
   private games: HTMLElement[] = [];
+  // Lazy cover loading: only pages near the viewport fetch their JPEG (35–85 KB
+  // each) — far pages get theirs when the window slides over them.
+  private posterEls: HTMLImageElement[] = [];
+  private coverLoaded = new Set<number>();
+  // Drag renders are coalesced to one per animation frame — Android fires
+  // pointermove faster than vsync, and render() walks every page.
+  private dragRenderQueued = false;
   private rewardEls: HTMLElement[] = [];
   private rewardStars: number[] = [];   // current reward per frame; swipe feed awards one star per win
   private gutters: HTMLElement[] = [];
@@ -264,6 +271,7 @@ export class Feed {
   private lastSolveMs = 0;                        // most recent manual solve time (result readout + challenge)
   private pendingSeriesParams = new Map<number, string>();   // encoded ?series= for the next mount of index i
   private pendingLevels = new Map<number, number>();          // ?level= for the next mount of index i (pins series)
+  private seriesRowDragHidden = false;                        // series row faded out for the current page swipe
   private challengeIntroShown = false;
   private challengePillEl: HTMLElement | null = null;
   private pendingEditorLaunch = new Set<number>();
@@ -706,6 +714,9 @@ export class Feed {
   private seriesLenFor(mechanicId: string): number {
     const base = (mechanicId || '').replace(/-swipe$/, '');
     if (base === 'pins' || base.startsWith('pins-')) return 2;
+    // Mechanics without multi-level content yet run a 1-level "series" (one level →
+    // straight to the chest).
+    if (base.includes('no-orders') || base.includes('second-board')) return 1;
     return this.SERIES_LEN;
   }
 
@@ -740,6 +751,7 @@ export class Feed {
     this.reportResult(i, runId, solveMs, 0);
     track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
     this.renderSeriesRow();
+    this.pulseSeriesSlot(this.series.done - 1);   // light up the just-filled slot
     this.manualRuns.delete(i);
     // Keep `playing` true through the chest so a stray swipe can't page away
     // mid-ceremony; it's cleared when the end-panel appears.
@@ -830,15 +842,23 @@ export class Feed {
 
   // ── Series slot row (5 slots + chest) ────────────────────────────────────
   private renderSeriesRow(): void {
-    if (!this.series) { this.removeSeriesRow(); return; }
+    const active = this.series;
+    // Autoplay PREVIEW: with no active series, show the same indicator for the
+    // on-screen mechanic (done=0) so the player sees how many levels the series has
+    // before taking over. Suppressed during reward/chest/win states.
+    const idx = active ? active.index : this.shownIndex;
+    const id = this.playables[idx]?.id ?? '';
+    const showPreview = !active && idx >= 0 && !!id && this.seriesEnabled(idx)
+      && !this.manualRuns.has(idx) && this.collectingRewardIndex === null && !this.seriesWinShown.has(idx);
+    if (!active && !showPreview) { this.removeSeriesRow(); return; }
     if (!this.seriesRowEl) {
       const el = document.createElement('div');
       el.className = 'series-row';
       this.viewport.appendChild(el);
       this.seriesRowEl = el;
     }
-    const { done } = this.series;
-    const len = this.seriesLen();
+    const done = active ? active.done : 0;
+    const len = active ? this.seriesLen() : this.seriesLenFor(id);
     let html = '';
     for (let s = 0; s < len; s++) {
       const state = s < done ? 'done' : s === done ? 'current' : 'todo';
@@ -847,6 +867,26 @@ export class Feed {
     html += `<div class="series-chest${done >= len ? ' series-chest--ready' : ''}">🎁</div>`;
     this.seriesRowEl.innerHTML = html;
     requestAnimationFrame(() => this.seriesRowEl?.classList.add('series-row--in'));
+  }
+
+  // A series level just completed → make its slot "light up": grow + brighten back
+  // to size, and splash particles off it. Called after renderSeriesRow re-marks the
+  // slot done.
+  private pulseSeriesSlot(slotIdx: number): void {
+    const row = this.seriesRowEl;
+    if (!row || slotIdx < 0) return;
+    const slot = row.querySelectorAll<HTMLElement>('.series-slot')[slotIdx];
+    if (!slot) return;
+    if (slot.animate) {
+      slot.animate([
+        { transform: 'scale(1)', filter: 'brightness(1)' },
+        { transform: 'scale(1.62)', filter: 'brightness(1.75)', offset: 0.42 },
+        { transform: 'scale(1)', filter: 'brightness(1)' },
+      ], { duration: 500, easing: 'cubic-bezier(0.34,1.56,0.64,1)' });
+    }
+    const r = slot.getBoundingClientRect();
+    const vp = this.viewport.getBoundingClientRect();
+    this.burstRewardCollectParticles(r.left - vp.left + r.width / 2, r.top - vp.top + r.height / 2, Math.max(12, r.width / 2));
   }
 
   private removeSeriesRow(): void {
@@ -882,8 +922,11 @@ export class Feed {
     // slot panel fades out as it launches.
     const slotChest = this.seriesRowEl?.querySelector<HTMLElement>('.series-chest');
     const fromRect = slotChest?.getBoundingClientRect() ?? null;
+    // Hide the panel's chest INSTANTLY (before the flyer appears) so it reads as the
+    // SAME gift lifting off its spot — not a duplicate. The rest of the row fades.
+    if (slotChest) slotChest.style.visibility = 'hidden';
     if (this.seriesRowEl) this.seriesRowEl.classList.remove('series-row--in');   // fade the panel
-    window.setTimeout(() => this.removeSeriesRow(), 260);
+    window.setTimeout(() => this.removeSeriesRow(), 300);
 
     const scrim = document.createElement('div');
     scrim.className = 'chest-ov';
@@ -900,10 +943,16 @@ export class Feed {
         const dx = (fromRect.left + fromRect.width / 2) - (to.left + to.width / 2);
         const dy = (fromRect.top + fromRect.height / 2) - (to.top + to.height / 2);
         const s = Math.max(0.12, fromRect.width / to.width);   // start at the slot icon's size
+        // The same gift "jumps" off the panel — squash in place, pop up (stretch),
+        // then arc through a high point and settle at centre.
+        const arcH = 90;
         chestBtn.animate([
-          { transform: `translate(${dx}px, ${dy}px) scale(${s})`, opacity: 0.7 },
-          { transform: 'translate(0,0) scale(1)', opacity: 1 },
-        ], { duration: 480, easing: 'cubic-bezier(0.2,1.3,0.4,1)', fill: 'backwards' });
+          { transform: `translate(${dx}px, ${dy}px) scale(${s * 0.8}, ${s * 1.2})`, offset: 0, easing: 'cubic-bezier(0.3,0,0.2,1)' },       // squash on its spot
+          { transform: `translate(${dx}px, ${dy - 18}px) scale(${s * 1.12}, ${s * 0.9})`, offset: 0.16, easing: 'cubic-bezier(0.2,0.6,0.2,1)' }, // pop up + stretch (leap)
+          { transform: `translate(${dx * 0.42}px, ${dy * 0.4 - arcH}px) scale(${(s + 1) / 2})`, offset: 0.6, easing: 'cubic-bezier(0.5,0,0.5,1)' }, // arc apex
+          { transform: `translate(0,0) scale(1.08)`, offset: 0.87, easing: 'ease-out' },   // land w/ tiny overshoot
+          { transform: `translate(0,0) scale(1)`, offset: 1 },
+        ], { duration: 660, fill: 'backwards' });
       }
     });
     this.startChestSparks(chestBtn);
@@ -1030,17 +1079,14 @@ export class Feed {
       window.setTimeout(land, REWARD_SHOT_MS);
       return;
     }
-    // Phase 1 — pop up: the star LAUNCHES compressed (squashed wide), straightens
-    // back to its true proportions on the way up, then at the apex does a quick
-    // squash→stretch "push-off" (a bounce in place). Phase 2 — it ACCELERATES from
-    // the apex straight into the counter and is removed on impact (land() bursts the
-    // splash). No deceleration, never at rest on the counter.
+    // Phase 1 — pop straight UP to the apex at natural proportions (no squash).
+    // Phase 2 — ACCELERATE from the apex into the counter, shrinking UNIFORMLY (the
+    // star never flattens), removed on impact (land() bursts the splash). No fade,
+    // never at rest on the counter.
     unit.animate([
-      { transform: 'translate3d(0,0,0) scale(1.35,0.68)', opacity: 1, offset: 0,    easing: 'cubic-bezier(0.2,0.75,0.35,1)' },   // launch, compressed
-      { transform: `translate3d(0,${-jump * 0.82}px,0) scale(1,1)`, opacity: 1, offset: 0.24, easing: 'cubic-bezier(0.4,0,0.6,1)' }, // straighten out rising
-      { transform: `translate3d(0,${-jump}px,0) scale(1.18,0.82)`, opacity: 1, offset: 0.34, easing: 'cubic-bezier(0.3,0,0.3,1)' },  // apex: compress (anticipation)
-      { transform: `translate3d(0,${-jump}px,0) scale(0.82,1.22)`, opacity: 1, offset: 0.42, easing: 'cubic-bezier(0.6,0,1,0.45)' }, // apex: push off (stretch) → accelerate
-      { transform: `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`, opacity: 1, offset: 1 },   // slam into the counter (ease-in, fastest at impact)
+      { transform: 'translate3d(0,0,0) scale(1,1)', opacity: 1, offset: 0,    easing: 'cubic-bezier(0.2,0.8,0.3,1)' },       // launch (natural)
+      { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, opacity: 1, offset: 0.32, easing: 'cubic-bezier(0.55,0,0.7,1)' }, // apex (still natural — no squash)
+      { transform: `translate3d(${toX}px,${landY}px,0) scale(0.6,0.6)`, opacity: 1, offset: 1 },   // slam into the counter, uniform shrink (never flattened)
     ], { duration: REWARD_SHOT_MS, fill: 'forwards' })
       .addEventListener('finish', land, { once: true });
   }
@@ -1204,6 +1250,9 @@ export class Feed {
       feed_pos: cur,
       mode: this.manualRuns.has(cur) ? 'playing' : 'auto',
     });
+    // Refresh the series indicator for the newly-shown unit — during autoplay it
+    // shows a preview (series length) for THIS mechanic (renderSeriesRow handles it).
+    this.renderSeriesRow();
   }
 
   // ── Warm-cost telemetry ──────────────────────────────────────────────────
@@ -1476,7 +1525,8 @@ export class Feed {
       const poster = document.createElement('img');
       poster.className = 'game__poster';
       poster.draggable = false;
-      poster.src = coverSrc(p.id);
+      // src is set lazily by ensureCover() — see ensureNearCovers().
+      this.posterEls[i] = poster;
       // No cover art shipped → the standard platform card (data URI, can't fail).
       poster.addEventListener('error', () => { poster.src = RIDE_PLACEHOLDER_SRC; }, { once: true });
       // INSIDE the slot: the poster then shares the iframe's exact box AND the
@@ -2365,7 +2415,25 @@ export class Feed {
       this.setFramePaused(i, this.shouldPauseFrame(i));
       this.tryRevealFrame(i);
     });
+    this.ensureNearCovers();
     this.pollAutoplayUi();
+  }
+
+  /** Fetch the cover for page i (wrap-safe), once. */
+  private ensureCover(i: number) {
+    const n = ((i % this.N) + this.N) % this.N;
+    if (this.coverLoaded.has(n)) return;
+    const poster = this.posterEls[n];
+    if (!poster) return;
+    this.coverLoaded.add(n);
+    poster.src = coverSrc(this.playables[n].id);
+  }
+
+  /** Covers for the window the user can reach next: prev (back-swipe), current,
+   *  and the two ahead (the incoming-poster ride reads from the same cache). */
+  private ensureNearCovers() {
+    const c = this.realIndex();
+    for (const d of [-1, 0, 1, 2]) this.ensureCover(c + d);
   }
 
   private shouldPauseFrame(i: number): boolean {
@@ -3136,13 +3204,39 @@ export class Feed {
       ? Math.max(-1, Math.min(1, rawProgress))
       : Math.max(0, Math.min(1, rawProgress));
     this.pos = this.basePos + pageProgress;
-    this.render(false);
+    this.queueDragRender();
+    // Fade the (fixed) series row OUT while the page swipes — it re-fades IN for the
+    // mechanic that settles (markUnitShown → renderSeriesRow) or on snap-back (onUp).
+    if (!this.seriesRowDragHidden && this.seriesRowEl && Math.abs(pageProgress) > 0.03) {
+      this.seriesRowDragHidden = true;
+      this.seriesRowEl.classList.remove('series-row--in');
+    }
+  }
+
+  /** One render per animation frame no matter how fast pointermove fires. The
+   *  `dragging` guard drops a frame queued just before onUp so it can't stomp
+   *  the settle animation with a stale transition-less render. */
+  private queueDragRender() {
+    if (this.dragRenderQueued) return;
+    this.dragRenderQueued = true;
+    requestAnimationFrame(() => {
+      this.dragRenderQueued = false;
+      if (this.dragging && this.dragMode !== 'reward') this.render(false);
+    });
   }
 
   private onUp(e: PointerEvent, surface: HTMLElement) {
     if (!this.dragging) return;
     this.dragging = false;
     try { surface.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+
+    // Series row was faded out for this swipe → fade it back in once the page settles.
+    // markUnitShown re-renders it on a unit change; this also covers a snap-back to
+    // the same mechanic (no unit change). Idempotent.
+    if (this.seriesRowDragHidden) {
+      this.seriesRowDragHidden = false;
+      window.setTimeout(() => this.renderSeriesRow(), 360);
+    }
 
     const dy = e.clientY - this.startY;
     let step = 0;
