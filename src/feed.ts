@@ -848,6 +848,12 @@ export class Feed {
     const gameLevel = this.seriesGameLevel(mechId, nextSeriesLevel);
     if (gameLevel != null) this.pendingLevels.set(i, gameLevel);
     else this.pendingLevels.delete(i);
+    // Suppress the in-slot arrival poster for this reload: it holds the unit's
+    // cover (baked at the FIRST level), which otherwise flashes the wrong level
+    // over the painted next-level board as the transition overlay fades out. The
+    // transition masks the reload and the level warm-paints underneath, so no
+    // placeholder is needed. Cleared on series teardown (clearSeriesUi).
+    this.games[i]?.classList.add('game--series-reload');
     this.reloadFrame(i);      // assigns its own fresh run id
     this.updateMechanicState(i);
     this.applyActiveStates();
@@ -1204,6 +1210,9 @@ export class Feed {
     this.seriesLevelUpPending = null;
     this.dismissChallengePill();
     this.hudEl?.classList.remove('hud--chest-lift');
+    // Restore normal arrival-poster behaviour (a future feed arrival at this unit
+    // should show its cover again).
+    this.feedEl?.querySelectorAll('.game--series-reload').forEach((el) => el.classList.remove('game--series-reload'));
     this.stopChestSparks();
     this.hideSeriesTransition();
     this.removeSeriesRow();

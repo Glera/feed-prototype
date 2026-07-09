@@ -245,6 +245,10 @@ body {
   -webkit-user-select: none;
 }
 .game--live .game__poster { opacity: 0; }
+/* In-series level reload: hide the arrival poster (it holds the FIRST level's
+   cover) so it can't flash the wrong level over the next-level board as the
+   between-levels transition fades. */
+.game--series-reload .game__poster { opacity: 0 !important; }
 /* Live-ride pages (warm frame painted its start screen): the REAL iframe is
    what parks in the viewport and rides in — keep the in-slot poster out of
    its way. */
@@ -294,7 +298,9 @@ body {
   pointer-events: none;
   opacity: 0;
 }
-.game--autoplay .game__reward { opacity: 1; }
+/* Reward is a SURPRISE — the per-mechanic star badge stays hidden in autoplay too
+   (only revealed via the chest at the end of a series). */
+.game--autoplay .game__reward { opacity: 0; }
 .game__reward-star {
   font-size: 15px;
   line-height: 1;
@@ -1649,8 +1655,8 @@ body {
 }
 .series-slot--done { background: linear-gradient(180deg, #45d68c, #2fae6e); color: #06120c; }
 .series-slot--current { border-color: #6ea8ff; color: #cfe0ff; }
-.series-chest { font-size: 20px; margin-left: 3px; filter: grayscale(1); opacity: 0.6; }
-.series-chest--ready { filter: none; opacity: 1; }
+.series-chest { font-size: 20px; margin-left: 3px; }
+.series-chest--ready { filter: drop-shadow(0 0 7px rgba(255, 216, 90, 0.85)); }
 
 .chest-ov {
   position: absolute; inset: 0; z-index: 2700;
@@ -1667,12 +1673,12 @@ body {
 }
 .chest-ov--in .chest-ov__chest { transform: scale(1); }
 /* Elastic squash→stretch on tap, like a merged item settling. */
-.chest-ov__chest--squish { animation: chest-squish 0.34s cubic-bezier(0.22,1.4,0.4,1); }
+.chest-ov__chest--squish { animation: chest-squish 0.52s cubic-bezier(0.33,1,0.68,1); }
 @keyframes chest-squish {
   0%   { transform: scale(1, 1); }
-  22%  { transform: scale(1.22, 0.8) translateY(6px); }   /* squash down */
-  50%  { transform: scale(0.86, 1.24) translateY(-14px); } /* stretch up (jump) */
-  74%  { transform: scale(1.08, 0.94) translateY(0); }
+  26%  { transform: scale(1.16, 0.86) translateY(5px); }    /* squash down (softer) */
+  56%  { transform: scale(0.9, 1.16) translateY(-12px); }   /* stretch up (jump) */
+  80%  { transform: scale(1.05, 0.96) translateY(0); }
   100% { transform: scale(1, 1) translateY(0); }
 }
 
