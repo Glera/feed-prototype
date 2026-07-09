@@ -258,8 +258,8 @@ export class Feed {
   // 5 levels of the SAME level with varied params; pins runs its 2 real authored
   // levels (level 1 → level 2). Length is per-mechanic (seriesLenFor). Levels are
   // manual, no autoplay between them; only the × exits. Stars are paid ONLY on
-  // completing the whole series, via the chest ceremony. A LOSS on any level restarts
-  // the series from level 1 (handleSeriesFail).
+  // completing the whole series, via the chest ceremony. A LOSS on a level just
+  // retries THAT level (cleared levels are kept), see handleSeriesFail.
   private readonly SERIES_LEN = 5;   // default length (mechanics without an override)
   private series: { index: number; done: number; reward: number; playing: boolean } | null = null;
   private seriesRowEl: HTMLElement | null = null;
@@ -713,7 +713,10 @@ export class Feed {
   // get real multi-level content.
   private seriesLenFor(mechanicId: string): number {
     const base = (mechanicId || '').replace(/-swipe$/, '');
+    if (base === 'pins-l3') return 1;                    // level-3 pins: standalone single-level series (for now)
     if (base === 'pins' || base.startsWith('pins-')) return 2;
+    if (base === 'merge-locked-v1' || base === 'marble-sort') return 3;
+    if (base === 'merge-timepress-v1' || base === 'merge-timepress-v2') return 2;
     // Mechanics without multi-level content yet run a 1-level "series" (one level →
     // straight to the chest).
     if (base.includes('no-orders') || base.includes('second-board')) return 1;
@@ -730,6 +733,7 @@ export class Feed {
   // vary by PARAMS (not levels) return null → no ?level= override.
   private seriesGameLevel(mechanicId: string, seriesLevel: number): number | null {
     const base = (mechanicId || '').replace(/-swipe$/, '');
+    if (base === 'pins-l3') return 3;                    // always load the level-3 build
     if (base === 'pins' || base.startsWith('pins-')) return seriesLevel;
     return null;
   }
@@ -751,15 +755,24 @@ export class Feed {
     this.reportResult(i, runId, solveMs, 0);
     track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
     this.renderSeriesRow();
-    this.pulseSeriesSlot(this.series.done - 1);   // light up the just-filled slot
     this.manualRuns.delete(i);
     // Keep `playing` true through the chest so a stray swipe can't page away
     // mid-ceremony; it's cleared when the end-panel appears.
-    if (this.series.done >= this.seriesLen()) { this.beginChest(i); return; }
+    if (this.series.done >= this.seriesLen()) {
+      // Final level: fill the LAST slot FIRST, then launch the chest — sequential,
+      // not simultaneous (the slot stamp reads before the gift lifts off the panel).
+      this.pulseSeriesSlot(this.series.done - 1);
+      window.setTimeout(() => this.beginChest(i), 560);
+      return;
+    }
     // Smooth transition: cover the reboot (which would otherwise flash the mechanic's
     // own intro/swipe text) with a short congratulation, then reveal the next level
     // once its fresh iframe is ready.
     this.showSeriesTransition(this.series.done);
+    // Light up the just-completed slot AFTER the transition dim has faded in — it
+    // reads far more clearly against the darkened screen than on the live level.
+    const filledSlot = this.series.done - 1;
+    window.setTimeout(() => this.pulseSeriesSlot(filledSlot), 300);
     window.setTimeout(() => {
       if (!this.series || this.series.index !== i || !this.series.playing) return;
       this.advanceSeriesInPlace(i);
@@ -878,11 +891,13 @@ export class Feed {
     const slot = row.querySelectorAll<HTMLElement>('.series-slot')[slotIdx];
     if (!slot) return;
     if (slot.animate) {
+      // Stamp-in: the filled circle appears LARGE + bright, then smoothly eases down
+      // to its resting size (longer, gentle ease-out — no jerky bounce).
       slot.animate([
-        { transform: 'scale(1)', filter: 'brightness(1)' },
-        { transform: 'scale(1.62)', filter: 'brightness(1.75)', offset: 0.42 },
-        { transform: 'scale(1)', filter: 'brightness(1)' },
-      ], { duration: 500, easing: 'cubic-bezier(0.34,1.56,0.64,1)' });
+        { transform: 'scale(1.9)', filter: 'brightness(1.85)', offset: 0 },
+        { transform: 'scale(1.06)', filter: 'brightness(1.12)', offset: 0.72 },
+        { transform: 'scale(1)', filter: 'brightness(1)', offset: 1 },
+      ], { duration: 720, easing: 'cubic-bezier(0.22,1,0.36,1)' });
     }
     const r = slot.getBoundingClientRect();
     const vp = this.viewport.getBoundingClientRect();
@@ -943,16 +958,13 @@ export class Feed {
         const dx = (fromRect.left + fromRect.width / 2) - (to.left + to.width / 2);
         const dy = (fromRect.top + fromRect.height / 2) - (to.top + to.height / 2);
         const s = Math.max(0.12, fromRect.width / to.width);   // start at the slot icon's size
-        // The same gift "jumps" off the panel — squash in place, pop up (stretch),
-        // then arc through a high point and settle at centre.
-        const arcH = 90;
+        // ONE continuous phase: the same gift glides from its exact panel spot/size
+        // straight to centre, growing to full size. No mid-point, no squash — a single
+        // smooth motion with a soft landing.
         chestBtn.animate([
-          { transform: `translate(${dx}px, ${dy}px) scale(${s * 0.8}, ${s * 1.2})`, offset: 0, easing: 'cubic-bezier(0.3,0,0.2,1)' },       // squash on its spot
-          { transform: `translate(${dx}px, ${dy - 18}px) scale(${s * 1.12}, ${s * 0.9})`, offset: 0.16, easing: 'cubic-bezier(0.2,0.6,0.2,1)' }, // pop up + stretch (leap)
-          { transform: `translate(${dx * 0.42}px, ${dy * 0.4 - arcH}px) scale(${(s + 1) / 2})`, offset: 0.6, easing: 'cubic-bezier(0.5,0,0.5,1)' }, // arc apex
-          { transform: `translate(0,0) scale(1.08)`, offset: 0.87, easing: 'ease-out' },   // land w/ tiny overshoot
-          { transform: `translate(0,0) scale(1)`, offset: 1 },
-        ], { duration: 660, fill: 'backwards' });
+          { transform: `translate(${dx}px, ${dy}px) scale(${s})`, opacity: 1 },
+          { transform: `translate(0,0) scale(1)`, opacity: 1 },
+        ], { duration: 520, easing: 'cubic-bezier(0.22,0.8,0.28,1)', fill: 'backwards' });
       }
     });
     this.startChestSparks(chestBtn);
@@ -976,6 +988,21 @@ export class Feed {
       if (remaining <= 0 && !paid) {
         paid = true;
         this.persistSeriesReward(i);
+        // The last star has launched — REMOVE the chest right now (don't wait for it
+        // to reach the counter): the gift is spent the moment its last star pops out.
+        this.stopChestSparks();
+        chestBtn.style.pointerEvents = 'none';
+        const hint = scrim.querySelector<HTMLElement>('.chest-ov__hint');
+        if (hint) hint.style.opacity = '0';
+        if (chestBtn.animate) {
+          chestBtn.animate([
+            { transform: 'scale(1)', opacity: 1 },
+            { transform: 'scale(0.2)', opacity: 0 },
+          ], { duration: 200, easing: 'cubic-bezier(0.4,0,1,0.7)', fill: 'forwards' });
+          window.setTimeout(() => { chestBtn.style.visibility = 'hidden'; }, 200);
+        } else {
+          chestBtn.style.visibility = 'hidden';
+        }
         // After the last star lands, hand off to the REAL win screen (old buttons +
         // swipe), not a bespoke panel.
         window.setTimeout(() => this.showSeriesWinScreen(i), 720);
@@ -2141,7 +2168,10 @@ export class Feed {
     this.frames.set(i, frame);
     const seriesParam = this.pendingSeriesParams.get(i);
     this.pendingSeriesParams.delete(i);   // one-shot: consumed by this mount
-    const levelParam = this.pendingLevels.get(i);
+    // Level for this mount: the pending (series-advance) value, else the mechanic's
+    // DEFAULT game level for series-level 1 — so a fixed-level series (e.g. pins-l3 →
+    // game level 3) loads its level even on the FIRST/preview mount, not level 1.
+    const levelParam = this.pendingLevels.get(i) ?? (this.seriesGameLevel(this.playables[i].id, 1) ?? undefined);
     this.pendingLevels.delete(i);         // one-shot
     frame.src = playableUrl(this.playables[i].id, {
       hostPaused: this.shouldPauseFrame(i),
@@ -2736,7 +2766,7 @@ export class Feed {
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('allow', 'autoplay');
     frame.addEventListener('load', () => this.disableFrameDoubleTapZoom(frame));
-    frame.src = playableUrl(mechanic, { hostPaused: false, auto: true });
+    frame.src = playableUrl(mechanic, { hostPaused: false, auto: true, level: this.seriesGameLevel(mechanic, 1) ?? undefined });
     ov.querySelector('.story-view__stage')!.appendChild(frame);
     this.storyFrame = frame;
 
@@ -3544,14 +3574,15 @@ export class Feed {
   private handleSeriesFail(i: number): void {
     if (!this.series || this.series.index !== i) { this.handleLoss(i); return; }
     track('series_fail', { mechanic_id: this.playables[i]?.id, level: this.series.done + 1 });
-    this.series.done = 0;             // back to the start of the series
+    // Retry the CURRENT level, not the whole series — `done` (levels already
+    // cleared) is preserved, so advanceSeriesInPlace relaunches level `done + 1`.
     this.series.playing = true;
     this.renderSeriesRow();
     this.manualRuns.delete(i);
     this.showSeriesRetry();
     window.setTimeout(() => {
       if (!this.series || this.series.index !== i || !this.series.playing) return;
-      this.advanceSeriesInPlace(i);   // done=0 → relaunches at series level 1
+      this.advanceSeriesInPlace(i);   // done unchanged → relaunches the current level
       this.awaitSeriesLevelReady(i);
     }, 700);
   }
@@ -3568,7 +3599,7 @@ export class Feed {
     this.seriesTransitionEl.innerHTML =
       `<div class="series-transition__praise">Почти получилось!</div>` +
       `<div class="series-transition__sub">Это было близко — попробуй ещё раз!</div>` +
-      `<div class="series-transition__next">Начинаем серию заново…</div>`;
+      `<div class="series-transition__next">Перезапускаем уровень…</div>`;
     requestAnimationFrame(() => this.seriesTransitionEl?.classList.add('series-transition--in'));
   }
 
