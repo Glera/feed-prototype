@@ -1,4 +1,4 @@
-import { PLAYABLES, playableUrl, type Playable } from './playables';
+import { PLAYABLES, playableUrl, coverUrl, type Playable } from './playables';
 import {
   apiSession, apiMe, variantIdForMechanic,
   apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge, apiChallengeInbox,
@@ -73,9 +73,10 @@ const RIDE_PLACEHOLDER_SRC = 'data:image/svg+xml,' + encodeURIComponent(
   + '</svg>'
 );
 
-/** The mechanic's cover-art URL — resolves next to its html like the payload. */
+/** The feed entry's cover-art URL (per ENTRY id, so aliased entries can ship
+ *  their own per-level cover). See coverUrl in playables.ts. */
 function coverSrc(id: string): string {
-  return playableUrl(id).split('?')[0].replace(/\.html$/, '.cover.jpg');
+  return coverUrl(id);
 }
 
 const LIVE_AHEAD = 0;              // explicit warm-next scheduling below owns ahead iframe lifetime

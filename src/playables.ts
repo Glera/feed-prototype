@@ -27,8 +27,24 @@ let MECH_VERSIONS: Record<string, string> = {};
 export function setMechanicVersions(m: Record<string, string> | null | undefined): void {
   if (m && typeof m === 'object') MECH_VERSIONS = m;
 }
+// Some feed entries REUSE another mechanic's shipped HTML (e.g. a different level of
+// the same build). id → html basename. Falls back to the id itself.
+const HTML_ALIAS: Record<string, string> = {
+  'pins-l3-swipe': 'pins-swipe',   // level-3 pins series rides the same pins-swipe build (?level=3)
+};
+function htmlFileFor(id: string): string { return HTML_ALIAS[id] ?? id; }
 function mechanicVersion(id: string): string {
-  return MECH_VERSIONS[id] || BUILD_TAG;
+  return MECH_VERSIONS[htmlFileFor(id)] || BUILD_TAG;   // shared HTML → shared cache-bust hash
+}
+
+/** Cover image URL for a feed entry — keyed by the ENTRY id (NOT the aliased
+ *  html), so an entry that reuses another mechanic's build (e.g. pins-l3-swipe →
+ *  pins-swipe.html at ?level=3) ships its OWN cover baked at its level. Missing
+ *  covers fall back to the standard card via the <img> onerror handler. */
+export function coverUrl(id: string): string {
+  let base = new URLSearchParams(location.search).get('base') || './';
+  if (!base.endsWith('/')) base += '/';
+  return `${base}${id}.cover.jpg?v=${mechanicVersion(id)}`;
 }
 
 export interface Playable {
@@ -42,7 +58,8 @@ export const PLAYABLES: Playable[] = [
   { id: 'merge-timepress-v1-swipe' },
   { id: 'merge-timepress-v2-swipe' },
   { id: 'merge-timepress-no-orders-v1-swipe' },
-  { id: 'merge-timepress-no-orders-v2-swipe' },
+  { id: 'pins-l3-swipe' },                    // level-3 pins as its own 1-level series (spaced away from pins-swipe)
+  { id: 'short-drama-swipe' },
   { id: 'merge-second-board-v1-swipe' },
   { id: 'merge-second-board-v2-swipe' },
 ];
@@ -52,7 +69,7 @@ export const PLAYABLES: Playable[] = [
 export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: boolean; series?: string; level?: number } = {}): string {
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
-  const url = `${base}${id}.html`;
+  const url = `${base}${htmlFileFor(id)}.html`;   // may alias to another mechanic's build
   const params = new URLSearchParams();
   if (options.hostPaused) params.set('hostPaused', '1');
   if (options.auto !== undefined) params.set('auto', options.auto ? '1' : '0');
