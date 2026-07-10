@@ -86,7 +86,10 @@ const TPL: Record<TplId, { label: string; ds: string; playableId: string }> = {
   pins:  { label: 'Pins',    ds: 'pull the pins, catch it all',   playableId: 'pins-swipe' },
 };
 const CREATABLE_TPLS: TplId[] = ['sort'];
-const SLOTS = [{ x: 115, y: 155 }, { x: 275, y: 170 }, { x: 115, y: 395 }, { x: 275, y: 380 }];
+// Blueprint geometry: symmetric 2×2 slots around a central hub. Future art
+// reskins these exact coordinates — keep them stable.
+const SLOTS = [{ x: 105, y: 155 }, { x: 285, y: 155 }, { x: 105, y: 385 }, { x: 285, y: 385 }];
+const HUB = { x: 195, y: 270 };
 const GUEST_REWARD = 25;
 const REROLL_COST = 30;
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
@@ -306,27 +309,10 @@ function outcomeOf(data: unknown): 'won' | 'lost' | null {
 
 // ── tiny SVG art ─────────────────────────────────────────────────────────────
 
-function prop(kind: PropKind, x: number, y: number, c1: string, c2: string): string {
-  const t = `transform="translate(${x},${y})"`;
-  switch (kind) {
-    case 'mushroom': return `<g ${t}><rect x="-2.5" y="-4" width="5" height="7" rx="2" fill="#F2E3C6"/><path d="M-7 -3 A7 6 0 0 1 7 -3 Z" fill="${c1}"/><circle cx="-2.5" cy="-6" r="1.3" fill="#fff" opacity=".85"/></g>`;
-    case 'crystal': return `<g ${t}><polygon points="0,-12 5,-4 3,3 -3,3 -5,-4" fill="${c1}"/><polygon points="7,-7 10,-2 8,3 5,2" fill="${c2}"/></g>`;
-    case 'coral': return `<g ${t}><circle cx="-4" cy="-2" r="4" fill="${c1}"/><circle cx="3" cy="-5" r="4.5" fill="${c2}"/><circle cx="4" cy="2" r="3.4" fill="${c1}"/></g>`;
-    case 'lollipop': return `<g ${t}><rect x="-1" y="-3" width="2" height="8" fill="#F2E3C6"/><circle cx="0" cy="-7" r="5" fill="${c1}"/><circle cx="0" cy="-7" r="2.4" fill="${c2}"/></g>`;
-    case 'rock': return `<g ${t}><polygon points="-7,4 -3,-6 4,-8 8,2 3,5" fill="${c1}"/><polyline points="-2,-2 1,0 0,3" stroke="${c2}" stroke-width="1.6" fill="none"/></g>`;
-  }
-}
-
-function house(tpl: TplId, body: string, roof: string): string {
-  const glyph = tpl === 'sort'
-    ? '<circle cx="0" cy="-2" r="2"/><circle cx="0" cy="3" r="2"/>'
-    : tpl === 'merge'
-      ? '<circle cx="-2.5" cy="0" r="1.8"/><circle cx="2.5" cy="0" r="1.8"/><circle cx="0" cy="-4" r="1.8"/>'
-      : '<rect x="-4" y="-1.5" width="8" height="3" rx="1.5"/>';
-  return `<g><rect x="-14" y="-8" width="28" height="20" rx="2.5" fill="${body}"/>
-    <polygon points="-17,-8 0,-22 17,-8" fill="${roof}"/>
-    <rect x="-4" y="2" width="8" height="10" rx="1.5" fill="${roof}" opacity=".85"/>
-    <g transform="translate(9,-14)"><circle r="6" fill="#fff"/><g fill="${roof}">${glyph}</g></g></g>`;
+// Perceived luminance 0..1 — picks a readable letter color on a theme fill.
+function luminance(hex: string): number {
+  const n = parseInt(hex.slice(1), 16);
+  return (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
 }
 
 // Compact preview driven by the same persisted variant config as the live fork.
@@ -408,6 +394,9 @@ const CSS = `
 .isl-mode--on{background:rgba(255,255,255,.18);color:#fff;font-weight:700}
 .isl-worldbox{flex:1;min-height:0;position:relative}
 .isl-worldbox svg{position:absolute;inset:0;width:100%;height:100%}
+.isl-legend{position:absolute;left:14px;bottom:10px;display:flex;gap:12px;pointer-events:none}
+.isl-legend span{display:flex;align-items:center;gap:5px;font-size:10.5px;color:rgba(255,255,255,.55)}
+.isl-legend b{width:8px;height:8px;border-radius:50%;display:inline-block}
 .isl-sector{cursor:pointer}
 .isl-sector--new{transform-box:fill-box;transform-origin:center;animation:isl-pop .55s cubic-bezier(.2,1.4,.4,1)}
 @keyframes isl-pop{from{opacity:0;transform:scale(.65)}}
@@ -433,6 +422,10 @@ const CSS = `
 .isl-tcard__pv img{width:100%;height:100%;object-fit:cover;display:block}
 .isl-tcard__nm{font-size:14px;font-weight:800}
 .isl-tcard__ds{font-size:12px;color:rgba(255,255,255,.55);line-height:1.35}
+.isl-status{display:inline-flex;align-items:center;gap:5px;margin-left:8px;padding:2.5px 9px;border-radius:999px;
+  border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.05);font-size:11px;color:rgba(255,255,255,.8);vertical-align:1px}
+.isl-status b{width:7px;height:7px;border-radius:50%;display:inline-block}
+.isl-status[data-pulse] b{animation:isl-puls 2.4s ease-in-out infinite}
 .isl-chips{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0 13px}
 .isl-chip{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);border-radius:999px;padding:7px 12px;font:inherit;font-size:12px;color:#fff}
 .isl-in{width:100%;border:1px solid rgba(255,255,255,.18);border-radius:12px;padding:12px 13px;font:inherit;font-size:14px;background:rgba(255,255,255,.08);color:#fff}
@@ -650,7 +643,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       '<button class="isl-mode isl-mode--on" type="button" data-mode="owner">My island</button>' +
       '<button class="isl-mode" type="button" data-mode="guest">As a guest</button>' +
     '</div>' +
-    '<div class="isl-worldbox"><svg viewBox="0 0 390 540" preserveAspectRatio="xMidYMid slice"></svg></div>' +
+    '<div class="isl-worldbox"><svg viewBox="0 0 390 540" preserveAspectRatio="xMidYMid slice"></svg><div class="isl-legend" data-legend></div></div>' +
     '<button class="isl-cta" type="button" data-guest-cta hidden>Play a series here · +' + GUEST_REWARD + ' 🧩</button>' +
     '<div class="isl-scrim" data-scrim></div>' +
     '<div class="isl-sheet" data-sheet></div>' +
@@ -684,64 +677,73 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   scrim.addEventListener('click', closeSheet);
 
   function refreshIsland(persist = false): void {
+    // Blueprint scheme (design variant B): dot grid, thin island outline,
+    // central hub with connectors, slots as theme-filled circles with the
+    // template initial. Status lives in rim DOTS (legend at the bottom);
+    // detailed status chips stay on the building card. Future art reskins
+    // these exact coordinates.
     let s =
-      '<rect width="390" height="540" fill="#20627A"/>' +
-      '<ellipse cx="60" cy="66" rx="46" ry="7" fill="#35798F" opacity=".6"/>' +
-      '<ellipse cx="330" cy="486" rx="52" ry="8" fill="#35798F" opacity=".6"/>' +
-      '<ellipse cx="342" cy="46" rx="30" ry="6" fill="#35798F" opacity=".5"/>' +
-      '<ellipse cx="195" cy="276" rx="176" ry="218" fill="#E4D49E"/>' +
-      '<ellipse cx="195" cy="274" rx="156" ry="195" fill="#A8C078"/>' +
-      '<ellipse cx="195" cy="274" rx="50" ry="34" fill="#D9CBA3"/>' +
-      '<g transform="translate(195,274)"><rect x="-2" y="-26" width="4" height="26" fill="#8A6B4A"/><polygon points="2,-26 26,-21 2,-15" fill="#E8603C"/></g>';
+      '<defs><pattern id="isl-dots" width="20" height="20" patternUnits="userSpaceOnUse">' +
+      '<circle cx="1.5" cy="1.5" r="1.1" fill="rgba(255,255,255,.10)"/></pattern></defs>' +
+      '<rect width="390" height="540" fill="url(#isl-dots)"/>' +
+      '<rect x="28" y="46" width="334" height="448" rx="92" fill="none" stroke="rgba(255,255,255,.30)" stroke-width="1.3"/>';
+    for (const p of SLOTS) {
+      // Trim connectors to the circle edges (hub r=22, slot r=40) so lines
+      // don't cut through the shapes.
+      const dx = p.x - HUB.x, dy = p.y - HUB.y, len = Math.hypot(dx, dy);
+      const x1 = HUB.x + (dx / len) * 24, y1 = HUB.y + (dy / len) * 24;
+      const x2 = p.x - (dx / len) * 42, y2 = p.y - (dy / len) * 42;
+      s += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="rgba(255,255,255,.14)" stroke-width="1"/>`;
+    }
+    s += `<circle cx="${HUB.x}" cy="${HUB.y}" r="22" fill="rgba(255,255,255,.07)" stroke="rgba(255,255,255,.30)" stroke-width="1.2"/>
+      <text x="${HUB.x}" y="${HUB.y + 5}" text-anchor="middle" font-size="14" font-weight="700" fill="rgba(255,255,255,.85)">G</text>`;
     SLOTS.forEach((p, i) => {
       const b = S.buildings.find((x) => x.slot === i);
       if (!b) {
         if (pendingSlots.has(i)) {
-          s += `<g><ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="#C9BC8E" stroke="#8FA662" stroke-width="2" stroke-dasharray="4 6"/>
-            <g class="isl-plus"><text x="${p.x}" y="${p.y + 3}" text-anchor="middle" font-size="24">🏗️</text></g>
-            <text x="${p.x}" y="${p.y + 28}" text-anchor="middle" font-size="11" fill="#5C7F41">generating…</text></g>`;
+          s += `<g><circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(239,159,39,.08)" stroke="#EF9F27" stroke-width="1.4" stroke-dasharray="5 5" class="isl-plus"/>
+            <text x="${p.x}" y="${p.y + 6}" text-anchor="middle" font-size="17" font-weight="700" fill="#F2B33D">…</text>
+            <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="#F2B33D">generating…</text></g>`;
         } else if (readyDrafts.has(i) && !guest) {
           const draft = readyDrafts.get(i)!;
           s += `<g class="isl-sector" data-slot="${i}">
-            <ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="${draft.pack.ground}" stroke="${draft.pack.edge}" stroke-width="2" stroke-dasharray="4 4"/>
-            <g class="isl-plus"><text x="${p.x}" y="${p.y + 2}" text-anchor="middle" font-size="22">✨</text></g>
-            <text x="${p.x}" y="${p.y + 27}" text-anchor="middle" font-size="11" fill="#fff">theme ready</text></g>`;
+            <circle cx="${p.x}" cy="${p.y}" r="40" fill="${draft.pack.ground}" fill-opacity=".5" stroke="${draft.pack.edge}" stroke-width="1.5" stroke-dasharray="4 4"/>
+            <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="18" font-weight="700" fill="rgba(255,255,255,.9)">${TPL[draft.tpl].label.charAt(0)}</text>
+            <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.75)">theme ready</text></g>`;
         } else if (!guest) {
           s += `<g class="isl-sector" data-slot="${i}">
-            <ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="#B7C98B" stroke="#8FA662" stroke-width="2" stroke-dasharray="7 7"/>
-            <g class="isl-plus"><circle cx="${p.x}" cy="${p.y - 6}" r="15" fill="#fff"/>
-            <text x="${p.x}" y="${p.y - 0.5}" text-anchor="middle" font-size="20" font-weight="700" fill="#E8603C">+</text></g>
-            <text x="${p.x}" y="${p.y + 26}" text-anchor="middle" font-size="11" fill="#5C7F41">build</text></g>`;
+            <circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.35)" stroke-width="1.4" stroke-dasharray="6 6"/>
+            <text x="${p.x}" y="${p.y + 9}" text-anchor="middle" font-size="26" font-weight="600" fill="rgba(255,255,255,.7)" class="isl-plus">+</text>
+            <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.45)">build</text></g>`;
         } else {
-          s += `<ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="#B7C98B" opacity=".55"/>`;
+          s += `<circle cx="${p.x}" cy="${p.y}" r="40" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="1.2" stroke-dasharray="6 6"/>`;
         }
         return;
       }
       const pk = resolvePack(b.pack);
-      const offs: Array<[number, number]> = [[-42, 16], [36, 22], [-30, -28], [34, -22]];
-      const props = offs.map((o, j) => prop(pk.prop, o[0], o[1], pk.items[j % pk.items.length], pk.items[(j + 1) % pk.items.length])).join('');
-      // The publish chain (bake → test → push → deploy) keeps running after the
-      // building appears — show it on the map so the slot reads as "busy" and
-      // players don't fire a second job into it.
+      // The publish chain keeps running after the building appears — the slot
+      // reads as busy (dashed rim + pulsing amber dot); rebuild/delete stay
+      // blocked in the building card until it finishes.
       const busy = Boolean(b.publishing) || pollingSlots.has(i);
+      const letterFill = luminance(pk.ground) > 0.55 ? '#1F1E1B' : '#FFFFFF';
       s += `<g class="isl-sector${b.fresh ? ' isl-sector--new' : ''}" data-b="${i}">
-        <ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="${pk.ground}" stroke="${pk.edge}" stroke-width="2"${busy ? ' stroke-dasharray="4 4"' : ''}/>
-        <g transform="translate(${p.x},${p.y})">${props}<g transform="translate(0,-4)">${house(b.tpl, pk.body, pk.roof)}</g></g>
-        <g><rect x="${p.x - 56}" y="${p.y + 30}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
-        <text x="${p.x}" y="${p.y + 43}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text></g>`;
-      if (busy) {
-        s += `<g class="isl-plus"><circle cx="${p.x + 46}" cy="${p.y - 36}" r="12" fill="rgba(255,255,255,.95)"/>
-          <text x="${p.x + 46}" y="${p.y - 31}" text-anchor="middle" font-size="13">🏗️</text></g>
-          <g><rect x="${p.x - 40}" y="${p.y + 51}" width="80" height="14" rx="7" fill="rgba(20,29,40,.78)"/>
-          <text x="${p.x}" y="${p.y + 61.5}" text-anchor="middle" font-size="9.5" font-weight="600" fill="#FFD98A" class="isl-plus">publishing…</text></g>`;
-      } else if (b.publishError) {
-        s += `<g><circle cx="${p.x + 46}" cy="${p.y - 36}" r="12" fill="rgba(255,255,255,.95)"/>
-          <text x="${p.x + 46}" y="${p.y - 31}" text-anchor="middle" font-size="13">⚠️</text></g>`;
+        <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
+        <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="19" font-weight="700" fill="${letterFill}">${TPL[b.tpl].label.charAt(0)}</text>`;
+      const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : hostedUrl(b) ? '#4CC38A' : null;
+      if (dot) {
+        s += `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`;
       }
-      s += '</g>';
+      s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
+        <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text></g>`;
       b.fresh = false;
     });
     svg.innerHTML = s;
+    // Status legend — owner mode only (the guest CTA occupies the bottom edge).
+    const legend = ov.querySelector('[data-legend]') as HTMLElement;
+    legend.innerHTML = guest ? '' :
+      '<span><b style="background:#4CC38A"></b>hosted</span>' +
+      '<span><b style="background:#EF9F27"></b>publishing</span>' +
+      '<span><b style="background:#E24B4A"></b>error</span>';
     svg.querySelectorAll<SVGElement>('[data-slot]').forEach((g) =>
       g.addEventListener('click', () => openCreate(Number(g.dataset.slot))));
     svg.querySelectorAll<SVGElement>('[data-b]').forEach((g) =>
@@ -943,12 +945,20 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     // The slot is "busy" for the whole publish chain — block actions that would
     // start a second job (rebuild) or orphan the running one (delete).
     const busy = Boolean(b.publishing) || pollingSlots.has(slot);
-    const publishState = hostedUrl(b) ? 'HOSTED' : busy ? 'Publishing…' : b.publishError ? `Publish failed · ${b.publishError}` : 'Local draft';
+    // Status badge mirrors the map dots (same colors) — one visual language.
+    const st = hostedUrl(b)
+      ? { c: '#4CC38A', t: 'hosted' }
+      : busy
+        ? { c: '#EF9F27', t: 'publishing…' }
+        : b.publishError
+          ? { c: '#E24B4A', t: `publish failed · ${b.publishError}` }
+          : { c: 'rgba(255,255,255,.45)', t: 'local draft' };
+    const badge = `<span class="isl-status"${busy ? ' data-pulse' : ''}><b style="background:${st.c}"></b>${esc(st.t)}</span>`;
     const retry = !hostedUrl(b) && !busy
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-publish>Retry publish</button>'
       : '';
     openSheet(`<h3>${esc(b.name)}</h3>
-      <div class="isl-sub">${TPL[b.tpl].label} · Lv ${levelOf(b)} · ${b.plays} plays · ♥ ${b.likes}<br>${esc(publishState)}</div>
+      <div class="isl-sub">${TPL[b.tpl].label} · Lv ${levelOf(b)} · ${b.plays} plays · ♥ ${b.likes} ${badge}</div>
       <div class="isl-board">${board(b.tpl, pk)}</div>
       <button class="isl-btn isl-btn--pri" type="button" data-play>▶ Play the series</button>
       ${retry}
