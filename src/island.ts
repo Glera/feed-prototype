@@ -66,16 +66,16 @@ const PACKS: Pack[] = [
     items: ['#D9534F', '#F2E3C6', '#E8A33D', '#8A5A44', '#6FA34B', '#5B8BD8'], prop: 'mushroom', body: '#F2E3C6', roof: '#C94A3D' },
   { id: 'neon', name: 'Neon city', kw: ['neon', 'cyber', 'city', 'night', 'неон', 'кибер', 'город', 'ноч'],
     ground: '#3A3357', edge: '#5C51A0', boardBg: '#241F38',
-    items: ['#41E0D0', '#FF5FA2', '#FFD84D', '#8F7FFF', '#9BF6FF', '#FF9350'], prop: 'crystal', body: '#4A4170', roof: '#41E0D0' },
+    items: ['#41E0D0', '#FF5FA2', '#FFD84D', '#8F7FFF', '#9BF6FF', '#FF6B3D'], prop: 'crystal', body: '#4A4170', roof: '#41E0D0' },
   { id: 'sea', name: 'Underwater world', kw: ['water', 'sea', 'ocean', 'fish', 'reef', 'вод', 'мор', 'океан', 'рыб', 'риф'],
     ground: '#4E9DB0', edge: '#38798A', boardBg: '#E3F2F5',
-    items: ['#FF8B7E', '#FFC85C', '#4FC9AE', '#4E8FD0', '#E3789E', '#8E6FE8'], prop: 'coral', body: '#DFF2EE', roof: '#FF8B7E' },
+    items: ['#FF8B7E', '#FFC85C', '#4FC9AE', '#4E8FD0', '#E858B8', '#8E6FE8'], prop: 'coral', body: '#DFF2EE', roof: '#FF8B7E' },
   { id: 'candy', name: 'Candy kingdom', kw: ['candy', 'sweet', 'caramel', 'cake', 'слад', 'конфет', 'карамел', 'торт'],
     ground: '#DE9FBE', edge: '#B96F92', boardBg: '#FBEFF5',
-    items: ['#F26FA8', '#7EC9EE', '#F5D96E', '#A98FEF', '#6FDCA4', '#C9E24E'], prop: 'lollipop', body: '#FBEFF5', roof: '#F26FA8' },
+    items: ['#F26FA8', '#7EC9EE', '#F5D96E', '#A98FEF', '#6FDCA4', '#FF9B54'], prop: 'lollipop', body: '#FBEFF5', roof: '#F26FA8' },
   { id: 'lava', name: 'Volcano wastes', kw: ['lava', 'volcano', 'fire', 'ash', 'лав', 'вулкан', 'ог', 'пепел'],
     ground: '#5A4A47', edge: '#42332F', boardBg: '#F0E4DC',
-    items: ['#FF7031', '#FFC02E', '#9C4433', '#5E4B48', '#FFE08A', '#4EA6D8'], prop: 'rock', body: '#7A625C', roof: '#FF7031' },
+    items: ['#FF7031', '#FFDD1C', '#9C4433', '#5E4B48', '#FFE08A', '#4EA6D8'], prop: 'rock', body: '#7A625C', roof: '#FF7031' },
 ];
 const TPL: Record<TplId, { label: string; ds: string; playableId: string }> = {
   sort:  { label: 'Sorting', ds: 'sort items into flasks',        playableId: SORT_RECIPE.baseBuild },
@@ -615,11 +615,25 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       const pk = resolvePack(b.pack);
       const offs: Array<[number, number]> = [[-42, 16], [36, 22], [-30, -28], [34, -22]];
       const props = offs.map((o, j) => prop(pk.prop, o[0], o[1], pk.items[j % pk.items.length], pk.items[(j + 1) % pk.items.length])).join('');
+      // The publish chain (bake → test → push → deploy) keeps running after the
+      // building appears — show it on the map so the slot reads as "busy" and
+      // players don't fire a second job into it.
+      const busy = Boolean(b.publishing) || pollingSlots.has(i);
       s += `<g class="isl-sector${b.fresh ? ' isl-sector--new' : ''}" data-b="${i}">
-        <ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="${pk.ground}" stroke="${pk.edge}" stroke-width="2"/>
+        <ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="${pk.ground}" stroke="${pk.edge}" stroke-width="2"${busy ? ' stroke-dasharray="4 4"' : ''}/>
         <g transform="translate(${p.x},${p.y})">${props}<g transform="translate(0,-4)">${house(b.tpl, pk.body, pk.roof)}</g></g>
         <g><rect x="${p.x - 56}" y="${p.y + 30}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
-        <text x="${p.x}" y="${p.y + 43}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text></g></g>`;
+        <text x="${p.x}" y="${p.y + 43}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text></g>`;
+      if (busy) {
+        s += `<g class="isl-plus"><circle cx="${p.x + 46}" cy="${p.y - 36}" r="12" fill="rgba(255,255,255,.95)"/>
+          <text x="${p.x + 46}" y="${p.y - 31}" text-anchor="middle" font-size="13">🏗️</text></g>
+          <g><rect x="${p.x - 40}" y="${p.y + 51}" width="80" height="14" rx="7" fill="rgba(20,29,40,.78)"/>
+          <text x="${p.x}" y="${p.y + 61.5}" text-anchor="middle" font-size="9.5" font-weight="600" fill="#FFD98A" class="isl-plus">publishing…</text></g>`;
+      } else if (b.publishError) {
+        s += `<g><circle cx="${p.x + 46}" cy="${p.y - 36}" r="12" fill="rgba(255,255,255,.95)"/>
+          <text x="${p.x + 46}" y="${p.y - 31}" text-anchor="middle" font-size="13">⚠️</text></g>`;
+      }
+      s += '</g>';
       b.fresh = false;
     });
     svg.innerHTML = s;
@@ -788,8 +802,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (!b) return;
     if (guest) { playSeries(b); return; }
     const pk = resolvePack(b.pack);
-    const publishState = hostedUrl(b) ? 'HOSTED' : b.publishing ? 'Publishing…' : b.publishError ? `Publish failed · ${b.publishError}` : 'Local draft';
-    const retry = !hostedUrl(b) && !b.publishing
+    // The slot is "busy" for the whole publish chain — block actions that would
+    // start a second job (rebuild) or orphan the running one (delete).
+    const busy = Boolean(b.publishing) || pollingSlots.has(slot);
+    const publishState = hostedUrl(b) ? 'HOSTED' : busy ? 'Publishing…' : b.publishError ? `Publish failed · ${b.publishError}` : 'Local draft';
+    const retry = !hostedUrl(b) && !busy
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-publish>Retry publish</button>'
       : '';
     openSheet(`<h3>${esc(b.name)}</h3>
@@ -797,17 +814,24 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       <div class="isl-board">${board(b.tpl, pk)}</div>
       <button class="isl-btn isl-btn--pri" type="button" data-play>▶ Play the series</button>
       ${retry}
-      <button class="isl-btn isl-btn--ghost" type="button" data-rebuild>Rebuild slot · replace this mechanic</button>
-      <button class="isl-btn isl-btn--ghost" type="button" data-delete>Delete mechanic</button>
-      <div class="isl-pk" style="margin-top:10px">Guests like it after they beat it — switch to guest mode to feel it</div>`);
+      <button class="isl-btn isl-btn--ghost" type="button" data-rebuild${busy ? ' disabled' : ''}>Rebuild slot · replace this mechanic</button>
+      <button class="isl-btn isl-btn--ghost" type="button" data-delete${busy ? ' disabled' : ''}>Delete mechanic</button>
+      <div class="isl-pk" style="margin-top:10px">${busy
+        ? 'Publishing in progress 🏗️ — rebuild and delete unlock when it finishes'
+        : 'Guests like it after they beat it — switch to guest mode to feel it'}</div>`);
     (sheet.querySelector('[data-play]') as HTMLElement).addEventListener('click', () => { closeSheet(); playSeries(b); });
     sheet.querySelector('[data-publish]')?.addEventListener('click', () => {
       closeSheet();
       toast('Publishing…');
       void bakeAndHost(slot, b.prompt ?? '');
     });
-    (sheet.querySelector('[data-rebuild]') as HTMLElement).addEventListener('click', () => { closeSheet(); openCreate(slot, b.name); });
+    (sheet.querySelector('[data-rebuild]') as HTMLElement).addEventListener('click', () => {
+      if (Boolean(b.publishing) || pollingSlots.has(slot)) { toast('Slot is busy — publishing in progress'); return; }
+      closeSheet();
+      openCreate(slot, b.name);
+    });
     (sheet.querySelector('[data-delete]') as HTMLElement).addEventListener('click', async () => {
+      if (Boolean(b.publishing) || pollingSlots.has(slot)) { toast('Slot is busy — publishing in progress'); return; }
       if (!await showConfirm(`Delete "${b.name}" from the island?`)) return;
       S.buildings = S.buildings.filter((x) => x.slot !== slot);
       closeSheet();

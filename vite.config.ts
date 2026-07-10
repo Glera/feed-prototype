@@ -181,7 +181,7 @@ function islandThemeApi(): Plugin {
                 res.end(JSON.stringify({ error: 'pack must be an object' }));
                 return;
               }
-              const packErr = validationError(pack as Record<string, unknown>);
+              const packErr = validatePack(pack as Record<string, unknown>);
               if (packErr) {
                 res.statusCode = 422;
                 res.end(JSON.stringify({ error: `invalid pack: ${packErr}` }));
