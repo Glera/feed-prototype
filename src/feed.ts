@@ -1,4 +1,21 @@
-import { PLAYABLES, playableUrl, coverUrl, setCoverBucket, type Playable } from './playables';
+import {
+  PLAYABLES,
+  playableUrl,
+  playablePayloadUrl,
+  coverUrl,
+  setCoverBucket,
+  mechanicMountCost,
+  mechanicPrefetchBytes,
+  mechanicAssetUrls,
+  type Playable,
+} from './playables';
+// Series-reward gift icons (inlined into the single-file feed bundle). One is picked
+// at random per mechanic for the chest in the series-row panel.
+import REWARD_ICON_1 from './assets/reward_lvl1.png';
+import REWARD_ICON_2 from './assets/reward_lvl2.png';
+import REWARD_ICON_3 from './assets/reward_lvl3.png';
+import REWARD_ICON_4 from './assets/reward_lvl4.png';
+const REWARD_ICONS = [REWARD_ICON_1, REWARD_ICON_2, REWARD_ICON_3, REWARD_ICON_4];
 import {
   apiSession, apiMe, variantIdForMechanic,
   apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge, apiChallengeInbox,
@@ -81,20 +98,17 @@ function coverSrc(id: string): string {
 
 const LIVE_AHEAD = 0;              // explicit warm-next scheduling below owns ahead iframe lifetime
 const LIVE_BEHIND = 0;             // back-swipe is disabled, so no idle previous iframe
-// Byte-prefetch depth (html + payload.js into the HTTP cache; NO iframe, no
-// main-thread cost, no JS-heap cost). Reels-style: pull content as far ahead
-// as the network can afford — in an infinite no-repeat feed every prefetched
-// byte gets used, the only waste is the tail when the user quits. Depth is
-// ADAPTIVE so a slow/metered connection isn't smothered by background bytes
-// (Network Information API — Android Chrome; iOS lacks it and gets the fast
-// default). Fetches are serialized, idle-gated and priority:'low' so they
-// never compete with the warm iframe's own load. Escape hatch: ?prefetch=off.
-function reserveAheadDepth(): number {
+// Byte-prefetch is deliberately independent from iframe mount. Pull shell +
+// payload into HTTP cache early, but cap the rolling window by BOTH depth and
+// bytes from versions.json. Unknown/old manifests use a conservative 1 MiB
+// estimate. Fetches stay serialized and low priority. Escape: ?prefetch=off.
+const MIB = 1024 * 1024;
+function reserveAheadPolicy(): { depth: number; bytes: number } {
   const c = (navigator as { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
-  if (c?.saveData) return 1;                                  // user asked to save data — respect it
-  if (c?.effectiveType === 'slow-2g' || c?.effectiveType === '2g') return 1;
-  if (c?.effectiveType === '3g') return 2;
-  return 4;                                                   // 4g / wifi / unknown (iOS)
+  if (c?.saveData) return { depth: 1, bytes: 1 * MIB };
+  if (c?.effectiveType === 'slow-2g' || c?.effectiveType === '2g') return { depth: 1, bytes: 1 * MIB };
+  if (c?.effectiveType === '3g') return { depth: 2, bytes: 4 * MIB };
+  return { depth: 4, bytes: 16 * MIB };                       // 4g / wifi / unknown (iOS)
 }
 const INITIAL_BATCH = 1;           // get the first mechanic visible; warm-next starts after it settles
 const PRELOADER_TIMEOUT_MS = 15000;
@@ -109,6 +123,7 @@ function runUid(): string {
 }
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
 const FRAME_READY_FALLBACK_MS = 900;
+const STAGED_READY_FALLBACK_MS = 7000;
 const FRAME_REVEAL_DELAY_MS = 90;
 // 150ms, was 900: the wait existed to shield the running demo from the warm
 // boot hitch. The hitch is gone (quality-bench cached, compile streamed off-
@@ -150,6 +165,7 @@ type SwipeApi = {
   closeEditor: () => void;
   isEditorOpen: () => boolean;
   restart: (opts?: { instant?: boolean }) => void;
+  prepareInteractive?: () => Promise<void> | void;
 };
 type PlayableHostApi = {
   swipe?: SwipeApi;                  // uniform swipe-platform API (preferred)
@@ -158,6 +174,7 @@ type PlayableHostApi = {
   hostGesture?: () => void;
   setEditorMode?: (enabled: boolean) => void;
   setHostPaused?: (paused: boolean) => void;
+  prepareInteractive?: () => Promise<void> | void;
   setAutoPlayEnabled?: (enabled: boolean) => void;       // legacy fallback
   startAutoPlay?: (options?: { immediate?: boolean }) => void;  // legacy fallback
   stopAutoPlay?: () => void;
@@ -250,6 +267,9 @@ export class Feed {
   private warmTimer: number | null = null;
   private warmIdleCancel: (() => void) | null = null;
   private frameLoaded = new Set<number>();
+  private frameStaticReady = new Set<number>();
+  private frameUsesStagedReady = new Set<number>();
+  private framePrepareRequested = new Set<number>();
   private frameReady = new Set<number>();
   private frameRevealed = new Set<number>();
   private framePaused = new Map<number, boolean>();
@@ -383,11 +403,11 @@ export class Feed {
   // while we decide which feels better.)
   private restartOnTakeover =
     (new URLSearchParams(location.search).get('takeover') || 'restart') !== 'continue';
-  // Warm-prefetch the next mechanic so it's mounted/parsed before the advance (default
-  // 'idle' — warms during idle time). Disable with ?warm=off to compare the un-warmed
-  // arrival (mechanic mounts on advance).
-  private warmNextEnabled =
-    (new URLSearchParams(location.search).get('warm') || 'idle') !== 'off';
+  // Default `adaptive`: idle-mount only light mechanics; heavy mechanics wait
+  // for directional swipe intent. `?warm=idle`/`?warm=1` forces the legacy idle
+  // mount for A/B, while `?warm=off` keeps every target cold until arrival.
+  private warmMode = new URLSearchParams(location.search).get('warm') || 'adaptive';
+  private warmNextEnabled = this.warmMode !== 'off';
   // LIVE RIDE experiment (default OFF, ?livein=1 to test): the warm NEXT page
   // parks at translateY(0) INSIDE the viewport, hidden under the opaque
   // current page — the browser renders+rasterises the live iframe there, and
@@ -451,6 +471,7 @@ export class Feed {
         return;
       }
       if (!t.classList.contains('page')) return;
+      if (this.settlingTargetIndex === null) return;
       this.settleSlide();
     });
 
@@ -929,6 +950,15 @@ export class Feed {
   }
 
   // ── Series slot row (5 slots + chest) ────────────────────────────────────
+  // A random reward-gift icon per mechanic, cached so it stays STABLE across the many
+  // re-renders of the series row (otherwise it would flicker between icons every tick).
+  private seriesRewardIcon = new Map<number, string>();
+  private rewardIconFor(idx: number): string {
+    let ic = this.seriesRewardIcon.get(idx);
+    if (!ic) { ic = REWARD_ICONS[Math.floor(Math.random() * REWARD_ICONS.length)]; this.seriesRewardIcon.set(idx, ic); }
+    return ic;
+  }
+
   private renderSeriesRow(): void {
     const active = this.series;
     // Autoplay PREVIEW: with no active series, show the same indicator for the
@@ -952,7 +982,7 @@ export class Feed {
       const state = s < done ? 'done' : s === done ? 'current' : 'todo';
       html += `<div class="series-slot series-slot--${state}">${s < done ? '✓' : s + 1}</div>`;
     }
-    html += `<div class="series-chest${done >= len ? ' series-chest--ready' : ''}">🎁</div>`;
+    html += `<div class="series-chest${done >= len ? ' series-chest--ready' : ''}"><img class="series-chest__img" src="${this.rewardIconFor(idx)}" alt="reward" draggable="false"></div>`;
     this.seriesRowEl.innerHTML = html;
     requestAnimationFrame(() => this.seriesRowEl?.classList.add('series-row--in'));
   }
@@ -1022,7 +1052,9 @@ export class Feed {
     scrim.className = 'chest-ov';
     scrim.innerHTML =
       '<div class="chest-ov__hint">Тапай сундук!</div>' +
-      '<button type="button" class="chest-ov__chest" aria-label="Open chest">🎁</button>';
+      // Same random gift icon as the series-row panel (rewardIconFor(i) is cached per
+      // mechanic) — the one that lifts off the panel is the one you tap in the centre.
+      `<button type="button" class="chest-ov__chest" aria-label="Open chest"><img class="chest-ov__chest__img" src="${this.rewardIconFor(i)}" alt="" draggable="false"></button>`;
     this.viewport.appendChild(scrim);
     this.chestEl = scrim;
     const chestBtn = scrim.querySelector<HTMLButtonElement>('.chest-ov__chest')!;
@@ -1370,6 +1402,7 @@ export class Feed {
   // Always collected (cheap); rendered as an on-screen overlay with ?perf=1.
   private bootTimingsLog = new Map<string, Record<string, unknown>>();
   private longTaskLog: { at: number; dur: number; warmId: string | null; src: string }[] = [];
+  private perfWindowStartedAt = performance.now();
   private perfOverlayEl: HTMLElement | null = null;
   private perfOverlayTextEl: HTMLElement | null = null;
   private perfDebug = new URLSearchParams(location.search).get('perf') === '1';
@@ -1470,12 +1503,17 @@ export class Feed {
   private perfReport(): string {
     const warmTasks = this.longTaskLog.filter((t) => t.warmId);
     const worst = warmTasks.reduce((m, t) => Math.max(m, t.dur), 0);
+    const first5 = this.longTaskLog.filter((t) => t.at >= this.perfWindowStartedAt && t.at <= this.perfWindowStartedAt + 5000);
+    const first5Sorted = first5.map((t) => t.dur).sort((a, b) => a - b);
+    const first5P95 = first5Sorted.length ? first5Sorted[Math.min(first5Sorted.length - 1, Math.ceil(first5Sorted.length * 0.95) - 1)] : 0;
+    const first5Tbt = first5.reduce((sum, task) => sum + Math.max(0, task.dur - 50), 0);
     const lines: string[] = [
       `[perf] ${new Date().toISOString()}`,
       navigator.userAgent,
       this.longTaskSupported
         ? `long>50ms: ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`
         : `frame-gaps≥100ms (rAF fallback, no Long Tasks API): ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`,
+      `first 5s: samples=${first5.length} p95=${first5P95}ms TBT=${first5Tbt}ms`,
       '',
       '── boot timings per mechanic ──',
     ];
@@ -1572,10 +1610,15 @@ export class Feed {
     }
     const warmTasks = this.longTaskLog.filter((t) => t.warmId);
     const worst = warmTasks.reduce((m, t) => Math.max(m, t.dur), 0);
+    const first5 = this.longTaskLog.filter((t) => t.at >= this.perfWindowStartedAt && t.at <= this.perfWindowStartedAt + 5000);
+    const first5Sorted = first5.map((t) => t.dur).sort((a, b) => a - b);
+    const first5P95 = first5Sorted.length ? first5Sorted[Math.min(first5Sorted.length - 1, Math.ceil(first5Sorted.length * 0.95) - 1)] : 0;
+    const first5Tbt = first5.reduce((sum, task) => sum + Math.max(0, task.dur - 50), 0);
     const lines: string[] = [
       this.longTaskSupported
         ? `long>50ms: ${this.longTaskLog.length} | during warm: ${warmTasks.length} | worst warm: ${worst}ms`
         : `gaps≥100ms: ${this.longTaskLog.length} | warm: ${warmTasks.length} | worst: ${worst}ms (rAF)`,
+      `first5 p95:${first5P95}ms tbt:${first5Tbt}ms n:${first5.length}`,
     ];
     for (const [id, t] of this.bootTimingsLog) {
       const net = typeof t.responseEndAt === 'number' ? t.responseEndAt : '?';
@@ -2302,6 +2345,9 @@ export class Feed {
 
   private resetFrameReadiness(i: number) {
     this.frameLoaded.delete(i);
+    this.frameStaticReady.delete(i);
+    this.frameUsesStagedReady.delete(i);
+    this.framePrepareRequested.delete(i);
     this.frameReady.delete(i);
     this.frameRevealed.delete(i);
     this.framePaused.delete(i);
@@ -2320,20 +2366,60 @@ export class Feed {
     const previous = this.frameFallbackTimers.get(i);
     if (previous) window.clearTimeout(previous);
     if (this.frameReady.has(i)) return;
+    const delay = this.frameUsesStagedReady.has(i) ? STAGED_READY_FALLBACK_MS : FRAME_READY_FALLBACK_MS;
     const timer = window.setTimeout(() => {
       this.frameFallbackTimers.delete(i);
       if (this.frames.get(i) !== frame) return;
       this.frameReady.add(i);
+      this.applyActiveStates();
       this.tryRevealFrame(i);
-    }, FRAME_READY_FALLBACK_MS);
+    }, delay);
     this.frameFallbackTimers.set(i, timer);
   }
 
+  private handlePlayableStaticReady(i: number) {
+    const frame = this.frames.get(i);
+    if (!frame) return;
+    this.frameStaticReady.add(i);
+    this.frameUsesStagedReady.add(i);
+    // Replace the 900ms legacy fallback with the staged hard cap. A real
+    // interactive_ready/ready normally arrives well before this.
+    this.queueFrameReadyFallback(i, frame);
+    this.applyActiveStates();
+    if (this.shouldPrepareInteractive(i)) this.requestInteractivePreparation(i);
+  }
+
+  private shouldPrepareInteractive(i: number): boolean {
+    return i === this.realIndex()
+      || i === this.warmIndex
+      || i === this.settlingTargetIndex
+      || this.liveHold.has(i);
+  }
+
+  private requestInteractivePreparation(i: number) {
+    if (this.frameReady.has(i) || this.framePrepareRequested.has(i)) return;
+    const frame = this.frames.get(i);
+    if (!frame) return;
+    this.framePrepareRequested.add(i);
+    try {
+      const api = this.playableApi(i);
+      const result = (api?.swipe?.prepareInteractive ?? api?.prepareInteractive)?.();
+      if (result && typeof (result as Promise<void>).catch === 'function') {
+        void (result as Promise<void>).catch(() => {});
+      }
+    } catch { /* cross-origin/legacy: postMessage below */ }
+    this.postPlayableCommand(frame, 'prepareInteractive');
+  }
+
   private handlePlayableReady(i: number) {
+    this.frameStaticReady.add(i);
     this.frameReady.add(i);
     const fallbackTimer = this.frameFallbackTimers.get(i);
     if (fallbackTimer) window.clearTimeout(fallbackTimer);
     this.frameFallbackTimers.delete(i);
+    // A staged current frame stayed host-paused while it prepared. Resume it
+    // before the 90ms poster fade so onInteractive runs behind the cover.
+    this.applyActiveStates();
     this.tryRevealFrame(i);
     this.ensureFrameAutoPlay(i);
     this.applyPendingEditor(i);
@@ -2576,6 +2662,7 @@ export class Feed {
     if (document.hidden) return true;
     if (this.overlayOpen) return true;   // a story / editor is up — freeze the whole feed
     if (this.collectingRewardIndex !== null) return true;   // star credit in flight — freeze EVERY frame behind the cover so nothing competes for the main thread
+    if (this.frameUsesStagedReady.has(i) && !this.frameReady.has(i)) return true;
     if (this.settlingTargetIndex === i) return true;
     return i !== this.realIndex() || (this.earnedThisCycle.has(i) && !this.manualRuns.has(i)) || this.failedThisCycle.has(i);
   }
@@ -2623,7 +2710,13 @@ export class Feed {
     if (next === cur) return 'next === current';
     if (this.earnedThisCycle.has(next)) return `next #${next} already earned this cycle`;
     if (this.failedThisCycle.has(next)) return `next #${next} already failed this cycle`;
+    if (!this.shouldIdleWarm(next)) return `next #${next} is ${mechanicMountCost(this.playables[next].id)}; waiting for swipe intent`;
     return '';
+  }
+
+  private shouldIdleWarm(i: number): boolean {
+    if (this.warmMode === 'idle' || this.warmMode === '1' || this.warmMode === 'on') return true;
+    return mechanicMountCost(this.playables[i]?.id ?? '') === 'light';
   }
   // Live snapshot — exposed as window.__feedWarm() (see constructor). Answers
   // "is the next mechanic pre-warmed, and if not, why".
@@ -2638,12 +2731,16 @@ export class Feed {
       warmIndex: this.warmIndex,
       nextMounted: this.frames.has(next),
       nextRevealed: this.frameRevealed.has(next),
+      mode: this.warmMode,
+      nextMountCost: next >= 0 ? mechanicMountCost(this.playables[next]?.id ?? '') : null,
       blockedNow: reason || '(not blocked — warm is allowed right now)',
       calmFramesSeenMax: this.warmCalmMax,
       calmFramesNeeded: WARM_NEXT_CALM_FRAMES,
-      diagnosis: this.warmCalmMax < WARM_NEXT_CALM_FRAMES
-        ? `the current mechanic never yielded ${WARM_NEXT_CALM_FRAMES} calm frames (≤${WARM_NEXT_CALM_FRAME_MS}ms) in a row → warm is STARVED (no idle window)`
-        : 'a calm window was reached at least once',
+      diagnosis: next >= 0 && !this.shouldIdleWarm(next)
+        ? 'intent-only mount: byte-prefetch may run, iframe creation waits for directional swipe intent'
+        : this.warmCalmMax < WARM_NEXT_CALM_FRAMES
+          ? `the current mechanic never yielded ${WARM_NEXT_CALM_FRAMES} calm frames (≤${WARM_NEXT_CALM_FRAME_MS}ms) in a row → warm is STARVED (no idle window)`
+          : 'a calm window was reached at least once',
       recentEvents: this.warmEvents.slice(-50),
     };
   }
@@ -2652,6 +2749,7 @@ export class Feed {
     this.clearWarmTimer();
     const next = this.desiredWarmIndex();
     if (next === null) { this.wlog(`schedule blocked: ${this.warmBlockReason()}`); return; }
+    if (!this.shouldIdleWarm(next)) { this.wlog(`idle mount skipped for #${next}: ${this.warmBlockReason()}`); return; }
     if (this.warmIndex === next && this.frames.has(next)) { this.wlog(`already warm: #${next}`); return; }
     this.wlog(`scheduled → will try to warm #${next} once the page goes calm`);
     this.warmTimer = window.setTimeout(() => {
@@ -2675,6 +2773,20 @@ export class Feed {
     this.updateLive();
     this.setFramePaused(expected, true);
     this.tryRevealFrame(expected);
+  }
+
+  /** Mount the target only after a real directional gesture (or committed programmatic advance). */
+  private mountIntentTarget(i: number) {
+    if (!this.warmNextEnabled || i < 0 || i >= this.N) return;
+    if (this.frames.has(i)) {
+      if (this.frameStaticReady.has(i)) this.requestInteractivePreparation(i);
+      return;
+    }
+    this.wlog(`INTENT mount #${i} (${mechanicMountCost(this.playables[i].id)})`);
+    // onDown already placed the target in liveHold; updateLive performs the
+    // expensive iframe navigation only now, after direction is known.
+    this.updateLive();
+    if (this.frameStaticReady.has(i)) this.requestInteractivePreparation(i);
   }
 
   private pauseAllFrames = () => {
@@ -2982,8 +3094,8 @@ export class Feed {
   // ── Island meta prototype (PARALLEL experiment to the meta world above) ────
   // Triangle icon on the feed bar. The player's island is a showcase of their
   // created mechanics: each one is a building that themes its own sector.
-  // All UI/state/styles live in src/island.ts (namespaced isl-*, localStorage);
-  // this method only owns the shared overlay boilerplate.
+  // UI/styles live in src/island.ts; state is server-authoritative with a local
+  // cache managed by src/island-state.ts. This method owns overlay boilerplate.
   private openIslandWorld() {
     if (this.overlayOpen) return;
     this.overlayOpen = true;
@@ -3497,9 +3609,14 @@ export class Feed {
   private prefetchReserve() {
     if (!this.prefetchEnabled) return;
     const base = this.realIndex();
-    for (let d = 1; d <= reserveAheadDepth(); d++) {
+    const policy = reserveAheadPolicy();
+    let plannedBytes = 0;
+    for (let d = 1; d <= policy.depth; d++) {
       const j = ((base + d) % this.N + this.N) % this.N;
+      const estimatedBytes = mechanicPrefetchBytes(this.playables[j].id) ?? MIB;
+      if (d > 1 && plannedBytes + estimatedBytes > policy.bytes) break;
       this.enqueuePrefetch(j);
+      plannedBytes += estimatedBytes;
     }
   }
 
@@ -3531,15 +3648,16 @@ export class Feed {
       }
       // The html URL must match the future warm-mount iframe src BYTE-FOR-BYTE
       // (query params included) or the HTTP cache misses. The blob-boot
-      // payload.js is param-less and referenced relatively by the html — fetch
-      // it too, it's the part V8 stream-compiles at boot.
+      // Fetch the exact cache-busted payload URL referenced by exported HTML;
+      // omitting its ?v hash creates a distinct cache entry in WebViews.
       const id = this.playables[i].id;
       // priority:'low' (Chromium fetch-priority hint; ignored elsewhere) keeps
       // background bytes from competing with the warm iframe's own load.
-      const lowPriority = { mode: 'no-cors', priority: 'low' } as RequestInit;
+      const lowPriority = { mode: 'no-cors', priority: 'low', cache: 'force-cache' } as RequestInit;
       Promise.allSettled([
         fetch(playableUrl(id, { hostPaused: true, auto: true }), lowPriority),
-        fetch(`${playableUrl(id).split('?')[0].replace(/\.html$/, '')}.payload.js`, lowPriority),
+        fetch(playablePayloadUrl(id), lowPriority),
+        ...mechanicAssetUrls(id).map((url) => fetch(url, lowPriority)),
       ])
         .then(() => this.markReady(i))
         .finally(() => {
@@ -3793,6 +3911,13 @@ export class Feed {
     if (dt > 0) this.velocity = (e.clientY - this.lastY) / dt;
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
+    // A real upward direction is the mount boundary for heavy next mechanics.
+    // Plain taps and sub-slop finger noise never create an iframe. An active
+    // series cannot page away, so it must not trigger unrelated work either.
+    if (dy <= -MIN_SWIPE_INTENT_PX && !(this.series && this.series.playing)) {
+      const next = this.indexForPos(Math.round(this.basePos) + 1);
+      this.mountIntentTarget(next);
+    }
     // Reward-collect drags don't scroll the page: the win star must stay PUT so the
     // collect flight starts from its resting spot (and pulses there) instead of
     // riding the finger upward first. The flick threshold still uses dy/velocity.
@@ -3981,6 +4106,10 @@ export class Feed {
       this.handleBootTimings(i, d);
       return;
     }
+    if (this.isPlayableStaticReadyMessage(e.data)) {
+      this.handlePlayableStaticReady(i);
+      return;
+    }
     if (this.isPlayableReadyMessage(e.data)) {
       this.handlePlayableReady(i);
       return;
@@ -4063,7 +4192,13 @@ export class Feed {
     if (!data || typeof data !== 'object') return false;
     const d = data as Record<string, unknown>;
     const type = String(d.type ?? '').toLowerCase();
-    return d.source === 'playable' && (type === 'ready' || type === 'loaded');
+    return d.source === 'playable' && (type === 'interactive_ready' || type === 'ready' || type === 'loaded');
+  }
+
+  private isPlayableStaticReadyMessage(data: unknown): boolean {
+    if (!data || typeof data !== 'object') return false;
+    const d = data as Record<string, unknown>;
+    return d.source === 'playable' && String(d.type ?? '').toLowerCase() === 'static_ready';
   }
 
   private hostGestureDeliveredSynchronously(data: unknown): boolean {
@@ -5117,6 +5252,9 @@ export class Feed {
       this.warmIndex = null;
       this.liveHold = new Set([fromIndex, targetIndex]);
       this.settlingTargetIndex = targetIndex;
+      // Programmatic advances have no pointer-move intent signal. Start their
+      // target navigation at commit; the host poster carries the transition.
+      if (this.warmNextEnabled) this.updateLive();
       this.stopRewardSparks(fromIndex);
       if (this.isForwardCycleWrap(fromPos, targetPos)) this.resetCycleAfterSettle = true;
       // Live-ride teleport for PROGRAMMATIC advances (× / ▲ button / post-win):

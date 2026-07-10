@@ -2412,7 +2412,8 @@ body {
 }
 .series-slot--done { background: linear-gradient(180deg, #45d68c, #2fae6e); color: #06120c; }
 .series-slot--current { border-color: #6ea8ff; color: #cfe0ff; }
-.series-chest { font-size: 20px; margin-left: 3px; }
+.series-chest { font-size: 20px; margin-left: 3px; line-height: 0; }
+.series-chest__img { width: 30px; height: 30px; object-fit: contain; display: block; }
 .series-chest--ready { filter: drop-shadow(0 0 7px rgba(255, 216, 90, 0.85)); }
 
 .chest-ov {
@@ -2424,10 +2425,11 @@ body {
 .chest-ov--in { opacity: 1; }
 .chest-ov__hint { color: #cfe0ff; font: 800 18px/1.2 system-ui, sans-serif; }
 .chest-ov__chest {
-  font-size: 108px; line-height: 1; background: none; border: 0; padding: 0; cursor: pointer;
+  font-size: 108px; line-height: 0; background: none; border: 0; padding: 0; cursor: pointer;
   transform: scale(0.7); transition: transform 0.24s cubic-bezier(0.2,1.4,0.4,1);
   -webkit-tap-highlight-color: transparent;
 }
+.chest-ov__chest__img { width: 128px; height: 128px; object-fit: contain; display: block; }
 .chest-ov--in .chest-ov__chest { transform: scale(1); }
 /* Elastic squash→stretch on tap, like a merged item settling. */
 .chest-ov__chest--squish { animation: chest-squish 0.52s cubic-bezier(0.33,1,0.68,1); }

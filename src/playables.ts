@@ -17,15 +17,23 @@
 declare const __PLATFORM_VERSION__: string;
 const BUILD_TAG = (typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev').replace(/[^0-9]/g, '') || 'dev';
 
-// Per-mechanic cache-bust version = the content hash of each mechanic's shipped
-// bundle, published by export-swipe.sh into versions.json and loaded at boot
-// (setMechanicVersions, fetched no-store). A mechanic's iframe URL changes ONLY
-// when ITS bundle changes, so unchanged mechanics stay cached across deploys, and
-// a changed one busts even inside a stale-cached feed (the manifest is always
-// fetched fresh). Falls back to the feed build tag for anything not in the map.
-let MECH_VERSIONS: Record<string, string> = {};
-export function setMechanicVersions(m: Record<string, string> | null | undefined): void {
-  if (m && typeof m === 'object') MECH_VERSIONS = m;
+// Per-mechanic deploy manifest. Older deployments contain `id → hash`; newer
+// ones add byte sizes and a coarse mount-cost class. Accept both shapes so the
+// platform and mechanic deploys can roll independently.
+export type MechanicMountCost = 'light' | 'heavy';
+export interface MechanicManifestEntry {
+  version: string;
+  htmlBytes?: number;
+  payloadBytes?: number;
+  assetBytes?: number;
+  assets?: string[];
+  mediaBytes?: number;
+  mountCost?: MechanicMountCost;
+}
+type MechanicManifestValue = string | MechanicManifestEntry;
+let MECH_MANIFEST: Record<string, MechanicManifestValue> = {};
+export function setMechanicVersions(m: Record<string, MechanicManifestValue> | null | undefined): void {
+  if (m && typeof m === 'object') MECH_MANIFEST = m;
 }
 // Some feed entries REUSE another mechanic's shipped HTML (e.g. a different level of
 // the same build). id → html basename. Falls back to the id itself.
@@ -33,8 +41,44 @@ const HTML_ALIAS: Record<string, string> = {
   'pins-l3-swipe': 'pins-swipe',   // level-3 pins series rides the same pins-swipe build (?level=3)
 };
 function htmlFileFor(id: string): string { return HTML_ALIAS[id] ?? id; }
+function manifestEntry(id: string): MechanicManifestEntry | null {
+  const raw = MECH_MANIFEST[htmlFileFor(id)];
+  if (!raw) return null;
+  return typeof raw === 'string' ? { version: raw } : raw;
+}
 function mechanicVersion(id: string): string {
-  return MECH_VERSIONS[htmlFileFor(id)] || BUILD_TAG;   // shared HTML → shared cache-bust hash
+  return manifestEntry(id)?.version || BUILD_TAG;   // shared HTML → shared cache-bust hash
+}
+
+/** Bytes fetched by the shell+payload+external-asset prefetch. Videos stay deferred. */
+export function mechanicPrefetchBytes(id: string): number | null {
+  const entry = manifestEntry(id);
+  if (!entry) return null;
+  const html = Number(entry.htmlBytes);
+  const payload = Number(entry.payloadBytes);
+  const assets = Number(entry.assetBytes);
+  if (!Number.isFinite(html) && !Number.isFinite(payload) && !Number.isFinite(assets)) return null;
+  return Math.max(0, Number.isFinite(html) ? html : 0)
+    + Math.max(0, Number.isFinite(payload) ? payload : 0)
+    + Math.max(0, Number.isFinite(assets) ? assets : 0);
+}
+
+export function mechanicAssetUrls(id: string): string[] {
+  const assets = manifestEntry(id)?.assets;
+  if (!Array.isArray(assets) || assets.length === 0) return [];
+  let base = new URLSearchParams(location.search).get('base') || './';
+  if (!base.endsWith('/')) base += '/';
+  return assets.filter((name): name is string => typeof name === 'string' && /^[\w.\-]+$/.test(name))
+    .map((name) => `${base}${name}`);
+}
+
+/** Conservative fallback: unknown artifacts wait for swipe intent. */
+export function mechanicMountCost(id: string): MechanicMountCost {
+  const entry = manifestEntry(id);
+  if (entry?.mountCost === 'light' || entry?.mountCost === 'heavy') return entry.mountCost;
+  const bootBytes = mechanicPrefetchBytes(id);
+  const mediaBytes = Math.max(0, Number(entry?.mediaBytes) || 0);
+  return bootBytes !== null && bootBytes <= 512 * 1024 && mediaBytes === 0 ? 'light' : 'heavy';
 }
 
 /** Cover image URL for a feed entry — keyed by the ENTRY id (NOT the aliased
@@ -66,8 +110,8 @@ export interface Playable {
 
 export const PLAYABLES: Playable[] = [
   { id: 'merge-locked-v1-swipe' },
-  { id: 'pins-swipe' },
   { id: 'marble-sort-swipe' },
+  { id: 'pins-swipe' },
   { id: 'merge-timepress-v1-swipe' },
   { id: 'merge-timepress-v2-swipe' },
   { id: 'merge-timepress-no-orders-v1-swipe' },
@@ -97,4 +141,11 @@ export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: 
   params.set('v', mechanicVersion(id));
   const query = params.toString();
   return query ? `${url}?${query}` : url;
+}
+
+/** Exact URL referenced by exported SWIPE HTML, including its payload hash. */
+export function playablePayloadUrl(id: string): string {
+  let base = new URLSearchParams(location.search).get('base') || './';
+  if (!base.endsWith('/')) base += '/';
+  return `${base}${htmlFileFor(id)}.payload.js?v=${mechanicVersion(id)}`;
 }

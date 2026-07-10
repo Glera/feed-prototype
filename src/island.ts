@@ -7,12 +7,23 @@
  * ground tint + props + palette all come from the theme pack, so the island
  * grows out of what the player makes instead of being decorated from a catalog.
  *
- * Prototype scope: island state is still localStorage, while dev-only Vite
- * endpoints provide theme generation and bake-on-confirm publishing. Playing a
- * building launches the hosted UGC artifact when it exists, with a client-side
- * fork/stock build as fallback.
+ * Island state is authoritative in swipe-backend and revision-synchronised
+ * across Telegram clients; localStorage is only the instant-paint/offline cache.
+ * Playing a building launches the hosted UGC artifact when it exists, with a
+ * client-side fork/stock build as fallback.
  */
-import { apiIslandBake, apiIslandBakeJob, apiIslandTheme, type IslandBakeJob } from './api';
+import {
+  ApiRequestError,
+  apiIslandBake,
+  apiIslandBakeJob,
+  apiIslandTheme,
+  type IslandBakeJob,
+  type IslandBuildingState,
+  type IslandPersistedState,
+  type IslandStoredPack,
+  type IslandTemplateId,
+} from './api';
+import { IslandStateSync, cacheIslandState, loadIslandState, replaceIslandState } from './island-state';
 import { coverUrl, playableUrl } from './playables';
 import { showConfirm } from './telegram';
 
@@ -26,30 +37,11 @@ const SORT_RECIPE = __ISLAND_SORT_RECIPE__;
 
 export interface IslandHostCtx { close(): void; }
 
-type TplId = 'sort' | 'merge' | 'pins';
-type PropKind = 'mushroom' | 'crystal' | 'coral' | 'lollipop' | 'rock';
-
-interface Pack {
-  id: string; name: string; kw: string[];
-  ground: string; edge: string; boardBg: string;
-  items: string[]; prop: PropKind; body: string; roof: string;
-}
-interface Building {
-  slot: number; tpl: TplId; pack: string; name: string;
-  plays: number; likes: number; liked: boolean; fresh?: boolean;
-  prompt?: string;
-  publishing?: boolean;
-  publishError?: string;
-  jobId?: string;
-  rel?: string;
-  url?: string;   // hosted build (swipe-ugc) — play this instead of the client-side fork
-}
-interface IslandState {
-  tokens: number;
-  buildings: Building[];
-  aiPacks?: Record<string, Pack>;   // Claude-generated theme packs, persisted so forks survive reloads
-  aiSeq?: number;
-}
+type TplId = IslandTemplateId;
+type PropKind = IslandStoredPack['prop'];
+type Pack = IslandStoredPack;
+type Building = IslandBuildingState;
+type IslandState = IslandPersistedState;
 interface CreationDraft {
   slot: number;
   tpl: TplId;
@@ -84,30 +76,10 @@ const TPL: Record<TplId, { label: string; ds: string; playableId: string }> = {
 };
 const CREATABLE_TPLS: TplId[] = ['sort'];
 const SLOTS = [{ x: 115, y: 155 }, { x: 275, y: 170 }, { x: 115, y: 395 }, { x: 275, y: 380 }];
-const STORE_KEY = 'island-proto-v1';
 const GUEST_REWARD = 25;
 const REROLL_COST = 30;
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
 const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
-
-function loadState(): IslandState {
-  try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (raw) {
-      const state = JSON.parse(raw) as IslandState;
-      state.buildings.forEach((b) => {
-        if (b.publishing && !b.jobId) {
-          b.publishing = false;
-          b.publishError = 'Publish status was interrupted; retry to confirm hosting';
-        }
-      });
-      return state;
-    }
-  } catch { /* first run / blocked storage */ }
-  return { tokens: 120, buildings: [
-    { slot: 1, tpl: 'sort', pack: 'neon', name: 'Neon sort', plays: 2431, likes: 128, liked: false },
-  ] };
-}
 
 function esc(t: string): string {
   return t.replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] as string));
@@ -424,7 +396,7 @@ function ensureStyles(): void {
 
 export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   ensureStyles();
-  const S = loadState();
+  const S: IslandState = loadIslandState();
   let guest = false;
   let cur: CreationDraft | null = null;
   let toastTimer = 0;
@@ -432,6 +404,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   const generationBySlot = new Map<number, number>();
   const readyDrafts = new Map<number, CreationDraft>();
   const pollingSlots = new Set<number>();
+  let stateSync: IslandStateSync | null = null;
 
   const resolvePack = (id: string): Pack => PACKS.find((x) => x.id === id) ?? S.aiPacks?.[id] ?? PACKS[0];
 
@@ -465,7 +438,17 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           save();
           job = await apiIslandBake({ request_id: b.jobId, pack: resolvePack(packRef), prompt, tpl: 'sort' });
         } else {
-          job = await apiIslandBakeJob(b.jobId);
+          try {
+            job = await apiIslandBakeJob(b.jobId);
+          } catch (error) {
+            // A local snapshot may outlive a bake request that never reached the
+            // backend (WebView closed mid-flight). Replace only a missing job;
+            // all real job failures keep their idempotent request id.
+            if (!(error instanceof ApiRequestError) || error.status !== 404) throw error;
+            b.jobId = newJobId();
+            save();
+            job = await apiIslandBake({ request_id: b.jobId, pack: resolvePack(packRef), prompt, tpl: 'sort' });
+          }
         }
       } catch (e) {
         if (!IS_DEV) throw e;
@@ -533,7 +516,26 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     }
   }
 
-  const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch { /* private mode */ } };
+  const save = () => {
+    if (stateSync) stateSync.changed();
+    else cacheIslandState(S);
+  };
+
+  function resumePendingBakes(): void {
+    S.buildings
+      .filter((building) => building.tpl === 'sort' && Boolean(building.jobId) && !hostedUrl(building))
+      .forEach((building) => { void bakeAndHost(building.slot, building.prompt ?? ''); });
+  }
+
+  stateSync = new IslandStateSync({
+    read: () => S,
+    apply: (state) => {
+      replaceIslandState(S, state);
+      refreshIsland(false);
+      cacheIslandState(S);
+    },
+    onHydrated: resumePendingBakes,
+  });
 
   ov.innerHTML =
     '<div class="isl-head">' +
@@ -583,7 +585,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   };
   scrim.addEventListener('click', closeSheet);
 
-  function refreshIsland(): void {
+  function refreshIsland(persist = false): void {
     let s =
       '<rect width="390" height="540" fill="#20627A"/>' +
       '<ellipse cx="60" cy="66" rx="46" ry="7" fill="#35798F" opacity=".6"/>' +
@@ -650,7 +652,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     (ov.querySelector('[data-stat]') as HTMLElement).textContent =
       `♥ ${likes} · ${S.buildings.length}/${SLOTS.length} mechanics`;
     (ov.querySelector('[data-tok]') as HTMLElement).textContent = String(S.tokens);
-    save();
+    if (persist) save();
   }
 
   // ── creation flow ──────────────────────────────────────────────────────────
@@ -724,7 +726,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       const resolved = pack ?? pickPack(req.prompt, req.pack.id);
       const isAi = Boolean(pack);
       if (pack) {
-        pack.id = `ai-${(S.aiSeq = (S.aiSeq ?? 0) + 1)}`;
+        // Sequence ids collide when phone and Desktop generate concurrently.
+        // A UUID-backed id makes independently-created packs mergeable.
+        pack.id = `ai-${newJobId()}`;
         S.aiPacks = { ...(S.aiPacks ?? {}), [pack.id]: pack };
       }
       req.pack = resolved;
@@ -784,7 +788,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       });
       cur = null;
       closeSheet();
-      refreshIsland();
+      refreshIsland(true);
       toast('Publishing…');
       void bakeAndHost(slot, prompt);
     });
@@ -840,7 +844,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (!await showConfirm(`Delete "${b.name}" from the island?`)) return;
       S.buildings = S.buildings.filter((x) => x.slot !== slot);
       closeSheet();
-      refreshIsland();
+      refreshIsland(true);
       toast('Mechanic removed from the island');
     });
   }
@@ -956,7 +960,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         save();
       });
       (win.querySelector('[data-home]') as HTMLElement).addEventListener('click', () => { cleanup(); refreshIsland(); });
-      refreshIsland();
+      refreshIsland(true);
     };
     const onMsg = (e: MessageEvent) => {
       if (!ov.isConnected) { cleanup(); return; }
@@ -988,8 +992,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (b) playSeries(b);
   });
 
-  refreshIsland();
-  S.buildings
-    .filter((building) => building.tpl === 'sort' && Boolean(building.jobId) && !hostedUrl(building))
-    .forEach((building) => { void bakeAndHost(building.slot, building.prompt ?? ''); });
+  // Paint the local cache immediately, then replace it with the authoritative
+  // server snapshot. Polling keeps an already-open island fresh across devices.
+  refreshIsland(false);
+  // Wait for the first server read before resuming jobs so a stale device cache
+  // cannot revive a bake that another client has already replaced.
+  void stateSync.hydrate().finally(resumePendingBakes);
+  const pollState = async () => {
+    if (!ov.isConnected) return;
+    await stateSync?.refresh();
+    window.setTimeout(pollState, 10000);
+  };
+  window.setTimeout(pollState, 10000);
 }

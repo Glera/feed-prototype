@@ -15,6 +15,7 @@ import { recipe as sortRecipe, renderThemePrompt, validatePack } from '../swipe-
 // deployed static site this plugin is absent; the files are served directly.
 function servePlayables(): Plugin {
   const playablesDir = path.resolve(__dirname, '../playables');
+  const deployManifest = path.resolve(__dirname, '../swipe-platform/versions.json');
   type SwipeBuild = { dir: string; root: string; html: string; payload: string };
   const resolveBuild = (name: string): SwipeBuild | null => {
     // Deploy artifacts are named `<base>-swipe.html`. The source dir is
@@ -29,10 +30,18 @@ function servePlayables(): Plugin {
     }
     return null;
   };
+  const deployVersion = (name: string): string => {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(deployManifest, 'utf8')) as Record<string, string | { version?: string }>;
+      const entry = manifest[name];
+      return typeof entry === 'string' ? entry : String(entry?.version || 'dev');
+    } catch { return 'dev'; }
+  };
   const rewriteDeployPaths = (name: string, source: string): string =>
     source
-      .replace('src="./payload.js"', `src="./${name}.payload.js"`)
-      .replace(/(["'])\.\/video-/g, `$1./${name}.video-`);
+      .replace('src="./payload.js"', `src="./${name}.payload.js?v=${encodeURIComponent(deployVersion(name))}"`)
+      .replace(/(["'])\.\/video-/g, `$1./${name}.video-`)
+      .replace(/(["'])\.\/asset-/g, `$1./${name}.asset-`);
   const resolveCover = (name: string, suffix: '' | '.c'): string | null => {
     const level = name.match(/^(.*)-l(\d+)-swipe$/);
     if (level) {
@@ -53,6 +62,12 @@ function servePlayables(): Plugin {
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = (req.url || '').split('?')[0];
+        if (url === '/versions.json' && fs.existsSync(deployManifest)) {
+          res.setHeader('content-type', 'application/json; charset=utf-8');
+          res.setHeader('cache-control', 'no-store');
+          res.end(fs.readFileSync(deployManifest, 'utf8'));
+          return;
+        }
         const htmlMatch = url.match(/^\/([\w.\-]+)\.html$/);
         if (htmlMatch && htmlMatch[1] !== 'index') {
           const name = htmlMatch[1];
@@ -93,6 +108,24 @@ function servePlayables(): Plugin {
           const file = build && path.join(build.root, `video-${videoMatch[2]}`);
           if (file && fs.existsSync(file)) {
             res.setHeader('content-type', file.endsWith('.mp4') ? 'video/mp4' : 'video/webm');
+            fs.createReadStream(file).pipe(res);
+            return;
+          }
+        }
+
+        const assetMatch = url.match(/^\/([\w.\-]+)\.asset-(.+)$/);
+        if (assetMatch) {
+          const build = resolveBuild(assetMatch[1]);
+          const file = build && path.join(build.root, `asset-${assetMatch[2]}`);
+          if (file && fs.existsSync(file)) {
+            const ext = path.extname(file).toLowerCase();
+            const contentType: Record<string, string> = {
+              '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+              '.webp': 'image/webp', '.avif': 'image/avif', '.gif': 'image/gif',
+              '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+              '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
+            };
+            res.setHeader('content-type', contentType[ext] || 'application/octet-stream');
             fs.createReadStream(file).pipe(res);
             return;
           }

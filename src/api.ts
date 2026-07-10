@@ -60,6 +60,31 @@ async function postRequired<T>(path: string, body?: unknown): Promise<T> {
   return data as T;
 }
 
+async function putRequired<T>(path: string, body: unknown): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}${path}`, {
+      method: 'PUT',
+      headers: headers(),
+      body: JSON.stringify(body),
+      // Island snapshots are small; allow a final write to outlive WebView
+      // pagehide when Telegram closes the Mini App immediately after an action.
+      keepalive: true,
+    });
+  } catch (e) {
+    throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const text = await r.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
+  if (!r.ok) {
+    const detail = data?.detail ?? data?.error ?? text ?? r.statusText;
+    throw new ApiRequestError(r.status, `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+  }
+  if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
+  return data as T;
+}
+
 async function getRequired<T>(path: string): Promise<T> {
   let r: Response;
   try {
@@ -205,6 +230,55 @@ export interface IslandThemePack {
   prop: 'mushroom' | 'crystal' | 'coral' | 'lollipop' | 'rock';
   body: string;
   roof: string;
+}
+
+export interface IslandStoredPack extends IslandThemePack {
+  id: string;
+  kw: string[];
+}
+
+export type IslandTemplateId = 'sort' | 'merge' | 'pins';
+
+export interface IslandBuildingState {
+  slot: number;
+  tpl: IslandTemplateId;
+  pack: string;
+  name: string;
+  plays: number;
+  likes: number;
+  liked: boolean;
+  fresh?: boolean;
+  prompt?: string;
+  publishing?: boolean;
+  publishError?: string;
+  jobId?: string;
+  rel?: string;
+  url?: string;
+}
+
+export interface IslandPersistedState {
+  tokens: number;
+  buildings: IslandBuildingState[];
+  aiPacks?: Record<string, IslandStoredPack>;
+  aiSeq?: number;
+}
+
+export interface IslandStateResponse {
+  state: IslandPersistedState | null;
+  revision: number;
+  schema_version: number;
+  updated_at: string | null;
+}
+
+export function apiIslandState(): Promise<IslandStateResponse> {
+  return getRequired<IslandStateResponse>('/api/island/state');
+}
+
+export function apiSaveIslandState(state: IslandPersistedState, expectedRevision: number): Promise<IslandStateResponse> {
+  return putRequired<IslandStateResponse>('/api/island/state', {
+    state,
+    expected_revision: expectedRevision,
+  });
 }
 
 export function apiIslandTheme(payload: { prompt: string; avoid?: string }): Promise<IslandThemePack> {
