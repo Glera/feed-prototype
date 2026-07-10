@@ -10,7 +10,7 @@
  * Island state is authoritative in swipe-backend and revision-synchronised
  * across Telegram clients; localStorage is only the instant-paint/offline cache.
  * Playing a building launches the hosted UGC artifact when it exists, with a
- * client-side fork/stock build as fallback.
+ * canonical stock build as fallback. Generated code never mutates that build.
  */
 import {
   ApiRequestError,
@@ -30,9 +30,7 @@ import { coverUrl, playableUrl } from './playables';
 import { showConfirm } from './telegram';
 
 declare const __ISLAND_SORT_RECIPE__: {
-  version: number;
   baseBuild: string;
-  sourcePalette: string[];
 };
 
 const SORT_RECIPE = __ISLAND_SORT_RECIPE__;
@@ -46,9 +44,61 @@ type VariantKeys = 'sceneBg' | 'belt' | 'outline' | 'seed' | 'difficulty' | 'mot
 type Pack = IslandStoredPack & Required<Pick<IslandStoredPack, VariantKeys>>;
 type Building = IslandBuildingState;
 type IslandState = IslandPersistedState;
+type CreationMode = 'guided' | 'wild';
+type ExperimentProvider = 'claude' | 'codex' | 'auto';
+interface ExperimentConcept {
+  title: string;
+  feeling: string;
+  pitch: string;
+  mechanic: string;
+  risk: 'low' | 'medium' | 'high';
+}
+interface ExperimentResult {
+  id: string;
+  parentId: string | null;
+  title: string;
+  pitch: string;
+  mechanic: string;
+  feeling: string;
+  prompt: string;
+  feedback: string | null;
+  attempts: number;
+  url: string;
+  agentSummary: string;
+}
+interface ExperimentJob {
+  id: string;
+  state: 'queued' | 'starting' | 'running' | 'ready' | 'failed' | 'cancelled';
+  phase: string;
+  message: string;
+  attempt: number;
+  logs: Array<{ phase: string; message: string; attempt?: number }>;
+  result?: ExperimentResult;
+  error?: string;
+}
+interface ExperimentPublishResult {
+  id: string;
+  rel: string;
+  meta: string;
+  url: string;
+  commit: string;
+  ready: boolean;
+  dryRun: boolean;
+}
+interface ExperimentPublishJob {
+  id: string;
+  state: 'queued' | 'starting' | 'running' | 'ready' | 'failed' | 'cancelled';
+  phase: string;
+  message: string;
+  logs: Array<{ phase: string; message: string }>;
+  result?: ExperimentPublishResult;
+  error?: string;
+}
 interface CreationDraft {
   slot: number;
   tpl: TplId;
+  mode: CreationMode;
+  provider: ExperimentProvider;
   prompt: string;
   pack: Pack;
   rerolls: number;
@@ -56,6 +106,15 @@ interface CreationDraft {
   motion: IslandMotionPreference;
   ai?: boolean;
   avoid?: string;
+  concepts?: ExperimentConcept[];
+  conceptJobId?: string;
+  concept?: ExperimentConcept;
+  experiment?: ExperimentResult;
+  experimentJobId?: string;
+}
+interface LocalExperimentState {
+  buildings: Building[];
+  packs: Record<string, Pack>;
 }
 
 const PACKS: Pack[] = [
@@ -94,6 +153,7 @@ const GUEST_REWARD = 25;
 const REROLL_COST = 30;
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
 const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
+const LOCAL_GENERATOR_URL = String((import.meta as any).env?.VITE_LOCAL_GENERATOR_URL || 'http://127.0.0.1:4317').replace(/\/$/, '');
 
 function stableSeed(value: string): number {
   let hash = 2166136261;
@@ -136,6 +196,41 @@ function errorText(error: unknown): string {
 function hostedUrl(building: Building): string | null {
   if (building.rel) return IS_DEV ? `/ugc/${building.rel}` : `${UGC_BASE_URL}/${building.rel}`;
   return building.url ?? null;
+}
+function isLocalExperiment(building: Building): boolean {
+  return IS_DEV && Boolean(building.url?.startsWith('/ugc/u/local-experiments/'));
+}
+function localExperimentId(building: Building): string | null {
+  if (!isLocalExperiment(building)) return null;
+  const match = building.url?.match(/\/([^/?]+)\.html(?:\?|$)/);
+  return match && /^[a-z0-9-]{8,80}$/.test(match[1]) ? match[1] : null;
+}
+function localExperimentStorageKey(): string {
+  const userId = (window as unknown as {
+    Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
+  }).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  return `island-local-experiments-v1${Number.isSafeInteger(userId) ? `:${userId}` : ''}`;
+}
+function loadLocalExperiments(): LocalExperimentState {
+  if (!IS_DEV) return { buildings: [], packs: {} };
+  try {
+    const raw = localStorage.getItem(localExperimentStorageKey());
+    if (!raw) return { buildings: [], packs: {} };
+    const parsed = JSON.parse(raw) as Partial<LocalExperimentState>;
+    return {
+      buildings: Array.isArray(parsed.buildings)
+        ? parsed.buildings.filter((building) => building && isLocalExperiment(building)
+          && Number.isInteger(building.slot) && building.slot >= 0 && building.slot < SLOTS.length).slice(0, SLOTS.length)
+        : [],
+      packs: parsed.packs && typeof parsed.packs === 'object' ? parsed.packs : {},
+    };
+  } catch {
+    return { buildings: [], packs: {} };
+  }
+}
+function saveLocalExperiments(state: LocalExperimentState): void {
+  if (!IS_DEV) return;
+  try { localStorage.setItem(localExperimentStorageKey(), JSON.stringify(state)); } catch { /* private mode */ }
 }
 function newJobId(): string {
   const cryptoApi = globalThis.crypto;
@@ -208,6 +303,124 @@ async function aiTheme(
   }
 }
 
+type LocalGeneratorState = 'queued' | 'starting' | 'running' | 'ready' | 'failed' | 'cancelled';
+interface LocalGeneratorJob<T> {
+  id: string;
+  type?: 'concepts' | 'experiment' | 'publish';
+  state: LocalGeneratorState;
+  phase: string;
+  message: string;
+  logs: Array<{ phase: string; message: string; attempt?: number }>;
+  result?: T;
+  error?: string;
+  request?: Record<string, unknown>;
+  consumedAt?: string | null;
+}
+
+function generatorClientId(): string {
+  const key = 'swipe-generator-client-v1';
+  try {
+    const current = localStorage.getItem(key);
+    if (current) return current;
+    const value = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : newJobId();
+    localStorage.setItem(key, value);
+    return value;
+  } catch {
+    return 'local-browser';
+  }
+}
+
+async function generatorRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!IS_DEV) throw new Error('The local generator is available only in development');
+  try {
+    const response = await fetch(`${LOCAL_GENERATOR_URL}${path}`, init);
+    const data = (await response.json()) as T & { error?: string };
+    if (!response.ok) throw new Error(data.error || `Generator HTTP ${response.status}`);
+    return data;
+  } catch (error) {
+    const message = errorText(error);
+    throw new Error(message.includes('fetch')
+      ? `Local generator is offline at ${LOCAL_GENERATOR_URL}; start swipe-generator`
+      : message);
+  }
+}
+
+async function createGeneratorJob<T>(body: Record<string, unknown>): Promise<LocalGeneratorJob<T>> {
+  return generatorRequest<LocalGeneratorJob<T>>('/v1/jobs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...body, clientId: generatorClientId() }),
+  });
+}
+
+async function generatorJob<T>(jobId: string): Promise<LocalGeneratorJob<T>> {
+  return generatorRequest<LocalGeneratorJob<T>>(`/v1/jobs/${encodeURIComponent(jobId)}`);
+}
+
+async function generatorJobs<T>(): Promise<Array<LocalGeneratorJob<T>>> {
+  const data = await generatorRequest<{ jobs: Array<LocalGeneratorJob<T>> }>(`/v1/jobs?clientId=${encodeURIComponent(generatorClientId())}`);
+  return data.jobs;
+}
+
+async function consumeGeneratorJob(jobId: string): Promise<void> {
+  await generatorRequest(`/v1/jobs/${encodeURIComponent(jobId)}/consume`, { method: 'POST' });
+}
+
+function generatorPending(state: LocalGeneratorState): boolean {
+  return state === 'queued' || state === 'starting' || state === 'running';
+}
+
+async function experimentConcepts(
+  prompt: string,
+  provider: ExperimentProvider,
+  slot: number,
+): Promise<{ concepts: ExperimentConcept[]; jobId: string }> {
+  const created = await createGeneratorJob<{ concepts: ExperimentConcept[] }>({
+    type: 'concepts', template: 'sort', prompt, provider, slot,
+  });
+  for (let poll = 0; poll < 300; poll++) {
+    const job = await generatorJob<{ concepts: ExperimentConcept[] }>(created.id);
+    if (job.state === 'ready' && Array.isArray(job.result?.concepts)) {
+      return { concepts: job.result.concepts, jobId: job.id };
+    }
+    if (!generatorPending(job.state)) throw new Error(job.error || job.message || 'Concept generation failed');
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+  throw new Error('Concept generation timed out after 5 minutes');
+}
+
+async function startExperiment(
+  prompt: string,
+  concept: ExperimentConcept,
+  provider: ExperimentProvider,
+  slot: number,
+  parentId?: string,
+  feedback?: string,
+): Promise<string> {
+  const job = await createGeneratorJob<ExperimentResult>({
+    type: 'experiment', baseline: 'sort-v2', prompt, concept, provider, slot, parentId, feedback,
+  });
+  return job.id;
+}
+
+async function experimentStatus(jobId: string): Promise<ExperimentJob> {
+  return generatorJob<ExperimentResult>(jobId) as Promise<ExperimentJob>;
+}
+
+async function startExperimentPublish(experimentId: string): Promise<string> {
+  const chat = (window as unknown as {
+    Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
+  }).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  const job = await createGeneratorJob<ExperimentPublishResult>({
+    type: 'publish', experimentId, user: chat ? String(chat) : 'dev', chat,
+  });
+  return job.id;
+}
+
+async function experimentPublishStatus(jobId: string): Promise<ExperimentPublishJob> {
+  return generatorJob<ExperimentPublishResult>(jobId) as Promise<ExperimentPublishJob>;
+}
+
 function pickPack(txt: string, excl: string | null): Pack {
   const t = txt.toLowerCase();
   let p = t ? PACKS.find((x) => x.kw.some((k) => t.includes(k))) : undefined;
@@ -216,77 +429,6 @@ function pickPack(txt: string, excl: string | null): Pack {
     p = pool[Math.floor(Math.random() * pool.length)];
   }
   return p;
-}
-
-// ── fork-at-launch (proof of the fork path) ─────────────────────────────────
-// A created mechanic is a RECIPE (base playable + a versioned runtime config),
-// materialised into a throwaway fork of the shipped artifact at launch time.
-// The same config is persisted and baked by the worker. Guards:
-//   * recipe checks that the base still exposes the config hook;
-//   * any fetch/transform failure → stock build;
-//   * boot watchdog in playSeries → stock build if the fork doesn't boot.
-// Injected from swipe-ugc/recipes/sort at build time; the worker owns the source.
-
-async function forkedSortHtml(pk: Pack, dbg: (m: string) => void): Promise<string | null> {
-  try {
-    const src = playableUrl(TPL.sort.playableId, { auto: false });
-    dbg(`fetch base: ${src}`);
-    const res = await fetch(src);
-    if (!res.ok) { dbg(`base fetch failed: HTTP ${res.status} → stock`); return null; }
-    let html = await res.text();
-    dbg(`base html: ${html.length} bytes`);
-    const variant = {
-      schemaVersion: SORT_RECIPE.version,
-      seed: pk.seed,
-      items: pk.items,
-      sceneBg: pk.sceneBg,
-      boardBg: pk.boardBg,
-      belt: pk.belt,
-      outline: pk.outline,
-      difficulty: pk.difficulty,
-      motion: pk.motion,
-      marbleStyle: pk.marbleStyle,
-      markerStyle: pk.markerStyle,
-      targetShape: pk.targetShape,
-      conveyorPath: pk.conveyorPath,
-      sourceShape: pk.sourceShape,
-      backgroundPattern: pk.backgroundPattern,
-    };
-    const variantJson = JSON.stringify(variant).replace(/<\/script/gi, '<\\/script');
-    const configScript = `<script>window.__UGC_SORT_VARIANT__=${variantJson}</script>`;
-    // Swipe deploys are shell + external payload; the client fallback inlines
-    // that payload so the generated blob URL remains self-contained.
-    const tag = html.match(/<script type="module" src="(\.[^"]*payload[^"]*)"><\/script>/);
-    if (tag) {
-      const purl = new URL(tag[1], new URL(src, location.href)).href;
-      dbg(`shape: shell + external payload, fetch: ${purl}`);
-      const pres = await fetch(purl);
-      if (!pres.ok) { dbg(`payload fetch failed: HTTP ${pres.status} → stock`); return null; }
-      let payload = await pres.text();
-      dbg(`payload: ${payload.length} bytes`);
-      if (!payload.includes('__UGC_SORT_VARIANT__')) { dbg('stale recipe: config hook not found in payload → stock'); return null; }
-      payload = payload.split('</script').join('<\\/script');
-      html = html.replace(tag[0], () => `${configScript}<script type="module">${payload}</script>`);
-    } else if (html.includes('__UGC_SORT_VARIANT__')) {
-      dbg('shape: single-file artifact');
-      html = html.replace('<head>', `<head>${configScript}`);
-    } else {
-      dbg('stale recipe: config hook not found in base → stock');
-      return null;
-    }
-    dbg(`variant v${SORT_RECIPE.version}: ${pk.difficulty}/${pk.motion}, ${pk.conveyorPath}, seed ${pk.seed}`);
-    // The fork boots in an about:blank frame: location.search is empty there, so
-    // bake the launch params straight into the artifact (part of the recipe).
-    html = html.split('window.location.search').join('"?auto=0"');
-    html = html.split('location.search').join('"?auto=0"');
-    // Insurance for artifacts with other relative refs (video files, covers).
-    const dir = new URL(src, location.href).href.replace(/\?.*$/, '').replace(/[^/]*$/, '');
-    html = html.replace('<head>', `<head><base href="${dir}">`);
-    return html;
-  } catch (e) {
-    dbg(`transform error: ${String(e)} → stock (cross-origin base? client fork needs same-origin)`);
-    return null;
-  }
 }
 
 // Same shape the feed's outcomeFromMessage accepts, trimmed to what the swipe
@@ -436,6 +578,16 @@ const CSS = `
 .isl-seg button:first-child{border-radius:8px 0 0 8px}.isl-seg button:last-child{border-radius:0 8px 8px 0}
 .isl-seg button.on{background:#fff;color:#101720;border-color:#fff}
 .isl-traits{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.isl-traits span{border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:4px 7px;font-size:10px;color:rgba(255,255,255,.72);text-transform:capitalize}
+.isl-create-mode{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:10px 0 12px}
+.isl-create-mode button{min-height:64px;text-align:left;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:9px 10px;background:rgba(255,255,255,.045);color:#fff;font:inherit}
+.isl-create-mode button.on{border-color:#4CC38A;background:rgba(76,195,138,.12)}
+.isl-create-mode b{display:block;font-size:12.5px;margin-bottom:4px}.isl-create-mode span{display:block;font-size:10.5px;line-height:1.3;color:rgba(255,255,255,.55)}
+.isl-labnote{border-left:3px solid #EF9F27;background:rgba(239,159,39,.08);padding:9px 11px;margin:8px 0 11px;font-size:11.5px;line-height:1.4;color:rgba(255,255,255,.74)}
+.isl-concepts{display:grid;gap:7px;margin:10px 0}.isl-concept{width:100%;text-align:left;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:10px 11px;background:rgba(255,255,255,.045);color:#fff;font:inherit}
+.isl-concept:active{transform:scale(.992)}.isl-concept__head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;font-weight:800}.isl-concept__risk{font-size:9px;text-transform:uppercase;color:#F2B33D}
+.isl-concept__feeling{font-size:11px;color:#8FD8C2;margin-top:4px}.isl-concept__pitch{font-size:11.5px;line-height:1.38;color:rgba(255,255,255,.66);margin-top:5px}
+.isl-lablog{list-style:none;margin:12px 0 6px;padding:0;display:flex;flex-direction:column;gap:7px;min-height:112px}.isl-lablog li{display:flex;gap:8px;font-size:11.5px;line-height:1.35;color:rgba(255,255,255,.55)}.isl-lablog li:last-child{color:#fff}.isl-lablog b{width:7px;height:7px;margin-top:4px;border-radius:50%;background:#EF9F27;flex:0 0 7px}.isl-lablog li.ok b{background:#4CC38A}.isl-lablog li.fail b{background:#E24B4A}
+.isl-labframe{display:block;width:100%;height:min(46vh,360px);border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#000;margin:7px 0 9px}
 .isl-in::placeholder{color:rgba(255,255,255,.35)}
 .isl-btn{width:100%;border:none;border-radius:13px;padding:13px;font:inherit;font-size:14.5px;font-weight:800;margin-top:8px}
 .isl-btn--pri{background:linear-gradient(180deg,#8ff0a3,#3ccc78);color:#112011;box-shadow:inset 0 1px 0 rgba(255,255,255,.36)}
@@ -488,6 +640,29 @@ function ensureStyles(): void {
 export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   ensureStyles();
   const S: IslandState = loadIslandState();
+  const localExperiments = loadLocalExperiments();
+  // One-time migration from the first lab prototype, which stored local-only
+  // buildings in the shared island cache. Pull them into the isolated overlay
+  // before IslandStateSync can observe or upload that cache.
+  const legacyLocalBuildings = S.buildings.filter(isLocalExperiment);
+  if (legacyLocalBuildings.length) {
+    const bySlot = new Map(localExperiments.buildings.map((building) => [building.slot, building]));
+    legacyLocalBuildings.forEach((building) => {
+      bySlot.set(building.slot, building);
+      const pack = S.aiPacks?.[building.pack];
+      if (pack) localExperiments.packs[building.pack] = normalizePack(pack);
+    });
+    localExperiments.buildings = [...bySlot.values()];
+    S.buildings = S.buildings.filter((building) => !isLocalExperiment(building));
+    if (S.aiPacks) {
+      for (const building of legacyLocalBuildings) {
+        if (!S.buildings.some((candidate) => candidate.pack === building.pack)) delete S.aiPacks[building.pack];
+      }
+      if (!Object.keys(S.aiPacks).length) delete S.aiPacks;
+    }
+    saveLocalExperiments(localExperiments);
+    cacheIslandState(S);
+  }
   let guest = false;
   let cur: CreationDraft | null = null;
   let toastTimer = 0;
@@ -497,7 +672,22 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   const pollingSlots = new Set<number>();
   let stateSync: IslandStateSync | null = null;
 
-  const resolvePack = (id: string): Pack => normalizePack(PACKS.find((x) => x.id === id) ?? S.aiPacks?.[id] ?? PACKS[0]);
+  const visibleBuildings = (): Building[] => {
+    const bySlot = new Map(S.buildings.map((building) => [building.slot, building]));
+    localExperiments.buildings.forEach((building) => bySlot.set(building.slot, building));
+    return [...bySlot.values()].sort((a, b) => a.slot - b.slot);
+  };
+  const persistLocalExperiments = () => saveLocalExperiments(localExperiments);
+  const removeLocalExperiment = (slot: number) => {
+    const removed = localExperiments.buildings.find((building) => building.slot === slot);
+    if (!removed) return;
+    localExperiments.buildings = localExperiments.buildings.filter((building) => building.slot !== slot);
+    if (!localExperiments.buildings.some((building) => building.pack === removed.pack)) delete localExperiments.packs[removed.pack];
+    persistLocalExperiments();
+  };
+  const resolvePack = (id: string): Pack => normalizePack(
+    PACKS.find((x) => x.id === id) ?? localExperiments.packs[id] ?? S.aiPacks?.[id] ?? PACKS[0],
+  );
 
   // Slots with a generation job in flight (player dismissed the sheet and kept
   // browsing). Rendered as a construction site; the job auto-builds on arrival.
@@ -507,7 +697,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // Bake-on-confirm: after a mechanic is BUILT, ship it through the production
   // pipeline (bake → autoplay test → publish to swipe-ugc → per-player bot
   // message; the player's chat id comes from the mini-app initData). On success
-  // the building switches from the client-side fork to the hosted build.
+  // the building switches from the canonical stock fallback to the hosted build.
   async function bakeAndHost(slot: number, prompt: string): Promise<void> {
     const b = S.buildings.find((x) => x.slot === slot);
     if (!b || b.tpl !== 'sort' || hostedUrl(b) || pollingSlots.has(slot)) return;
@@ -666,6 +856,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   };
 
   const openSheet = (html: string) => {
+    delete sheet.dataset.publishRun;
     sheet.innerHTML = '<div class="isl-grab"></div>' + html;
     sheet.classList.add('isl-sheet--show');
     scrim.classList.add('isl-scrim--show');
@@ -697,8 +888,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     }
     s += `<circle cx="${HUB.x}" cy="${HUB.y}" r="22" fill="rgba(255,255,255,.07)" stroke="rgba(255,255,255,.30)" stroke-width="1.2"/>
       <text x="${HUB.x}" y="${HUB.y + 5}" text-anchor="middle" font-size="14" font-weight="700" fill="rgba(255,255,255,.85)">G</text>`;
+    const buildings = visibleBuildings();
+    let localFreshChanged = false;
     SLOTS.forEach((p, i) => {
-      const b = S.buildings.find((x) => x.slot === i);
+      const b = buildings.find((x) => x.slot === i);
       if (!b) {
         if (pendingSlots.has(i)) {
           s += `<g><circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(239,159,39,.08)" stroke="#EF9F27" stroke-width="1.4" stroke-dasharray="5 5" class="isl-plus"/>
@@ -729,29 +922,34 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       s += `<g class="isl-sector${b.fresh ? ' isl-sector--new' : ''}" data-b="${i}">
         <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
         <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="19" font-weight="700" fill="${letterFill}">${TPL[b.tpl].label.charAt(0)}</text>`;
-      const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : hostedUrl(b) ? '#4CC38A' : null;
+      const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : isLocalExperiment(b) ? '#58A6FF' : hostedUrl(b) ? '#4CC38A' : null;
       if (dot) {
         s += `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`;
       }
       s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
         <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text></g>`;
-      b.fresh = false;
+      if (b.fresh) {
+        b.fresh = false;
+        if (isLocalExperiment(b)) localFreshChanged = true;
+      }
     });
     svg.innerHTML = s;
     // Status legend — owner mode only (the guest CTA occupies the bottom edge).
     const legend = ov.querySelector('[data-legend]') as HTMLElement;
     legend.innerHTML = guest ? '' :
       '<span><b style="background:#4CC38A"></b>hosted</span>' +
+      (IS_DEV ? '<span><b style="background:#58A6FF"></b>local lab</span>' : '') +
       '<span><b style="background:#EF9F27"></b>publishing</span>' +
       '<span><b style="background:#E24B4A"></b>error</span>';
     svg.querySelectorAll<SVGElement>('[data-slot]').forEach((g) =>
       g.addEventListener('click', () => openCreate(Number(g.dataset.slot))));
     svg.querySelectorAll<SVGElement>('[data-b]').forEach((g) =>
       g.addEventListener('click', () => openBuilding(Number(g.dataset.b))));
-    const likes = S.buildings.reduce((a, b) => a + b.likes, 0);
+    const likes = buildings.reduce((a, b) => a + b.likes, 0);
     (ov.querySelector('[data-stat]') as HTMLElement).textContent =
-      `♥ ${likes} · ${S.buildings.length}/${SLOTS.length} mechanics`;
+      `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;
     (ov.querySelector('[data-tok]') as HTMLElement).textContent = String(S.tokens);
+    if (localFreshChanged) persistLocalExperiments();
     if (persist) save();
   }
 
@@ -761,10 +959,13 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const ready = readyDrafts.get(slot);
     if (ready) {
       cur = ready;
-      stepPreview();
+      if (ready.mode === 'wild' && ready.experiment) stepExperimentPreview();
+      else if (ready.mode === 'wild' && ready.concepts?.length) stepExperimentChoice();
+      else if (ready.mode === 'wild') stepPrompt();
+      else stepPreview();
       return;
     }
-    cur = { slot, tpl: 'sort', prompt: '', pack: PACKS[0], rerolls: 1, difficulty: 'surprise', motion: 'surprise' };
+    cur = { slot, tpl: 'sort', mode: 'guided', provider: 'auto', prompt: '', pack: PACKS[0], rerolls: 1, difficulty: 'surprise', motion: 'surprise' };
     const cards = CREATABLE_TPLS.map((id) =>
       `<button class="isl-tcard" type="button" data-t="${id}">
         <span class="isl-tcard__pv"><img src="${coverUrl(TPL[id].playableId)}" alt="" onerror="this.style.display='none'"></span>
@@ -781,6 +982,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
 
   function stepPrompt(): void {
     if (!cur) return;
+    const guided = cur.mode === 'guided';
     const chips = ['mushroom forest', 'neon city', 'underwater world', 'candy kingdom', 'volcano wastes']
       .map((c) => `<button class="isl-chip" type="button">${c}</button>`).join('');
     const difficultyOptions: Array<[IslandDifficultyPreference, string]> = [
@@ -789,17 +991,37 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const motionOptions: Array<[IslandMotionPreference, string]> = [
       ['surprise', 'Surprise'], ['calm', 'Calm'], ['heavy', 'Heavy'], ['bouncy', 'Bouncy'], ['chaotic', 'Chaotic'],
     ];
-    openSheet(`<h3>${TPL[cur.tpl].label}: theme</h3><div class="isl-sub">Step 2 of 3 · describe the world in your own words</div>
-      <textarea class="isl-in isl-in--prompt" data-prm placeholder="e.g. black industrial night, restrained red accents" maxlength="120" rows="3">${esc(cur.prompt)}</textarea>
-      <div class="isl-chips">${chips}</div>
+    const modePicker = IS_DEV ? `<div class="isl-create-mode">
+      <button type="button" data-create-mode="guided" class="${guided ? 'on' : ''}"><b>Within rules</b><span>Fast, predictable, always uses the safe variant contract</span></button>
+      <button type="button" data-create-mode="wild" class="${!guided ? 'on' : ''}"><b>Free experiment</b><span>Local agent mutates a disposable pinned fork</span></button>
+    </div>` : '';
+    const guidedControls = `<div class="isl-chips">${chips}</div>
       <div class="isl-choice"><div class="isl-choice__label">Difficulty</div><div class="isl-seg" data-diff-group>
         ${difficultyOptions.map(([value, label]) => `<button type="button" data-diff="${value}" class="${cur!.difficulty === value ? 'on' : ''}">${label}</button>`).join('')}
       </div></div>
       <div class="isl-choice"><div class="isl-choice__label">Motion</div><div class="isl-seg" data-motion-group>
         ${motionOptions.map(([value, label]) => `<button type="button" data-motion="${value}" class="${cur!.motion === value ? 'on' : ''}">${label}</button>`).join('')}
+      </div></div>`;
+    const wildControls = `<div class="isl-choice"><div class="isl-choice__label">Local subscription runner</div><div class="isl-seg" data-provider-group>
+        ${([['auto', 'Auto'], ['claude', 'Claude'], ['codex', 'Codex']] as Array<[ExperimentProvider, string]>).map(([value, label]) => `<button type="button" data-provider="${value}" class="${cur!.provider === value ? 'on' : ''}">${label}</button>`).join('')}
       </div></div>
-      <button class="isl-btn isl-btn--pri" type="button" data-gen>Generate theme ✨</button>`);
+      <div class="isl-labnote"><b>Separate local generator</b><br>The platform only submits and reconnects to persistent jobs at ${esc(LOCAL_GENERATOR_URL)}. The agent mutates a pinned non-release baseline; only a full autoplay WIN is shown.</div>`;
+    openSheet(`<h3>${TPL[cur.tpl].label}: ${guided ? 'guided variant' : 'free experiment'}</h3><div class="isl-sub">${guided ? 'Step 2 of 3 · choose a controlled direction' : 'Roll concepts first, then let the agent mutate the code'}</div>
+      ${modePicker}
+      <textarea class="isl-in isl-in--prompt" data-prm placeholder="${guided ? 'e.g. black industrial night, restrained red accents' : 'e.g. make gravity feel unreliable and the board slightly hostile'}" maxlength="${guided ? 120 : 500}" rows="${guided ? 3 : 4}">${esc(cur.prompt)}</textarea>
+      ${guided ? guidedControls : wildControls}
+      <button class="isl-btn isl-btn--pri" type="button" data-gen>${guided ? 'Generate guided variant' : 'Roll 3 wild concepts'}</button>`);
     const inp = sheet.querySelector('[data-prm]') as HTMLTextAreaElement;
+    sheet.querySelectorAll<HTMLButtonElement>('[data-create-mode]').forEach((button) =>
+      button.addEventListener('click', () => {
+        if (!cur) return;
+        cur.prompt = inp.value;
+        cur.mode = button.dataset.createMode as CreationMode;
+        cur.concepts = undefined;
+        cur.concept = undefined;
+        cur.experiment = undefined;
+        stepPrompt();
+      }));
     sheet.querySelectorAll<HTMLElement>('.isl-chip').forEach((c) =>
       c.addEventListener('click', () => { inp.value = c.textContent || ''; }));
     sheet.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach((button) =>
@@ -814,11 +1036,87 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         cur.motion = button.dataset.motion as IslandMotionPreference;
         sheet.querySelectorAll('[data-motion]').forEach((item) => item.classList.toggle('on', item === button));
       }));
+    sheet.querySelectorAll<HTMLButtonElement>('[data-provider]').forEach((button) =>
+      button.addEventListener('click', () => {
+        if (!cur) return;
+        cur.provider = button.dataset.provider as ExperimentProvider;
+        sheet.querySelectorAll('[data-provider]').forEach((item) => item.classList.toggle('on', item === button));
+      }));
     (sheet.querySelector('[data-gen]') as HTMLElement).addEventListener('click', () => {
       if (!cur) return;
       cur.prompt = inp.value.trim();
-      stepGen();
+      if (cur.mode === 'wild') stepExperimentConcepts();
+      else stepGen();
     });
+  }
+
+  function stepExperimentConcepts(): void {
+    if (!cur || cur.mode !== 'wild') return;
+    const req = cur;
+    if (req.conceptJobId) void consumeGeneratorJob(req.conceptJobId).catch(() => undefined);
+    req.conceptJobId = undefined;
+    req.concepts = undefined;
+    req.concept = undefined;
+    readyDrafts.delete(req.slot);
+    const generationId = ++generationSeq;
+    generationBySlot.set(req.slot, generationId);
+    pendingSlots.add(req.slot);
+    refreshIsland(false);
+    openSheet(`<h3>Rolling concepts…</h3><div class="isl-sub">${esc(req.prompt || 'surprise me')}</div>
+      <ul class="isl-lablog"><li><b></b><span>Looking for three different feelings, not three skins</span></li></ul>
+      <div class="isl-pk">This uses the selected local subscription runner. No release code is changed.</div>`);
+    void experimentConcepts(req.prompt, req.provider, req.slot).then(({ concepts, jobId }) => {
+      if (generationBySlot.get(req.slot) !== generationId) return;
+      generationBySlot.delete(req.slot);
+      pendingSlots.delete(req.slot);
+      req.concepts = concepts;
+      req.conceptJobId = jobId;
+      readyDrafts.set(req.slot, req);
+      const interactive = ov.isConnected && sheet.classList.contains('isl-sheet--show') && cur === req;
+      if (interactive) stepExperimentChoice();
+      else if (ov.isConnected) {
+        refreshIsland(false);
+        toast('Three experiment concepts are ready · tap the slot');
+      }
+    }).catch((error) => {
+      if (generationBySlot.get(req.slot) !== generationId) return;
+      generationBySlot.delete(req.slot);
+      pendingSlots.delete(req.slot);
+      refreshIsland(false);
+      if (cur !== req || !sheet.classList.contains('isl-sheet--show')) {
+        if (ov.isConnected) toast(`Concept roll failed · ${errorText(error)}`);
+        return;
+      }
+      openSheet(`<h3>Concept roll failed</h3><div class="isl-sub">${esc(errorText(error))}</div>
+        <button class="isl-btn isl-btn--pri" type="button" data-retry>Retry</button>
+        <button class="isl-btn isl-btn--ghost" type="button" data-back>Back to prompt</button>`);
+      sheet.querySelector('[data-retry]')?.addEventListener('click', stepExperimentConcepts);
+      sheet.querySelector('[data-back]')?.addEventListener('click', stepPrompt);
+    });
+  }
+
+  function stepExperimentChoice(): void {
+    if (!cur || cur.mode !== 'wild' || !cur.concepts?.length) return;
+    openSheet(`<h3>Choose your throw</h3><div class="isl-sub">Each concept becomes a different code fork</div>
+      <div class="isl-concepts">${cur.concepts.map((concept, index) => `<button type="button" class="isl-concept" data-concept="${index}">
+        <span class="isl-concept__head"><span>${esc(concept.title)}</span><span class="isl-concept__risk">${esc(concept.risk)} risk</span></span>
+        <span class="isl-concept__feeling">${esc(concept.feeling)}</span>
+        <span class="isl-concept__pitch">${esc(concept.pitch)}</span>
+      </button>`).join('')}</div>
+      <button class="isl-btn isl-btn--ghost" type="button" data-reroll-concepts>Roll three more</button>
+      <button class="isl-btn isl-btn--ghost" type="button" data-back>Change the brief</button>`);
+    sheet.querySelectorAll<HTMLButtonElement>('[data-concept]').forEach((button) =>
+      button.addEventListener('click', () => {
+        if (!cur?.concepts) return;
+        const concept = cur.concepts[Number(button.dataset.concept)];
+        if (!concept) return;
+        cur.concept = concept;
+        if (cur.conceptJobId) void consumeGeneratorJob(cur.conceptJobId).catch(() => undefined);
+        cur.conceptJobId = undefined;
+        void runExperiment();
+      }));
+    sheet.querySelector('[data-reroll-concepts]')?.addEventListener('click', stepExperimentConcepts);
+    sheet.querySelector('[data-back]')?.addEventListener('click', stepPrompt);
   }
 
   function stepGen(): void {
@@ -895,6 +1193,365 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     });
   }
 
+  function installExperimentResult(req: CreationDraft, result: ExperimentResult, jobId: string): void {
+    const base = pickPack(req.prompt, null);
+    const localPack = normalizePack({
+      ...base,
+      id: `exp-${result.id}`,
+      name: result.title.slice(0, 40),
+      kw: [],
+      seed: stableSeed(result.id),
+    });
+    req.pack = localPack;
+    req.ai = true;
+    req.experiment = result;
+    req.experimentJobId = jobId;
+    readyDrafts.set(req.slot, req);
+    const interactive = ov.isConnected && sheet.classList.contains('isl-sheet--show') && cur === req;
+    if (interactive) stepExperimentPreview();
+    else if (ov.isConnected) {
+      refreshIsland();
+      toast(`Experiment "${result.title.slice(0, 24)}" passed · tap the slot to inspect`);
+    }
+  }
+
+  async function runExperiment(parentId?: string, feedback?: string): Promise<void> {
+    if (!cur || cur.mode !== 'wild' || !cur.concept) return;
+    const req = cur;
+    const concept = cur.concept;
+    readyDrafts.delete(req.slot);
+    const generationId = ++generationSeq;
+    generationBySlot.set(req.slot, generationId);
+    pendingSlots.add(req.slot);
+    refreshIsland();
+    openSheet(`<h3 data-lab-title>${parentId ? 'Tuning the experiment…' : 'Mutating the mechanic…'}</h3>
+      <div class="isl-sub">${esc(concept.title)} · persistent ${esc(req.provider)} subscription runner</div>
+      <ul class="isl-lablog" data-lablog><li><b></b><span>Queueing an isolated code fork</span></li></ul>
+      <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>
+      <div class="isl-pk" style="margin-top:8px">The agent gets up to 3 build/autoplay repair attempts. Failed code is never placed on the island.</div>`);
+    sheet.querySelector('[data-dismiss]')?.addEventListener('click', closeSheet);
+
+    const paintJob = (job: ExperimentJob) => {
+      if (!ov.isConnected || !sheet.classList.contains('isl-sheet--show') || cur !== req) return;
+      const titleEl = sheet.querySelector('[data-lab-title]');
+      if (titleEl) titleEl.textContent = job.state === 'failed' ? 'Experiment failed' : job.state === 'ready' ? 'Autoplay won' : parentId ? 'Tuning the experiment…' : 'Mutating the mechanic…';
+      const log = sheet.querySelector('[data-lablog]');
+      if (!log) return;
+      log.innerHTML = job.logs.map((entry) => {
+        const cls = entry.phase === 'failed-attempt' ? 'fail' : entry.phase === 'publish' || entry.phase === 'ready' ? 'ok' : '';
+        const attempt = entry.attempt ? `Attempt ${entry.attempt} · ` : '';
+        return `<li class="${cls}"><b></b><span>${esc(attempt + entry.message)}</span></li>`;
+      }).join('') || '<li><b></b><span>Starting the local worker</span></li>';
+    };
+
+    let jobId = '';
+    let job: ExperimentJob | null = null;
+    try {
+      jobId = await startExperiment(req.prompt, concept, req.provider, req.slot, parentId, feedback);
+      for (let poll = 0; poll < 1200; poll++) {
+        if (generationBySlot.get(req.slot) !== generationId) return;
+        job = await experimentStatus(jobId);
+        paintJob(job);
+        if (!generatorPending(job.state)) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+      if (!job || generatorPending(job.state)) throw new Error('Experiment timed out after 20 minutes');
+      if (job.state !== 'ready' || !job.result) throw new Error(job.error || job.message || 'Experiment failed');
+      if (generationBySlot.get(req.slot) !== generationId) return;
+
+      generationBySlot.delete(req.slot);
+      pendingSlots.delete(req.slot);
+      installExperimentResult(req, job.result, jobId);
+    } catch (error) {
+      if (generationBySlot.get(req.slot) !== generationId) return;
+      generationBySlot.delete(req.slot);
+      pendingSlots.delete(req.slot);
+      refreshIsland();
+      const message = errorText(error);
+      console.error('[island] local experiment failed:', message);
+      if (jobId && job && !generatorPending(job.state)) void consumeGeneratorJob(jobId).catch(() => undefined);
+      if (!ov.isConnected || !sheet.classList.contains('isl-sheet--show') || cur !== req) {
+        if (ov.isConnected) toast(`Experiment failed · ${message}`);
+        return;
+      }
+      openSheet(`<h3>Experiment exhausted its attempts</h3><div class="isl-sub">${esc(message)}</div>
+        <button class="isl-btn isl-btn--pri" type="button" data-retry>Try this concept again</button>
+        <button class="isl-btn isl-btn--ghost" type="button" data-concepts>Choose another concept</button>
+        <button class="isl-btn isl-btn--ghost" type="button" data-back>Change the brief</button>`);
+      sheet.querySelector('[data-retry]')?.addEventListener('click', () => { void runExperiment(parentId, feedback); });
+      sheet.querySelector('[data-concepts]')?.addEventListener('click', stepExperimentChoice);
+      sheet.querySelector('[data-back]')?.addEventListener('click', stepPrompt);
+    }
+  }
+
+  async function resumeGeneratorExperiments(): Promise<void> {
+    let jobs: Array<LocalGeneratorJob<ExperimentResult>>;
+    try {
+      jobs = await generatorJobs<ExperimentResult>();
+    } catch (error) {
+      console.log('[island] local generator reconnect unavailable:', errorText(error));
+      return;
+    }
+    const claimedSlots = new Set<number>();
+    for (const job of jobs) {
+      if ((job.type !== 'concepts' && job.type !== 'experiment') || job.consumedAt) continue;
+      const request = job.request || {};
+      const slot = Number(request.slot);
+      if (!Number.isInteger(slot) || slot < 0 || slot >= SLOTS.length) {
+        void consumeGeneratorJob(job.id).catch(() => undefined);
+        continue;
+      }
+      if (claimedSlots.has(slot)) {
+        void consumeGeneratorJob(job.id).catch(() => undefined);
+        continue;
+      }
+      claimedSlots.add(slot);
+      const concept = request.concept as ExperimentConcept | undefined;
+      if (job.type === 'experiment' && (!concept?.title || !concept.mechanic)) {
+        void consumeGeneratorJob(job.id).catch(() => undefined);
+        continue;
+      }
+      const req: CreationDraft = {
+        slot,
+        tpl: 'sort',
+        mode: 'wild',
+        provider: request.provider === 'claude' || request.provider === 'codex' ? request.provider : 'auto',
+        prompt: String(request.prompt || ''),
+        pack: PACKS[0],
+        rerolls: 1,
+        difficulty: 'surprise',
+        motion: 'surprise',
+        ai: true,
+        concept: job.type === 'experiment' ? concept : undefined,
+      };
+      const installConcepts = (current: LocalGeneratorJob<ExperimentResult>) => {
+        const concepts = (current.result as unknown as { concepts?: ExperimentConcept[] } | undefined)?.concepts;
+        if (!Array.isArray(concepts) || concepts.length !== 3) return false;
+        req.concepts = concepts;
+        req.conceptJobId = current.id;
+        readyDrafts.set(slot, req);
+        refreshIsland(false);
+        if (ov.isConnected) toast('Three experiment concepts are ready · tap the slot');
+        return true;
+      };
+      if (job.state === 'ready' && job.result) {
+        if (job.type === 'concepts') {
+          if (!installConcepts(job)) void consumeGeneratorJob(job.id).catch(() => undefined);
+          continue;
+        }
+        if (localExperiments.buildings.some((building) => localExperimentId(building) === job.result!.id)
+          || S.buildings.some((building) => building.url?.includes(job.result!.id))) {
+          void consumeGeneratorJob(job.id).catch(() => undefined);
+          continue;
+        }
+        installExperimentResult(req, job.result, job.id);
+        continue;
+      }
+      if (!generatorPending(job.state)) {
+        void consumeGeneratorJob(job.id).catch(() => undefined);
+        if (ov.isConnected) toast(`Recovered experiment failed · ${job.error || job.message}`);
+        continue;
+      }
+
+      const generationId = ++generationSeq;
+      generationBySlot.set(slot, generationId);
+      pendingSlots.add(slot);
+      refreshIsland(false);
+      void (async () => {
+        try {
+          let current = job;
+          for (let poll = 0; poll < 24 * 60 * 60; poll++) {
+            if (generationBySlot.get(slot) !== generationId) return;
+            current = await generatorJob<ExperimentResult>(job.id);
+            if (!generatorPending(current.state)) break;
+            await new Promise((resolve) => window.setTimeout(resolve, 1000));
+          }
+          if (generationBySlot.get(slot) !== generationId) return;
+          generationBySlot.delete(slot);
+          pendingSlots.delete(slot);
+          if (current.state === 'ready' && current.result) {
+            if (current.type === 'concepts') {
+              if (!installConcepts(current)) void consumeGeneratorJob(current.id).catch(() => undefined);
+            } else installExperimentResult(req, current.result, current.id);
+          }
+          else {
+            void consumeGeneratorJob(current.id).catch(() => undefined);
+            refreshIsland(false);
+            if (ov.isConnected) toast(`Recovered experiment failed · ${current.error || current.message}`);
+          }
+        } catch (error) {
+          // Keep the durable service job unconsumed. A later page reload can
+          // reconnect again after the local service comes back.
+          generationBySlot.delete(slot);
+          pendingSlots.delete(slot);
+          refreshIsland(false);
+          console.log('[island] generator reconnect interrupted:', errorText(error));
+        }
+      })();
+    }
+  }
+
+  async function publishExperiment(input: {
+    id: string;
+    slot: number;
+    tpl: TplId;
+    pack: Pack;
+    name: string;
+    prompt: string;
+    draft?: CreationDraft;
+    source?: Building;
+  }): Promise<void> {
+    const sourceId = input.source ? localExperimentId(input.source) : input.draft?.experiment?.id ?? null;
+    if (!sourceId || sourceId !== input.id) { toast('Local experiment source is no longer available'); return; }
+    const publishUiId = newJobId();
+    openSheet(`<h3 data-publish-title>Publishing experiment…</h3>
+      <div class="isl-sub">${esc(input.name)} · standalone artifact only</div>
+      <ul class="isl-lablog" data-publish-log><li><b></b><span>Queueing sandbox recheck</span></li></ul>
+      <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>
+      <div class="isl-labnote" style="margin-top:8px">The temporary source patch stays local. The commit allowlist contains only the self-contained HTML and its public metadata.</div>`);
+    sheet.dataset.publishRun = publishUiId;
+    sheet.querySelector('[data-dismiss]')?.addEventListener('click', closeSheet);
+    const publishUiOpen = () => sheet.dataset.publishRun === publishUiId && sheet.classList.contains('isl-sheet--show');
+
+    const paint = (job: ExperimentPublishJob) => {
+      if (!ov.isConnected || !publishUiOpen()) return;
+      const titleEl = sheet.querySelector('[data-publish-title]');
+      if (titleEl) titleEl.textContent = job.state === 'failed' ? 'Publish failed' : job.state === 'ready' ? 'Published' : 'Publishing experiment…';
+      const log = sheet.querySelector('[data-publish-log]');
+      if (!log) return;
+      log.innerHTML = job.logs.map((entry) => {
+        const cls = entry.phase === 'failed' ? 'fail' : entry.phase === 'deploy' || entry.phase === 'already-published' ? 'ok' : '';
+        return `<li class="${cls}"><b></b><span>${esc(entry.message)}</span></li>`;
+      }).join('') || '<li><b></b><span>Starting the publish worker</span></li>';
+    };
+
+    let jobId = '';
+    let job: ExperimentPublishJob | null = null;
+    try {
+      jobId = await startExperimentPublish(input.id);
+      for (let poll = 0; poll < 420; poll++) {
+        job = await experimentPublishStatus(jobId);
+        paint(job);
+        if (!generatorPending(job.state)) break;
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+      if (!job || generatorPending(job.state)) throw new Error('Publish timed out after 7 minutes');
+      if (job.state !== 'ready' || !job.result?.url || !job.result.commit) {
+        throw new Error(job.error || job.message || 'Experiment publish failed');
+      }
+      void consumeGeneratorJob(jobId).catch(() => undefined);
+
+      let source: Building | undefined;
+      if (input.source) {
+        source = localExperiments.buildings.find((building) => building.slot === input.slot && localExperimentId(building) === input.id);
+        if (!source) { toast('Published, but the local slot changed — hosted artifact was not placed'); return; }
+      } else if (!input.draft || readyDrafts.get(input.slot) !== input.draft || input.draft.experiment?.id !== input.id) {
+        toast('Published, but the draft changed — hosted artifact was not placed');
+        return;
+      }
+
+      const stats = source ?? { plays: 0, likes: 0, liked: false };
+      const pack = normalizePack(input.pack);
+      removeLocalExperiment(input.slot);
+      readyDrafts.delete(input.slot);
+      S.aiPacks = { ...(S.aiPacks ?? {}), [pack.id]: pack };
+      S.buildings = S.buildings.filter((building) => building.slot !== input.slot);
+      S.buildings.push({
+        slot: input.slot,
+        tpl: input.tpl,
+        pack: pack.id,
+        name: input.name.slice(0, 16),
+        prompt: input.prompt,
+        plays: stats.plays,
+        likes: stats.likes,
+        liked: stats.liked,
+        fresh: true,
+        publishing: false,
+        url: job.result.url,
+      });
+      if (input.draft?.experimentJobId) void consumeGeneratorJob(input.draft.experimentJobId).catch(() => undefined);
+      if (cur === input.draft) cur = null;
+      if (publishUiOpen()) closeSheet();
+      refreshIsland(true);
+      toast(job.result.ready ? 'Published to hosting ✅' : 'Published; Render is warming up');
+    } catch (error) {
+      const message = errorText(error);
+      console.error('[island] experiment publish failed:', message);
+      if (jobId && job && !generatorPending(job.state)) void consumeGeneratorJob(jobId).catch(() => undefined);
+      if (!ov.isConnected || !publishUiOpen()) {
+        if (ov.isConnected) toast(`Publish failed · ${message}`);
+        return;
+      }
+      openSheet(`<h3>Publish failed</h3><div class="isl-sub">${esc(message)}</div>
+        <button class="isl-btn isl-btn--pri" type="button" data-retry-publish>Retry publish</button>
+        <button class="isl-btn isl-btn--ghost" type="button" data-back>Back</button>`);
+      sheet.querySelector('[data-retry-publish]')?.addEventListener('click', () => { void publishExperiment(input); });
+      sheet.querySelector('[data-back]')?.addEventListener('click', () => {
+        if (input.draft) { cur = input.draft; stepExperimentPreview(); }
+        else openBuilding(input.slot);
+      });
+    }
+  }
+
+  function stepExperimentPreview(): void {
+    if (!cur || cur.mode !== 'wild' || !cur.experiment || !cur.concept) return;
+    const req = cur;
+    const result = cur.experiment;
+    openSheet(`<h3>${esc(result.title)}</h3><div class="isl-sub">Local experiment · autoplay won on attempt ${result.attempts}</div>
+      <iframe class="isl-labframe" sandbox="allow-scripts" src="${esc(result.url)}?auto=0" title="${esc(result.title)}"></iframe>
+      <div class="isl-concept__feeling">${esc(result.feeling)}</div>
+      <div class="isl-pk" style="margin-top:5px">${esc(result.pitch)}</div>
+      <button class="isl-btn isl-btn--pri" type="button" data-publish-lab>Publish tested artifact</button>
+      <button class="isl-btn isl-btn--ghost" type="button" data-place>Keep as a local overlay</button>
+      <div class="isl-choice"><div class="isl-choice__label">What should the agent change?</div>
+        <textarea class="isl-in" data-feedback maxlength="500" rows="3" placeholder="e.g. slower, darker, keep the echo visible longer"></textarea>
+      </div>
+      <button class="isl-btn isl-btn--ghost" type="button" data-tune>Tune this result</button>
+      <button class="isl-btn isl-btn--ghost" type="button" data-concepts>Try another concept</button>
+      <div class="isl-labnote">This artifact and its lineage live only on this dev machine. Placing it creates a local overlay; it never replaces or syncs the hosted building in that slot.</div>`);
+    sheet.querySelector('[data-publish-lab]')?.addEventListener('click', () => {
+      if (cur !== req || !req.experiment) return;
+      void publishExperiment({
+        id: req.experiment.id,
+        slot: req.slot,
+        tpl: req.tpl,
+        pack: req.pack,
+        name: req.experiment.title,
+        prompt: req.prompt,
+        draft: req,
+      });
+    });
+    sheet.querySelector('[data-place]')?.addEventListener('click', () => {
+      if (cur !== req || !req.experiment) return;
+      const { slot, tpl, prompt, pack } = req;
+      readyDrafts.delete(slot);
+      removeLocalExperiment(slot);
+      localExperiments.packs[pack.id] = pack;
+      localExperiments.buildings.push({
+        slot, tpl, pack: pack.id, name: req.experiment.title.slice(0, 16), prompt,
+        plays: 0, likes: 0, liked: false, fresh: true, publishing: false, url: req.experiment.url,
+      });
+      if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
+      cur = null;
+      closeSheet();
+      persistLocalExperiments();
+      refreshIsland(false);
+      toast('Local experiment placed · not synced or published');
+    });
+    sheet.querySelector('[data-tune]')?.addEventListener('click', () => {
+      if (cur !== req || !req.experiment) return;
+      const input = sheet.querySelector('[data-feedback]') as HTMLTextAreaElement;
+      const nextFeedback = input.value.trim();
+      if (!nextFeedback) { toast('Describe what should change first'); return; }
+      if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
+      void runExperiment(req.experiment.id, nextFeedback);
+    });
+    sheet.querySelector('[data-concepts]')?.addEventListener('click', () => {
+      if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
+      stepExperimentChoice();
+    });
+  }
+
   function stepPreview(): void {
     if (!cur) return;
     const pk = cur.pack;
@@ -912,6 +1569,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       const { slot, tpl: tplId, prompt } = cur;
       // Slots are the cap: building on an occupied slot replaces its mechanic.
       readyDrafts.delete(slot);
+      removeLocalExperiment(slot);
       S.buildings = S.buildings.filter((x) => x.slot !== slot);
       S.buildings.push({
         slot, tpl: tplId, pack: pk.id, name: nm.slice(0, 16), prompt,
@@ -938,7 +1596,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // ── building card + play (real mechanic in an iframe) ──────────────────────
 
   function openBuilding(slot: number): void {
-    const b = S.buildings.find((x) => x.slot === slot);
+    const b = visibleBuildings().find((x) => x.slot === slot);
     if (!b) return;
     if (guest) { playSeries(b); return; }
     const pk = resolvePack(b.pack);
@@ -946,8 +1604,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     // start a second job (rebuild) or orphan the running one (delete).
     const busy = Boolean(b.publishing) || pollingSlots.has(slot);
     // Status badge mirrors the map dots (same colors) — one visual language.
-    const st = hostedUrl(b)
-      ? { c: '#4CC38A', t: 'hosted' }
+    const localLab = isLocalExperiment(b);
+    const st = localLab
+      ? { c: '#58A6FF', t: 'local lab' }
+      : hostedUrl(b)
+        ? { c: '#4CC38A', t: 'hosted' }
       : busy
         ? { c: '#EF9F27', t: 'publishing…' }
         : b.publishError
@@ -957,10 +1618,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const retry = !hostedUrl(b) && !busy
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-publish>Retry publish</button>'
       : '';
+    const publishLab = localLab
+      ? '<button class="isl-btn isl-btn--pri" type="button" data-publish-lab>Publish tested artifact</button>'
+      : '';
     openSheet(`<h3>${esc(b.name)}</h3>
       <div class="isl-sub">${TPL[b.tpl].label} · Lv ${levelOf(b)} · ${b.plays} plays · ♥ ${b.likes} ${badge}</div>
       <div class="isl-board">${board(b.tpl, pk)}</div>
       <button class="isl-btn isl-btn--pri" type="button" data-play>▶ Play the series</button>
+      ${publishLab}
       ${retry}
       <button class="isl-btn isl-btn--ghost" type="button" data-rebuild${busy ? ' disabled' : ''}>Rebuild slot · replace this mechanic</button>
       <button class="isl-btn isl-btn--ghost" type="button" data-delete${busy ? ' disabled' : ''}>Delete mechanic</button>
@@ -973,6 +1638,19 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       toast('Publishing…');
       void bakeAndHost(slot, b.prompt ?? '');
     });
+    sheet.querySelector('[data-publish-lab]')?.addEventListener('click', () => {
+      const experimentId = localExperimentId(b);
+      if (!experimentId) { toast('Local experiment source is missing'); return; }
+      void publishExperiment({
+        id: experimentId,
+        slot: b.slot,
+        tpl: b.tpl,
+        pack: pk,
+        name: b.name,
+        prompt: b.prompt ?? '',
+        source: b,
+      });
+    });
     (sheet.querySelector('[data-rebuild]') as HTMLElement).addEventListener('click', () => {
       if (Boolean(b.publishing) || pollingSlots.has(slot)) { toast('Slot is busy — publishing in progress'); return; }
       closeSheet();
@@ -981,9 +1659,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     (sheet.querySelector('[data-delete]') as HTMLElement).addEventListener('click', async () => {
       if (Boolean(b.publishing) || pollingSlots.has(slot)) { toast('Slot is busy — publishing in progress'); return; }
       if (!await showConfirm(`Delete "${b.name}" from the island?`)) return;
-      S.buildings = S.buildings.filter((x) => x.slot !== slot);
       closeSheet();
-      refreshIsland(true);
+      if (localLab) {
+        removeLocalExperiment(slot);
+        refreshIsland(false);
+      } else {
+        S.buildings = S.buildings.filter((x) => x.slot !== slot);
+        refreshIsland(true);
+      }
       toast('Mechanic removed from the island');
     });
   }
@@ -1000,6 +1683,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const frame = document.createElement('iframe');
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('allow', 'autoplay');
+    if (isLocalExperiment(b)) frame.setAttribute('sandbox', 'allow-scripts');
     play.appendChild(frame);
     ov.appendChild(play);
 
@@ -1019,62 +1703,25 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     });
     dbg(`launch: "${b.name}" tpl=${b.tpl} pack=${b.pack} guest=${guest}`);
 
-    // Themed fork for sort; everything else (and every fallback) = stock build.
+    // The canonical playable is never transformed in the client. Generated
+    // mechanics exist only as tested hosted/local-lab artifacts.
     const stockSrc = playableUrl(TPL[b.tpl].playableId, { auto: false });
     const pk = resolvePack(b.pack);
-    let watchdog = 0;
     void (async () => {
-      // Hosted build wins over the client-side fork: it's the tested, published
-      // artifact. Real URL → query params work; no watchdog (cross-origin in
-      // prod, and the artifact already passed the worker's autoplay gate).
       const hosted = hostedUrl(b);
       if (hosted) {
         dbg(`loading hosted build: ${hosted}`);
-        setChip(`HOSTED · ${pk.name}`);
+        setChip(`${isLocalExperiment(b) ? 'LOCAL LAB' : 'HOSTED'} · ${pk.name}`);
         frame.src = `${hosted}${hosted.includes('?') ? '&' : '?'}auto=0`;
         return;
       }
-      let forked = false;
-      if (b.tpl === 'sort') {
-        const html = await forkedSortHtml(pk, dbg);
-        if (html && frame.isConnected) {
-          try {
-            const doc = frame.contentWindow?.document;
-            if (doc) { doc.open(); doc.write(html); doc.close(); forked = true; }
-          } catch (e) { dbg(`doc.write failed: ${String(e)}`); forked = false; }
-        }
-      } else {
-        dbg(`no fork recipe for tpl=${b.tpl} yet → stock`);
-      }
-      if (!forked) {
-        dbg(`loading stock: ${stockSrc}`);
-        setChip(`STOCK · ${b.tpl}`);
-        frame.src = stockSrc;
-        return;
-      }
-      dbg('fork written into frame');
-      setChip(`FORK · ${pk.name}`);
-      // Fork didn't boot (no canvas mounted) → quietly reload the stock build.
-      watchdog = window.setTimeout(() => {
-        try {
-          if (frame.isConnected && !frame.contentWindow?.document.querySelector('canvas')) {
-            dbg('watchdog: no canvas in 5s → reloading stock');
-            setChip('STOCK · watchdog');
-            frame.src = stockSrc;
-          } else {
-            dbg('watchdog: canvas mounted, fork is live');
-          }
-        } catch (e) {
-          dbg(`watchdog error: ${String(e)} → stock`);
-          setChip('STOCK · watchdog');
-          frame.src = stockSrc;
-        }
-      }, 5000);
+      dbg(`loading canonical stock: ${stockSrc}`);
+      setChip(`STOCK · ${b.tpl}`);
+      frame.src = stockSrc;
     })();
 
     const cleanup = () => {
       window.removeEventListener('message', onMsg);
-      window.clearTimeout(watchdog);
       try { frame.src = 'about:blank'; } catch { /* noop */ }
       play.remove();
     };
@@ -1096,10 +1743,12 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         b.likes += b.liked ? 1 : -1;
         btn.classList.toggle('isl-like--on', b.liked);
         btn.textContent = b.liked ? '♥ Liked' : '♡ Like this mechanic';
-        save();
+        if (isLocalExperiment(b)) persistLocalExperiments();
+        else save();
       });
       (win.querySelector('[data-home]') as HTMLElement).addEventListener('click', () => { cleanup(); refreshIsland(); });
-      refreshIsland(true);
+      if (isLocalExperiment(b)) { persistLocalExperiments(); refreshIsland(false); }
+      else refreshIsland(true);
     };
     const onMsg = (e: MessageEvent) => {
       if (!ov.isConnected) { cleanup(); return; }
@@ -1127,13 +1776,15 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       refreshIsland();
     }));
   (ov.querySelector('[data-guest-cta]') as HTMLElement).addEventListener('click', () => {
-    const b = S.buildings[Math.floor(Math.random() * S.buildings.length)];
+    const buildings = visibleBuildings();
+    const b = buildings[Math.floor(Math.random() * buildings.length)];
     if (b) playSeries(b);
   });
 
   // Paint the local cache immediately, then replace it with the authoritative
   // server snapshot. Polling keeps an already-open island fresh across devices.
   refreshIsland(false);
+  if (IS_DEV) void resumeGeneratorExperiments();
   // Wait for the first server read before resuming jobs so a stale device cache
   // cannot revive a bake that another client has already replaced.
   void stateSync.hydrate().finally(resumePendingBakes);
