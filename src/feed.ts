@@ -2715,8 +2715,17 @@ export class Feed {
   }
 
   private shouldIdleWarm(i: number): boolean {
-    if (this.warmMode === 'idle' || this.warmMode === '1' || this.warmMode === 'on') return true;
-    return mechanicMountCost(this.playables[i]?.id ?? '') === 'light';
+    // Default: the immediate NEXT mechanic is ALWAYS pre-warmed during idle.
+    // Gating heavy mechanics on swipe intent (the previous 'adaptive' default)
+    // regressed on device: 9 of 10 mechanics are 'heavy' by the byte manifest,
+    // so nothing pre-mounted no matter how long the player idled, every swipe
+    // arrived on a loading cover, and the mount cost landed INSIDE the gesture.
+    // The calm-frames gate + staged boot already make a background warm cheap
+    // (~100-180ms worst on A32 after the mount surgery) — idle time is the
+    // right place for it. mountCost still classifies byte-prefetch depth, and
+    // '?warm=intent' keeps the intent-only behaviour for A/B comparisons.
+    if (this.warmMode === 'intent') return mechanicMountCost(this.playables[i]?.id ?? '') === 'light';
+    return true;
   }
   // Live snapshot — exposed as window.__feedWarm() (see constructor). Answers
   // "is the next mechanic pre-warmed, and if not, why".
