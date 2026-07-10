@@ -266,6 +266,16 @@ export class Feed {
   private warmCalmMax = 0;   // most consecutive "calm" frames the low-impact scheduler has seen
   private warmTimer: number | null = null;
   private warmIdleCancel: (() => void) | null = null;
+  // ── Finger-aware warm prepare. The heavy warm phase (prepareInteractive:
+  //    decode/GL init inside the warm frame) runs on the SAME main thread as
+  //    the mechanic the user is playing — a 200-400ms block under an active
+  //    finger is felt as a mid-gameplay рывок. Touches inside the mechanic
+  //    never reach the host document, so a same-origin probe inside each
+  //    frame tracks them; while a real finger is down, background warm
+  //    preparation is parked in deferredWarmPrepare and flushed on release. ──
+  private mechanicPointerDown = false;
+  private mechanicPointerDownAt = 0;
+  private deferredWarmPrepare = new Set<number>();
   private frameLoaded = new Set<number>();
   private frameStaticReady = new Set<number>();
   private frameUsesStagedReady = new Set<number>();
@@ -2266,6 +2276,7 @@ export class Feed {
       if (this.frames.get(i) !== frame) return;
       this.markWarmTimeline(i, 'loadAt');
       this.disableFrameDoubleTapZoom(frame);
+      this.attachPointerActivityProbe(frame);
       this.frameLoaded.add(i);
       this.setFramePaused(i, this.shouldPauseFrame(i));
       this.queueFrameReadyFallback(i, frame);
@@ -2348,6 +2359,7 @@ export class Feed {
     this.frameStaticReady.delete(i);
     this.frameUsesStagedReady.delete(i);
     this.framePrepareRequested.delete(i);
+    this.deferredWarmPrepare.delete(i);
     this.frameReady.delete(i);
     this.frameRevealed.delete(i);
     this.framePaused.delete(i);
@@ -2396,10 +2408,62 @@ export class Feed {
       || this.liveHold.has(i);
   }
 
+  // Same-origin probe: real (isTrusted) pointer state inside a mechanic frame.
+  // Autoplay dispatches synthetic pointer events — those must not read as a
+  // user finger. Cross-origin frames (none in the feed today) skip the probe;
+  // warm prepare simply isn't finger-gated for them.
+  private attachPointerActivityProbe(frame: HTMLIFrameElement) {
+    try {
+      const win = frame.contentWindow;
+      if (!win) return;
+      const down = (e: PointerEvent) => {
+        if (!e.isTrusted) return;
+        this.mechanicPointerDown = true;
+        this.mechanicPointerDownAt = performance.now();
+      };
+      const up = (e: PointerEvent) => {
+        if (!e.isTrusted) return;
+        this.mechanicPointerDown = false;
+        this.flushDeferredWarmPrepare();
+      };
+      win.addEventListener('pointerdown', down, { capture: true, passive: true });
+      win.addEventListener('pointerup', up, { capture: true, passive: true });
+      win.addEventListener('pointercancel', up, { capture: true, passive: true });
+    } catch { /* cross-origin frame */ }
+  }
+
+  // Defer ONLY pure background warm. Arrival-driven preparation (current,
+  // settling target, liveHold during a drag) always beats smoothness — the
+  // user is about to land there.
+  private shouldDeferWarmPrepare(i: number): boolean {
+    if (i === this.realIndex() || i === this.settlingTargetIndex || this.liveHold.has(i)) return false;
+    if (this.dragging) return true;
+    if (!this.mechanicPointerDown) return false;
+    // A press that never ended (missed pointerup on unmount, a long hold)
+    // must not starve the warm forever.
+    return performance.now() - this.mechanicPointerDownAt < 2500;
+  }
+
+  private flushDeferredWarmPrepare() {
+    if (!this.deferredWarmPrepare.size) return;
+    for (const i of [...this.deferredWarmPrepare]) {
+      this.deferredWarmPrepare.delete(i);
+      if (!this.frames.has(i) || !this.frameStaticReady.has(i)) continue;
+      this.requestInteractivePreparation(i);
+    }
+  }
+
   private requestInteractivePreparation(i: number) {
     if (this.frameReady.has(i) || this.framePrepareRequested.has(i)) return;
     const frame = this.frames.get(i);
     if (!frame) return;
+    if (this.shouldDeferWarmPrepare(i)) {
+      this.deferredWarmPrepare.add(i);
+      this.wlog(`prepareInteractive #${i} deferred — finger down on the current mechanic`);
+      // Re-check even if the release never flushes (stale press guard).
+      window.setTimeout(() => this.flushDeferredWarmPrepare(), 2600);
+      return;
+    }
     this.framePrepareRequested.add(i);
     try {
       const api = this.playableApi(i);
@@ -2743,6 +2807,8 @@ export class Feed {
       mode: this.warmMode,
       nextMountCost: next >= 0 ? mechanicMountCost(this.playables[next]?.id ?? '') : null,
       blockedNow: reason || '(not blocked — warm is allowed right now)',
+      fingerDown: this.mechanicPointerDown,
+      deferredPrepare: [...this.deferredWarmPrepare],
       calmFramesSeenMax: this.warmCalmMax,
       calmFramesNeeded: WARM_NEXT_CALM_FRAMES,
       diagnosis: next >= 0 && !this.shouldIdleWarm(next)
@@ -3961,6 +4027,9 @@ export class Feed {
     if (!this.dragging) return;
     this.dragging = false;
     try { surface.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+    // Warm prepare parked during the drag resumes now — if the drag commits,
+    // the target index would stop deferring anyway (settling/liveHold).
+    this.flushDeferredWarmPrepare();
 
     // Series row was faded out for this swipe → fade it back in once the page settles.
     // markUnitShown re-renders it on a unit change; this also covers a snap-back to
