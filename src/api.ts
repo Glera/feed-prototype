@@ -31,6 +31,35 @@ async function post<T>(path: string, body?: unknown): Promise<T | null> {
   }
 }
 
+export class ApiRequestError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'ApiRequestError';
+  }
+}
+
+async function postRequired<T>(path: string, body?: unknown): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: headers(),
+      body: body != null ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const text = await r.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
+  if (!r.ok) {
+    const detail = data?.detail ?? data?.error ?? text ?? r.statusText;
+    throw new ApiRequestError(r.status, `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+  }
+  if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
+  return data as T;
+}
+
 async function get<T>(path: string): Promise<T | null> {
   try {
     const r = await fetch(`${API_BASE}${path}`, { headers: headers() });
@@ -160,12 +189,12 @@ export interface IslandThemePack {
   roof: string;
 }
 
-export function apiIslandTheme(payload: { prompt: string; avoid?: string }): Promise<IslandThemePack | null> {
-  return post<IslandThemePack>('/api/island/theme', payload);
+export function apiIslandTheme(payload: { prompt: string; avoid?: string }): Promise<IslandThemePack> {
+  return postRequired<IslandThemePack>('/api/island/theme', payload);
 }
 
-export function apiIslandBake(payload: { pack: IslandThemePack; prompt: string; tpl?: 'sort' }): Promise<{ rel: string; url: string; ready?: boolean } | null> {
-  return post<{ rel: string; url: string; ready?: boolean }>('/api/island/bake', payload);
+export function apiIslandBake(payload: { pack: IslandThemePack; prompt: string; tpl?: 'sort' }): Promise<{ rel: string; url: string; ready?: boolean }> {
+  return postRequired<{ rel: string; url: string; ready?: boolean }>('/api/island/bake', payload);
 }
 
 export interface ChallengeInboxItem {

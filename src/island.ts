@@ -28,6 +28,9 @@ interface Pack {
 interface Building {
   slot: number; tpl: TplId; pack: string; name: string;
   plays: number; likes: number; liked: boolean; fresh?: boolean;
+  prompt?: string;
+  publishing?: boolean;
+  publishError?: string;
   url?: string;   // hosted build (swipe-ugc) — play this instead of the client-side fork
 }
 interface IslandState {
@@ -35,6 +38,15 @@ interface IslandState {
   buildings: Building[];
   aiPacks?: Record<string, Pack>;   // Claude-generated theme packs, persisted so forks survive reloads
   aiSeq?: number;
+}
+interface CreationDraft {
+  slot: number;
+  tpl: TplId;
+  prompt: string;
+  pack: Pack;
+  rerolls: number;
+  ai?: boolean;
+  avoid?: string;
 }
 
 const PACKS: Pack[] = [
@@ -64,11 +76,21 @@ const SLOTS = [{ x: 115, y: 155 }, { x: 275, y: 170 }, { x: 115, y: 395 }, { x: 
 const STORE_KEY = 'island-proto-v1';
 const GUEST_REWARD = 25;
 const REROLL_COST = 30;
+const IS_DEV = Boolean((import.meta as any).env?.DEV);
 
 function loadState(): IslandState {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (raw) return JSON.parse(raw) as IslandState;
+    if (raw) {
+      const state = JSON.parse(raw) as IslandState;
+      state.buildings.forEach((b) => {
+        if (b.publishing) {
+          b.publishing = false;
+          b.publishError = 'Publish status was interrupted; retry to confirm hosting';
+        }
+      });
+      return state;
+    }
   } catch { /* first run / blocked storage */ }
   return { tokens: 120, buildings: [
     { slot: 1, tpl: 'sort', pack: 'neon', name: 'Neon sort', plays: 2431, likes: 128, liked: false },
@@ -80,29 +102,33 @@ function esc(t: string): string {
 }
 function cap(s: string): string { return s.charAt(0).toUpperCase() + s.slice(1); }
 function levelOf(b: Building): number { return 1 + Math.floor(Math.log10(1 + b.plays)); }
+function errorText(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 240);
+}
 
-// Real theme generation: the vite dev server exposes POST /island-api/theme
-// (vite.config.ts islandThemeApi), which asks Claude for a theme pack from the
-// player's prompt. Absent endpoint / no API key / invalid output → null, and
-// the caller falls back to the keyword presets — generation never blocks play.
+// Production must use the authenticated backend. The Vite endpoint and preset
+// fallback exist only for local development, where Claude CLI is available.
 async function aiTheme(prompt: string, avoid?: string): Promise<Pack | null> {
   try {
     const apiPack = await apiIslandTheme({ prompt, avoid });
-    if (apiPack) {
-      console.log('[island] backend theme:', apiPack.name, apiPack.items.join(' '));
-      return {
-        id: apiPack.id ?? '', name: apiPack.name.slice(0, 24), kw: apiPack.kw ?? [],
-        ground: apiPack.ground, edge: apiPack.edge, boardBg: apiPack.boardBg,
-        items: apiPack.items, prop: apiPack.prop, body: apiPack.body, roof: apiPack.roof,
-      };
-    }
+    console.log('[island] backend theme:', apiPack.name, apiPack.items.join(' '));
+    return {
+      id: apiPack.id ?? '', name: apiPack.name.slice(0, 24), kw: apiPack.kw ?? [],
+      ground: apiPack.ground, edge: apiPack.edge, boardBg: apiPack.boardBg,
+      items: apiPack.items, prop: apiPack.prop, body: apiPack.body, roof: apiPack.roof,
+    };
+  } catch (e) {
+    if (!IS_DEV) throw e;
+    console.log('[island] backend theme unavailable in dev:', errorText(e), '→ Vite/CLI fallback');
+  }
 
+  try {
     const ctrl = new AbortController();
     // Generous: the dev endpoint may route through the Claude Code CLI
     // (subscription path), which takes tens of seconds. The UX is async
     // anyway — the player can dismiss the sheet and keep browsing.
     const timer = window.setTimeout(() => ctrl.abort(), 120000);
-    const res = await fetch('island-api/theme', {
+    const res = await fetch('/island-api/theme', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt, avoid }),
@@ -120,7 +146,7 @@ async function aiTheme(prompt: string, avoid?: string): Promise<Pack | null> {
       items, prop: data.prop as PropKind, body: String(data.body), roof: String(data.roof),
     };
   } catch (e) {
-    console.log('[island] theme APIs unreachable:', String(e), '→ preset fallback');
+    console.log('[island] dev theme APIs unreachable:', errorText(e), '→ preset fallback');
     return null;
   }
 }
@@ -372,10 +398,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   ensureStyles();
   const S = loadState();
   let guest = false;
-  let cur: { slot: number; tpl: TplId; prompt: string; pack: Pack; rerolls: number; ai?: boolean; avoid?: string } | null = null;
+  let cur: CreationDraft | null = null;
   let toastTimer = 0;
   let generationSeq = 0;
   const generationBySlot = new Map<number, number>();
+  const readyDrafts = new Map<number, CreationDraft>();
 
   const resolvePack = (id: string): Pack => PACKS.find((x) => x.id === id) ?? S.aiPacks?.[id] ?? PACKS[0];
 
@@ -392,39 +419,54 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const b = S.buildings.find((x) => x.slot === slot);
     if (!b || b.tpl !== 'sort' || b.url) return;   // only sort has a bake recipe so far
     const packRef = b.pack;
+    b.prompt = prompt;
+    b.publishing = true;
+    b.publishError = undefined;
+    save();
+    refreshIsland();
     const chat = (window as unknown as { Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } } })
       .Telegram?.WebApp?.initDataUnsafe?.user?.id;
     try {
-      const hosted = await apiIslandBake({ pack: resolvePack(packRef), prompt, tpl: 'sort' });
-      if (hosted?.url) {
-        const now = S.buildings.find((x) => x.slot === slot);
-        if (!now || now.pack !== packRef) return;
-        now.url = hosted.url;
-        save();
-        console.log('[island] hosted:', hosted.url, hosted.ready ? '(ready)' : '(deploy pending)');
-        if (ov.isConnected) toast(hosted.ready === false ? 'Published; hosting is warming up' : 'Published to hosting ✅');
-        return;
+      let hosted: { rel: string; url: string; ready?: boolean };
+      try {
+        hosted = await apiIslandBake({ pack: resolvePack(packRef), prompt, tpl: 'sort' });
+      } catch (e) {
+        if (!IS_DEV) throw e;
+        console.log('[island] backend bake unavailable in dev:', errorText(e), '→ Vite worker fallback');
+        const ctrl = new AbortController();
+        const timer = window.setTimeout(() => ctrl.abort(), 300000);
+        const res = await fetch('/island-api/bake', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ pack: resolvePack(packRef), prompt, chat }),
+          signal: ctrl.signal,
+        });
+        window.clearTimeout(timer);
+        const data = (await res.json()) as { rel?: string; url?: string; error?: string };
+        if (!res.ok || !data.url) throw new Error(String(data.error ?? `HTTP ${res.status}`));
+        hosted = { rel: data.rel ?? '', url: data.url, ready: true };
       }
-
-      const ctrl = new AbortController();
-      const timer = window.setTimeout(() => ctrl.abort(), 300000);
-      const res = await fetch('island-api/bake', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ pack: resolvePack(packRef), prompt, chat }),
-        signal: ctrl.signal,
-      });
-      window.clearTimeout(timer);
-      const data = (await res.json()) as { url?: string; error?: string };
-      if (!res.ok || !data.url) { console.log('[island] dev bake failed:', data.error ?? res.status, '— keeping client-side fork'); return; }
+      if (!hosted.url) throw new Error('Backend published no hosted URL; check UGC_BASE_URL');
       const now = S.buildings.find((x) => x.slot === slot);
       if (!now || now.pack !== packRef) return;   // slot was rebuilt meanwhile
-      now.url = data.url;
+      now.url = hosted.url;
+      now.publishing = false;
+      now.publishError = undefined;
       save();
-      console.log('[island] dev hosted:', data.url);
-      if (ov.isConnected) toast('Published to hosting ✅');
+      refreshIsland();
+      console.log('[island] hosted:', hosted.url, hosted.ready ? '(ready)' : '(deploy pending)');
+      if (ov.isConnected) toast(hosted.ready === false ? 'Published; hosting is warming up' : 'Published to hosting ✅');
     } catch (e) {
-      console.log('[island] bake APIs unreachable:', String(e), '— keeping client-side fork');
+      const message = errorText(e);
+      const now = S.buildings.find((x) => x.slot === slot);
+      if (now && now.pack === packRef) {
+        now.publishing = false;
+        now.publishError = message;
+        save();
+        refreshIsland();
+      }
+      console.error('[island] publish failed:', message);
+      if (ov.isConnected) toast(`Publish failed · ${message}`);
     }
   }
 
@@ -490,7 +532,13 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         if (pendingSlots.has(i)) {
           s += `<g><ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="#C9BC8E" stroke="#8FA662" stroke-width="2" stroke-dasharray="4 6"/>
             <g class="isl-plus"><text x="${p.x}" y="${p.y + 3}" text-anchor="middle" font-size="24">🏗️</text></g>
-            <text x="${p.x}" y="${p.y + 28}" text-anchor="middle" font-size="11" fill="#5C7F41">building…</text></g>`;
+            <text x="${p.x}" y="${p.y + 28}" text-anchor="middle" font-size="11" fill="#5C7F41">generating…</text></g>`;
+        } else if (readyDrafts.has(i) && !guest) {
+          const draft = readyDrafts.get(i)!;
+          s += `<g class="isl-sector" data-slot="${i}">
+            <ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="${draft.pack.ground}" stroke="${draft.pack.edge}" stroke-width="2" stroke-dasharray="4 4"/>
+            <g class="isl-plus"><text x="${p.x}" y="${p.y + 2}" text-anchor="middle" font-size="22">✨</text></g>
+            <text x="${p.x}" y="${p.y + 27}" text-anchor="middle" font-size="11" fill="#fff">theme ready</text></g>`;
         } else if (!guest) {
           s += `<g class="isl-sector" data-slot="${i}">
             <ellipse cx="${p.x}" cy="${p.y}" rx="70" ry="52" fill="#B7C98B" stroke="#8FA662" stroke-width="2" stroke-dasharray="7 7"/>
@@ -527,6 +575,12 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // ── creation flow ──────────────────────────────────────────────────────────
 
   function openCreate(slot: number, replacing?: string): void {
+    const ready = readyDrafts.get(slot);
+    if (ready) {
+      cur = ready;
+      stepPreview();
+      return;
+    }
     cur = { slot, tpl: 'sort', prompt: '', pack: PACKS[0], rerolls: 1 };
     const cards = CREATABLE_TPLS.map((id) =>
       `<button class="isl-tcard" type="button" data-t="${id}">
@@ -563,6 +617,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   function stepGen(): void {
     if (!cur) return;
     const req = cur;
+    readyDrafts.delete(req.slot);
     const generationId = ++generationSeq;
     generationBySlot.set(req.slot, generationId);
     pendingSlots.add(req.slot);
@@ -591,26 +646,37 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         pack.id = `ai-${(S.aiSeq = (S.aiSeq ?? 0) + 1)}`;
         S.aiPacks = { ...(S.aiPacks ?? {}), [pack.id]: pack };
       }
+      req.pack = resolved;
+      req.ai = isAi;
+      readyDrafts.set(req.slot, req);
       const interactive = ov.isConnected && sheet.classList.contains('isl-sheet--show') && cur === req;
       if (interactive) {
-        req.pack = resolved;
-        req.ai = isAi;
         save();
         stepPreview();
         return;
       }
-      // Player moved on (sheet dismissed or island closed) — auto-build the
-      // mechanic with the arrived theme; skip preview/reroll. State is saved
-      // even if the island overlay is gone, so it's there on the next visit.
+      // Generation only prepares a theme. Closing the sheet must never publish
+      // or create a building; the player returns to this draft and confirms Build.
       const nm = isAi ? resolved.name : (req.prompt ? cap(req.prompt) : resolved.name);
-      S.buildings = S.buildings.filter((x) => x.slot !== req.slot);
-      S.buildings.push({ slot: req.slot, tpl: req.tpl, pack: resolved.id, name: nm.slice(0, 16), plays: 0, likes: 0, liked: false, fresh: true });
-      save();
       if (ov.isConnected) {
         refreshIsland();
-        toast(`"${nm.slice(0, 16)}" is ready 🌱`);
+        toast(`Theme "${nm.slice(0, 16)}" is ready · tap the slot to Build`);
       }
-      void bakeAndHost(req.slot, req.prompt);
+    }).catch((error) => {
+      if (generationBySlot.get(req.slot) !== generationId) return;
+      generationBySlot.delete(req.slot);
+      pendingSlots.delete(req.slot);
+      const message = errorText(error);
+      refreshIsland();
+      console.error('[island] theme generation failed:', message);
+      const interactive = ov.isConnected && sheet.classList.contains('isl-sheet--show') && cur === req;
+      if (!interactive) {
+        if (ov.isConnected) toast(`Theme failed · ${message}`);
+        return;
+      }
+      openSheet(`<h3>Theme generation failed</h3><div class="isl-sub">${esc(message)}</div>
+        <button class="isl-btn isl-btn--pri" type="button" data-retry>Retry</button>`);
+      sheet.querySelector('[data-retry]')?.addEventListener('click', () => stepGen());
     });
   }
 
@@ -629,12 +695,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (!cur) return;
       const { slot, tpl: tplId, prompt } = cur;
       // Slots are the cap: building on an occupied slot replaces its mechanic.
+      readyDrafts.delete(slot);
       S.buildings = S.buildings.filter((x) => x.slot !== slot);
-      S.buildings.push({ slot, tpl: tplId, pack: pk.id, name: nm.slice(0, 16), plays: 0, likes: 0, liked: false, fresh: true });
+      S.buildings.push({
+        slot, tpl: tplId, pack: pk.id, name: nm.slice(0, 16), prompt,
+        plays: 0, likes: 0, liked: false, fresh: true, publishing: true,
+      });
       cur = null;
       closeSheet();
       refreshIsland();
-      toast('Built! The sector took your theme 🌱');
+      toast('Publishing…');
       void bakeAndHost(slot, prompt);
     });
     (sheet.querySelector('[data-rr]') as HTMLElement).addEventListener('click', () => {
@@ -642,6 +712,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (cur.rerolls > 0) cur.rerolls--;
       else if (S.tokens >= REROLL_COST) { S.tokens -= REROLL_COST; save(); }
       else { toast('Not enough tokens'); return; }
+      readyDrafts.delete(cur.slot);
       (ov.querySelector('[data-tok]') as HTMLElement).textContent = String(S.tokens);
       cur.avoid = cur.ai ? cur.pack.name : undefined;
       stepGen();
@@ -655,14 +726,24 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (!b) return;
     if (guest) { playSeries(b); return; }
     const pk = resolvePack(b.pack);
+    const publishState = b.url ? 'HOSTED' : b.publishing ? 'Publishing…' : b.publishError ? `Publish failed · ${b.publishError}` : 'Local draft';
+    const retry = !b.url && !b.publishing
+      ? '<button class="isl-btn isl-btn--ghost" type="button" data-publish>Retry publish</button>'
+      : '';
     openSheet(`<h3>${esc(b.name)}</h3>
-      <div class="isl-sub">${TPL[b.tpl].label} · Lv ${levelOf(b)} · ${b.plays} plays · ♥ ${b.likes}</div>
+      <div class="isl-sub">${TPL[b.tpl].label} · Lv ${levelOf(b)} · ${b.plays} plays · ♥ ${b.likes}<br>${esc(publishState)}</div>
       <div class="isl-board">${board(b.tpl, pk)}</div>
       <button class="isl-btn isl-btn--pri" type="button" data-play>▶ Play the series</button>
+      ${retry}
       <button class="isl-btn isl-btn--ghost" type="button" data-rebuild>Rebuild slot · replace this mechanic</button>
       <button class="isl-btn isl-btn--ghost" type="button" data-delete>Delete mechanic</button>
       <div class="isl-pk" style="margin-top:10px">Guests like it after they beat it — switch to guest mode to feel it</div>`);
     (sheet.querySelector('[data-play]') as HTMLElement).addEventListener('click', () => { closeSheet(); playSeries(b); });
+    sheet.querySelector('[data-publish]')?.addEventListener('click', () => {
+      closeSheet();
+      toast('Publishing…');
+      void bakeAndHost(slot, b.prompt ?? '');
+    });
     (sheet.querySelector('[data-rebuild]') as HTMLElement).addEventListener('click', () => { closeSheet(); openCreate(slot, b.name); });
     (sheet.querySelector('[data-delete]') as HTMLElement).addEventListener('click', () => {
       if (!window.confirm(`Delete "${b.name}" from the island?`)) return;
