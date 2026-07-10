@@ -405,9 +405,10 @@ const CSS = `
 .isl-like{border:2px solid #E8603C;background:transparent;color:#fff;border-radius:999px;padding:11px 22px;font:inherit;font-size:14.5px}
 .isl-like--on{background:#E8603C;font-weight:800}
 .isl-win__home{background:#fff;color:#10222C;border:none;border-radius:13px;padding:12px 30px;font:inherit;font-size:14.5px;font-weight:800}
-.isl-toast{position:absolute;top:calc(var(--safe-top) + 10px);left:50%;transform:translate(-50%,-80px);background:rgba(255,255,255,.95);
-  color:#10222C;border-radius:12px;padding:10px 16px;font-size:12.5px;font-weight:600;transition:transform .3s;max-width:86%;text-align:center;z-index:10}
-.isl-toast--show{transform:translate(-50%,0)}
+.isl-toast{position:absolute;bottom:calc(var(--safe-bottom) + 84px);left:50%;transform:translate(-50%,24px);opacity:0;
+  background:rgba(255,255,255,.95);color:#10222C;border-radius:12px;padding:10px 16px;font-size:12.5px;font-weight:600;
+  transition:transform .3s,opacity .3s;max-width:86%;text-align:center;z-index:10;pointer-events:none}
+.isl-toast--show{transform:translate(-50%,0);opacity:1}
 @media (prefers-reduced-motion: reduce){.island-world *{animation:none!important;transition:none!important}}
 `;
 
@@ -559,12 +560,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   const sheet = ov.querySelector('[data-sheet]') as HTMLElement;
   const scrim = ov.querySelector('[data-scrim]') as HTMLElement;
 
+  // Toasts sit at the BOTTOM (the top slides under the phone notch) and fade
+  // in place instead of flying off-screen. Long error details are truncated —
+  // the full text lives on the building card (publishError) and in the console —
+  // and the display time scales with length so it's actually readable.
   const toast = (t: string) => {
     const el = ov.querySelector('[data-toast]') as HTMLElement;
-    el.textContent = t;
+    el.textContent = t.length > 140 ? `${t.slice(0, 140)}…` : t;
     el.classList.add('isl-toast--show');
     window.clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => el.classList.remove('isl-toast--show'), 2400);
+    toastTimer = window.setTimeout(() => el.classList.remove('isl-toast--show'), Math.min(8000, Math.max(2400, t.length * 45)));
   };
 
   const openSheet = (html: string) => {
