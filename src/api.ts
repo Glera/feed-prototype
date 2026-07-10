@@ -60,6 +60,24 @@ async function postRequired<T>(path: string, body?: unknown): Promise<T> {
   return data as T;
 }
 
+async function getRequired<T>(path: string): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}${path}`, { headers: headers() });
+  } catch (e) {
+    throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const text = await r.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
+  if (!r.ok) {
+    const detail = data?.detail ?? data?.error ?? text ?? r.statusText;
+    throw new ApiRequestError(r.status, `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+  }
+  if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
+  return data as T;
+}
+
 async function get<T>(path: string): Promise<T | null> {
   try {
     const r = await fetch(`${API_BASE}${path}`, { headers: headers() });
@@ -193,8 +211,21 @@ export function apiIslandTheme(payload: { prompt: string; avoid?: string }): Pro
   return postRequired<IslandThemePack>('/api/island/theme', payload);
 }
 
-export function apiIslandBake(payload: { pack: IslandThemePack; prompt: string; tpl?: 'sort' }): Promise<{ rel: string; url: string; ready?: boolean }> {
-  return postRequired<{ rel: string; url: string; ready?: boolean }>('/api/island/bake', payload);
+export interface IslandBakeJob {
+  job_id: string;
+  status: 'queued' | 'baking' | 'deploying' | 'ready' | 'published' | 'failed';
+  rel: string;
+  url: string;
+  error: string;
+  ready: boolean;
+}
+
+export function apiIslandBake(payload: { request_id: string; pack: IslandThemePack; prompt: string; tpl?: 'sort' }): Promise<IslandBakeJob> {
+  return postRequired<IslandBakeJob>('/api/island/bake', payload);
+}
+
+export function apiIslandBakeJob(jobId: string): Promise<IslandBakeJob> {
+  return getRequired<IslandBakeJob>(`/api/island/bake/${encodeURIComponent(jobId)}`);
 }
 
 export interface ChallengeInboxItem {

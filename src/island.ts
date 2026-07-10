@@ -12,8 +12,17 @@
  * building launches the hosted UGC artifact when it exists, with a client-side
  * fork/stock build as fallback.
  */
-import { apiIslandBake, apiIslandTheme } from './api';
+import { apiIslandBake, apiIslandBakeJob, apiIslandTheme, type IslandBakeJob } from './api';
 import { coverUrl, playableUrl } from './playables';
+import { showConfirm } from './telegram';
+
+declare const __ISLAND_SORT_RECIPE__: {
+  version: number;
+  baseBuild: string;
+  sourcePalette: string[];
+};
+
+const SORT_RECIPE = __ISLAND_SORT_RECIPE__;
 
 export interface IslandHostCtx { close(): void; }
 
@@ -31,6 +40,8 @@ interface Building {
   prompt?: string;
   publishing?: boolean;
   publishError?: string;
+  jobId?: string;
+  rel?: string;
   url?: string;   // hosted build (swipe-ugc) — play this instead of the client-side fork
 }
 interface IslandState {
@@ -67,7 +78,7 @@ const PACKS: Pack[] = [
     items: ['#FF7031', '#FFC02E', '#9C4433', '#5E4B48', '#FFE08A', '#4EA6D8'], prop: 'rock', body: '#7A625C', roof: '#FF7031' },
 ];
 const TPL: Record<TplId, { label: string; ds: string; playableId: string }> = {
-  sort:  { label: 'Sorting', ds: 'sort items into flasks',        playableId: 'marble-sort-swipe' },
+  sort:  { label: 'Sorting', ds: 'sort items into flasks',        playableId: SORT_RECIPE.baseBuild },
   merge: { label: 'Merge',   ds: 'combine and grow the chain',    playableId: 'merge-locked-v1-swipe' },
   pins:  { label: 'Pins',    ds: 'pull the pins, catch it all',   playableId: 'pins-swipe' },
 };
@@ -77,6 +88,7 @@ const STORE_KEY = 'island-proto-v1';
 const GUEST_REWARD = 25;
 const REROLL_COST = 30;
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
+const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
 
 function loadState(): IslandState {
   try {
@@ -84,7 +96,7 @@ function loadState(): IslandState {
     if (raw) {
       const state = JSON.parse(raw) as IslandState;
       state.buildings.forEach((b) => {
-        if (b.publishing) {
+        if (b.publishing && !b.jobId) {
           b.publishing = false;
           b.publishError = 'Publish status was interrupted; retry to confirm hosting';
         }
@@ -104,6 +116,20 @@ function cap(s: string): string { return s.charAt(0).toUpperCase() + s.slice(1);
 function levelOf(b: Building): number { return 1 + Math.floor(Math.log10(1 + b.plays)); }
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 240);
+}
+function hostedUrl(building: Building): string | null {
+  if (building.rel) return IS_DEV ? `/ugc/${building.rel}` : `${UGC_BASE_URL}/${building.rel}`;
+  return building.url ?? null;
+}
+function newJobId(): string {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi.randomUUID === 'function') return cryptoApi.randomUUID();
+  const bytes = new Uint8Array(16);
+  cryptoApi.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const h = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
 // Production must use the authenticated backend. The Vite endpoint and preset
@@ -171,7 +197,8 @@ function pickPack(txt: string, excl: string | null): Pack {
 //     (base rebuilt incompatibly → recipe is stale → play the stock build);
 //   * any fetch/transform failure → stock build;
 //   * boot watchdog in playSeries → stock build if the fork doesn't boot.
-const SORT_MARBLES = ['#F5C842', '#5BC8D8', '#FF9F43', '#FF7B7B', '#B07BFF', '#7BE87B'];
+// Injected from swipe-ugc/recipes/sort at build time; the worker owns the source.
+const SORT_MARBLES = SORT_RECIPE.sourcePalette;
 
 async function forkedSortHtml(pk: Pack, dbg: (m: string) => void): Promise<string | null> {
   try {
@@ -403,6 +430,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   let generationSeq = 0;
   const generationBySlot = new Map<number, number>();
   const readyDrafts = new Map<number, CreationDraft>();
+  const pollingSlots = new Set<number>();
 
   const resolvePack = (id: string): Pack => PACKS.find((x) => x.id === id) ?? S.aiPacks?.[id] ?? PACKS[0];
 
@@ -417,7 +445,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // the building switches from the client-side fork to the hosted build.
   async function bakeAndHost(slot: number, prompt: string): Promise<void> {
     const b = S.buildings.find((x) => x.slot === slot);
-    if (!b || b.tpl !== 'sort' || b.url) return;   // only sort has a bake recipe so far
+    if (!b || b.tpl !== 'sort' || hostedUrl(b) || pollingSlots.has(slot)) return;
+    pollingSlots.add(slot);
     const packRef = b.pack;
     b.prompt = prompt;
     b.publishing = true;
@@ -426,10 +455,17 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     refreshIsland();
     const chat = (window as unknown as { Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } } })
       .Telegram?.WebApp?.initDataUnsafe?.user?.id;
+    let terminalFailure = false;
     try {
-      let hosted: { rel: string; url: string; ready?: boolean };
+      let job: IslandBakeJob;
       try {
-        hosted = await apiIslandBake({ pack: resolvePack(packRef), prompt, tpl: 'sort' });
+        if (!b.jobId) {
+          b.jobId = newJobId();
+          save();
+          job = await apiIslandBake({ request_id: b.jobId, pack: resolvePack(packRef), prompt, tpl: 'sort' });
+        } else {
+          job = await apiIslandBakeJob(b.jobId);
+        }
       } catch (e) {
         if (!IS_DEV) throw e;
         console.log('[island] backend bake unavailable in dev:', errorText(e), '→ Vite worker fallback');
@@ -444,29 +480,55 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         window.clearTimeout(timer);
         const data = (await res.json()) as { rel?: string; url?: string; error?: string };
         if (!res.ok || !data.url) throw new Error(String(data.error ?? `HTTP ${res.status}`));
-        hosted = { rel: data.rel ?? '', url: data.url, ready: true };
+        job = { job_id: b.jobId ?? '', status: 'ready', rel: data.rel ?? '', url: data.url, error: '', ready: true };
       }
-      if (!hosted.url) throw new Error('Backend published no hosted URL; check UGC_BASE_URL');
+
+      let pollErrors = 0;
+      for (let attempt = 0; !['ready', 'published', 'failed'].includes(job.status); attempt++) {
+        if (attempt >= 180) {
+          if (ov.isConnected) toast('Publishing continues in background');
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        const current = S.buildings.find((x) => x.slot === slot);
+        if (!current || current.pack !== packRef || !current.jobId) return;
+        try {
+          job = await apiIslandBakeJob(current.jobId);
+          pollErrors = 0;
+        } catch (e) {
+          if (++pollErrors < 4) continue;
+          throw e;
+        }
+      }
+      if (job.status === 'failed') {
+        terminalFailure = true;
+        throw new Error(job.error || 'Bake job failed');
+      }
+      if (!job.url || !job.rel) throw new Error('Backend published no hosted URL; check UGC_BASE_URL');
       const now = S.buildings.find((x) => x.slot === slot);
       if (!now || now.pack !== packRef) return;   // slot was rebuilt meanwhile
-      now.url = hosted.url;
+      now.rel = job.rel;
+      now.url = undefined;
       now.publishing = false;
       now.publishError = undefined;
       save();
       refreshIsland();
-      console.log('[island] hosted:', hosted.url, hosted.ready ? '(ready)' : '(deploy pending)');
-      if (ov.isConnected) toast(hosted.ready === false ? 'Published; hosting is warming up' : 'Published to hosting ✅');
+      console.log('[island] hosted:', job.url, job.ready ? '(ready)' : '(deploy pending)');
+      if (ov.isConnected) toast(job.ready ? 'Published to hosting ✅' : 'Published; hosting is warming up');
     } catch (e) {
       const message = errorText(e);
       const now = S.buildings.find((x) => x.slot === slot);
       if (now && now.pack === packRef) {
         now.publishing = false;
         now.publishError = message;
+        if (terminalFailure) now.jobId = undefined;
         save();
         refreshIsland();
       }
       console.error('[island] publish failed:', message);
       if (ov.isConnected) toast(`Publish failed · ${message}`);
+    } finally {
+      pollingSlots.delete(slot);
     }
   }
 
@@ -726,8 +788,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (!b) return;
     if (guest) { playSeries(b); return; }
     const pk = resolvePack(b.pack);
-    const publishState = b.url ? 'HOSTED' : b.publishing ? 'Publishing…' : b.publishError ? `Publish failed · ${b.publishError}` : 'Local draft';
-    const retry = !b.url && !b.publishing
+    const publishState = hostedUrl(b) ? 'HOSTED' : b.publishing ? 'Publishing…' : b.publishError ? `Publish failed · ${b.publishError}` : 'Local draft';
+    const retry = !hostedUrl(b) && !b.publishing
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-publish>Retry publish</button>'
       : '';
     openSheet(`<h3>${esc(b.name)}</h3>
@@ -745,8 +807,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       void bakeAndHost(slot, b.prompt ?? '');
     });
     (sheet.querySelector('[data-rebuild]') as HTMLElement).addEventListener('click', () => { closeSheet(); openCreate(slot, b.name); });
-    (sheet.querySelector('[data-delete]') as HTMLElement).addEventListener('click', () => {
-      if (!window.confirm(`Delete "${b.name}" from the island?`)) return;
+    (sheet.querySelector('[data-delete]') as HTMLElement).addEventListener('click', async () => {
+      if (!await showConfirm(`Delete "${b.name}" from the island?`)) return;
       S.buildings = S.buildings.filter((x) => x.slot !== slot);
       closeSheet();
       refreshIsland();
@@ -793,10 +855,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       // Hosted build wins over the client-side fork: it's the tested, published
       // artifact. Real URL → query params work; no watchdog (cross-origin in
       // prod, and the artifact already passed the worker's autoplay gate).
-      if (b.url) {
-        dbg(`loading hosted build: ${b.url}`);
+      const hosted = hostedUrl(b);
+      if (hosted) {
+        dbg(`loading hosted build: ${hosted}`);
         setChip(`HOSTED · ${pk.name}`);
-        frame.src = `${b.url}${b.url.includes('?') ? '&' : '?'}auto=0`;
+        frame.src = `${hosted}${hosted.includes('?') ? '&' : '?'}auto=0`;
         return;
       }
       let forked = false;
@@ -897,4 +960,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   });
 
   refreshIsland();
+  S.buildings
+    .filter((building) => building.tpl === 'sort' && Boolean(building.jobId) && !hostedUrl(building))
+    .forEach((building) => { void bakeAndHost(building.slot, building.prompt ?? ''); });
 }

@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import { execFile } from 'child_process';
+import { recipe as sortRecipe, renderThemePrompt, validatePack } from '../swipe-ugc/recipes/sort/recipe.mjs';
 
 // Dev only: serve each playable's SWIPE build from playables/<id>/dist-swipe/,
 // so `npm run dev` mirrors the deployed swipe-platform site (where `./<id>.html`
@@ -111,53 +112,20 @@ function servePlayables(): Plugin {
 // is absent (deployed static site) or errors (no key, bad output) — the island
 // never breaks because of this. In production this becomes a backend endpoint.
 function islandThemeApi(): Plugin {
-  const HEX = /^#[0-9A-Fa-f]{6}$/;
-  const PROPS = ['mushroom', 'crystal', 'coral', 'lollipop', 'rock'];
   const SCHEMA = {
     type: 'object',
     properties: {
       name: { type: 'string', description: 'Short evocative theme name, 2-3 words, in the same language as the prompt' },
-      items: { type: 'array', items: { type: 'string' }, description: 'Exactly 6 marble colors as #RRGGBB hex' },
+      items: { type: 'array', minItems: sortRecipe.pack.itemCount, maxItems: sortRecipe.pack.itemCount, items: { type: 'string', pattern: sortRecipe.pack.hexPattern }, description: 'Gameplay-distinguishable marble colors' },
       ground: { type: 'string', description: 'Island sector ground color, mid-tone saturated, #RRGGBB' },
       edge: { type: 'string', description: 'Darker shade of ground, #RRGGBB' },
       boardBg: { type: 'string', description: 'Board background tint fitting the theme, #RRGGBB' },
       body: { type: 'string', description: 'Building body color, #RRGGBB' },
       roof: { type: 'string', description: 'Building roof color, more saturated, #RRGGBB' },
-      prop: { type: 'string', enum: PROPS, description: 'Decoration shape that best fits the theme' },
+      prop: { type: 'string', enum: sortRecipe.pack.props, description: 'Decoration shape that best fits the theme' },
     },
     required: ['name', 'items', 'ground', 'edge', 'boardBg', 'body', 'roof', 'prop'],
     additionalProperties: false,
-  };
-  const themePrompt = (prompt: string, avoid?: string) =>
-    `You are generating a visual theme pack for a marble-sort puzzle retheme in a mobile game.
-Player's theme prompt: "${prompt || 'surprise me'}"
-${avoid ? `The player rerolled: make this variant clearly different from the previous one named "${avoid}".\n` : ''}Rules:
-- items: exactly 6 marble colors. They MUST be instantly distinguishable from each other (distinct hues, never shades of one color) and readable on the game's dark blue-grey board (#4A5878). Saturated mid-to-bright colors; no near-black, no near-white.
-- Colors should evoke the theme (e.g. a desert theme leans sand/terracotta/turquoise, a night theme leans neon).
-- ground/edge: the theme's island-sector ground and its darker border.
-- boardBg: soft tint for preview cards (light for day themes, dark for night/neon themes).
-- body/roof: a small building in this theme.
-- prop: the decoration silhouette that fits best.
-- name: short and evocative, same language as the player's prompt.`;
-  // Returns null when the pack is acceptable, else a human-readable reason that
-  // is fed back to the model for one corrective retry.
-  const validationError = (p: Record<string, unknown>): string | null => {
-    if (!Array.isArray(p.items) || p.items.length !== 6 || !p.items.every((c) => typeof c === 'string' && HEX.test(c)))
-      return 'items must be exactly 6 #RRGGBB hex colors';
-    for (const k of ['ground', 'edge', 'boardBg', 'body', 'roof'])
-      if (typeof p[k] !== 'string' || !HEX.test(p[k] as string)) return `${k} must be a #RRGGBB hex color`;
-    if (typeof p.prop !== 'string' || !PROPS.includes(p.prop)) return `prop must be one of ${PROPS.join('/')}`;
-    if (typeof p.name !== 'string' || !p.name.trim()) return 'name must be a non-empty string';
-    // Marbles must be gameplay-distinguishable: min pairwise RGB distance.
-    const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-    const items = (p.items as string[]).map(rgb);
-    for (let i = 0; i < items.length; i++)
-      for (let j = i + 1; j < items.length; j++) {
-        const d = Math.abs(items[i][0] - items[j][0]) + Math.abs(items[i][1] - items[j][1]) + Math.abs(items[i][2] - items[j][2]);
-        if (d < 90)
-          return `marble colors ${(p.items as string[])[i]} and ${(p.items as string[])[j]} are too similar — players must tell every marble apart instantly; use more distinct hues (you may bend realism for gameplay)`;
-      }
-    return null;
   };
   // Subscription path for prototyping: with no API key in the environment we
   // shell out to the locally installed Claude Code CLI (`claude -p`) — those
@@ -254,12 +222,12 @@ ${avoid ? `The player rerolled: make this variant clearly different from the pre
             res.setHeader('content-type', 'application/json');
             try {
               const { prompt, avoid } = JSON.parse(body || '{}') as { prompt?: string; avoid?: string };
-              const basePrompt = themePrompt(String(prompt ?? ''), avoid ? String(avoid) : undefined);
+              const basePrompt = renderThemePrompt(String(prompt ?? ''), avoid ? String(avoid) : undefined);
               const generate = async (fullPrompt: string): Promise<Record<string, unknown>> => {
                 if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) {
                   const client = new Anthropic();
                   const msg = await client.messages.create({
-                    model: 'claude-opus-4-8',
+                    model: process.env.ISLAND_THEME_MODEL || 'claude-opus-4-8',
                     max_tokens: 1000,
                     output_config: { format: { type: 'json_schema', schema: SCHEMA }, effort: 'low' },
                     messages: [{ role: 'user', content: fullPrompt }],
@@ -276,7 +244,7 @@ ${avoid ? `The player rerolled: make this variant clearly different from the pre
               let lastError = '';
               for (let attempt = 0; attempt < 2; attempt++) {
                 const pack = await generate(attempt === 0 ? basePrompt : `${basePrompt}\nYour previous attempt was rejected by validation: ${lastError}. Fix exactly that while keeping the theme.`);
-                const err = validationError(pack);
+                const err = validatePack(pack);
                 if (!err) { res.end(JSON.stringify(pack)); return; }
                 lastError = err;
               }
@@ -305,6 +273,7 @@ export default defineConfig({
     // badge carries the git short-hash (timestamps collide at minute resolution).
     // Falls back to a bare UTC timestamp for standalone/dev builds.
     __PLATFORM_VERSION__: JSON.stringify(process.env.PLATFORM_VERSION || new Date().toISOString().slice(0, 16).replace('T', ' ')),
+    __ISLAND_SORT_RECIPE__: JSON.stringify(sortRecipe),
   },
   build: {
     target: 'es2018',

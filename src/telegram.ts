@@ -64,6 +64,23 @@ export function shareChallenge(shareUrl: string, deepLink: string, text: string)
   try { window.open(link, '_blank'); } catch { /* blocked */ }
 }
 
+/** Native Telegram confirmation where available; browser fallback elsewhere. */
+export function showConfirm(message: string): Promise<boolean> {
+  const tg: AnyTG | undefined = (window as any).Telegram?.WebApp;
+  if (tg && typeof tg.showConfirm === 'function') {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(Boolean(value));
+      };
+      try { tg.showConfirm(message, done); } catch { done(window.confirm(message)); }
+    });
+  }
+  return Promise.resolve(window.confirm(message));
+}
+
 function setVars(top: number, bottom: number, left: number, right: number): void {
   const root = document.documentElement;
   const px = (n: number) => `${Math.max(0, Math.round(n || 0))}px`;
