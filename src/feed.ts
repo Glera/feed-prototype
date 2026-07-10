@@ -1,4 +1,4 @@
-import { PLAYABLES, playableUrl, coverUrl, type Playable } from './playables';
+import { PLAYABLES, playableUrl, coverUrl, setCoverBucket, type Playable } from './playables';
 import {
   apiSession, apiMe, variantIdForMechanic,
   apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge, apiChallengeInbox,
@@ -164,6 +164,44 @@ type PlayableHostApi = {
   toggleEditor?: () => void;
 };
 
+type MetaPlot = {
+  id: string;
+  name: string;
+  template: string;
+  mood: string;
+  playableId: string;
+  visitors: string;
+  likes: string;
+  earned: number;
+  promo: string;
+  tone: string;
+  empty?: boolean;
+};
+
+type MetaTemplateId = 'merge' | 'sort' | 'pin';
+
+type MetaTemplate = {
+  id: MetaTemplateId;
+  label: string;
+  name: string;
+  mood: string;
+  playableId: string;
+  visitors: string;
+  likes: string;
+  earned: number;
+  promo: string;
+  tone: string;
+};
+
+type MetaVariantSpec = {
+  template: MetaTemplateId;
+  theme: string;
+  modifier: string;
+  summary: string;
+  series?: Record<string, number | string>;
+  level?: number;
+};
+
 export class Feed {
   private viewport: HTMLElement;
   private feedEl: HTMLElement;
@@ -311,6 +349,22 @@ export class Feed {
   private overlayOpen = false;                 // story-view OR editor overlay is up
   private overlayEl: HTMLElement | null = null;
   private storyFrame: HTMLIFrameElement | null = null;  // the open story's mechanic iframe
+  private metaTokens = 1240;
+  private metaClaimReady = 0;
+  private metaSelectedPlotId = 'plot-a';
+  private metaBuilderPlotId: string | null = null;
+  private metaBuilderTemplate: MetaTemplateId = 'merge';
+  private metaBuilderTheme = 'Neon rain';
+  private metaBuilderModifier = 'Chain rewards';
+  private metaRemixed = new Set<string>();
+  private metaBuiltPlots = new Map<string, MetaTemplateId>();
+  private metaVariants = new Map<string, MetaVariantSpec>();
+  private metaPlotLevels = new Map<string, number>([
+    ['plot-a', 0],
+    ['plot-b', 0],
+    ['plot-c', 0],
+    ['plot-d', 0],
+  ]);
 
   private prefetched = new Set<number>();
   private ready = new Set<number>();
@@ -368,6 +422,8 @@ export class Feed {
     this.activeChallenge = challenge;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
+    this.pickCoverBucket();   // decide tall/compact cover aspect BEFORE any cover loads
+    if (this.HOLD_COVER) document.documentElement.classList.add('holdcover');
     this.buildIncoming();
     this.mountHud();
     this.mountFeedBar();
@@ -408,7 +464,6 @@ export class Feed {
     (window as any).__feedHostGesture = this.onHostGesture;
     window.setInterval(this.pollPlayableAnalytics, ANALYTICS_POLL_MS);
     window.setInterval(this.pollAutoplayUi, 250);
-    window.setInterval(this.tickReelTimecode, 1000);
     this.initPerfTelemetry();
     // Debug hook: window.__feedWarm() → live snapshot of the next-mechanic warm
     // state (is it pre-warmed? if not, why — blocked, or calm window starved?).
@@ -470,6 +525,15 @@ export class Feed {
   // live with your latest push before testing changes.
   private renderVersionLabel(): void {
     if (!this.versionEl) return;
+    // holdcover debug: show ONLY the short slot readout (platform/time/api make the
+    // line overflow off-screen). This is the TRUE in-Telegram slot aspect → tells us
+    // exactly what to bake at (fill-stretch = |slot − bake|).
+    if (this.HOLD_COVER) {
+      this.versionEl.textContent = this.dbgSlot
+        ? `slot ${this.dbgSlot.w}×${this.dbgSlot.h}  a=${this.dbgSlot.a}  ${this.coverBucket === '.c' ? 'desk .80' : 'mob .65'}`
+        : 'measuring slot…';
+      return;
+    }
     const stamp = (typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev').slice(5);
     const api = this.backendVersion ? ` · api ${this.backendVersion}` : '';
     this.versionEl.textContent = `platform · ${stamp}${api}`;
@@ -701,7 +765,7 @@ export class Feed {
   }
 
   // ── Series (W2) ──────────────────────────────────────────────────────────
-  // Every mechanic runs as a 5-level series once taken over. Levels are manual,
+  // Every mechanic runs as a multi-level series once taken over. Levels are manual,
   // auto-advance in place (no autoplay between), stars only from the end chest.
   private seriesEnabled(i: number): boolean {
     // Challenge play is a one-shot "beat the time" — never a series.
@@ -714,10 +778,11 @@ export class Feed {
   // get real multi-level content.
   private seriesLenFor(mechanicId: string): number {
     const base = (mechanicId || '').replace(/-swipe$/, '');
-    if (base === 'pins-l3') return 1;                    // level-3 pins: standalone single-level series (for now)
+    if (base === 'pins-l3') return 2;                    // level-3 pins: 2-level series (game level 3 → level 4)
     if (base === 'pins' || base.startsWith('pins-')) return 2;
     if (base === 'merge-locked-v1' || base === 'marble-sort') return 3;
     if (base === 'merge-timepress-v1' || base === 'merge-timepress-v2') return 2;
+    if (base === 'short-drama') return 6;                // 6 authored clips, one per level (?level=1..6)
     // Mechanics without multi-level content yet run a 1-level "series" (one level →
     // straight to the chest).
     if (base.includes('no-orders') || base.includes('second-board')) return 1;
@@ -734,8 +799,9 @@ export class Feed {
   // vary by PARAMS (not levels) return null → no ?level= override.
   private seriesGameLevel(mechanicId: string, seriesLevel: number): number | null {
     const base = (mechanicId || '').replace(/-swipe$/, '');
-    if (base === 'pins-l3') return 3;                    // always load the level-3 build
+    if (base === 'pins-l3') return 2 + seriesLevel;      // series L1 → game level 3, L2 → game level 4
     if (base === 'pins' || base.startsWith('pins-')) return seriesLevel;
+    if (base === 'short-drama') return seriesLevel;      // series level N → clip N
     return null;
   }
 
@@ -1516,20 +1582,6 @@ export class Feed {
     if (this.perfOverlayTextEl) this.perfOverlayTextEl.textContent = lines.slice(0, 14).join('\n');
   }
 
-  // Camcorder-style running timecode on the video reel. Counts up while a mechanic
-  // is shown; resets when the shown mechanic changes. One cheap text update/sec.
-  private reelTimeIndex = -1;
-  private reelTimeSeconds = 0;
-  private tickReelTimecode = () => {
-    if (document.hidden) return;
-    const i = this.realIndex();
-    if (i !== this.reelTimeIndex) { this.reelTimeIndex = i; this.reelTimeSeconds = 0; }
-    else this.reelTimeSeconds++;
-    const s = this.reelTimeSeconds;
-    const txt = `0:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-    const el = this.games[i]?.querySelector<HTMLElement>('.game__reel-time');
-    if (el && el.textContent !== txt) el.textContent = txt;
-  };
 
   private realIndex(): number {
     return this.indexForPos(this.pos);
@@ -1626,8 +1678,7 @@ export class Feed {
         '<span class="game__reel-corner game__reel-corner--tr"></span>' +
         '<span class="game__reel-corner game__reel-corner--bl"></span>' +
         '<span class="game__reel-corner game__reel-corner--br"></span>' +
-        '<span class="game__reel-rec"><span class="game__reel-play">▶</span></span>' +
-        '<span class="game__reel-time">0:00:00</span>';
+        '<span class="game__reel-rec"><span class="game__reel-play">▶</span></span>';
       game.appendChild(reel);
 
       const state = document.createElement('div');
@@ -1686,6 +1737,8 @@ export class Feed {
         e.stopPropagation();
         switcher.querySelectorAll('.feed-bar__icon--active').forEach((el) => el.classList.remove('feed-bar__icon--active'));
         icon.classList.add('feed-bar__icon--active');
+        if (name === 'diamond') this.openMetaWorld();
+        if (name === 'triangle') this.openIslandWorld();
       });
       switcher.appendChild(icon);
     });
@@ -2370,8 +2423,19 @@ export class Feed {
     }
   }
 
+  // TEMP (?holdcover=1): the arriving cover HOLDS (poster shown, mechanic autoplay
+  // NOT started) until the first tap, which releases it → autoplay starts + poster
+  // fades. Lets us screenshot the static cover and the live frame for alignment
+  // checks. The autoplay overlay is kept "active" while held so its tap surface stays
+  // live; the .holdcover CSS hides the dim veil so the cover reads clean.
+  private readonly HOLD_COVER = typeof location !== 'undefined' && new URLSearchParams(location.search).get('holdcover') === '1';
+  private holdReleased = new Set<number>();
+  private dbgSlot: { w: number; h: number; a: number } | null = null;
+
   private ensureFrameAutoPlay(i: number) {
     if (this.manualRuns.has(i) || this.shouldPauseFrame(i)) return;
+    if (this.HOLD_COVER && !this.holdReleased.has(i)) return;   // hold at cover until tapped
+
     // While a reward star is still flying to the counter, hold off starting the
     // next mechanic's autoplay — it kicks in once the collect finishes (afterCollect).
     if (this.collectingRewardIndex !== null) return;
@@ -2420,7 +2484,7 @@ export class Feed {
       // Start the solve-time clock on the first takeover of this unit (the win
       // metric — "how fast you solved it", lower is better).
       this.manualStartMs.set(i, performance.now());
-      // Taking over a mechanic begins its 5-level series (unless this is a
+      // Taking over a mechanic begins its configured series (unless this is a
       // one-shot challenge play).
       this.maybeStartSeries(i);
     }
@@ -2458,6 +2522,36 @@ export class Feed {
     this.ensureNearCovers();
     this.pollAutoplayUi();
   }
+
+  /** Pick the cover aspect bucket for THIS device from the real slot box (covers
+   *  are baked in two aspects — tall ~0.55, compact ~0.72 — see gen-covers). The
+   *  poster is object-fit:fill'd into the slot, so the nearer-aspect bake stretches
+   *  least. Threshold = midpoint of the two clusters (0.636). Idempotent; re-run on
+   *  resize — if the bucket flips, drop loaded covers so they refetch at the new
+   *  aspect. */
+  private coverBucket = '';
+  private pickCoverBucket() {
+    const slot = this.viewport.querySelector<HTMLElement>('.game__slot');
+    let w = window.innerWidth, h = Math.max(1, window.innerHeight - 146);
+    if (slot && slot.offsetWidth && slot.offsetHeight) { w = slot.offsetWidth; h = slot.offsetHeight; }
+    this.dbgSlot = { w: Math.round(w), h: Math.round(h), a: +(w / h).toFixed(3) };
+    // Buckets measured IN Telegram: mobile ~0.65 (Android 0.63 / iPhone 0.64–0.66),
+    // desktop ~0.80. Threshold = midpoint 0.72 → mobile ('') vs desktop ('.c').
+    const bucket = (w / h) > 0.72 ? '.c' : '';
+    this.renderVersionLabel();   // reflect measured slot on the debug badge (holdcover)
+    if (bucket === this.coverBucket && this.coverLoadedBucketSet) return;
+    this.coverBucket = bucket;
+    this.coverLoadedBucketSet = true;
+    setCoverBucket(bucket);
+    // Flip mid-session (resize/rotate): invalidate cached covers + re-request.
+    if (this.coverLoaded.size) {
+      this.coverLoaded.clear();
+      this.ensureNearCovers();
+      this.incomingIndex = -1;   // force updateIncomingPoster to refetch
+      this.updateIncomingPoster();
+    }
+  }
+  private coverLoadedBucketSet = false;
 
   /** Fetch the cover for page i (wrap-safe), once. */
   private ensureCover(i: number) {
@@ -2635,6 +2729,10 @@ export class Feed {
           }
         } catch { /* cross-origin */ }
       }
+      // TEMP holdcover: keep the overlay ACTIVE on the held unit so its tap surface
+      // stays live (veil hidden via .holdcover CSS), even though the mechanic's own
+      // autoplay hasn't started yet — the tap is what releases it.
+      if (this.HOLD_COVER && isCurrent && !this.holdReleased.has(i)) active = true;
       this.setAutoplayUi(i, active, preview);
 
       // Hint above the fixed bar: only about TAPPING to play this mechanic (paging is
@@ -2646,7 +2744,7 @@ export class Feed {
       // screen (current + revealed + un-paused). Never re-shown mid-run — a
       // poster snapping over a live leaving frame would flash; remount
       // (resetFrameReadiness) restores it for the next cycle.
-      if (isCurrent && !paused && this.frameRevealed.has(i)) {
+      if (isCurrent && !paused && this.frameRevealed.has(i) && (!this.HOLD_COVER || this.holdReleased.has(i))) {
         this.games[i]?.classList.add('game--live');
       }
       // Live-ride pages show their real iframe: the in-slot poster (z above
@@ -2861,6 +2959,464 @@ export class Feed {
     this.viewedFriends.add(idx);
     const avatar = this.storiesEl?.querySelector(`.story[data-friend="${idx}"] .story__avatar`);
     avatar?.classList.add('story__avatar--viewed');
+  }
+
+  // ── Meta world prototype ──────────────────────────────────────────────────
+  // First pass at the creator meta: a player's location is a tiny park where
+  // each plot is a playable mechanic that can earn visits, likes, and tokens.
+  private openMetaWorld() {
+    if (this.overlayOpen) return;
+    this.overlayOpen = true;
+    this.applyActiveStates();
+
+    const ov = document.createElement('div');
+    ov.className = 'meta-world';
+    this.viewport.appendChild(ov);
+    this.overlayEl = ov;
+    this.renderMetaWorld(ov);
+    if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+  }
+
+  // ── Island meta prototype (PARALLEL experiment to the meta world above) ────
+  // Triangle icon on the feed bar. The player's island is a showcase of their
+  // created mechanics: each one is a building that themes its own sector.
+  // All UI/state/styles live in src/island.ts (namespaced isl-*, localStorage);
+  // this method only owns the shared overlay boilerplate.
+  private openIslandWorld() {
+    if (this.overlayOpen) return;
+    this.overlayOpen = true;
+    this.applyActiveStates();
+
+    const ov = document.createElement('div');
+    ov.className = 'island-world';
+    this.viewport.appendChild(ov);
+    this.overlayEl = ov;
+    void import('./island').then((m) => m.renderIslandWorld(ov, { close: () => this.closeOverlay() }));
+    if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+  }
+
+  private metaTemplates(): MetaTemplate[] {
+    return [
+      {
+        id: 'merge',
+        label: 'Merge',
+        name: 'Merge Kitchen',
+        mood: 'Combine orders',
+        playableId: 'merge-timepress-v1-swipe',
+        visitors: '3.4K',
+        likes: '811',
+        earned: 124,
+        promo: 'Rising creator',
+        tone: 'green',
+      },
+      {
+        id: 'sort',
+        label: 'Sorting',
+        name: 'Sort Harbor',
+        mood: 'Sort by color',
+        playableId: 'marble-sort-swipe',
+        visitors: '940',
+        likes: '176',
+        earned: 42,
+        promo: 'Friends route',
+        tone: 'blue',
+      },
+      {
+        id: 'pin',
+        label: 'Pins',
+        name: 'Pin Tower',
+        mood: 'Pull the pins',
+        playableId: 'pins-swipe',
+        visitors: '1.8K',
+        likes: '342',
+        earned: 86,
+        promo: 'Portal drop: 12%',
+        tone: 'amber',
+      },
+    ];
+  }
+
+  private metaTemplateFor(id: MetaTemplateId): MetaTemplate {
+    return this.metaTemplates().find((tpl) => tpl.id === id) ?? this.metaTemplates()[0];
+  }
+
+  private metaVariantSpec(template: MetaTemplateId): MetaVariantSpec {
+    const theme = this.metaBuilderTheme;
+    const modifier = this.metaBuilderModifier;
+    if (template === 'sort') {
+      const rects = modifier === 'Speed round' ? 4 : modifier === 'Limited moves' ? 16 : 12;
+      return {
+        template,
+        theme,
+        modifier,
+        summary: `${rects} sorting targets`,
+        series: { rects, theme, modifier },
+      };
+    }
+    if (template === 'pin') {
+      const level = modifier === 'Speed round' ? 1 : modifier === 'Limited moves' ? 3 : 2;
+      return {
+        template,
+        theme,
+        modifier,
+        summary: `Pins level ${level}`,
+        level,
+      };
+    }
+    const orders = modifier === 'Speed round' ? 3 : modifier === 'Limited moves' ? 6 : 5;
+    const itemLevelDelta = theme === 'Frozen cabin' || modifier === 'Limited moves' ? 1 : 0;
+    return {
+      template,
+      theme,
+      modifier,
+      summary: `${orders} orders · items +${itemLevelDelta}`,
+      series: { orders, itemLevelDelta, theme, modifier },
+    };
+  }
+
+  private metaPlots(): MetaPlot[] {
+    const slots = ['plot-a', 'plot-b', 'plot-c', 'plot-d'];
+    return slots.map((id, idx) => {
+      const templateId = this.metaBuiltPlots.get(id);
+      if (!templateId) {
+        return {
+          id,
+          name: `Empty Cell ${idx + 1}`,
+          template: 'Choose template',
+          mood: 'Merge · Sorting · Pins',
+          playableId: '',
+          visitors: '0',
+          likes: '0',
+          earned: 0,
+          promo: 'Tap to build',
+          tone: 'muted',
+          empty: true,
+        };
+      }
+      const tpl = this.metaTemplateFor(templateId);
+      const level = this.metaPlotLevels.get(id) ?? 1;
+      const variant = this.metaVariants.get(id);
+      return {
+        id,
+        name: tpl.name,
+        template: tpl.label,
+        mood: variant ? variant.summary : tpl.mood,
+        playableId: tpl.playableId,
+        visitors: tpl.visitors,
+        likes: tpl.likes,
+        earned: tpl.earned + Math.max(0, level - 1) * 18,
+        promo: variant ? `${variant.theme} · ${variant.modifier}` : tpl.promo,
+        tone: tpl.tone,
+      };
+    });
+  }
+
+  private renderMetaWorld(ov: HTMLElement) {
+    const plots = this.metaPlots();
+    if (!plots.some((p) => p.id === this.metaSelectedPlotId)) this.metaSelectedPlotId = plots[0]?.id ?? 'plot-a';
+    const selected = plots.find((p) => p.id === this.metaSelectedPlotId) ?? plots[0];
+    const selectedLevel = this.metaPlotLevels.get(selected.id) ?? 0;
+    const selectedUpgradeCost = 100 + selectedLevel * 70;
+    const selectedCanUpgrade = !selected.empty && this.metaTokens >= selectedUpgradeCost;
+    const builderPlot = this.metaBuilderPlotId ? plots.find((p) => p.id === this.metaBuilderPlotId) : null;
+    const builderCost = builderPlot?.empty ? 120 : Math.max(90, 80 + (this.metaPlotLevels.get(builderPlot?.id ?? '') ?? 0) * 20);
+    const builderCanPublish = !!builderPlot && this.metaTokens >= builderCost;
+    const totalEarned = plots.reduce((sum, p) => sum + p.earned, 0);
+    const builtCount = plots.filter((p) => !p.empty).length;
+    const firstEmpty = plots.find((p) => p.empty);
+    const builderPreview = this.metaVariantSpec(this.metaBuilderTemplate);
+    const builderTemplates = this.metaTemplates();
+    const builderThemes = ['Neon rain', 'Frozen cabin', 'Cozy bakery'];
+    const builderModifiers = ['Chain rewards', 'Speed round', 'Limited moves'];
+
+    ov.innerHTML =
+      '<div class="meta-world__header">' +
+        '<div>' +
+          '<div class="meta-world__eyebrow">Creator District</div>' +
+          '<div class="meta-world__title">My Park</div>' +
+        '</div>' +
+        `<div class="meta-world__wallet"><span>${this.metaTokens}</span><small>tokens</small></div>` +
+        '<button class="meta-world__close" type="button" aria-label="Close">x</button>' +
+      '</div>' +
+      '<div class="meta-world__body">' +
+        '<section class="meta-world__scene" aria-label="Player location">' +
+          '<div class="meta-world__skyline">' +
+            '<div class="meta-world__portal"><span>Portal</span></div>' +
+            '<div class="meta-world__bank"><span>Bank</span></div>' +
+          '</div>' +
+          '<div class="meta-world__island">' +
+            plots.map((p, idx) => {
+              const level = this.metaPlotLevels.get(p.id) ?? 0;
+              return (
+                `<button class="meta-plot meta-plot--${p.tone}${p.empty ? ' meta-plot--empty' : ''}${p.id === selected.id ? ' meta-plot--active' : ''}" type="button" data-focus="${p.id}" style="--plot-i:${idx}">` +
+                  `<span class="meta-plot__tower"><i></i></span>` +
+                  `<span class="meta-plot__name">${p.name}</span>` +
+                  `<span class="meta-plot__level">Lv ${level || '-'}</span>` +
+                '</button>'
+              );
+            }).join('') +
+          '</div>' +
+        '</section>' +
+        '<section class="meta-world__panel" aria-label="Meta actions">' +
+          '<div class="meta-world__summary">' +
+            `<div><strong>${totalEarned}</strong><span>daily yield</span></div>` +
+            `<div><strong>${this.metaClaimReady}</strong><span>ready</span></div>` +
+            `<div><strong>${builtCount}/4</strong><span>built</span></div>` +
+          '</div>' +
+          '<div class="meta-world__actions">' +
+            `<button class="meta-world__primary" type="button" data-claim${this.metaClaimReady <= 0 ? ' disabled' : ''}>Claim ${this.metaClaimReady}</button>` +
+            `<button class="meta-world__ghost" type="button" data-build-next${firstEmpty ? '' : ' disabled'}>${firstEmpty ? 'Build cell' : 'All built'}</button>` +
+          '</div>' +
+          `<div class="meta-selected meta-selected--${selected.tone}">` +
+            '<div class="meta-selected__top">' +
+              '<div>' +
+                `<div class="meta-selected__kicker">${selected.empty ? 'Open slot' : selected.template}</div>` +
+                `<div class="meta-selected__name">${selected.name}</div>` +
+                `<div class="meta-selected__sub">${selected.mood}</div>` +
+              '</div>' +
+              `<div class="meta-selected__level">Lv ${selectedLevel || '-'}</div>` +
+            '</div>' +
+            '<div class="meta-selected__stats">' +
+              `<span>${selected.visitors}<small>visits</small></span>` +
+              `<span>${selected.likes}<small>likes</small></span>` +
+              `<span>${selected.earned}<small>yield</small></span>` +
+            '</div>' +
+            '<div class="meta-selected__actions">' +
+              (selected.empty
+                ? '<button class="meta-selected__primary" type="button" data-generate-slot>Choose template</button>'
+                : '<button class="meta-selected__primary" type="button" data-play>Play</button>' +
+                  '<button type="button" data-remix>Remix</button>' +
+                  `<button type="button" data-upgrade="${selected.id}"${selectedCanUpgrade ? '' : ' disabled'}>Upgrade ${selectedUpgradeCost}</button>`) +
+            '</div>' +
+          '</div>' +
+          (builderPlot
+            ? '<div class="meta-builder">' +
+                '<div class="meta-builder__top">' +
+                  `<strong>${builderPlot.empty ? 'Choose Template' : 'Remix Lab'}</strong>` +
+                  `<span>${builderCost} tokens</span>` +
+                '</div>' +
+                '<div class="meta-builder__row">' +
+                  '<small>Template</small>' +
+                  '<div class="meta-builder__templates">' +
+                    builderTemplates.map((tpl) => (
+                      `<button class="meta-template meta-template--${tpl.tone}${tpl.id === this.metaBuilderTemplate ? ' is-active' : ''}" type="button" data-builder-template="${tpl.id}">` +
+                        `<strong>${tpl.label}</strong>` +
+                        `<span>${tpl.mood}</span>` +
+                      '</button>'
+                    )).join('') +
+                  '</div>' +
+                '</div>' +
+                '<div class="meta-builder__row">' +
+                  '<small>Look</small>' +
+                  '<div class="meta-builder__chips">' +
+                    builderThemes.map((name) => `<button class="${name === this.metaBuilderTheme ? 'is-active' : ''}" type="button" data-builder-theme="${name}">${name}</button>`).join('') +
+                  '</div>' +
+                '</div>' +
+                '<div class="meta-builder__row">' +
+                  '<small>Rule twist</small>' +
+                  '<div class="meta-builder__chips">' +
+                    builderModifiers.map((name) => `<button class="${name === this.metaBuilderModifier ? 'is-active' : ''}" type="button" data-builder-modifier="${name}">${name}</button>`).join('') +
+                  '</div>' +
+                '</div>' +
+                '<div class="meta-builder__spec">' +
+                  '<small>Generated spec</small>' +
+                  `<strong>${builderPreview.summary}</strong>` +
+                '</div>' +
+                '<div class="meta-builder__actions">' +
+                  '<button class="meta-world__ghost" type="button" data-builder-cancel>Cancel</button>' +
+                  `<button class="meta-world__primary" type="button" data-builder-publish${builderCanPublish ? '' : ' disabled'}>Publish</button>` +
+                '</div>' +
+              '</div>'
+            : '') +
+          '<div class="meta-world__plots">' +
+            plots.map((p) => {
+              const level = this.metaPlotLevels.get(p.id) ?? 0;
+              const cost = 100 + level * 70;
+              const canUpgrade = !p.empty && this.metaTokens >= cost;
+              return (
+                `<article class="meta-card meta-card--${p.tone}${p.empty ? ' meta-card--empty' : ''}${p.id === selected.id ? ' meta-card--active' : ''}" data-select="${p.id}">` +
+                  '<div class="meta-card__top">' +
+                    '<div>' +
+                      `<div class="meta-card__name">${p.name}</div>` +
+                      `<div class="meta-card__sub">${p.template} · ${p.mood}</div>` +
+                    '</div>' +
+                    `<div class="meta-card__level">Lv ${level || '-'}</div>` +
+                  '</div>' +
+                  '<div class="meta-card__stats">' +
+                    `<span>${p.visitors}<small>visits</small></span>` +
+                    `<span>${p.likes}<small>likes</small></span>` +
+                    `<span>${p.earned}<small>yield</small></span>` +
+                  '</div>' +
+                  '<div class="meta-card__foot">' +
+                    `<span>${p.promo}</span>` +
+                    (p.empty
+                      ? '<button type="button" data-generate-slot>Choose</button>'
+                      : `<button type="button" data-upgrade="${p.id}"${canUpgrade ? '' : ' disabled'}>Upgrade ${cost}</button>`) +
+                  '</div>' +
+                '</article>'
+              );
+            }).join('') +
+          '</div>' +
+        '</section>' +
+      '</div>';
+
+    ov.querySelector('.meta-world__close')!.addEventListener('click', () => this.closeOverlay());
+    ov.querySelectorAll<HTMLElement>('[data-focus], [data-select]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const id = el.dataset.focus ?? el.dataset.select;
+        if (!id) return;
+        this.metaSelectedPlotId = id;
+        const plot = this.metaPlots().find((p) => p.id === id);
+        if (plot?.empty) {
+          this.openMetaBuilder(ov, id);
+        } else {
+          this.metaBuilderPlotId = null;
+          this.renderMetaWorld(ov);
+        }
+      });
+    });
+    ov.querySelector('[data-claim]')?.addEventListener('click', () => {
+      if (this.metaClaimReady <= 0) return;
+      this.metaTokens += this.metaClaimReady;
+      this.metaClaimReady = 0;
+      this.renderMetaWorld(ov);
+    });
+    ov.querySelector('[data-build-next]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const next = this.metaPlots().find((p) => p.empty);
+      if (next) this.openMetaBuilder(ov, next.id);
+    });
+    ov.querySelector('[data-generate-slot]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.openMetaBuilder(ov, selected.id);
+    });
+    ov.querySelector('[data-play]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.playMetaPlot(ov, selected.id);
+    });
+    ov.querySelector('[data-remix]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.openMetaBuilder(ov, selected.id);
+    });
+    ov.querySelectorAll<HTMLElement>('[data-upgrade]').forEach((btn) => {
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.upgradeMetaPlot(ov, btn.dataset.upgrade!);
+      });
+    });
+    ov.querySelectorAll<HTMLElement>('[data-builder-template]').forEach((btn) => {
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.metaBuilderTemplate = btn.dataset.builderTemplate! as MetaTemplateId;
+        this.renderMetaWorld(ov);
+      });
+    });
+    ov.querySelectorAll<HTMLElement>('[data-builder-theme]').forEach((btn) => {
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.metaBuilderTheme = btn.dataset.builderTheme!;
+        this.renderMetaWorld(ov);
+      });
+    });
+    ov.querySelectorAll<HTMLElement>('[data-builder-modifier]').forEach((btn) => {
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.metaBuilderModifier = btn.dataset.builderModifier!;
+        this.renderMetaWorld(ov);
+      });
+    });
+    ov.querySelector('[data-builder-cancel]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.metaBuilderPlotId = null;
+      this.renderMetaWorld(ov);
+    });
+    ov.querySelector('[data-builder-publish]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.publishMetaBuilder(ov);
+    });
+  }
+
+  private openMetaBuilder(ov: HTMLElement, id: string) {
+    this.metaSelectedPlotId = id;
+    this.metaBuilderTemplate = this.metaBuiltPlots.get(id) ?? this.metaBuilderTemplate;
+    this.metaBuilderPlotId = id;
+    this.renderMetaWorld(ov);
+  }
+
+  private upgradeMetaPlot(ov: HTMLElement, id: string) {
+    const plot = this.metaPlots().find((p) => p.id === id);
+    if (!plot || plot.empty) return;
+    const level = this.metaPlotLevels.get(id) ?? 0;
+    const cost = 100 + level * 70;
+    if (this.metaTokens < cost) return;
+    this.metaTokens -= cost;
+    this.metaPlotLevels.set(id, level + 1);
+    this.metaClaimReady += 18 + level * 4;
+    this.renderMetaWorld(ov);
+  }
+
+  private publishMetaBuilder(ov: HTMLElement) {
+    const id = this.metaBuilderPlotId;
+    if (!id) return;
+    const plot = this.metaPlots().find((p) => p.id === id);
+    if (!plot) return;
+    const level = this.metaPlotLevels.get(id) ?? 0;
+    const cost = plot.empty ? 120 : Math.max(90, 80 + level * 20);
+    if (this.metaTokens < cost) return;
+    this.metaTokens -= cost;
+    const variant = this.metaVariantSpec(this.metaBuilderTemplate);
+    if (plot.empty) {
+      this.metaBuiltPlots.set(id, this.metaBuilderTemplate);
+      this.metaVariants.set(id, variant);
+      this.metaPlotLevels.set(id, 1);
+      this.metaClaimReady += 28;
+    } else {
+      this.metaBuiltPlots.set(id, this.metaBuilderTemplate);
+      this.metaVariants.set(id, variant);
+      this.metaRemixed.add(id);
+      this.metaClaimReady += 20 + level * 3;
+    }
+    this.metaSelectedPlotId = id;
+    this.metaBuilderPlotId = null;
+    this.renderMetaWorld(ov);
+  }
+
+  private playMetaPlot(ov: HTMLElement, id: string) {
+    const plot = this.metaPlots().find((p) => p.id === id);
+    if (!plot || plot.empty) {
+      this.openMetaBuilder(ov, id);
+      return;
+    }
+    const idx = this.playables.findIndex((p) => p.id === plot.playableId);
+    if (idx < 0) return;
+    const currentPos = Math.round(this.pos);
+    const currentIndex = this.indexForPos(currentPos);
+    const forward = (idx - currentIndex + this.N) % this.N;
+    const backward = forward - this.N;
+    const step = Math.abs(backward) < forward ? backward : forward;
+    const wasMounted = this.frames.has(idx);
+    this.queueMetaVariantForIndex(idx, id);
+    this.closeOverlay();
+    window.setTimeout(() => {
+      this.goTo(currentPos + step, true);
+      if (wasMounted) {
+        this.queueMetaVariantForIndex(idx, id);
+        this.reloadFrame(idx);
+      }
+    }, 0);
+  }
+
+  private queueMetaVariantForIndex(idx: number, plotId: string) {
+    const variant = this.metaVariants.get(plotId);
+    if (!variant) {
+      this.pendingSeriesParams.delete(idx);
+      this.pendingLevels.delete(idx);
+      return;
+    }
+    if (variant.series) this.pendingSeriesParams.set(idx, encodeURIComponent(JSON.stringify(variant.series)));
+    else this.pendingSeriesParams.delete(idx);
+    if (variant.level != null) this.pendingLevels.set(idx, variant.level);
+    else this.pendingLevels.delete(idx);
   }
 
   // ── Mechanic editor (placeholder) ──────────────────────────────────────────
@@ -3372,6 +3928,15 @@ export class Feed {
     if (step === 0 && autoplayTapIndex !== null && !movedPastTap) {
       this.unlockAudioForCurrentAndNext(autoplayTapIndex, true);
       this.goTo(commitBasePos);
+      if (this.HOLD_COVER && !this.holdReleased.has(autoplayTapIndex)) {
+        // TEMP: first tap RELEASES the held cover → start autoplay + fade the poster
+        // (NOT a takeover to manual), so the live autoplay frame can be screenshotted.
+        this.holdReleased.add(autoplayTapIndex);
+        this.games[autoplayTapIndex]?.classList.add('game--live');
+        this.ensureFrameAutoPlay(autoplayTapIndex);
+        this.pollAutoplayUi();
+        return;
+      }
       this.activateManualFromAutoplay(autoplayTapIndex);
       return;
     }
@@ -3626,10 +4191,6 @@ export class Feed {
         api?.swipe?.restart();
         if (api?.swipe?.hasAutoPlay) api.swipe.startAutoPlay();
       } catch { /* cross-origin */ }
-      // The demo just restarted — reset the camcorder timecode so it counts from 0 again.
-      this.reelTimeSeconds = 0;
-      const timeEl = this.games[i]?.querySelector<HTMLElement>('.game__reel-time');
-      if (timeEl) timeEl.textContent = '0:00:00';
     }, 800);
     this.autoplayLoopTimers.set(i, t);
   }
@@ -4616,6 +5177,9 @@ export class Feed {
   private onResize = () => {
     this.measure();
     this.render(false);
+    // Slot aspect may have crossed the bucket threshold (rotate/resize) — re-pick
+    // the cover bucket; if it flipped, pickCoverBucket refetches covers itself.
+    this.pickCoverBucket();
     // Slot geometry changed with the viewport — re-measure the resident
     // poster layer's box (force by resetting the identity guard).
     this.incomingIndex = -1;

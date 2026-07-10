@@ -2,6 +2,8 @@ import { defineConfig, type Plugin } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 import fs from 'fs';
 import path from 'path';
+import Anthropic from '@anthropic-ai/sdk';
+import { execFile } from 'child_process';
 
 // Dev only: serve each playable's SWIPE build from playables/<id>/dist-swipe/,
 // so `npm run dev` mirrors the deployed swipe-platform site (where `./<id>.html`
@@ -12,27 +14,280 @@ import path from 'path';
 // deployed static site this plugin is absent; the files are served directly.
 function servePlayables(): Plugin {
   const playablesDir = path.resolve(__dirname, '../playables');
+  type SwipeBuild = { dir: string; root: string; html: string; payload: string };
+  const resolveBuild = (name: string): SwipeBuild | null => {
+    // Deploy artifacts are named `<base>-swipe.html`. The source dir is
+    // either that exact name (a dedicated `-swipe` fork dir) or the base
+    // dir with the `-swipe` stripped (built with SWIPE=1). Try both.
+    const candidates = [name, name.replace(/-swipe$/, '')];
+    for (const dir of candidates) {
+      const root = path.join(playablesDir, dir, 'dist-swipe');
+      const html = path.join(root, 'index.html');
+      const payload = path.join(root, 'payload.js');
+      if (fs.existsSync(html)) return { dir, root, html, payload };
+    }
+    return null;
+  };
+  const rewriteDeployPaths = (name: string, source: string): string =>
+    source
+      .replace('src="./payload.js"', `src="./${name}.payload.js"`)
+      .replace(/(["'])\.\/video-/g, `$1./${name}.video-`);
+  const resolveCover = (name: string, suffix: '' | '.c'): string | null => {
+    const level = name.match(/^(.*)-l(\d+)-swipe$/);
+    if (level) {
+      for (const sourceName of [`${level[1]}-swipe`, level[1]]) {
+        const build = resolveBuild(sourceName);
+        const file = build && path.join(build.root, `cover.l${level[2]}${suffix}.jpg`);
+        if (file && fs.existsSync(file)) return file;
+      }
+    }
+
+    const build = resolveBuild(name);
+    const file = build && path.join(build.root, `cover${suffix}.jpg`);
+    return file && fs.existsSync(file) ? file : null;
+  };
+
   return {
     name: 'serve-swipe-playables',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = (req.url || '').split('?')[0];
-        const m = url.match(/^\/([\w.\-]+)\.html$/);
-        if (m && m[1] !== 'index') {
-          // Deploy artifacts are named `<base>-swipe.html`. The source dir is
-          // either that exact name (a dedicated `-swipe` fork dir) or the base
-          // dir with the `-swipe` stripped (built with SWIPE=1). Try both.
-          const candidates = [m[1], m[1].replace(/-swipe$/, '')];
-          for (const dir of candidates) {
-            const file = path.join(playablesDir, dir, 'dist-swipe', 'index.html');
-            if (fs.existsSync(file)) {
-              res.setHeader('content-type', 'text/html; charset=utf-8');
-              fs.createReadStream(file).pipe(res);
-              return;
-            }
+        const htmlMatch = url.match(/^\/([\w.\-]+)\.html$/);
+        if (htmlMatch && htmlMatch[1] !== 'index') {
+          const name = htmlMatch[1];
+          const build = resolveBuild(name);
+          if (build) {
+            const html = rewriteDeployPaths(name, fs.readFileSync(build.html, 'utf8'));
+            res.setHeader('content-type', 'text/html; charset=utf-8');
+            res.end(html);
+            return;
           }
         }
+
+        const payloadMatch = url.match(/^\/([\w.\-]+)\.payload\.js$/);
+        if (payloadMatch) {
+          const name = payloadMatch[1];
+          const build = resolveBuild(name);
+          if (build && fs.existsSync(build.payload)) {
+            const js = rewriteDeployPaths(name, fs.readFileSync(build.payload, 'utf8'));
+            res.setHeader('content-type', 'application/javascript; charset=utf-8');
+            res.end(js);
+            return;
+          }
+        }
+
+        const coverMatch = url.match(/^\/([\w.\-]+)\.cover(\.c)?\.jpg$/);
+        if (coverMatch) {
+          const file = resolveCover(coverMatch[1], (coverMatch[2] || '') as '' | '.c');
+          if (file) {
+            res.setHeader('content-type', 'image/jpeg');
+            fs.createReadStream(file).pipe(res);
+            return;
+          }
+        }
+
+        const videoMatch = url.match(/^\/([\w.\-]+)\.video-(.+)$/);
+        if (videoMatch) {
+          const build = resolveBuild(videoMatch[1]);
+          const file = build && path.join(build.root, `video-${videoMatch[2]}`);
+          if (file && fs.existsSync(file)) {
+            res.setHeader('content-type', file.endsWith('.mp4') ? 'video/mp4' : 'video/webm');
+            fs.createReadStream(file).pipe(res);
+            return;
+          }
+        }
+
         next();
+      });
+    },
+  };
+}
+
+// Dev only: theme-pack generation for the ISLAND meta prototype (src/island.ts,
+// triangle icon). POST /island-api/theme {prompt, avoid?} → Claude generates a
+// color/style pack that the island's fork recipe applies to the mechanic.
+// Credentials: ANTHROPIC_API_KEY env (or an `ant auth login` profile) read at
+// request time. The client falls back to keyword presets whenever this endpoint
+// is absent (deployed static site) or errors (no key, bad output) — the island
+// never breaks because of this. In production this becomes a backend endpoint.
+function islandThemeApi(): Plugin {
+  const HEX = /^#[0-9A-Fa-f]{6}$/;
+  const PROPS = ['mushroom', 'crystal', 'coral', 'lollipop', 'rock'];
+  const SCHEMA = {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'Short evocative theme name, 2-3 words, in the same language as the prompt' },
+      items: { type: 'array', items: { type: 'string' }, description: 'Exactly 6 marble colors as #RRGGBB hex' },
+      ground: { type: 'string', description: 'Island sector ground color, mid-tone saturated, #RRGGBB' },
+      edge: { type: 'string', description: 'Darker shade of ground, #RRGGBB' },
+      boardBg: { type: 'string', description: 'Board background tint fitting the theme, #RRGGBB' },
+      body: { type: 'string', description: 'Building body color, #RRGGBB' },
+      roof: { type: 'string', description: 'Building roof color, more saturated, #RRGGBB' },
+      prop: { type: 'string', enum: PROPS, description: 'Decoration shape that best fits the theme' },
+    },
+    required: ['name', 'items', 'ground', 'edge', 'boardBg', 'body', 'roof', 'prop'],
+    additionalProperties: false,
+  };
+  const themePrompt = (prompt: string, avoid?: string) =>
+    `You are generating a visual theme pack for a marble-sort puzzle retheme in a mobile game.
+Player's theme prompt: "${prompt || 'surprise me'}"
+${avoid ? `The player rerolled: make this variant clearly different from the previous one named "${avoid}".\n` : ''}Rules:
+- items: exactly 6 marble colors. They MUST be instantly distinguishable from each other (distinct hues, never shades of one color) and readable on the game's dark blue-grey board (#4A5878). Saturated mid-to-bright colors; no near-black, no near-white.
+- Colors should evoke the theme (e.g. a desert theme leans sand/terracotta/turquoise, a night theme leans neon).
+- ground/edge: the theme's island-sector ground and its darker border.
+- boardBg: soft tint for preview cards (light for day themes, dark for night/neon themes).
+- body/roof: a small building in this theme.
+- prop: the decoration silhouette that fits best.
+- name: short and evocative, same language as the player's prompt.`;
+  // Returns null when the pack is acceptable, else a human-readable reason that
+  // is fed back to the model for one corrective retry.
+  const validationError = (p: Record<string, unknown>): string | null => {
+    if (!Array.isArray(p.items) || p.items.length !== 6 || !p.items.every((c) => typeof c === 'string' && HEX.test(c)))
+      return 'items must be exactly 6 #RRGGBB hex colors';
+    for (const k of ['ground', 'edge', 'boardBg', 'body', 'roof'])
+      if (typeof p[k] !== 'string' || !HEX.test(p[k] as string)) return `${k} must be a #RRGGBB hex color`;
+    if (typeof p.prop !== 'string' || !PROPS.includes(p.prop)) return `prop must be one of ${PROPS.join('/')}`;
+    if (typeof p.name !== 'string' || !p.name.trim()) return 'name must be a non-empty string';
+    // Marbles must be gameplay-distinguishable: min pairwise RGB distance.
+    const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const items = (p.items as string[]).map(rgb);
+    for (let i = 0; i < items.length; i++)
+      for (let j = i + 1; j < items.length; j++) {
+        const d = Math.abs(items[i][0] - items[j][0]) + Math.abs(items[i][1] - items[j][1]) + Math.abs(items[i][2] - items[j][2]);
+        if (d < 90)
+          return `marble colors ${(p.items as string[])[i]} and ${(p.items as string[])[j]} are too similar — players must tell every marble apart instantly; use more distinct hues (you may bend realism for gameplay)`;
+      }
+    return null;
+  };
+  // Subscription path for prototyping: with no API key in the environment we
+  // shell out to the locally installed Claude Code CLI (`claude -p`) — those
+  // calls are covered by the developer's Claude subscription instead of
+  // per-call API billing. Slower (~10-60s) and dev-machine-only; production
+  // uses the API (or a backend worker) with a real key.
+  const cliTheme = (fullPrompt: string) =>
+    new Promise<Record<string, unknown>>((resolve, reject) => {
+      execFile(
+        'claude',
+        ['-p', `${fullPrompt}\nReturn ONLY the raw JSON object with keys name, items, ground, edge, boardBg, body, roof, prop. No markdown fences, no prose.`],
+        { timeout: 120000, maxBuffer: 1024 * 1024 },
+        (err, stdout) => {
+          if (err) { reject(err); return; }
+          try {
+            const m = String(stdout).match(/\{[\s\S]*\}/);
+            if (!m) throw new Error('no JSON in CLI output');
+            resolve(JSON.parse(m[0]) as Record<string, unknown>);
+          } catch (e) { reject(e); }
+        },
+      );
+    });
+  return {
+    name: 'island-theme-api',
+    configureServer(server) {
+      const ugcRoot = path.resolve(__dirname, '../swipe-ugc');
+
+      // Serve the UGC repo in dev so hosted builds play without Render
+      // (production serves the same paths from the swipe-ugc static site).
+      server.middlewares.use('/ugc', (req, res, next) => {
+        const rel = decodeURIComponent((req.url || '/').split('?')[0]);
+        const file = path.join(ugcRoot, rel);
+        if (!file.startsWith(ugcRoot) || !fs.existsSync(file) || !fs.statSync(file).isFile()) { next(); return; }
+        res.setHeader('content-type', file.endsWith('.html') ? 'text/html; charset=utf-8' : 'application/javascript; charset=utf-8');
+        res.end(fs.readFileSync(file));
+      });
+
+      // Bake-on-confirm: called when the player BUILDS a mechanic (not per
+      // preview/reroll). Runs the swipe-ugc worker synchronously: bake →
+      // autoplay test → git publish → per-player bot notification (--chat from
+      // the mini-app initData). Returns the hosted URL.
+      server.middlewares.use('/island-api/bake', (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end(); return; }
+        let body = '';
+        req.on('data', (c: Buffer) => { body += c.toString(); });
+        req.on('end', () => {
+          void (async () => {
+            res.setHeader('content-type', 'application/json');
+            try {
+              const { pack, prompt, chat } = JSON.parse(body || '{}') as { pack?: unknown; prompt?: string; chat?: number };
+              if (!pack || typeof pack !== 'object') {
+                res.statusCode = 422;
+                res.end(JSON.stringify({ error: 'pack must be an object' }));
+                return;
+              }
+              const packErr = validationError(pack as Record<string, unknown>);
+              if (packErr) {
+                res.statusCode = 422;
+                res.end(JSON.stringify({ error: `invalid pack: ${packErr}` }));
+                return;
+              }
+              const worker = path.resolve(ugcRoot, 'worker/bake.mjs');
+              if (!fs.existsSync(worker)) throw new Error('bake worker not found');
+              const wargs = [worker, '--pack', JSON.stringify(pack), '--prompt', String(prompt ?? ''), '--user', 'dev'];
+              if (chat) wargs.push('--chat', String(chat));
+              const stdout = await new Promise<string>((resolve, reject) => {
+                execFile('node', wargs, { timeout: 300000 }, (werr, out, errOut) => {
+                  console.log(`[ugc-worker] ${werr ? `failed: ${String(werr)}` : 'ok'}`);
+                  if (out) console.log(out.trim());
+                  if (errOut) console.error(errOut.trim());
+                  if (werr) reject(new Error(errOut.trim() || String(werr)));
+                  else resolve(out);
+                });
+              });
+              const m = stdout.match(/^RESULT (\{.*\})$/m);
+              if (!m) throw new Error('no RESULT line from worker');
+              const rel = (JSON.parse(m[1]) as { rel: string }).rel;
+              const base = process.env.UGC_BASE_URL;
+              res.end(JSON.stringify({ rel, url: base ? `${base.replace(/\/$/, '')}/${rel}` : `ugc/${rel}` }));
+            } catch (e) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: String(e) }));
+            }
+          })();
+        });
+      });
+
+      server.middlewares.use('/island-api/theme', (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end(); return; }
+        let body = '';
+        req.on('data', (c: Buffer) => { body += c.toString(); });
+        req.on('end', () => {
+          void (async () => {
+            res.setHeader('content-type', 'application/json');
+            try {
+              const { prompt, avoid } = JSON.parse(body || '{}') as { prompt?: string; avoid?: string };
+              const basePrompt = themePrompt(String(prompt ?? ''), avoid ? String(avoid) : undefined);
+              const generate = async (fullPrompt: string): Promise<Record<string, unknown>> => {
+                if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) {
+                  const client = new Anthropic();
+                  const msg = await client.messages.create({
+                    model: 'claude-opus-4-8',
+                    max_tokens: 1000,
+                    output_config: { format: { type: 'json_schema', schema: SCHEMA }, effort: 'low' },
+                    messages: [{ role: 'user', content: fullPrompt }],
+                  });
+                  const text = msg.content.find((b) => b.type === 'text');
+                  if (!text || text.type !== 'text') throw new Error('no text block in response');
+                  return JSON.parse(text.text) as Record<string, unknown>;
+                }
+                return cliTheme(fullPrompt);   // subscription-covered dev path
+              };
+              // QA gate with one corrective retry: the validation failure is fed
+              // back to the model verbatim (the fork-path pattern — validate
+              // after, don't predict before).
+              let lastError = '';
+              for (let attempt = 0; attempt < 2; attempt++) {
+                const pack = await generate(attempt === 0 ? basePrompt : `${basePrompt}\nYour previous attempt was rejected by validation: ${lastError}. Fix exactly that while keeping the theme.`);
+                const err = validationError(pack);
+                if (!err) { res.end(JSON.stringify(pack)); return; }
+                lastError = err;
+              }
+              res.statusCode = 422;
+              res.end(JSON.stringify({ error: `pack failed validation twice: ${lastError}` }));
+            } catch (e) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: String(e) }));
+            }
+          })();
+        });
       });
     },
   };
@@ -43,11 +298,13 @@ function servePlayables(): Plugin {
 // (one file, no external requests, openable on a phone via the deploy URL).
 export default defineConfig({
   base: './',
-  plugins: [servePlayables(), viteSingleFile()],
+  plugins: [servePlayables(), islandThemeApi(), viteSingleFile()],
   define: {
     // Build stamp shown bottom-left on the feed bar so it's clear which platform
-    // build is live. "YYYY-MM-DD HH:MM" (UTC), sliced to "MM-DD HH:MM" for display.
-    __PLATFORM_VERSION__: JSON.stringify(new Date().toISOString().slice(0, 16).replace('T', ' ')),
+    // build is live. deploy-swipe.sh passes PLATFORM_VERSION="<time> · <commit>" so the
+    // badge carries the git short-hash (timestamps collide at minute resolution).
+    // Falls back to a bare UTC timestamp for standalone/dev builds.
+    __PLATFORM_VERSION__: JSON.stringify(process.env.PLATFORM_VERSION || new Date().toISOString().slice(0, 16).replace('T', ' ')),
   },
   build: {
     target: 'es2018',

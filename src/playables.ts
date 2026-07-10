@@ -41,10 +41,23 @@ function mechanicVersion(id: string): string {
  *  html), so an entry that reuses another mechanic's build (e.g. pins-l3-swipe →
  *  pins-swipe.html at ?level=3) ships its OWN cover baked at its level. Missing
  *  covers fall back to the standard card via the <img> onerror handler. */
+// Cover aspect bucket for THIS device, set once at boot from the measured slot
+// aspect (see Feed.pickCoverBucket). '' = tall (~0.55, modern phones), '.c' =
+// compact (~0.72, iPhone SE / small Android). Covers are baked in both aspects so
+// the object-fit:fill'd poster registers with the live canvas on either cluster.
+let coverBucket = '';
+export function setCoverBucket(suffix: string): void {
+  coverBucket = suffix === '.c' ? '.c' : '';
+}
+// Cover-generation epoch — bump when covers are re-baked WITHOUT a payload change
+// (the `?v=` below is the payload hash, so it wouldn't bust the WebView cover cache
+// on its own). cv=2: two-aspect buckets (0.55/0.72). cv=3: re-baked at REAL Telegram
+// aspects (mobile 0.65 / desktop 0.80) + object-fit:cover.
+const COVER_EPOCH = 3;
 export function coverUrl(id: string): string {
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
-  return `${base}${id}.cover.jpg?v=${mechanicVersion(id)}`;
+  return `${base}${id}.cover${coverBucket}.jpg?v=${mechanicVersion(id)}&cv=${COVER_EPOCH}`;
 }
 
 export interface Playable {

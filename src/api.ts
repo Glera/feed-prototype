@@ -145,6 +145,29 @@ export function apiCompleteChallenge(id: string, metricValue: number): Promise<C
   return post<ChallengeComplete>(`/api/challenges/${encodeURIComponent(id)}/complete`, { metric_value: metricValue });
 }
 
+// ── Island UGC generation / bake ─────────────────────────────────────────────
+
+export interface IslandThemePack {
+  id?: string;
+  name: string;
+  kw?: string[];
+  ground: string;
+  edge: string;
+  boardBg: string;
+  items: string[];
+  prop: 'mushroom' | 'crystal' | 'coral' | 'lollipop' | 'rock';
+  body: string;
+  roof: string;
+}
+
+export function apiIslandTheme(payload: { prompt: string; avoid?: string }): Promise<IslandThemePack | null> {
+  return post<IslandThemePack>('/api/island/theme', payload);
+}
+
+export function apiIslandBake(payload: { pack: IslandThemePack; prompt: string; tpl?: 'sort' }): Promise<{ rel: string; url: string; ready?: boolean } | null> {
+  return post<{ rel: string; url: string; ready?: boolean }>('/api/island/bake', payload);
+}
+
 export interface ChallengeInboxItem {
   id: string;
   mechanic_id: string;
