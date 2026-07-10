@@ -19,6 +19,8 @@ import {
   apiIslandTheme,
   type IslandBakeJob,
   type IslandBuildingState,
+  type IslandDifficultyPreference,
+  type IslandMotionPreference,
   type IslandPersistedState,
   type IslandStoredPack,
   type IslandTemplateId,
@@ -39,7 +41,9 @@ export interface IslandHostCtx { close(): void; }
 
 type TplId = IslandTemplateId;
 type PropKind = IslandStoredPack['prop'];
-type Pack = IslandStoredPack;
+type VariantKeys = 'sceneBg' | 'belt' | 'outline' | 'seed' | 'difficulty' | 'motion' | 'marbleStyle'
+  | 'markerStyle' | 'targetShape' | 'conveyorPath' | 'sourceShape' | 'backgroundPattern';
+type Pack = IslandStoredPack & Required<Pick<IslandStoredPack, VariantKeys>>;
 type Building = IslandBuildingState;
 type IslandState = IslandPersistedState;
 interface CreationDraft {
@@ -48,26 +52,33 @@ interface CreationDraft {
   prompt: string;
   pack: Pack;
   rerolls: number;
+  difficulty: IslandDifficultyPreference;
+  motion: IslandMotionPreference;
   ai?: boolean;
   avoid?: string;
 }
 
 const PACKS: Pack[] = [
   { id: 'forest', name: 'Mushroom forest', kw: ['mushroom', 'forest', 'moss', 'гриб', 'лес', 'мох'],
-    ground: '#79A155', edge: '#5C7F41', boardBg: '#EAF2DC',
-    items: ['#D9534F', '#F2E3C6', '#E8A33D', '#8A5A44', '#6FA34B', '#5B8BD8'], prop: 'mushroom', body: '#F2E3C6', roof: '#C94A3D' },
+    ground: '#79A155', edge: '#5C7F41', sceneBg: '#152218', boardBg: '#24372A', belt: '#556B50', outline: '#B6C6A8',
+    items: ['#D9534F', '#F2E3C6', '#E8A33D', '#8A5A44', '#6FA34B', '#5B8BD8'], prop: 'mushroom', body: '#F2E3C6', roof: '#C94A3D',
+    seed: 0xF012E57, difficulty: 'easy', motion: 'calm', marbleStyle: 'matte', markerStyle: 'dots', targetShape: 'bowl', conveyorPath: 'oval', sourceShape: 'flask', backgroundPattern: 'grid' },
   { id: 'neon', name: 'Neon city', kw: ['neon', 'cyber', 'city', 'night', 'неон', 'кибер', 'город', 'ноч'],
-    ground: '#3A3357', edge: '#5C51A0', boardBg: '#241F38',
-    items: ['#41E0D0', '#FF5FA2', '#FFD84D', '#8F7FFF', '#9BF6FF', '#FF6B3D'], prop: 'crystal', body: '#4A4170', roof: '#41E0D0' },
+    ground: '#3A3357', edge: '#5C51A0', sceneBg: '#050509', boardBg: '#10101A', belt: '#242038', outline: '#59F3E7',
+    items: ['#41E0D0', '#FF5FA2', '#FFD84D', '#8F7FFF', '#9BF6FF', '#FF6B3D'], prop: 'crystal', body: '#4A4170', roof: '#41E0D0',
+    seed: 0x0E0C17A, difficulty: 'hard', motion: 'chaotic', marbleStyle: 'glass', markerStyle: 'glyphs', targetShape: 'hex', conveyorPath: 'wave', sourceShape: 'silo', backgroundPattern: 'stars' },
   { id: 'sea', name: 'Underwater world', kw: ['water', 'sea', 'ocean', 'fish', 'reef', 'вод', 'мор', 'океан', 'рыб', 'риф'],
-    ground: '#4E9DB0', edge: '#38798A', boardBg: '#E3F2F5',
-    items: ['#FF8B7E', '#FFC85C', '#4FC9AE', '#4E8FD0', '#E858B8', '#8E6FE8'], prop: 'coral', body: '#DFF2EE', roof: '#FF8B7E' },
+    ground: '#4E9DB0', edge: '#38798A', sceneBg: '#071A22', boardBg: '#103441', belt: '#245F70', outline: '#9FE7F1',
+    items: ['#FF8B7E', '#FFC85C', '#4FC9AE', '#4E8FD0', '#E858B8', '#8E6FE8'], prop: 'coral', body: '#DFF2EE', roof: '#FF8B7E',
+    seed: 0x05EA2026, difficulty: 'easy', motion: 'calm', marbleStyle: 'bubble', markerStyle: 'rings', targetShape: 'bowl', conveyorPath: 'oval', sourceShape: 'flask', backgroundPattern: 'bubbles' },
   { id: 'candy', name: 'Candy kingdom', kw: ['candy', 'sweet', 'caramel', 'cake', 'слад', 'конфет', 'карамел', 'торт'],
-    ground: '#DE9FBE', edge: '#B96F92', boardBg: '#FBEFF5',
-    items: ['#F26FA8', '#7EC9EE', '#F5D96E', '#A98FEF', '#6FDCA4', '#FF9B54'], prop: 'lollipop', body: '#FBEFF5', roof: '#F26FA8' },
+    ground: '#DE9FBE', edge: '#B96F92', sceneBg: '#2A1423', boardBg: '#4A203B', belt: '#7B4167', outline: '#FFD9EC',
+    items: ['#F26FA8', '#7EC9EE', '#F5D96E', '#A98FEF', '#6FDCA4', '#FF9B54'], prop: 'lollipop', body: '#FBEFF5', roof: '#F26FA8',
+    seed: 0xCA0D1202, difficulty: 'medium', motion: 'bouncy', marbleStyle: 'glossy', markerStyle: 'stripes', targetShape: 'jar', conveyorPath: 'racetrack', sourceShape: 'bottle', backgroundPattern: 'solid' },
   { id: 'lava', name: 'Volcano wastes', kw: ['lava', 'volcano', 'fire', 'ash', 'лав', 'вулкан', 'ог', 'пепел'],
-    ground: '#5A4A47', edge: '#42332F', boardBg: '#F0E4DC',
-    items: ['#FF7031', '#FFDD1C', '#9C4433', '#5E4B48', '#FFE08A', '#4EA6D8'], prop: 'rock', body: '#7A625C', roof: '#FF7031' },
+    ground: '#5A4A47', edge: '#42332F', sceneBg: '#120A08', boardBg: '#2A1410', belt: '#4C2920', outline: '#FF8A4A',
+    items: ['#FF7031', '#FFDD1C', '#9C4433', '#5E4B48', '#FFE08A', '#4EA6D8'], prop: 'rock', body: '#7A625C', roof: '#FF7031',
+    seed: 0x1A7A2026, difficulty: 'hard', motion: 'heavy', marbleStyle: 'ember', markerStyle: 'dots', targetShape: 'crystal', conveyorPath: 'compact', sourceShape: 'hopper', backgroundPattern: 'embers' },
 ];
 const TPL: Record<TplId, { label: string; ds: string; playableId: string }> = {
   sort:  { label: 'Sorting', ds: 'sort items into flasks',        playableId: SORT_RECIPE.baseBuild },
@@ -80,6 +91,36 @@ const GUEST_REWARD = 25;
 const REROLL_COST = 30;
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
 const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
+
+function stableSeed(value: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
+  return hash >>> 0;
+}
+
+function normalizePack(raw: IslandStoredPack): Pack {
+  const fallback = PACKS.find((pack) => pack.id === raw.id) ?? PACKS[0];
+  return {
+    ...raw,
+    sceneBg: raw.sceneBg ?? fallback.sceneBg,
+    belt: raw.belt ?? fallback.belt,
+    outline: raw.outline ?? fallback.outline,
+    seed: Number.isInteger(raw.seed) ? Number(raw.seed) >>> 0 : stableSeed(`${raw.id}:${raw.name}`),
+    difficulty: raw.difficulty ?? fallback.difficulty,
+    motion: raw.motion ?? fallback.motion,
+    marbleStyle: raw.marbleStyle ?? fallback.marbleStyle,
+    markerStyle: raw.markerStyle ?? fallback.markerStyle,
+    targetShape: raw.targetShape ?? fallback.targetShape,
+    conveyorPath: raw.conveyorPath ?? fallback.conveyorPath,
+    sourceShape: raw.sourceShape ?? fallback.sourceShape,
+    backgroundPattern: raw.backgroundPattern ?? fallback.backgroundPattern,
+  };
+}
+
+function variantFingerprint(pack: Pack): string {
+  return [pack.name, pack.marbleStyle, pack.markerStyle, pack.targetShape, pack.conveyorPath,
+    pack.sourceShape, pack.backgroundPattern, pack.difficulty, pack.motion].join('|').slice(0, 220);
+}
 
 function esc(t: string): string {
   return t.replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] as string));
@@ -106,15 +147,25 @@ function newJobId(): string {
 
 // Production must use the authenticated backend. The Vite endpoint and preset
 // fallback exist only for local development, where Claude CLI is available.
-async function aiTheme(prompt: string, avoid?: string): Promise<Pack | null> {
+async function aiTheme(
+  prompt: string,
+  avoid?: string,
+  difficulty: IslandDifficultyPreference = 'surprise',
+  motion: IslandMotionPreference = 'surprise',
+): Promise<Pack | null> {
   try {
-    const apiPack = await apiIslandTheme({ prompt, avoid });
+    const apiPack = await apiIslandTheme({ prompt, avoid, difficulty, motion });
     console.log('[island] backend theme:', apiPack.name, apiPack.items.join(' '));
-    return {
+    return normalizePack({
       id: apiPack.id ?? '', name: apiPack.name.slice(0, 24), kw: apiPack.kw ?? [],
       ground: apiPack.ground, edge: apiPack.edge, boardBg: apiPack.boardBg,
+      sceneBg: apiPack.sceneBg, belt: apiPack.belt, outline: apiPack.outline,
       items: apiPack.items, prop: apiPack.prop, body: apiPack.body, roof: apiPack.roof,
-    };
+      seed: apiPack.seed, difficulty: apiPack.difficulty, motion: apiPack.motion,
+      marbleStyle: apiPack.marbleStyle, markerStyle: apiPack.markerStyle,
+      targetShape: apiPack.targetShape, conveyorPath: apiPack.conveyorPath,
+      sourceShape: apiPack.sourceShape, backgroundPattern: apiPack.backgroundPattern,
+    });
   } catch (e) {
     if (!IS_DEV) throw e;
     console.log('[island] backend theme unavailable in dev:', errorText(e), '→ Vite/CLI fallback');
@@ -129,7 +180,7 @@ async function aiTheme(prompt: string, avoid?: string): Promise<Pack | null> {
     const res = await fetch('/island-api/theme', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt, avoid }),
+      body: JSON.stringify({ prompt, avoid, difficulty, motion }),
       signal: ctrl.signal,
     });
     window.clearTimeout(timer);
@@ -138,11 +189,16 @@ async function aiTheme(prompt: string, avoid?: string): Promise<Pack | null> {
     const items = data.items as string[];
     if (!Array.isArray(items) || items.length !== 6) return null;
     console.log('[island] dev theme:', data.name, items.join(' '));
-    return {
+    return normalizePack({
       id: '', name: String(data.name).slice(0, 24), kw: [],
       ground: String(data.ground), edge: String(data.edge), boardBg: String(data.boardBg),
+      sceneBg: String(data.sceneBg), belt: String(data.belt), outline: String(data.outline),
       items, prop: data.prop as PropKind, body: String(data.body), roof: String(data.roof),
-    };
+      seed: Number(data.seed), difficulty: data.difficulty as Pack['difficulty'], motion: data.motion as Pack['motion'],
+      marbleStyle: data.marbleStyle as Pack['marbleStyle'], markerStyle: data.markerStyle as Pack['markerStyle'],
+      targetShape: data.targetShape as Pack['targetShape'], conveyorPath: data.conveyorPath as Pack['conveyorPath'],
+      sourceShape: data.sourceShape as Pack['sourceShape'], backgroundPattern: data.backgroundPattern as Pack['backgroundPattern'],
+    });
   } catch (e) {
     console.log('[island] dev theme APIs unreachable:', errorText(e), '→ preset fallback');
     return null;
@@ -160,17 +216,13 @@ function pickPack(txt: string, excl: string | null): Pack {
 }
 
 // ── fork-at-launch (proof of the fork path) ─────────────────────────────────
-// A created mechanic is a RECIPE (base playable + edits), materialised into a
-// throwaway fork of the shipped artifact at launch time. The base build is
-// fetched read-only and never modified. marble-sort is the first base: fully
-// self-contained single file, all art procedural, marble palette = 6 hex
-// constants — so the recipe is a palette substitution. Guards:
-//   * recipe checks the artifact still contains the expected constants
-//     (base rebuilt incompatibly → recipe is stale → play the stock build);
+// A created mechanic is a RECIPE (base playable + a versioned runtime config),
+// materialised into a throwaway fork of the shipped artifact at launch time.
+// The same config is persisted and baked by the worker. Guards:
+//   * recipe checks that the base still exposes the config hook;
 //   * any fetch/transform failure → stock build;
 //   * boot watchdog in playSeries → stock build if the fork doesn't boot.
 // Injected from swipe-ugc/recipes/sort at build time; the worker owns the source.
-const SORT_MARBLES = SORT_RECIPE.sourcePalette;
 
 async function forkedSortHtml(pk: Pack, dbg: (m: string) => void): Promise<string | null> {
   try {
@@ -180,18 +232,27 @@ async function forkedSortHtml(pk: Pack, dbg: (m: string) => void): Promise<strin
     if (!res.ok) { dbg(`base fetch failed: HTTP ${res.status} → stock`); return null; }
     let html = await res.text();
     dbg(`base html: ${html.length} bytes`);
-    let replaced = 0;
-    const applyPalette = (text: string): string => {
-      SORT_MARBLES.forEach((hex, i) => {
-        const n = text.split(hex).length - 1;
-        replaced += n;
-        dbg(`  ${hex} → ${pk.items[i % pk.items.length]} (${n}x)`);
-        text = text.split(hex).join(pk.items[i % pk.items.length]);
-      });
-      return text;
+    const variant = {
+      schemaVersion: SORT_RECIPE.version,
+      seed: pk.seed,
+      items: pk.items,
+      sceneBg: pk.sceneBg,
+      boardBg: pk.boardBg,
+      belt: pk.belt,
+      outline: pk.outline,
+      difficulty: pk.difficulty,
+      motion: pk.motion,
+      marbleStyle: pk.marbleStyle,
+      markerStyle: pk.markerStyle,
+      targetShape: pk.targetShape,
+      conveyorPath: pk.conveyorPath,
+      sourceShape: pk.sourceShape,
+      backgroundPattern: pk.backgroundPattern,
     };
-    // Swipe deploys are shell + external payload; older artifacts are single-file.
-    // The recipe edits whichever part actually carries the palette.
+    const variantJson = JSON.stringify(variant).replace(/<\/script/gi, '<\\/script');
+    const configScript = `<script>window.__UGC_SORT_VARIANT__=${variantJson}</script>`;
+    // Swipe deploys are shell + external payload; the client fallback inlines
+    // that payload so the generated blob URL remains self-contained.
     const tag = html.match(/<script type="module" src="(\.[^"]*payload[^"]*)"><\/script>/);
     if (tag) {
       const purl = new URL(tag[1], new URL(src, location.href)).href;
@@ -200,17 +261,17 @@ async function forkedSortHtml(pk: Pack, dbg: (m: string) => void): Promise<strin
       if (!pres.ok) { dbg(`payload fetch failed: HTTP ${pres.status} → stock`); return null; }
       let payload = await pres.text();
       dbg(`payload: ${payload.length} bytes`);
-      if (!payload.includes(SORT_MARBLES[0])) { dbg('stale recipe: palette constants not found in payload → stock'); return null; }
-      payload = applyPalette(payload).split('</script').join('<\\/script');
-      html = html.replace(tag[0], () => `<script type="module">${payload}</script>`);
-    } else if (html.includes(SORT_MARBLES[0])) {
+      if (!payload.includes('__UGC_SORT_VARIANT__')) { dbg('stale recipe: config hook not found in payload → stock'); return null; }
+      payload = payload.split('</script').join('<\\/script');
+      html = html.replace(tag[0], () => `${configScript}<script type="module">${payload}</script>`);
+    } else if (html.includes('__UGC_SORT_VARIANT__')) {
       dbg('shape: single-file artifact');
-      html = applyPalette(html);
+      html = html.replace('<head>', `<head>${configScript}`);
     } else {
-      dbg('stale recipe: no payload tag and no palette constants in html → stock');
+      dbg('stale recipe: config hook not found in base → stock');
       return null;
     }
-    dbg(`palette applied: ${replaced} replacements`);
+    dbg(`variant v${SORT_RECIPE.version}: ${pk.difficulty}/${pk.motion}, ${pk.conveyorPath}, seed ${pk.seed}`);
     // The fork boots in an about:blank frame: location.search is empty there, so
     // bake the launch params straight into the artifact (part of the recipe).
     html = html.split('window.location.search').join('"?auto=0"');
@@ -268,18 +329,48 @@ function house(tpl: TplId, body: string, roof: string): string {
     <g transform="translate(9,-14)"><circle r="6" fill="#fff"/><g fill="${roof}">${glyph}</g></g></g>`;
 }
 
-// Mock board used ONLY as the generation preview (playing uses the real build).
-function board(tpl: TplId, pk: Pick<Pack, 'items' | 'boardBg' | 'edge'>): string {
+// Compact preview driven by the same persisted variant config as the live fork.
+function board(tpl: TplId, pk: Pack): string {
   const dark = parseInt(pk.boardBg.slice(1, 3), 16) < 100;
   const cell = dark ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.09)';
-  let s = `<svg viewBox="0 0 300 170" style="display:block;width:100%"><rect width="300" height="170" fill="${pk.boardBg}"/>`;
+  let s = `<svg viewBox="0 0 300 170" style="display:block;width:100%"><rect width="300" height="170" fill="${pk.sceneBg}"/>`;
   if (tpl === 'sort') {
-    const fills = [[0, 1, 0, 2], [3, 2, 1], [4, 0, 3, 1], [2]];
-    fills.forEach((tube, i) => {
-      const x = 42 + i * 60;
-      s += `<rect x="${x - 17}" y="28" width="34" height="118" rx="15" fill="${cell}" stroke="${pk.edge}" stroke-width="1.6"/>`;
-      tube.forEach((ci, j) => { s += `<circle cx="${x}" cy="${132 - j * 27}" r="12" fill="${pk.items[ci]}"/>`; });
-    });
+    if (pk.backgroundPattern === 'grid') {
+      for (let x = 0; x < 300; x += 22) s += `<line x1="${x}" y1="0" x2="${x}" y2="170" stroke="${pk.outline}" opacity=".12"/>`;
+      for (let y = 0; y < 170; y += 22) s += `<line x1="0" y1="${y}" x2="300" y2="${y}" stroke="${pk.outline}" opacity=".12"/>`;
+    }
+    s += `<rect x="12" y="8" width="276" height="99" rx="14" fill="${pk.boardBg}" stroke="${pk.outline}" opacity=".96"/>`;
+    const source = pk.sourceShape === 'hopper'
+      ? 'M55 16 L72 91 L131 104 M245 16 L228 91 L169 104 M55 16 H245'
+      : pk.sourceShape === 'flask'
+        ? 'M105 16 V30 L55 48 V91 L131 104 M195 16 V30 L245 48 V91 L169 104 M105 16 H195'
+        : pk.sourceShape === 'silo'
+          ? 'M55 29 Q150 2 245 29 V91 L169 104 M55 29 V91 L131 104'
+          : 'M55 16 V91 L131 104 M245 16 V91 L169 104 M55 16 H245';
+    s += `<path d="${source}" fill="none" stroke="${pk.outline}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>`;
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 6; c++) {
+      const color = pk.items[(c + r) % pk.items.length], x = 78 + c * 29, y = 30 + r * 24;
+      if (pk.marbleStyle === 'gem') s += `<polygon points="${x},${y - 7} ${x + 6},${y - 3} ${x + 6},${y + 4} ${x},${y + 7} ${x - 6},${y + 4} ${x - 6},${y - 3}" fill="${color}"/>`;
+      else s += `<circle cx="${x}" cy="${y}" r="7" fill="${pk.marbleStyle === 'obsidian' ? '#090B0F' : color}" stroke="${pk.marbleStyle === 'obsidian' ? color : pk.outline}" stroke-width="1.3"/>`;
+      if (pk.markerStyle !== 'none') s += `<circle cx="${x}" cy="${y}" r="2" fill="${pk.marbleStyle === 'obsidian' ? color : '#fff'}" opacity=".8"/>`;
+    }
+    const conveyor = pk.conveyorPath === 'oval'
+      ? `<ellipse cx="150" cy="119" rx="103" ry="13"/>`
+      : pk.conveyorPath === 'compact'
+        ? `<rect x="45" y="107" width="210" height="24" rx="5"/>`
+        : pk.conveyorPath === 'wave'
+          ? `<path d="M45 119 C78 96 112 140 150 119 S222 96 255 119 C222 142 188 98 150 119 S78 142 45 119 Z"/>`
+          : `<rect x="45" y="107" width="210" height="24" rx="12"/>`;
+    s += `<g fill="${pk.belt}" stroke="${pk.outline}" stroke-width="2">${conveyor}</g>`;
+    const columns = pk.difficulty === 'easy' ? 3 : pk.difficulty === 'expert' ? 5 : 4;
+    const tw = columns === 5 ? 40 : 48, gap = 7, total = columns * tw + (columns - 1) * gap, start = (300 - total) / 2;
+    for (let i = 0; i < columns; i++) {
+      const x = start + i * (tw + gap), color = pk.items[i % pk.items.length];
+      if (pk.targetShape === 'hex') s += `<polygon points="${x + 6},140 ${x + tw - 6},140 ${x + tw},150 ${x + tw - 6},160 ${x + 6},160 ${x},150" fill="${color}40" stroke="${color}"/>`;
+      else if (pk.targetShape === 'bowl') s += `<path d="M${x} 142 Q${x + tw / 2} 168 ${x + tw} 142 V140 H${x}Z" fill="${color}40" stroke="${color}"/>`;
+      else if (pk.targetShape === 'crystal') s += `<polygon points="${x},150 ${x + 8},140 ${x + tw - 8},140 ${x + tw},150 ${x + tw - 12},160 ${x + 12},160" fill="${color}40" stroke="${color}"/>`;
+      else s += `<rect x="${x}" y="140" width="${tw}" height="20" rx="${pk.targetShape === 'jar' ? 5 : 10}" fill="${color}40" stroke="${color}"/>`;
+    }
   } else if (tpl === 'merge') {
     const grid = [[1, 0, 2, -1, 0], [0, 3, -1, 1, 2], [2, -1, 4, 0, 1]];
     grid.forEach((row, r) => row.forEach((v, c) => {
@@ -345,6 +436,13 @@ const CSS = `
 .isl-chips{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0 13px}
 .isl-chip{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);border-radius:999px;padding:7px 12px;font:inherit;font-size:12px;color:#fff}
 .isl-in{width:100%;border:1px solid rgba(255,255,255,.18);border-radius:12px;padding:12px 13px;font:inherit;font-size:14px;background:rgba(255,255,255,.08);color:#fff}
+.isl-in--prompt{min-height:76px;line-height:1.35;resize:none}
+.isl-choice{margin-top:12px}.isl-choice__label{font-size:11px;font-weight:800;text-transform:uppercase;color:rgba(255,255,255,.55);margin-bottom:6px}
+.isl-seg{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px}
+.isl-seg button{min-width:0;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.055);color:rgba(255,255,255,.65);padding:8px 2px;font:700 10.5px/1 system-ui,sans-serif}
+.isl-seg button:first-child{border-radius:8px 0 0 8px}.isl-seg button:last-child{border-radius:0 8px 8px 0}
+.isl-seg button.on{background:#fff;color:#101720;border-color:#fff}
+.isl-traits{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.isl-traits span{border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:4px 7px;font-size:10px;color:rgba(255,255,255,.72);text-transform:capitalize}
 .isl-in::placeholder{color:rgba(255,255,255,.35)}
 .isl-btn{width:100%;border:none;border-radius:13px;padding:13px;font:inherit;font-size:14.5px;font-weight:800;margin-top:8px}
 .isl-btn--pri{background:linear-gradient(180deg,#8ff0a3,#3ccc78);color:#112011;box-shadow:inset 0 1px 0 rgba(255,255,255,.36)}
@@ -406,7 +504,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   const pollingSlots = new Set<number>();
   let stateSync: IslandStateSync | null = null;
 
-  const resolvePack = (id: string): Pack => PACKS.find((x) => x.id === id) ?? S.aiPacks?.[id] ?? PACKS[0];
+  const resolvePack = (id: string): Pack => normalizePack(PACKS.find((x) => x.id === id) ?? S.aiPacks?.[id] ?? PACKS[0]);
 
   // Slots with a generation job in flight (player dismissed the sheet and kept
   // browsing). Rendered as a construction site; the job auto-builds on arrival.
@@ -664,7 +762,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       stepPreview();
       return;
     }
-    cur = { slot, tpl: 'sort', prompt: '', pack: PACKS[0], rerolls: 1 };
+    cur = { slot, tpl: 'sort', prompt: '', pack: PACKS[0], rerolls: 1, difficulty: 'surprise', motion: 'surprise' };
     const cards = CREATABLE_TPLS.map((id) =>
       `<button class="isl-tcard" type="button" data-t="${id}">
         <span class="isl-tcard__pv"><img src="${coverUrl(TPL[id].playableId)}" alt="" onerror="this.style.display='none'"></span>
@@ -683,13 +781,37 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (!cur) return;
     const chips = ['mushroom forest', 'neon city', 'underwater world', 'candy kingdom', 'volcano wastes']
       .map((c) => `<button class="isl-chip" type="button">${c}</button>`).join('');
+    const difficultyOptions: Array<[IslandDifficultyPreference, string]> = [
+      ['surprise', 'Surprise'], ['easy', 'Easy'], ['medium', 'Medium'], ['hard', 'Hard'], ['expert', 'Expert'],
+    ];
+    const motionOptions: Array<[IslandMotionPreference, string]> = [
+      ['surprise', 'Surprise'], ['calm', 'Calm'], ['heavy', 'Heavy'], ['bouncy', 'Bouncy'], ['chaotic', 'Chaotic'],
+    ];
     openSheet(`<h3>${TPL[cur.tpl].label}: theme</h3><div class="isl-sub">Step 2 of 3 · describe the world in your own words</div>
-      <input class="isl-in" data-prm placeholder="e.g. rainy neon city at night" maxlength="40">
+      <textarea class="isl-in isl-in--prompt" data-prm placeholder="e.g. black industrial night, restrained red accents" maxlength="120" rows="3">${esc(cur.prompt)}</textarea>
       <div class="isl-chips">${chips}</div>
+      <div class="isl-choice"><div class="isl-choice__label">Difficulty</div><div class="isl-seg" data-diff-group>
+        ${difficultyOptions.map(([value, label]) => `<button type="button" data-diff="${value}" class="${cur!.difficulty === value ? 'on' : ''}">${label}</button>`).join('')}
+      </div></div>
+      <div class="isl-choice"><div class="isl-choice__label">Motion</div><div class="isl-seg" data-motion-group>
+        ${motionOptions.map(([value, label]) => `<button type="button" data-motion="${value}" class="${cur!.motion === value ? 'on' : ''}">${label}</button>`).join('')}
+      </div></div>
       <button class="isl-btn isl-btn--pri" type="button" data-gen>Generate theme ✨</button>`);
-    const inp = sheet.querySelector('[data-prm]') as HTMLInputElement;
+    const inp = sheet.querySelector('[data-prm]') as HTMLTextAreaElement;
     sheet.querySelectorAll<HTMLElement>('.isl-chip').forEach((c) =>
       c.addEventListener('click', () => { inp.value = c.textContent || ''; }));
+    sheet.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach((button) =>
+      button.addEventListener('click', () => {
+        if (!cur) return;
+        cur.difficulty = button.dataset.diff as IslandDifficultyPreference;
+        sheet.querySelectorAll('[data-diff]').forEach((item) => item.classList.toggle('on', item === button));
+      }));
+    sheet.querySelectorAll<HTMLButtonElement>('[data-motion]').forEach((button) =>
+      button.addEventListener('click', () => {
+        if (!cur) return;
+        cur.motion = button.dataset.motion as IslandMotionPreference;
+        sheet.querySelectorAll('[data-motion]').forEach((item) => item.classList.toggle('on', item === button));
+      }));
     (sheet.querySelector('[data-gen]') as HTMLElement).addEventListener('click', () => {
       if (!cur) return;
       cur.prompt = inp.value.trim();
@@ -716,14 +838,20 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const rm = matchMedia('(prefers-reduced-motion: reduce)').matches;
     lis.forEach((li, i) => window.setTimeout(() => li.classList.add('done'), rm ? 0 : 350 + i * 520));
     const minWait = new Promise<void>((r) => window.setTimeout(() => r(), rm ? 300 : 2400));
-    void Promise.all([aiTheme(req.prompt, req.avoid), minWait]).then(([pack]) => {
+    void Promise.all([aiTheme(req.prompt, req.avoid, req.difficulty, req.motion), minWait]).then(([pack]) => {
       if (generationBySlot.get(req.slot) !== generationId) {
         refreshIsland();
         return;
       }
       generationBySlot.delete(req.slot);
       pendingSlots.delete(req.slot);
-      const resolved = pack ?? pickPack(req.prompt, req.pack.id);
+      const fallback = pickPack(req.prompt, req.pack.id);
+      const resolved = normalizePack(pack ?? {
+        ...fallback,
+        seed: stableSeed(`${req.prompt}:${generationId}:${Date.now()}`),
+        difficulty: req.difficulty === 'surprise' ? fallback.difficulty : req.difficulty,
+        motion: req.motion === 'surprise' ? fallback.motion : req.motion,
+      });
       const isAi = Boolean(pack);
       if (pack) {
         // Sequence ids collide when phone and Desktop generate concurrently.
@@ -773,6 +901,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     openSheet(`<h3>Theme preview</h3><div class="isl-sub">Step 3 of 3 · how the mechanic will look</div>
       <div class="isl-board">${board(cur.tpl, pk)}</div>
       <div class="isl-pk"><b>${esc(nm)}</b> · ${TPL[cur.tpl].label} · <span style="opacity:.65">${cur.ai ? 'AI theme ✨' : 'preset theme (AI offline)'}</span></div>
+      <div class="isl-traits"><span>${pk.difficulty}</span><span>${pk.motion}</span><span>${pk.marbleStyle}</span><span>${pk.targetShape}</span><span>${pk.conveyorPath}</span></div>
       <div class="isl-swrow" style="margin-top:8px">${pk.items.map((c) => `<span class="isl-sw isl-sw--in" style="background:${c}"></span>`).join('')}</div>
       <button class="isl-btn isl-btn--pri" type="button" data-build>Build on the island</button>
       <button class="isl-btn isl-btn--ghost" type="button" data-rr>${rl}</button>`);
@@ -799,7 +928,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       else { toast('Not enough tokens'); return; }
       readyDrafts.delete(cur.slot);
       (ov.querySelector('[data-tok]') as HTMLElement).textContent = String(S.tokens);
-      cur.avoid = cur.ai ? cur.pack.name : undefined;
+      cur.avoid = variantFingerprint(cur.pack);
       stepGen();
     });
   }

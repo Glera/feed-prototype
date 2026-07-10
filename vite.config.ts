@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import { execFile } from 'child_process';
-import { recipe as sortRecipe, renderThemePrompt, validatePack } from '../swipe-ugc/recipes/sort/recipe.mjs';
+import { finalizePack, recipe as sortRecipe, renderThemePrompt, resolvePreferences, validatePack, validatePromptAdherence, validateRerollDifference } from '../swipe-ugc/recipes/sort/recipe.mjs';
 
 // Dev only: serve each playable's SWIPE build from playables/<id>/dist-swipe/,
 // so `npm run dev` mirrors the deployed swipe-platform site (where `./<id>.html`
@@ -152,12 +152,24 @@ function islandThemeApi(): Plugin {
       items: { type: 'array', minItems: sortRecipe.pack.itemCount, maxItems: sortRecipe.pack.itemCount, items: { type: 'string', pattern: sortRecipe.pack.hexPattern }, description: 'Gameplay-distinguishable marble colors' },
       ground: { type: 'string', description: 'Island sector ground color, mid-tone saturated, #RRGGBB' },
       edge: { type: 'string', description: 'Darker shade of ground, #RRGGBB' },
-      boardBg: { type: 'string', description: 'Board background tint fitting the theme, #RRGGBB' },
+      sceneBg: { type: 'string', description: 'Dominant live mechanic background, faithfully follows dark/light prompt, #RRGGBB' },
+      boardBg: { type: 'string', description: 'Source-board surface color fitting the theme, #RRGGBB' },
+      belt: { type: 'string', description: 'Conveyor surface color, #RRGGBB' },
+      outline: { type: 'string', description: 'Readable structural outline color, #RRGGBB' },
       body: { type: 'string', description: 'Building body color, #RRGGBB' },
       roof: { type: 'string', description: 'Building roof color, more saturated, #RRGGBB' },
       prop: { type: 'string', enum: sortRecipe.pack.props, description: 'Decoration shape that best fits the theme' },
+      difficulty: { type: 'string', enum: sortRecipe.pack.difficulties },
+      motion: { type: 'string', enum: sortRecipe.pack.motions },
+      marbleStyle: { type: 'string', enum: sortRecipe.pack.marbleStyles },
+      markerStyle: { type: 'string', enum: sortRecipe.pack.markerStyles },
+      targetShape: { type: 'string', enum: sortRecipe.pack.targetShapes },
+      conveyorPath: { type: 'string', enum: sortRecipe.pack.conveyorPaths },
+      sourceShape: { type: 'string', enum: sortRecipe.pack.sourceShapes },
+      backgroundPattern: { type: 'string', enum: sortRecipe.pack.backgroundPatterns },
     },
-    required: ['name', 'items', 'ground', 'edge', 'boardBg', 'body', 'roof', 'prop'],
+    required: ['name', 'items', 'ground', 'edge', 'sceneBg', 'boardBg', 'belt', 'outline', 'body', 'roof', 'prop',
+      'difficulty', 'motion', 'marbleStyle', 'markerStyle', 'targetShape', 'conveyorPath', 'sourceShape', 'backgroundPattern'],
     additionalProperties: false,
   };
   // Subscription path for prototyping: with no API key in the environment we
@@ -169,7 +181,7 @@ function islandThemeApi(): Plugin {
     new Promise<Record<string, unknown>>((resolve, reject) => {
       execFile(
         'claude',
-        ['-p', `${fullPrompt}\nReturn ONLY the raw JSON object with keys name, items, ground, edge, boardBg, body, roof, prop. No markdown fences, no prose.`],
+        ['-p', fullPrompt],
         { timeout: 120000, maxBuffer: 1024 * 1024 },
         (err, stdout) => {
           if (err) { reject(err); return; }
@@ -254,14 +266,22 @@ function islandThemeApi(): Plugin {
           void (async () => {
             res.setHeader('content-type', 'application/json');
             try {
-              const { prompt, avoid } = JSON.parse(body || '{}') as { prompt?: string; avoid?: string };
-              const basePrompt = renderThemePrompt(String(prompt ?? ''), avoid ? String(avoid) : undefined);
+              const { prompt, avoid, difficulty = 'surprise', motion = 'surprise' } = JSON.parse(body || '{}') as {
+                prompt?: string;
+                avoid?: string;
+                difficulty?: string;
+                motion?: string;
+              };
+              const preferences = { difficulty, motion };
+              const seed = Math.floor(Math.random() * 0x100000000);
+              const resolvedPreferences = resolvePreferences(seed, preferences);
+              const basePrompt = renderThemePrompt(String(prompt ?? ''), avoid ? String(avoid) : undefined, resolvedPreferences);
               const generate = async (fullPrompt: string): Promise<Record<string, unknown>> => {
                 if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) {
                   const client = new Anthropic();
                   const msg = await client.messages.create({
                     model: process.env.ISLAND_THEME_MODEL || 'claude-opus-4-8',
-                    max_tokens: 1000,
+                    max_tokens: 1500,
                     output_config: { format: { type: 'json_schema', schema: SCHEMA }, effort: 'low' },
                     messages: [{ role: 'user', content: fullPrompt }],
                   });
@@ -276,8 +296,11 @@ function islandThemeApi(): Plugin {
               // after, don't predict before).
               let lastError = '';
               for (let attempt = 0; attempt < 2; attempt++) {
-                const pack = await generate(attempt === 0 ? basePrompt : `${basePrompt}\nYour previous attempt was rejected by validation: ${lastError}. Fix exactly that while keeping the theme.`);
-                const err = validatePack(pack);
+                const generated = await generate(attempt === 0 ? basePrompt : `${basePrompt}\nYour previous attempt was rejected by validation: ${lastError}. Fix exactly that while keeping the theme.`);
+                const pack = finalizePack(generated, seed, preferences);
+                const err = validatePack(pack)
+                  || validatePromptAdherence(pack, String(prompt ?? ''))
+                  || validateRerollDifference(pack, avoid ? String(avoid) : undefined);
                 if (!err) { res.end(JSON.stringify(pack)); return; }
                 lastError = err;
               }

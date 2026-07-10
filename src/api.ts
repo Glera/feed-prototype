@@ -219,17 +219,34 @@ export function apiCompleteChallenge(id: string, metricValue: number): Promise<C
 
 // ── Island UGC generation / bake ─────────────────────────────────────────────
 
+export type IslandDifficulty = 'easy' | 'medium' | 'hard' | 'expert';
+export type IslandDifficultyPreference = 'surprise' | IslandDifficulty;
+export type IslandMotion = 'calm' | 'heavy' | 'bouncy' | 'chaotic';
+export type IslandMotionPreference = 'surprise' | IslandMotion;
+
 export interface IslandThemePack {
   id?: string;
   name: string;
   kw?: string[];
   ground: string;
   edge: string;
+  sceneBg?: string;
   boardBg: string;
+  belt?: string;
+  outline?: string;
   items: string[];
   prop: 'mushroom' | 'crystal' | 'coral' | 'lollipop' | 'rock';
   body: string;
   roof: string;
+  seed?: number;
+  difficulty?: IslandDifficulty;
+  motion?: IslandMotion;
+  marbleStyle?: 'glossy' | 'matte' | 'glass' | 'metal' | 'gem' | 'bubble' | 'ember' | 'obsidian';
+  markerStyle?: 'none' | 'rings' | 'dots' | 'stripes' | 'glyphs';
+  targetShape?: 'capsule' | 'hex' | 'jar' | 'bowl' | 'crystal';
+  conveyorPath?: 'racetrack' | 'oval' | 'compact' | 'wave';
+  sourceShape?: 'bottle' | 'hopper' | 'silo' | 'flask';
+  backgroundPattern?: 'solid' | 'grid' | 'stars' | 'bubbles' | 'embers';
 }
 
 export interface IslandStoredPack extends IslandThemePack {
@@ -281,7 +298,12 @@ export function apiSaveIslandState(state: IslandPersistedState, expectedRevision
   });
 }
 
-export function apiIslandTheme(payload: { prompt: string; avoid?: string }): Promise<IslandThemePack> {
+export function apiIslandTheme(payload: {
+  prompt: string;
+  avoid?: string;
+  difficulty?: IslandDifficultyPreference;
+  motion?: IslandMotionPreference;
+}): Promise<IslandThemePack> {
   return postRequired<IslandThemePack>('/api/island/theme', payload);
 }
 
