@@ -534,9 +534,11 @@ export class Feed {
         : 'measuring slot…';
       return;
     }
-    const stamp = (typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev').slice(5);
+    const rawStamp = typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : 'dev';
+    const [builtAt, platformCommit = 'dev'] = rawStamp.split(' · ', 2);
+    const date = builtAt === 'dev' ? 'dev' : builtAt.slice(5);
     const api = this.backendVersion ? ` · api ${this.backendVersion}` : '';
-    this.versionEl.textContent = `platform · ${stamp}${api}`;
+    this.versionEl.textContent = `${date} · platform ${platformCommit}${api}`;
   }
 
   // Apply a server balance WITHOUT clobbering optimistic local progress: if the
