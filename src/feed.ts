@@ -16,6 +16,7 @@ import REWARD_ICON_2 from './assets/reward_lvl2.png';
 import REWARD_ICON_3 from './assets/reward_lvl3.png';
 import REWARD_ICON_4 from './assets/reward_lvl4.png';
 const REWARD_ICONS = [REWARD_ICON_1, REWARD_ICON_2, REWARD_ICON_3, REWARD_ICON_4];
+import STAR_GOLDEN from './assets/rarity_star_golden.png';
 import {
   apiSession, apiMe, variantIdForMechanic,
   apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge, apiChallengeInbox,
@@ -858,9 +859,12 @@ export class Feed {
     // out only at the chest).
     this.reportResult(i, runId, solveMs, 0);
     track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
+    const filledSlot = this.series.done - 1;
+    // Hold the just-cleared slot as PENDING (not yet green) so the panel arrives
+    // without it, and pulseSeriesSlot then plays the green-in as a fresh appearance.
+    this.pulsePendingSlot = filledSlot;
     this.renderSeriesRow({ forceVisible: true });
     this.manualRuns.delete(i);
-    const filledSlot = this.series.done - 1;
     // Keep `playing` true through the chest so a stray swipe can't page away
     // mid-ceremony; it's cleared when the end-panel appears.
     if (this.series.done >= this.seriesLen()) {
@@ -973,6 +977,7 @@ export class Feed {
   // A random reward-gift icon per mechanic, cached so it stays STABLE across the many
   // re-renders of the series row (otherwise it would flicker between icons every tick).
   private seriesRewardIcon = new Map<number, string>();
+  private pulsePendingSlot = -1;   // slot index rendered as PENDING (not green) until its pulse plays the green-in
   private rewardIconFor(idx: number): string {
     let ic = this.seriesRewardIcon.get(idx);
     if (!ic) { ic = REWARD_ICONS[Math.floor(Math.random() * REWARD_ICONS.length)]; this.seriesRewardIcon.set(idx, ic); }
@@ -1004,8 +1009,10 @@ export class Feed {
     const len = active ? this.seriesLen() : this.seriesLenFor(id);
     let html = '';
     for (let s = 0; s < len; s++) {
-      const state = s < done ? 'done' : s === done ? 'current' : 'todo';
-      html += `<div class="series-slot series-slot--${state}">${s < done ? '✓' : s + 1}</div>`;
+      const pending = s === this.pulsePendingSlot;   // fill held back for pulseSeriesSlot
+      const isDone = s < done && !pending;
+      const state = isDone ? 'done' : (s === done || pending) ? 'current' : 'todo';
+      html += `<div class="series-slot series-slot--${state}">${isDone ? '✓' : s + 1}</div>`;
     }
     html += `<div class="series-chest${done >= len ? ' series-chest--ready' : ''}"><img class="series-chest__img" src="${this.rewardIconFor(idx)}" alt="reward" draggable="false"></div>`;
     this.seriesRowEl.innerHTML = html;
@@ -1050,21 +1057,39 @@ export class Feed {
     if (!row || slotIdx < 0) return;
     const slot = row.querySelectorAll<HTMLElement>('.series-slot')[slotIdx];
     if (!slot) return;
+    // It arrived PENDING (grey, number) — flip it to its completed green look now, so
+    // the green-in below reads as the fill genuinely APPEARING, not already there.
+    this.pulsePendingSlot = -1;
+    slot.classList.remove('series-slot--current', 'series-slot--todo');
+    slot.classList.add('series-slot--done');
+    slot.textContent = '✓';
     const r = slot.getBoundingClientRect();
     const vp = this.viewport.getBoundingClientRect();
     const cx = r.left - vp.left + r.width / 2, cy = r.top - vp.top + r.height / 2;
-    const DUR = 560;
+    const DUR = 620;
     if (slot.animate) {
-      // The green circle ARRIVES from large + transparent and eases down into its
-      // slot (a single ease-out — no jerky bounce), settling with a soft tap.
+      // The green circle GROWS IN from large + transparent to its place — ONE smooth
+      // ease-out, no mid-flight keyframe (that's what made it feel jerky).
       slot.animate([
-        { transform: 'scale(2.9)', opacity: 0, filter: 'brightness(1.9)', offset: 0 },
-        { transform: 'scale(1.14)', opacity: 1, filter: 'brightness(1.3)', offset: 0.62 },
-        { transform: 'scale(1)', opacity: 1, filter: 'brightness(1)', offset: 1 },
-      ], { duration: DUR, easing: 'cubic-bezier(0.16,0.86,0.24,1)', fill: 'backwards' });
+        { transform: 'scale(3.4)', opacity: 0, offset: 0 },
+        { transform: 'scale(1)', opacity: 1, offset: 1 },
+      ], { duration: DUR, easing: 'cubic-bezier(0.17,0.84,0.28,1)', fill: 'backwards' });
+      // A soft green halo blooms with it and fades — makes the appearance prominent.
+      const halo = document.createElement('div');
+      halo.style.cssText =
+        `position:absolute;left:${cx}px;top:${cy}px;width:${r.width}px;height:${r.height}px;` +
+        `margin:${-r.height / 2}px 0 0 ${-r.width / 2}px;border-radius:50%;pointer-events:none;z-index:2650;` +
+        'background:radial-gradient(circle,rgba(69,214,140,0.6),rgba(69,214,140,0) 68%);will-change:transform,opacity;';
+      this.viewport.appendChild(halo);
+      halo.animate([
+        { transform: 'scale(3.6)', opacity: 0, offset: 0 },
+        { transform: 'scale(1.7)', opacity: 0.85, offset: 0.5 },
+        { transform: 'scale(2.4)', opacity: 0, offset: 1 },
+      ], { duration: DUR + 140, easing: 'cubic-bezier(0.2,0.7,0.3,1)', fill: 'forwards' })
+        .addEventListener('finish', () => halo.remove(), { once: true });
     }
-    // Particles splash the instant the circle lands in its place (not at launch).
-    window.setTimeout(() => this.burstRewardCollectParticles(cx, cy, Math.max(12, r.width / 2)), Math.round(DUR * 0.6));
+    // Particles splash as the circle lands in its place (not at launch).
+    window.setTimeout(() => this.burstRewardCollectParticles(cx, cy, Math.max(14, r.width / 2)), Math.round(DUR * 0.66));
   }
 
   private removeSeriesRow(immediate = false): void {
@@ -1249,14 +1274,15 @@ export class Feed {
 
   // A single gold ★ star unit — identical art to the reward row (buildRewardStarRow).
   private makeStarUnit(px: number): HTMLElement {
-    const u = document.createElement('span');
+    const u = document.createElement('img');
     u.className = 'reward__star-unit';
-    u.textContent = '★';
+    u.src = STAR_GOLDEN;
+    u.draggable = false;
+    u.alt = '';
     u.style.cssText =
-      `display:inline-block;font-size:${px}px;line-height:1;color:#ffd85a;` +
+      `display:block;width:${px}px;height:${px}px;object-fit:contain;` +
       'transform-origin:50% 100%;will-change:transform;' +
-      'filter:drop-shadow(0 8px 16px rgba(255,147,42,0.34));' +
-      'text-shadow:0 3px 0 #8d4a12, 0 0 14px rgba(255,221,89,0.5), 0 0 26px rgba(255,105,28,0.22);';
+      'filter:drop-shadow(0 8px 16px rgba(255,147,42,0.42));';
     return u;
   }
 
@@ -1450,6 +1476,7 @@ export class Feed {
 
   private clearSeriesUi(): void {
     this.seriesLevelUpPending = null;
+    this.pulsePendingSlot = -1;
     this.dismissChallengePill();
     this.hudEl?.classList.remove('hud--chest-lift');
     // Restore normal arrival-poster behaviour (a future feed arrival at this unit
@@ -4739,14 +4766,7 @@ export class Feed {
     row.style.cssText = 'display:flex;align-items:flex-end;justify-content:center;gap:clamp(2px,1.4vw,8px);pointer-events:none;';
     const unitPx = n >= 7 ? 46 : n >= 5 ? 54 : 64;   // fit up to 10 across the panel
     for (let k = 0; k < n; k++) {
-      const u = document.createElement('span');
-      u.className = 'reward__star-unit';
-      u.textContent = '★';
-      u.style.cssText =
-        `display:inline-block;font-size:${unitPx}px;line-height:1;color:#ffd85a;` +
-        'transform-origin:50% 100%;will-change:transform;' +
-        'filter:drop-shadow(0 8px 16px rgba(255,147,42,0.34));' +
-        'text-shadow:0 3px 0 #8d4a12, 0 0 14px rgba(255,221,89,0.5), 0 0 26px rgba(255,105,28,0.22);';
+      const u = this.makeStarUnit(unitPx);
       // Cascade drop-in — each star lands a beat after the previous.
       if (u.animate) u.animate([
         { transform: 'translateY(-46px) scale(0.35)', opacity: 0 },
