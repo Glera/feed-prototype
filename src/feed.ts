@@ -1030,6 +1030,15 @@ export class Feed {
     });
   }
 
+  private renderSeriesRowAfterReveal(index: number): void {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (this.shownIndex !== index) return;
+        this.renderSeriesRow({ giftBounce: true });
+      });
+    });
+  }
+
   private setSeriesRowManualHidden(hidden: boolean): void {
     this.seriesRowEl?.classList.toggle('series-row--manual-hidden', hidden);
   }
@@ -1569,9 +1578,10 @@ export class Feed {
       feed_pos: cur,
       mode: this.manualRuns.has(cur) ? 'playing' : 'auto',
     });
-    // Refresh the series indicator for the newly-shown unit — during autoplay it
-    // shows a preview (series length) for THIS mechanic (renderSeriesRow handles it).
-    this.renderSeriesRow({ giftBounce: true });
+    // Refresh the series indicator for the newly-shown unit. Defer it a couple
+    // of frames so the iframe's first autoplay frame does not share a frame with
+    // host-side DOM rebuild + panel entrance.
+    this.renderSeriesRowAfterReveal(cur);
   }
 
   // ── Warm-cost telemetry ──────────────────────────────────────────────────
