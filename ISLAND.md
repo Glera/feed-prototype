@@ -28,7 +28,7 @@
 | Репо | Роль | Ключевые файлы |
 |---|---|---|
 | `feed-prototype` | UI острова и подключение к сервисам | `src/island.ts`, `src/feed.ts`, `src/api.ts`; в dev раздаёт `/ugc/*`, но не запускает agent jobs |
-| `swipe-generator` | Отдельная локальная персистентная очередь | `.data/jobs`, Claude/Codex adapters, detached runners; доступна на `127.0.0.1:4317` |
+| `swipe-generator` | Отдельная локальная персистентная очередь | `.data/jobs`, Claude/Codex adapters, detached runners; Vite запускает/перезапускает сервис на `127.0.0.1:4317` |
 | `swipe-backend` | Продакшн-эндпоинты + bake-runtime | `/api/island/theme`, durable `/api/island/bake` jobs, Node + Playwright runtime; клонирует только `swipe-ugc` |
 | `swipe-ugc` | Нерелизные базы, воркеры и hosting артефактов | `bases/sort-v2`, `generator/baselines.json`, `worker/bake.mjs`, `worker/experiment.mjs`, `render.yaml` |
 | `playables` | Только first-party SWIPE-механики | `canonical/swipe-locks.json` + `scripts/check-swipe-canonical.mjs` защищают эталонный sort при каждой SWIPE-сборке |
@@ -155,7 +155,7 @@ worktree `swipe-ugc` от `origin`, коммитит по allowlist только
 |---|---|---|
 | клиент | `VITE_API_BASE` | база swipe-backend (иначе прод-URL по умолчанию) |
 | vite dev | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` | API-путь генерации; без них — `claude -p` под подпиской |
-| клиент dev | `VITE_LOCAL_GENERATOR_URL` | локальный генератор, default `http://127.0.0.1:4317` |
+| клиент dev | `VITE_LOCAL_GENERATOR_URL`, `SWIPE_GENERATOR_AUTOSTART=0` | endpoint генератора; опционально отключить запуск вместе с Vite |
 | backend | `ISLAND_THEME_MODEL` | модель генерации (default `claude-opus-4-8`) |
 | backend | `UGC_REPO_PATH`, `UGC_BASE_URL`, `BOT_TOKEN` | worker repo, публичная база, бот |
 | backend | `ISLAND_BAKE_TIMEOUT_SEC` (300), `ISLAND_DEPLOY_WAIT_SEC` (90), `ISLAND_DEPLOY_POLL_SEC` (3) | таймауты bake/деплой-ожидания |

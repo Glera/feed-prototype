@@ -3,8 +3,83 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 import fs from 'fs';
 import path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { finalizePack, recipe as sortRecipe, renderThemePrompt, resolvePreferences, validatePack, validatePromptAdherence, validateRerollDifference } from '../swipe-ugc/recipes/sort/recipe.mjs';
+
+// Local-only process supervisor. Starting the SWIPE dev platform also starts
+// the persistent subscription-backed generator, while an already-running
+// standalone instance is reused. Detached job runners outlive either HTTP
+// process, so a Vite restart reconnects instead of cancelling generation.
+function localGeneratorLifecycle(): Plugin {
+  const generatorRoot = path.resolve(__dirname, '../swipe-generator');
+  const endpoint = process.env.VITE_LOCAL_GENERATOR_URL || 'http://127.0.0.1:4317';
+  const autostart = process.env.SWIPE_GENERATOR_AUTOSTART !== '0';
+  let child: ReturnType<typeof spawn> | null = null;
+  let monitor: ReturnType<typeof setInterval> | null = null;
+  let closing = false;
+
+  const healthy = async (): Promise<boolean> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 800);
+    try {
+      const response = await fetch(`${endpoint.replace(/\/$/, '')}/health`, { signal: controller.signal });
+      return response.ok;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  const ensureRunning = async (): Promise<void> => {
+    if (!autostart || closing || child?.exitCode === null || await healthy()) return;
+    let url: URL;
+    try { url = new URL(endpoint); } catch {
+      console.warn(`[swipe-generator] invalid VITE_LOCAL_GENERATOR_URL: ${endpoint}`);
+      return;
+    }
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(url.hostname)) {
+      console.warn(`[swipe-generator] autostart skipped for non-local endpoint: ${endpoint}`);
+      return;
+    }
+    const entry = path.join(generatorRoot, 'src', 'server.mjs');
+    if (!fs.existsSync(entry)) {
+      console.warn(`[swipe-generator] service not found at ${generatorRoot}`);
+      return;
+    }
+    const launched = spawn(process.execPath, [entry], {
+      cwd: generatorRoot,
+      env: {
+        ...process.env,
+        SWIPE_GENERATOR_HOST: url.hostname,
+        SWIPE_GENERATOR_PORT: url.port || '4317',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child = launched;
+    launched.stdout?.on('data', (chunk: Buffer) => process.stdout.write(chunk));
+    launched.stderr?.on('data', (chunk: Buffer) => process.stderr.write(chunk));
+    launched.once('exit', (code, signal) => {
+      if (child === launched) child = null;
+      if (!closing) console.warn(`[swipe-generator] exited (${signal || code}); Vite will restart it`);
+    });
+  };
+
+  return {
+    name: 'local-swipe-generator',
+    apply: 'serve',
+    configureServer(server) {
+      void ensureRunning();
+      monitor = setInterval(() => { void ensureRunning(); }, 5000);
+      monitor.unref();
+      server.httpServer?.once('close', () => {
+        closing = true;
+        if (monitor) clearInterval(monitor);
+        if (child?.exitCode === null) child.kill('SIGTERM');
+      });
+    },
+  };
+}
 
 // Dev only: serve each playable's SWIPE build from playables/<id>/dist-swipe/,
 // so `npm run dev` mirrors the deployed swipe-platform site (where `./<id>.html`
@@ -322,7 +397,7 @@ function islandThemeApi(): Plugin {
 // (one file, no external requests, openable on a phone via the deploy URL).
 export default defineConfig({
   base: './',
-  plugins: [servePlayables(), islandThemeApi(), viteSingleFile()],
+  plugins: [localGeneratorLifecycle(), servePlayables(), islandThemeApi(), viteSingleFile()],
   define: {
     // Build stamp shown bottom-left on the feed bar so it's clear which platform
     // build is live. deploy-swipe.sh passes PLATFORM_VERSION="<time> · <commit>" so the
