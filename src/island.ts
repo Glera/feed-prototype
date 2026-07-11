@@ -38,13 +38,13 @@ const SORT_RECIPE = __ISLAND_SORT_RECIPE__;
 export interface IslandHostCtx { close(): void; }
 
 type TplId = IslandTemplateId;
-type PropKind = IslandStoredPack['prop'];
 type VariantKeys = 'sceneBg' | 'belt' | 'outline' | 'seed' | 'difficulty' | 'motion' | 'marbleStyle'
   | 'markerStyle' | 'targetShape' | 'conveyorPath' | 'sourceShape' | 'backgroundPattern';
 type Pack = IslandStoredPack & Required<Pick<IslandStoredPack, VariantKeys>>;
-type Building = IslandBuildingState;
+type Building = IslandBuildingState & { autoplayPassed?: boolean };
 type IslandState = IslandPersistedState;
-type CreationMode = 'guided' | 'wild';
+type CreationMode = 'safe' | 'guided' | 'wild';
+type CreationTier = 'free' | 'cheap' | 'expensive';
 type ExperimentProvider = 'claude' | 'codex' | 'auto';
 interface ExperimentConcept {
   title: string;
@@ -65,6 +65,16 @@ interface ExperimentResult {
   attempts: number;
   url: string;
   agentSummary: string;
+  autoplayPassed?: boolean;
+  gateError?: string | null;
+}
+interface GeneratorLiveness {
+  state: 'queued' | 'runner' | 'agent' | 'quiet' | 'recovering' | 'finished' | 'failed' | 'cancelled';
+  runnerPid?: number;
+  agentPid?: number;
+  checkedAt?: string;
+  lastSignalAt?: string;
+  sourceEdited?: boolean;
 }
 interface ExperimentJob {
   id: string;
@@ -72,9 +82,11 @@ interface ExperimentJob {
   phase: string;
   message: string;
   attempt: number;
-  logs: Array<{ phase: string; message: string; attempt?: number }>;
+  logs: Array<{ phase: string; message: string; attempt?: number; at?: string }>;
   result?: ExperimentResult;
   error?: string;
+  pid?: number | null;
+  liveness?: GeneratorLiveness;
 }
 interface ExperimentPublishResult {
   id: string;
@@ -98,9 +110,11 @@ interface CreationDraft {
   slot: number;
   tpl: TplId;
   mode: CreationMode;
+  tier: CreationTier;
   provider: ExperimentProvider;
   prompt: string;
   pack: Pack;
+  presetId: string;
   rerolls: number;
   difficulty: IslandDifficultyPreference;
   motion: IslandMotionPreference;
@@ -111,6 +125,37 @@ interface CreationDraft {
   concept?: ExperimentConcept;
   experiment?: ExperimentResult;
   experimentJobId?: string;
+  candidates?: CreationCandidate[];
+}
+type CandidateState = 'waiting' | 'generating' | 'ready' | 'failed';
+interface CreationCandidate {
+  mode: CreationMode;
+  state: CandidateState;
+  pack?: Pack;
+  ai: boolean;
+  played?: boolean;
+  outcome?: 'won' | 'lost';
+  startedAt?: number;
+  jobId?: string;
+  logs?: Array<{ phase: string; message: string; attempt?: number; at?: string }>;
+  liveness?: GeneratorLiveness;
+  phase?: string;
+  error?: string;
+  concept?: ExperimentConcept;
+  experiment?: ExperimentResult;
+  experimentJobId?: string;
+}
+interface ExperimentBundleSnapshot {
+  schemaVersion: 1;
+  tier: 'expensive';
+  slot: number;
+  prompt: string;
+  provider: ExperimentProvider;
+  difficulty: IslandDifficultyPreference;
+  motion: IslandMotionPreference;
+  safePack: Pack;
+  guidedPack?: Pack;
+  guidedError?: string;
 }
 interface LocalExperimentState {
   buildings: Building[];
@@ -150,7 +195,6 @@ const CREATABLE_TPLS: TplId[] = ['sort'];
 const SLOTS = [{ x: 105, y: 155 }, { x: 285, y: 155 }, { x: 105, y: 385 }, { x: 285, y: 385 }];
 const HUB = { x: 195, y: 270 };
 const GUEST_REWARD = 25;
-const REROLL_COST = 30;
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
 const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
 const LOCAL_GENERATOR_URL = String((import.meta as any).env?.VITE_LOCAL_GENERATOR_URL || 'http://127.0.0.1:4317').replace(/\/$/, '');
@@ -188,7 +232,6 @@ function variantFingerprint(pack: Pack): string {
 function esc(t: string): string {
   return t.replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] as string));
 }
-function cap(s: string): string { return s.charAt(0).toUpperCase() + s.slice(1); }
 function levelOf(b: Building): number { return 1 + Math.floor(Math.log10(1 + b.plays)); }
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 240);
@@ -196,6 +239,40 @@ function errorText(error: unknown): string {
 function hostedUrl(building: Building): string | null {
   if (building.rel) return IS_DEV ? `/ugc/${building.rel}` : `${UGC_BASE_URL}/${building.rel}`;
   return building.url ?? null;
+}
+function sortVariant(pack: Pack): Record<string, unknown> {
+  return {
+    schemaVersion: 2,
+    seed: pack.seed,
+    items: pack.items,
+    sceneBg: pack.sceneBg,
+    boardBg: pack.boardBg,
+    belt: pack.belt,
+    outline: pack.outline,
+    difficulty: pack.difficulty,
+    motion: pack.motion,
+    marbleStyle: pack.marbleStyle,
+    markerStyle: pack.markerStyle,
+    targetShape: pack.targetShape,
+    conveyorPath: pack.conveyorPath,
+    sourceShape: pack.sourceShape,
+    backgroundPattern: pack.backgroundPattern,
+  };
+}
+function encodePreviewVariant(pack: Pack): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(sortVariant(pack)));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function candidatePreviewUrl(candidate: CreationCandidate): string | null {
+  if (candidate.mode === 'wild') {
+    const url = candidate.experiment?.url;
+    return url ? `${url}${url.includes('?') ? '&' : '?'}auto=0` : null;
+  }
+  if (!candidate.pack) return null;
+  const shell = IS_DEV ? '/ugc/preview/sort-v2.html' : `${UGC_BASE_URL}/preview/sort-v2.html`;
+  return `${shell}?auto=0#${encodePreviewVariant(candidate.pack)}`;
 }
 function isLocalExperiment(building: Building): boolean {
   return IS_DEV && Boolean(building.url?.startsWith('/ugc/u/local-experiments/'));
@@ -243,8 +320,8 @@ function newJobId(): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
-// Production must use the authenticated backend. The Vite endpoint and preset
-// fallback exist only for local development, where Claude CLI is available.
+// Guided generation is always the bounded backend/API path. Subscription
+// agents belong exclusively to the local wild experiment service.
 async function aiTheme(
   prompt: string,
   avoid?: string,
@@ -265,41 +342,8 @@ async function aiTheme(
       sourceShape: apiPack.sourceShape, backgroundPattern: apiPack.backgroundPattern,
     });
   } catch (e) {
-    if (!IS_DEV) throw e;
-    console.log('[island] backend theme unavailable in dev:', errorText(e), '→ Vite/CLI fallback');
-  }
-
-  try {
-    const ctrl = new AbortController();
-    // Generous: the dev endpoint may route through the Claude Code CLI
-    // (subscription path), which takes tens of seconds. The UX is async
-    // anyway — the player can dismiss the sheet and keep browsing.
-    const timer = window.setTimeout(() => ctrl.abort(), 120000);
-    const res = await fetch('/island-api/theme', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt, avoid, difficulty, motion }),
-      signal: ctrl.signal,
-    });
-    window.clearTimeout(timer);
-    const data = (await res.json()) as Record<string, unknown>;
-    if (!res.ok) { console.log('[island] dev theme API error:', data.error, '→ preset fallback'); return null; }
-    const items = data.items as string[];
-    if (!Array.isArray(items) || items.length !== 6) return null;
-    console.log('[island] dev theme:', data.name, items.join(' '));
-    return normalizePack({
-      id: '', name: String(data.name).slice(0, 24), kw: [],
-      ground: String(data.ground), edge: String(data.edge), boardBg: String(data.boardBg),
-      sceneBg: String(data.sceneBg), belt: String(data.belt), outline: String(data.outline),
-      items, prop: data.prop as PropKind, body: String(data.body), roof: String(data.roof),
-      seed: Number(data.seed), difficulty: data.difficulty as Pack['difficulty'], motion: data.motion as Pack['motion'],
-      marbleStyle: data.marbleStyle as Pack['marbleStyle'], markerStyle: data.markerStyle as Pack['markerStyle'],
-      targetShape: data.targetShape as Pack['targetShape'], conveyorPath: data.conveyorPath as Pack['conveyorPath'],
-      sourceShape: data.sourceShape as Pack['sourceShape'], backgroundPattern: data.backgroundPattern as Pack['backgroundPattern'],
-    });
-  } catch (e) {
-    console.log('[island] dev theme APIs unreachable:', errorText(e), '→ preset fallback');
-    return null;
+    console.log('[island] bounded API theme unavailable:', errorText(e));
+    throw e;
   }
 }
 
@@ -310,11 +354,16 @@ interface LocalGeneratorJob<T> {
   state: LocalGeneratorState;
   phase: string;
   message: string;
-  logs: Array<{ phase: string; message: string; attempt?: number }>;
+  logs: Array<{ phase: string; message: string; attempt?: number; at?: string }>;
   result?: T;
   error?: string;
   request?: Record<string, unknown>;
   consumedAt?: string | null;
+  createdAt?: string;
+  provider?: ExperimentProvider | null;
+  attempt?: number;
+  pid?: number | null;
+  liveness?: GeneratorLiveness;
 }
 
 function generatorClientId(): string {
@@ -328,6 +377,13 @@ function generatorClientId(): string {
   } catch {
     return 'local-browser';
   }
+}
+
+function telegramChatId(): number | undefined {
+  const value = (window as unknown as {
+    Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
+  }).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  return Number.isSafeInteger(value) ? value : undefined;
 }
 
 async function generatorRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -370,23 +426,55 @@ function generatorPending(state: LocalGeneratorState): boolean {
   return state === 'queued' || state === 'starting' || state === 'running';
 }
 
+function signalAge(at?: string): string {
+  const time = at ? Date.parse(at) : NaN;
+  if (!Number.isFinite(time)) return 'unknown';
+  const minutes = Math.max(0, Math.floor((Date.now() - time) / 60000));
+  return minutes < 1 ? 'less than a minute ago' : `${minutes}m ago`;
+}
+
+function generatorHealth(
+  liveness: GeneratorLiveness | undefined,
+  state: LocalGeneratorState | CandidateState,
+  pid?: number | null,
+): string {
+  if (liveness?.state === 'quiet') {
+    return `quiet but alive · agent PID ${liveness.agentPid || '?'} · last output/source edit ${signalAge(liveness.lastSignalAt)}`;
+  }
+  if (liveness?.state === 'agent') {
+    return `agent PID ${liveness.agentPid || '?'} alive · last output/source edit ${signalAge(liveness.lastSignalAt)}`;
+  }
+  if (liveness?.state === 'runner') return `worker runner PID ${liveness.runnerPid || pid || '?'} alive`;
+  if (liveness?.state === 'recovering') return 'runner disappeared · job safely returned to the durable queue';
+  if (liveness?.state === 'queued' || state === 'queued' || state === 'waiting') return 'durable queue · safe across page reloads';
+  if (liveness?.state === 'finished' || state === 'ready') return 'worker finished normally';
+  if (liveness?.state === 'failed' || state === 'failed') return 'worker reached a terminal failure';
+  if (liveness?.state === 'cancelled' || state === 'cancelled') return 'job was cancelled';
+  if (state === 'running' || state === 'starting' || state === 'generating') return `worker runner PID ${pid || '?'} alive`;
+  return `terminal state · ${state}`;
+}
+
 async function experimentConcepts(
   prompt: string,
   provider: ExperimentProvider,
   slot: number,
+  bundle?: ExperimentBundleSnapshot,
+  onProgress?: (job: LocalGeneratorJob<{ concepts: ExperimentConcept[] }>) => void,
 ): Promise<{ concepts: ExperimentConcept[]; jobId: string }> {
   const created = await createGeneratorJob<{ concepts: ExperimentConcept[] }>({
-    type: 'concepts', template: 'sort', prompt, provider, slot,
+    type: 'concepts', template: 'sort', prompt, provider, slot, bundle,
   });
-  for (let poll = 0; poll < 300; poll++) {
+  onProgress?.(created);
+  for (let poll = 0; poll < 24 * 60 * 60; poll++) {
     const job = await generatorJob<{ concepts: ExperimentConcept[] }>(created.id);
+    onProgress?.(job);
     if (job.state === 'ready' && Array.isArray(job.result?.concepts)) {
       return { concepts: job.result.concepts, jobId: job.id };
     }
     if (!generatorPending(job.state)) throw new Error(job.error || job.message || 'Concept generation failed');
     await new Promise((resolve) => window.setTimeout(resolve, 1000));
   }
-  throw new Error('Concept generation timed out after 5 minutes');
+  throw new Error('Concept generation reached its 24-hour deadline');
 }
 
 async function startExperiment(
@@ -396,9 +484,11 @@ async function startExperiment(
   slot: number,
   parentId?: string,
   feedback?: string,
+  bundle?: ExperimentBundleSnapshot,
 ): Promise<string> {
+  const chat = telegramChatId();
   const job = await createGeneratorJob<ExperimentResult>({
-    type: 'experiment', baseline: 'sort-v2', prompt, concept, provider, slot, parentId, feedback,
+    type: 'experiment', baseline: 'sort-v2', prompt, concept, provider, slot, parentId, feedback, bundle, chat,
   });
   return job.id;
 }
@@ -408,9 +498,7 @@ async function experimentStatus(jobId: string): Promise<ExperimentJob> {
 }
 
 async function startExperimentPublish(experimentId: string): Promise<string> {
-  const chat = (window as unknown as {
-    Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
-  }).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  const chat = telegramChatId();
   const job = await createGeneratorJob<ExperimentPublishResult>({
     type: 'publish', experimentId, user: chat ? String(chat) : 'dev', chat,
   });
@@ -429,6 +517,40 @@ function pickPack(txt: string, excl: string | null): Pack {
     p = pool[Math.floor(Math.random() * pool.length)];
   }
   return p;
+}
+
+function safeParameterizedPack(draft: CreationDraft): Pack {
+  const requested = draft.presetId !== 'surprise'
+    ? PACKS.find((pack) => pack.id === draft.presetId)
+    : undefined;
+  const base = requested ?? pickPack(draft.prompt, null);
+  const seed = stableSeed(`${newJobId()}:${draft.slot}:${draft.prompt}:${draft.presetId}`);
+  const choose = <T,>(values: readonly T[], shift: number): T => values[(seed >>> shift) % values.length];
+  const marbleStyles: Pack['marbleStyle'][] = ['glossy', 'matte', 'glass', 'metal', 'gem', 'bubble', 'ember', 'obsidian'];
+  const markerStyles: Pack['markerStyle'][] = ['none', 'rings', 'dots', 'stripes', 'glyphs'];
+  const targetShapes: Pack['targetShape'][] = ['capsule', 'hex', 'jar', 'bowl', 'crystal'];
+  const conveyorPaths: Pack['conveyorPath'][] = ['racetrack', 'oval', 'compact', 'wave'];
+  const sourceShapes: Pack['sourceShape'][] = ['bottle', 'hopper', 'silo', 'flask'];
+  const backgroundPatterns: Pack['backgroundPattern'][] = ['solid', 'grid', 'stars', 'bubbles', 'embers'];
+  const difficulties: Pack['difficulty'][] = ['easy', 'medium', 'hard', 'expert'];
+  const motions: Pack['motion'][] = ['calm', 'heavy', 'bouncy', 'chaotic'];
+  const rotate = seed % base.items.length;
+  return normalizePack({
+    ...base,
+    id: `safe-${newJobId()}`,
+    name: `${base.name} Mix`.slice(0, 40),
+    kw: [],
+    items: [...base.items.slice(rotate), ...base.items.slice(0, rotate)],
+    seed,
+    difficulty: draft.difficulty === 'surprise' ? choose(difficulties, 2) : draft.difficulty,
+    motion: draft.motion === 'surprise' ? choose(motions, 5) : draft.motion,
+    marbleStyle: choose(marbleStyles, 8),
+    markerStyle: choose(markerStyles, 11),
+    targetShape: choose(targetShapes, 14),
+    conveyorPath: choose(conveyorPaths, 17),
+    sourceShape: choose(sourceShapes, 20),
+    backgroundPattern: choose(backgroundPatterns, 23),
+  });
 }
 
 // Same shape the feed's outcomeFromMessage accepts, trimmed to what the swipe
@@ -564,12 +686,14 @@ const CSS = `
 .isl-tcard__pv img{width:100%;height:100%;object-fit:cover;display:block}
 .isl-tcard__nm{font-size:14px;font-weight:800}
 .isl-tcard__ds{font-size:12px;color:rgba(255,255,255,.55);line-height:1.35}
+.isl-tiers{display:grid;gap:8px}.isl-tier{display:grid;grid-template-columns:1fr auto;gap:4px 10px;text-align:left;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:11px 12px;background:rgba(255,255,255,.045);color:#fff;font:inherit}
+.isl-tier b{font-size:14px}.isl-tier>span:last-child{grid-column:1/-1;font-size:11px;line-height:1.35;color:rgba(255,255,255,.58)}.isl-tier__price{grid-column:2;grid-row:1;font-size:9px;font-weight:900;color:#8FD8C2}.isl-tier:disabled{opacity:.42}
 .isl-status{display:inline-flex;align-items:center;gap:5px;margin-left:8px;padding:2.5px 9px;border-radius:999px;
   border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.05);font-size:11px;color:rgba(255,255,255,.8);vertical-align:1px}
 .isl-status b{width:7px;height:7px;border-radius:50%;display:inline-block}
 .isl-status[data-pulse] b{animation:isl-puls 2.4s ease-in-out infinite}
 .isl-chips{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0 13px}
-.isl-chip{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);border-radius:999px;padding:7px 12px;font:inherit;font-size:12px;color:#fff}
+.isl-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);border-radius:999px;padding:7px 12px;font:inherit;font-size:12px;color:#fff}.isl-chip.on{border-color:#8FD8C2;background:rgba(76,195,138,.14)}.isl-chip i{width:9px;height:9px;border-radius:3px;display:inline-block}
 .isl-in{width:100%;border:1px solid rgba(255,255,255,.18);border-radius:12px;padding:12px 13px;font:inherit;font-size:14px;background:rgba(255,255,255,.08);color:#fff}
 .isl-in--prompt{min-height:76px;line-height:1.35;resize:none}
 .isl-choice{margin-top:12px}.isl-choice__label{font-size:11px;font-weight:800;text-transform:uppercase;color:rgba(255,255,255,.55);margin-bottom:6px}
@@ -577,6 +701,7 @@ const CSS = `
 .isl-seg button{min-width:0;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.055);color:rgba(255,255,255,.65);padding:8px 2px;font:700 10.5px/1 system-ui,sans-serif}
 .isl-seg button:first-child{border-radius:8px 0 0 8px}.isl-seg button:last-child{border-radius:0 8px 8px 0}
 .isl-seg button.on{background:#fff;color:#101720;border-color:#fff}
+.isl-seg--three{grid-template-columns:repeat(3,minmax(0,1fr))}
 .isl-traits{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.isl-traits span{border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:4px 7px;font-size:10px;color:rgba(255,255,255,.72);text-transform:capitalize}
 .isl-create-mode{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:10px 0 12px}
 .isl-create-mode button{min-height:64px;text-align:left;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:9px 10px;background:rgba(255,255,255,.045);color:#fff;font:inherit}
@@ -586,6 +711,7 @@ const CSS = `
 .isl-concepts{display:grid;gap:7px;margin:10px 0}.isl-concept{width:100%;text-align:left;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:10px 11px;background:rgba(255,255,255,.045);color:#fff;font:inherit}
 .isl-concept:active{transform:scale(.992)}.isl-concept__head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;font-weight:800}.isl-concept__risk{font-size:9px;text-transform:uppercase;color:#F2B33D}
 .isl-concept__feeling{font-size:11px;color:#8FD8C2;margin-top:4px}.isl-concept__pitch{font-size:11.5px;line-height:1.38;color:rgba(255,255,255,.66);margin-top:5px}
+.isl-candidates{display:grid;gap:8px}.isl-candidate{width:100%;display:block;text-align:left;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:0 0 10px;overflow:hidden;background:rgba(255,255,255,.045);color:#fff}.isl-candidate--ready{border-color:rgba(143,216,194,.48)}.isl-candidate[role=button]{cursor:pointer}.isl-candidate[role=button]:focus-visible{outline:2px solid #8FD8C2;outline-offset:2px}.isl-candidate__media{height:112px;overflow:hidden;background:#090d12}.isl-candidate__media svg{width:100%;height:100%;object-fit:cover}.isl-candidate__media--pending{display:flex;align-items:center;justify-content:center;gap:7px}.isl-candidate__media--pending b{width:7px;height:7px;border-radius:50%;background:#EF9F27;animation:isl-puls 1.2s ease-in-out infinite}.isl-candidate__media--pending b:nth-child(2){animation-delay:.18s}.isl-candidate__media--pending b:nth-child(3){animation-delay:.36s}.isl-candidate__head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 11px 0}.isl-candidate__head>span{display:flex;align-items:center;gap:7px}.isl-candidate__head em{font-style:normal;font-size:8px;font-weight:900;color:#8FD8C2;border:1px solid rgba(143,216,194,.35);padding:3px 5px;border-radius:4px}.isl-candidate__head b{font-size:12.5px}.isl-candidate__head>i{font-style:normal;font-size:8px;font-weight:900;color:#F2B33D;max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.isl-candidate__detail{display:block;padding:6px 11px 0;font-size:10.5px;line-height:1.35;color:rgba(255,255,255,.58)}.isl-candidate__actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:9px 11px 0}.isl-candidate__actions button{min-height:34px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(255,255,255,.07);color:#fff;font:800 11px/1 system-ui,sans-serif}.isl-candidate__actions button[data-keep]{background:#fff;color:#101720;border-color:#fff}.isl-candidate__result{color:#8FD8C2}.isl-progressmeta{display:flex;justify-content:space-between;gap:12px;margin:10px 0;font-size:11px;color:rgba(255,255,255,.62)}.isl-progressmeta b{color:#fff}.isl-progresslog{max-height:148px;overflow:auto;border-top:1px solid rgba(255,255,255,.1);padding-top:8px;margin-top:10px}.isl-progresslog div{font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:rgba(255,255,255,.56);margin-bottom:5px}.isl-progresslog b{color:#8FD8C2;font-weight:800}
 .isl-lablog{list-style:none;margin:12px 0 6px;padding:0;display:flex;flex-direction:column;gap:7px;min-height:112px}.isl-lablog li{display:flex;gap:8px;font-size:11.5px;line-height:1.35;color:rgba(255,255,255,.55)}.isl-lablog li:last-child{color:#fff}.isl-lablog b{width:7px;height:7px;margin-top:4px;border-radius:50%;background:#EF9F27;flex:0 0 7px}.isl-lablog li.ok b{background:#4CC38A}.isl-lablog li.fail b{background:#E24B4A}
 .isl-labframe{display:block;width:100%;height:min(46vh,360px);border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#000;margin:7px 0 9px}
 .isl-in::placeholder{color:rgba(255,255,255,.35)}
@@ -666,18 +792,39 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   let guest = false;
   let cur: CreationDraft | null = null;
   let toastTimer = 0;
+  let progressTimer = 0;
   let generationSeq = 0;
   const generationBySlot = new Map<number, number>();
   const readyDrafts = new Map<number, CreationDraft>();
   const pollingSlots = new Set<number>();
+  const pendingPhaseBySlot = new Map<number, string>();
   let stateSync: IslandStateSync | null = null;
 
   const visibleBuildings = (): Building[] => {
-    const bySlot = new Map(S.buildings.map((building) => [building.slot, building]));
+    const bySlot = new Map<number, Building>(S.buildings.map((building) => [building.slot, building]));
     localExperiments.buildings.forEach((building) => bySlot.set(building.slot, building));
-    return [...bySlot.values()].sort((a, b) => a.slot - b.slot);
+    return [...bySlot.values()]
+      .filter((building) => !guest || !isLocalExperiment(building) || building.autoplayPassed === true)
+      .sort((a, b) => a.slot - b.slot);
   };
   const persistLocalExperiments = () => saveLocalExperiments(localExperiments);
+  const pendingPhase = (value: string): string => {
+    const phase = value.toLowerCase();
+    if (/queue|wait|start|reconnect/.test(phase)) return 'queued';
+    if (/concept/.test(phase)) return 'concepts';
+    if (/agent|repair|fork|mutat|heartbeat/.test(phase)) return 'coding';
+    if (/safety|typecheck|build|allowlist/.test(phase)) return 'checking';
+    if (/conformance|test|autoplay/.test(phase)) return 'playtesting';
+    if (/publish|save|ready/.test(phase)) return 'finalizing';
+    if (/api|theme|guided/.test(phase)) return 'theme AI';
+    return 'generating';
+  };
+  const setPendingPhase = (slot: number, value: string): void => {
+    const next = pendingPhase(value);
+    if (pendingPhaseBySlot.get(slot) === next) return;
+    pendingPhaseBySlot.set(slot, next);
+    if (ov.isConnected) refreshIsland(false);
+  };
   const removeLocalExperiment = (slot: number) => {
     const removed = localExperiments.buildings.find((building) => building.slot === slot);
     if (!removed) return;
@@ -689,9 +836,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     PACKS.find((x) => x.id === id) ?? localExperiments.packs[id] ?? S.aiPacks?.[id] ?? PACKS[0],
   );
 
-  // Slots with a generation job in flight (player dismissed the sheet and kept
-  // browsing). Rendered as a construction site; the job auto-builds on arrival.
-  // In-memory only — a reload during generation simply frees the slot.
+  // Slots with a generation job in flight. Generation never auto-builds: the
+  // player returns, plays the candidates, and explicitly keeps one. Wild jobs
+  // are durable in swipe-generator and reconnect after page/Vite restarts.
   const pendingSlots = new Set<number>();
 
   // Bake-on-confirm: after a mechanic is BUILT, ship it through the production
@@ -856,12 +1003,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   };
 
   const openSheet = (html: string) => {
+    window.clearInterval(progressTimer);
+    progressTimer = 0;
     delete sheet.dataset.publishRun;
     sheet.innerHTML = '<div class="isl-grab"></div>' + html;
     sheet.classList.add('isl-sheet--show');
     scrim.classList.add('isl-scrim--show');
   };
   const closeSheet = () => {
+    window.clearInterval(progressTimer);
+    progressTimer = 0;
     sheet.classList.remove('isl-sheet--show');
     scrim.classList.remove('isl-scrim--show');
   };
@@ -894,9 +1045,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       const b = buildings.find((x) => x.slot === i);
       if (!b) {
         if (pendingSlots.has(i)) {
-          s += `<g><circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(239,159,39,.08)" stroke="#EF9F27" stroke-width="1.4" stroke-dasharray="5 5" class="isl-plus"/>
-            <text x="${p.x}" y="${p.y + 6}" text-anchor="middle" font-size="17" font-weight="700" fill="#F2B33D">…</text>
-            <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="#F2B33D">generating…</text></g>`;
+          const phase = pendingPhaseBySlot.get(i) || pendingPhase(readyDrafts.get(i)?.candidates?.find((candidate) => candidate.state === 'generating')?.phase || 'generating');
+          const color = phase === 'playtesting' ? '#4CC38A' : phase === 'coding' ? '#58A6FF' : phase === 'checking' ? '#C4A7E7' : '#EF9F27';
+          s += `<g class="isl-sector" data-slot="${i}"><circle cx="${p.x}" cy="${p.y}" r="40" fill="${color}" fill-opacity=".08" stroke="${color}" stroke-width="1.4" stroke-dasharray="5 5" class="isl-plus"/>
+            <text x="${p.x}" y="${p.y + 6}" text-anchor="middle" font-size="17" font-weight="700" fill="${color}">…</text>
+            <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="${color}">${phase}</text></g>`;
         } else if (readyDrafts.has(i) && !guest) {
           const draft = readyDrafts.get(i)!;
           s += `<g class="isl-sector" data-slot="${i}">
@@ -959,71 +1112,189 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const ready = readyDrafts.get(slot);
     if (ready) {
       cur = ready;
-      if (ready.mode === 'wild' && ready.experiment) stepExperimentPreview();
+      if (ready.candidates?.length) stepCandidates(ready);
+      else if (pendingSlots.has(slot)) stepPendingSlot(slot, ready);
+      else if (ready.mode === 'wild' && ready.experiment) stepExperimentPreview();
       else if (ready.mode === 'wild' && ready.concepts?.length) stepExperimentChoice();
       else if (ready.mode === 'wild') stepPrompt();
       else stepPreview();
       return;
     }
-    cur = { slot, tpl: 'sort', mode: 'guided', provider: 'auto', prompt: '', pack: PACKS[0], rerolls: 1, difficulty: 'surprise', motion: 'surprise' };
+    if (pendingSlots.has(slot)) {
+      stepPendingSlot(slot);
+      return;
+    }
+    cur = {
+      slot, tpl: 'sort', mode: 'safe', tier: 'free', provider: 'auto', prompt: '', pack: PACKS[0],
+      presetId: 'surprise', rerolls: 1, difficulty: 'surprise', motion: 'surprise',
+    };
     const cards = CREATABLE_TPLS.map((id) =>
       `<button class="isl-tcard" type="button" data-t="${id}">
         <span class="isl-tcard__pv"><img src="${coverUrl(TPL[id].playableId)}" alt="" onerror="this.style.display='none'"></span>
         <span><span class="isl-tcard__nm">${TPL[id].label}</span><br><span class="isl-tcard__ds">${TPL[id].ds}</span></span>
       </button>`).join('');
     const sub = replacing
-      ? `Step 1 of 3 · this REPLACES “${esc(replacing)}” — its plays and likes are lost`
-      : 'Step 1 of 3 · pick a template — the theme comes next';
+      ? `This REPLACES “${esc(replacing)}” — its plays and likes are lost`
+      : 'Pick the mechanic, then choose how widely it may vary';
     openSheet(`<h3>${replacing ? 'Rebuild slot' : 'New mechanic'}</h3><div class="isl-sub">${sub}</div>
       <div class="isl-tcards">${cards}</div>`);
     sheet.querySelectorAll<HTMLElement>('[data-t]').forEach((c) =>
-      c.addEventListener('click', () => { if (cur) { cur.tpl = c.dataset.t as TplId; stepPrompt(); } }));
+      c.addEventListener('click', () => { if (cur) { cur.tpl = c.dataset.t as TplId; stepTier(); } }));
+  }
+
+  function stepPendingSlot(slot: number, draft?: CreationDraft): void {
+    if (draft) cur = draft;
+    openSheet(`<h3>Generation in progress</h3><div class="isl-sub">Live state from the persistent local worker</div>
+      <div data-pending-live><ul class="isl-lablog"><li><b></b><span>Reading current worker state…</span></li></ul></div>
+      <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>`);
+    sheet.querySelector('[data-dismiss]')?.addEventListener('click', closeSheet);
+    const live = sheet.querySelector('[data-pending-live]') as HTMLElement;
+    const stages = [
+      'Generate and validate a creative concept',
+      'Create a disposable fork at the pinned commit/tree',
+      'Claude/Codex reads and edits only SWIPE TypeScript',
+      'Check path allowlist, patch budget, and forbidden capabilities',
+      'Run tsc and reject new diagnostics in changed files',
+      'Build a self-contained SWIPE artifact',
+      'Inject network-deny CSP; test lifecycle, pause, manual input, and idle',
+      'Run fixed-seed autoplay; retry the same build once on a flaky result',
+      'Save the candidate and its lineage locally',
+    ];
+    let reading = false;
+    const paint = async () => {
+      if (reading) return;
+      reading = true;
+      const recovered = readyDrafts.get(slot);
+      if (recovered?.candidates?.length) {
+        window.clearInterval(progressTimer);
+        progressTimer = 0;
+        stepCandidates(recovered);
+        reading = false;
+        return;
+      }
+      try {
+        const jobs = await generatorJobs<unknown>();
+        const matching = jobs.filter((job) => Number(job.request?.slot) === slot
+          && (job.type === 'concepts' || job.type === 'experiment') && !job.consumedAt);
+        const job = matching.find((candidate) => generatorPending(candidate.state)) ?? matching[0];
+        if (!job) {
+          if (recovered && !pendingSlots.has(slot)) { openCreate(slot); reading = false; return; }
+          live.innerHTML = '<div class="isl-labnote"><b>No active job found</b><br>The worker has no unconsumed generation for this slot. Close this sheet and retry.</div>';
+          reading = false;
+          return;
+        }
+        setPendingPhase(slot, job.phase || job.message);
+        const phaseText = `${job.phase} ${job.logs.map((entry) => entry.phase).join(' ')}`.toLowerCase();
+        let current = 0;
+        if (job.state === 'ready') current = 8;
+        else if (/publish|soft-gate/.test(phaseText)) current = 8;
+        else if (/test|test-retry|autoplay/.test(job.phase)) current = 7;
+        else if (/conformance/.test(job.phase)) current = 6;
+        else if (/build/.test(job.phase)) current = 5;
+        else if (/typecheck/.test(job.phase)) current = 4;
+        else if (/safety/.test(job.phase)) current = 3;
+        else if (/agent|repair/.test(job.phase)) current = 2;
+        else if (/fork/.test(job.phase)) current = 1;
+        const failedAttempts = job.logs.filter((entry) => entry.phase === 'failed-attempt').length;
+        const attempt = Math.max(Number(job.attempt || 0), failedAttempts + 1);
+        const created = job.createdAt ? Date.parse(job.createdAt) : Date.now();
+        const elapsedSeconds = Math.max(0, Math.floor((Date.now() - (Number.isFinite(created) ? created : Date.now())) / 1000));
+        const elapsed = elapsedSeconds < 60 ? `${elapsedSeconds}s` : `${Math.floor(elapsedSeconds / 60)}m ${String(elapsedSeconds % 60).padStart(2, '0')}s`;
+        const runningAhead = jobs.filter((candidate) => candidate.id !== job.id && (candidate.state === 'running' || candidate.state === 'starting')).length;
+        const health = generatorHealth(job.liveness, job.state, job.pid);
+        const eta = job.state === 'queued'
+          ? `${runningAhead || 1} job ahead · outcome no later than 24h after start`
+          : job.state === 'ready' ? 'ready; UI is reconnecting'
+          : job.state === 'failed' ? 'stopped after its repair budget'
+          : current <= 2 ? 'agent may use the remaining 24h job budget'
+          : current <= 5 ? 'roughly 2–5 min'
+          : 'roughly 1–4 min if autoplay passes';
+        const rows = stages.map((stage, index) => {
+          const done = index < current || job.state === 'ready';
+          const failed = job.state === 'failed' && index === current;
+          return `<li class="${done ? 'ok' : failed ? 'fail' : ''}"><b></b><span>${stage}${index === current && generatorPending(job.state) ? ' · now' : ''}</span></li>`;
+        }).join('');
+        const logs = job.logs.slice(-12).map((entry) => `<div><b>${esc(entry.phase.toUpperCase())}</b> ${esc(entry.message)}</div>`).join('');
+        const provider = String(job.provider || job.request?.provider || 'resolving').toUpperCase();
+        live.innerHTML = `<div class="isl-progressmeta"><span>Elapsed <b>${elapsed}</b></span><span>ETA <b>${esc(eta)}</b></span></div>
+          <div class="isl-pk"><b>${provider}</b> · ${job.state.toUpperCase()} · ${job.type === 'experiment' ? `repair attempt ${Math.min(attempt, 3)}/3` : 'concept pass'}<br>${esc(health)}</div>
+          <ul class="isl-lablog">${rows}</ul>
+          ${job.error ? `<div class="isl-labnote"><b>Worker stopped</b><br>${esc(job.error)}</div>` : ''}
+          <div class="isl-progresslog"><div class="isl-choice__label">Actual worker log</div>${logs || '<div>Waiting for the first worker event…</div>'}</div>`;
+      } catch (error) {
+        live.innerHTML = `<div class="isl-labnote"><b>Worker connection interrupted</b><br>${esc(errorText(error))}. The detached job keeps running; this screen will retry.</div>`;
+      } finally {
+        reading = false;
+      }
+    };
+    void paint();
+    progressTimer = window.setInterval(() => { void paint(); }, 1000);
+  }
+
+  function stepTier(): void {
+    if (!cur) return;
+    const expensiveDisabled = !IS_DEV;
+    openSheet(`<h3>Choose a generation pack</h3><div class="isl-sub">You only build the result you keep</div>
+      <div class="isl-tiers">
+        <button type="button" data-tier="free" class="isl-tier">
+          <span class="isl-tier__price">FREE</span><b>Safe roll</b><span>1 option · parameters only · no model</span>
+        </button>
+        <button type="button" data-tier="cheap" class="isl-tier">
+          <span class="isl-tier__price">LOW COST</span><b>Guided pair</b><span>2 options · safe + bounded API model</span>
+        </button>
+        <button type="button" data-tier="expensive" class="isl-tier"${expensiveDisabled ? ' disabled' : ''}>
+          <span class="isl-tier__price">HIGH COST${expensiveDisabled ? ' · LOCAL LAB' : ''}</span><b>Creative trio</b><span>3 options · safe + guided now · code experiment may work until tomorrow</span>
+        </button>
+      </div>`);
+    sheet.querySelectorAll<HTMLButtonElement>('[data-tier]').forEach((button) =>
+      button.addEventListener('click', () => {
+        if (!cur || button.disabled) return;
+        cur.tier = button.dataset.tier as CreationTier;
+        cur.mode = 'safe';
+        cur.candidates = undefined;
+        cur.concepts = undefined;
+        cur.concept = undefined;
+        cur.experiment = undefined;
+        stepPrompt();
+      }));
   }
 
   function stepPrompt(): void {
     if (!cur) return;
-    const guided = cur.mode === 'guided';
-    const chips = ['mushroom forest', 'neon city', 'underwater world', 'candy kingdom', 'volcano wastes']
-      .map((c) => `<button class="isl-chip" type="button">${c}</button>`).join('');
+    const free = cur.tier === 'free';
+    const chips = PACKS.map((pack) => `<button class="isl-chip${cur!.presetId === pack.id ? ' on' : ''}" type="button" data-preset="${pack.id}">
+      <i style="background:${pack.items[0]}"></i>${esc(pack.name)}</button>`).join('');
     const difficultyOptions: Array<[IslandDifficultyPreference, string]> = [
       ['surprise', 'Surprise'], ['easy', 'Easy'], ['medium', 'Medium'], ['hard', 'Hard'], ['expert', 'Expert'],
     ];
     const motionOptions: Array<[IslandMotionPreference, string]> = [
       ['surprise', 'Surprise'], ['calm', 'Calm'], ['heavy', 'Heavy'], ['bouncy', 'Bouncy'], ['chaotic', 'Chaotic'],
     ];
-    const modePicker = IS_DEV ? `<div class="isl-create-mode">
-      <button type="button" data-create-mode="guided" class="${guided ? 'on' : ''}"><b>Within rules</b><span>Fast, predictable, always uses the safe variant contract</span></button>
-      <button type="button" data-create-mode="wild" class="${!guided ? 'on' : ''}"><b>Free experiment</b><span>Local agent mutates a disposable pinned fork</span></button>
-    </div>` : '';
-    const guidedControls = `<div class="isl-chips">${chips}</div>
+    const controls = `<div class="isl-choice"><div class="isl-choice__label">Theme direction</div>
+      <div class="isl-chips"><button class="isl-chip${cur.presetId === 'surprise' ? ' on' : ''}" type="button" data-preset="surprise">Surprise</button>${chips}</div></div>
       <div class="isl-choice"><div class="isl-choice__label">Difficulty</div><div class="isl-seg" data-diff-group>
         ${difficultyOptions.map(([value, label]) => `<button type="button" data-diff="${value}" class="${cur!.difficulty === value ? 'on' : ''}">${label}</button>`).join('')}
       </div></div>
       <div class="isl-choice"><div class="isl-choice__label">Motion</div><div class="isl-seg" data-motion-group>
         ${motionOptions.map(([value, label]) => `<button type="button" data-motion="${value}" class="${cur!.motion === value ? 'on' : ''}">${label}</button>`).join('')}
       </div></div>`;
-    const wildControls = `<div class="isl-choice"><div class="isl-choice__label">Local subscription runner</div><div class="isl-seg" data-provider-group>
+    const providerControls = cur.tier === 'expensive' ? `<div class="isl-choice"><div class="isl-choice__label">Creative model</div><div class="isl-seg isl-seg--three" data-provider-group>
         ${([['auto', 'Auto'], ['claude', 'Claude'], ['codex', 'Codex']] as Array<[ExperimentProvider, string]>).map(([value, label]) => `<button type="button" data-provider="${value}" class="${cur!.provider === value ? 'on' : ''}">${label}</button>`).join('')}
-      </div></div>
-      <div class="isl-labnote"><b>Separate local generator</b><br>The platform only submits and reconnects to persistent jobs at ${esc(LOCAL_GENERATOR_URL)}. The agent mutates a pinned non-release baseline; only a full autoplay WIN is shown.</div>`;
-    openSheet(`<h3>${TPL[cur.tpl].label}: ${guided ? 'guided variant' : 'free experiment'}</h3><div class="isl-sub">${guided ? 'Step 2 of 3 · choose a controlled direction' : 'Roll concepts first, then let the agent mutate the code'}</div>
-      ${modePicker}
-      <textarea class="isl-in isl-in--prompt" data-prm placeholder="${guided ? 'e.g. black industrial night, restrained red accents' : 'e.g. make gravity feel unreliable and the board slightly hostile'}" maxlength="${guided ? 120 : 500}" rows="${guided ? 3 : 4}">${esc(cur.prompt)}</textarea>
-      ${guided ? guidedControls : wildControls}
-      <button class="isl-btn isl-btn--pri" type="button" data-gen>${guided ? 'Generate guided variant' : 'Roll 3 wild concepts'}</button>`);
-    const inp = sheet.querySelector('[data-prm]') as HTMLTextAreaElement;
-    sheet.querySelectorAll<HTMLButtonElement>('[data-create-mode]').forEach((button) =>
+      </div></div>` : '';
+    const promptInput = free ? '' : `<textarea class="isl-in isl-in--prompt" data-prm placeholder="e.g. black industrial night, restrained red accents" maxlength="500" rows="3">${esc(cur.prompt)}</textarea>`;
+    const count = cur.tier === 'free' ? 1 : cur.tier === 'cheap' ? 2 : 3;
+    openSheet(`<h3>${TPL[cur.tpl].label} · ${cur.tier}</h3><div class="isl-sub">Prepare ${count} ${count === 1 ? 'option' : 'options'}</div>
+      ${promptInput}${controls}${providerControls}
+      <button class="isl-btn isl-btn--pri" type="button" data-gen>${free ? 'Create safe option' : `Generate ${count} options`}</button>
+      <button class="isl-btn isl-btn--ghost" type="button" data-back-tier>Change pack</button>`);
+    const inp = sheet.querySelector('[data-prm]') as HTMLTextAreaElement | null;
+    sheet.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((button) =>
       button.addEventListener('click', () => {
         if (!cur) return;
-        cur.prompt = inp.value;
-        cur.mode = button.dataset.createMode as CreationMode;
-        cur.concepts = undefined;
-        cur.concept = undefined;
-        cur.experiment = undefined;
-        stepPrompt();
+        cur.presetId = button.dataset.preset || 'surprise';
+        sheet.querySelectorAll('[data-preset]').forEach((item) => item.classList.toggle('on', item === button));
+        if (inp && cur.presetId !== 'surprise') inp.value = PACKS.find((pack) => pack.id === cur!.presetId)?.name ?? inp.value;
       }));
-    sheet.querySelectorAll<HTMLElement>('.isl-chip').forEach((c) =>
-      c.addEventListener('click', () => { inp.value = c.textContent || ''; }));
     sheet.querySelectorAll<HTMLButtonElement>('[data-diff]').forEach((button) =>
       button.addEventListener('click', () => {
         if (!cur) return;
@@ -1044,10 +1315,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       }));
     (sheet.querySelector('[data-gen]') as HTMLElement).addEventListener('click', () => {
       if (!cur) return;
-      cur.prompt = inp.value.trim();
-      if (cur.mode === 'wild') stepExperimentConcepts();
-      else stepGen();
+      cur.prompt = inp?.value.trim() || PACKS.find((pack) => pack.id === cur!.presetId)?.name || '';
+      void generatePackage();
     });
+    sheet.querySelector('[data-back-tier]')?.addEventListener('click', stepTier);
   }
 
   function stepExperimentConcepts(): void {
@@ -1061,6 +1332,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const generationId = ++generationSeq;
     generationBySlot.set(req.slot, generationId);
     pendingSlots.add(req.slot);
+    setPendingPhase(req.slot, 'concepts');
     refreshIsland(false);
     openSheet(`<h3>Rolling concepts…</h3><div class="isl-sub">${esc(req.prompt || 'surprise me')}</div>
       <ul class="isl-lablog"><li><b></b><span>Looking for three different feelings, not three skins</span></li></ul>
@@ -1069,6 +1341,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (generationBySlot.get(req.slot) !== generationId) return;
       generationBySlot.delete(req.slot);
       pendingSlots.delete(req.slot);
+      pendingPhaseBySlot.delete(req.slot);
       req.concepts = concepts;
       req.conceptJobId = jobId;
       readyDrafts.set(req.slot, req);
@@ -1082,6 +1355,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (generationBySlot.get(req.slot) !== generationId) return;
       generationBySlot.delete(req.slot);
       pendingSlots.delete(req.slot);
+      pendingPhaseBySlot.delete(req.slot);
       refreshIsland(false);
       if (cur !== req || !sheet.classList.contains('isl-sheet--show')) {
         if (ov.isConnected) toast(`Concept roll failed · ${errorText(error)}`);
@@ -1119,93 +1393,397 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     sheet.querySelector('[data-back]')?.addEventListener('click', stepPrompt);
   }
 
-  function stepGen(): void {
-    if (!cur) return;
-    const req = cur;
-    readyDrafts.delete(req.slot);
-    const generationId = ++generationSeq;
-    generationBySlot.set(req.slot, generationId);
-    pendingSlots.add(req.slot);
-    refreshIsland();
-    const steps = ['asking the theme model', 'validating the palette', 'deriving island colors', 'assembling on the engine'];
-    openSheet(`<h3>Generating…</h3><div class="isl-sub">${esc(req.prompt || 'random theme')}</div>
-      <ul class="isl-gensteps">${steps.map((x) => `<li><span class="d"></span>${x}</li>`).join('')}</ul>
-      <div class="isl-swrow"></div>
-      <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing — build it when ready</button>
-      <div class="isl-pk" style="margin-top:8px">Generation can take a minute. If you close this, the mechanic is built automatically and the island will show it when it's ready.</div>`);
-    sheet.querySelector('[data-dismiss]')?.addEventListener('click', () => closeSheet());
-    const lis = [...sheet.querySelectorAll('.isl-gensteps li')];
-    const rm = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    lis.forEach((li, i) => window.setTimeout(() => li.classList.add('done'), rm ? 0 : 350 + i * 520));
-    const minWait = new Promise<void>((r) => window.setTimeout(() => r(), rm ? 300 : 2400));
-    void Promise.all([aiTheme(req.prompt, req.avoid, req.difficulty, req.motion), minWait]).then(([pack]) => {
-      if (generationBySlot.get(req.slot) !== generationId) {
-        refreshIsland();
-        return;
-      }
-      generationBySlot.delete(req.slot);
-      pendingSlots.delete(req.slot);
-      const fallback = pickPack(req.prompt, req.pack.id);
-      const resolved = normalizePack(pack ?? {
-        ...fallback,
-        seed: stableSeed(`${req.prompt}:${generationId}:${Date.now()}`),
-        difficulty: req.difficulty === 'surprise' ? fallback.difficulty : req.difficulty,
-        motion: req.motion === 'surprise' ? fallback.motion : req.motion,
-      });
-      const isAi = Boolean(pack);
-      if (pack) {
-        // Sequence ids collide when phone and Desktop generate concurrently.
-        // A UUID-backed id makes independently-created packs mergeable.
-        pack.id = `ai-${newJobId()}`;
-        S.aiPacks = { ...(S.aiPacks ?? {}), [pack.id]: pack };
-      }
-      req.pack = resolved;
-      req.ai = isAi;
-      readyDrafts.set(req.slot, req);
-      const interactive = ov.isConnected && sheet.classList.contains('isl-sheet--show') && cur === req;
-      if (interactive) {
-        save();
-        stepPreview();
-        return;
-      }
-      // Generation only prepares a theme. Closing the sheet must never publish
-      // or create a building; the player returns to this draft and confirms Build.
-      const nm = isAi ? resolved.name : (req.prompt ? cap(req.prompt) : resolved.name);
-      if (ov.isConnected) {
-        refreshIsland();
-        toast(`Theme "${nm.slice(0, 16)}" is ready · tap the slot to Build`);
-      }
-    }).catch((error) => {
-      if (generationBySlot.get(req.slot) !== generationId) return;
-      generationBySlot.delete(req.slot);
-      pendingSlots.delete(req.slot);
-      const message = errorText(error);
-      refreshIsland();
-      console.error('[island] theme generation failed:', message);
-      const interactive = ov.isConnected && sheet.classList.contains('isl-sheet--show') && cur === req;
-      if (!interactive) {
-        if (ov.isConnected) toast(`Theme failed · ${message}`);
-        return;
-      }
-      openSheet(`<h3>Theme generation failed</h3><div class="isl-sub">${esc(message)}</div>
-        <button class="isl-btn isl-btn--pri" type="button" data-retry>Retry</button>`);
-      sheet.querySelector('[data-retry]')?.addEventListener('click', () => stepGen());
-    });
-  }
+  const candidateFor = (draft: CreationDraft, mode: CreationMode): CreationCandidate | undefined =>
+    draft.candidates?.find((candidate) => candidate.mode === mode);
 
-  function installExperimentResult(req: CreationDraft, result: ExperimentResult, jobId: string): void {
-    const base = pickPack(req.prompt, null);
-    const localPack = normalizePack({
+  function experimentPack(prompt: string, result: ExperimentResult): Pack {
+    const base = pickPack(prompt, null);
+    return normalizePack({
       ...base,
       id: `exp-${result.id}`,
       name: result.title.slice(0, 40),
       kw: [],
       seed: stableSeed(result.id),
     });
+  }
+
+  function chooseCandidate(req: CreationDraft, candidate: CreationCandidate): void {
+    if (candidate.state !== 'ready' || !candidate.pack) return;
+    cur = req;
+    req.mode = candidate.mode;
+    req.pack = candidate.pack;
+    req.ai = candidate.ai;
+    req.concept = candidate.concept;
+    req.experiment = candidate.experiment;
+    req.experimentJobId = candidate.experimentJobId;
+    readyDrafts.set(req.slot, req);
+    if (candidate.mode === 'wild') stepExperimentPreview();
+    else stepPreview();
+  }
+
+  function playCandidate(req: CreationDraft, candidate: CreationCandidate): void {
+    const src = candidatePreviewUrl(candidate);
+    if (!src || candidate.state !== 'ready') { toast('This preview is not ready yet'); return; }
+    const title = candidate.experiment?.title || candidate.pack?.name || 'Mechanic candidate';
+    const play = document.createElement('div');
+    play.className = 'isl-play';
+    play.innerHTML = `<div class="isl-play__head">
+      <div class="isl-play__nm">${esc(title)} <span style="opacity:.55;font-weight:600">· candidate</span></div>
+      <button class="isl-dbg" type="button" data-state>${candidate.mode === 'wild' ? 'LOCAL LAB' : 'PREVIEW'}</button>
+      <button class="isl-close" type="button" aria-label="Back" data-back>✕</button>
+    </div>`;
+    const frame = document.createElement('iframe');
+    frame.setAttribute('scrolling', 'no');
+    frame.setAttribute('allow', 'autoplay');
+    frame.title = title;
+    if (candidate.mode === 'wild') frame.setAttribute('sandbox', 'allow-scripts');
+    play.appendChild(frame);
+    ov.appendChild(play);
+    const chip = play.querySelector('[data-state]') as HTMLElement;
+    let bootTimer = 0;
+
+    const prepare = () => {
+      frame.contentWindow?.postMessage({ target: 'playable-swipe', type: 'setHostPaused', paused: false }, '*');
+      frame.contentWindow?.postMessage({ target: 'playable-swipe', type: 'prepareInteractive' }, '*');
+    };
+    const cleanup = () => {
+      window.clearTimeout(bootTimer);
+      window.removeEventListener('message', onMessage);
+      try { frame.src = 'about:blank'; } catch { /* noop */ }
+      play.remove();
+      if (!ov.isConnected) return;
+      if (req.candidates?.length) stepCandidates(req);
+      else if (req.mode === 'wild') stepExperimentPreview();
+      else stepPreview();
+    };
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== frame.contentWindow) return;
+      const data = event.data as Record<string, unknown> | null;
+      if (data?.source === 'playable' && data.type === 'swipe-ready') prepare();
+      const outcome = outcomeOf(event.data);
+      if (!outcome) return;
+      candidate.played = true;
+      candidate.outcome = outcome;
+      chip.textContent = outcome === 'won' ? 'WIN' : 'TRY AGAIN';
+      if (outcome === 'won') toast('Candidate completed · you can keep it or try the others');
+    };
+    window.addEventListener('message', onMessage);
+    frame.addEventListener('load', () => {
+      candidate.played = true;
+      chip.textContent = candidate.outcome === 'won' ? 'WIN' : candidate.mode === 'wild' ? 'LOCAL LAB' : 'PLAYING';
+      prepare();
+      bootTimer = window.setTimeout(prepare, 400);
+    }, { once: true });
+    (play.querySelector('[data-back]') as HTMLElement).addEventListener('click', cleanup);
+    frame.src = src;
+  }
+
+  function stepCandidateProgress(req: CreationDraft, candidate: CreationCandidate): void {
+    cur = req;
+    const title = candidate.mode === 'guided' ? 'Guided API variation' : 'Creative code experiment';
+    openSheet(`<h3>${title}</h3><div class="isl-sub">Live generation status</div>
+      <div data-progress-live></div>
+      <button class="isl-btn isl-btn--ghost" type="button" data-back-options>Back to candidates</button>`);
+    const live = sheet.querySelector('[data-progress-live]') as HTMLElement;
+    const elapsed = () => {
+      const seconds = Math.max(0, Math.floor((Date.now() - (candidate.startedAt || Date.now())) / 1000));
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      return `${minutes}m ${String(seconds % 60).padStart(2, '0')}s`;
+    };
+    const paint = () => {
+      const phases = candidate.logs?.map((entry) => entry.phase.toLowerCase()) ?? [];
+      const phaseText = `${candidate.phase || ''} ${phases.join(' ')}`.toLowerCase();
+      const stages = candidate.mode === 'guided'
+        ? ['Request accepted', 'Model generates bounded pack', 'Contract validation', 'Ready to compare']
+        : [
+            'Concept model proposes directions',
+            'Create isolated pinned fork',
+            'Claude/Codex reads and edits SWIPE source',
+            'Patch allowlist + capability scan',
+            'Check new TypeScript diagnostics',
+            'Build standalone SWIPE artifact',
+            'Lifecycle, pause, manual, idle + network conformance',
+            'Fixed-seed autoplay with one flake retry',
+            'Save candidate locally',
+          ];
+      let current = 0;
+      if (candidate.mode === 'guided') {
+        current = candidate.state === 'ready' ? 3 : candidate.state === 'failed' ? 2 : 1;
+      } else if (candidate.state === 'ready') current = 8;
+      else if (/publish|soft-gate/.test(phaseText)) current = 8;
+      else if (/test|test-retry|autoplay/.test(phaseText)) current = 7;
+      else if (/conformance/.test(phaseText)) current = 6;
+      else if (/build/.test(phaseText)) current = 5;
+      else if (/typecheck|typescript/.test(phaseText)) current = 4;
+      else if (/safety|capability|allowlist/.test(phaseText)) current = 3;
+      else if (/agent|repair|mutat/.test(phaseText)) current = 2;
+      else if (/fork/.test(phaseText)) current = 1;
+      const eta = candidate.state === 'ready' ? 'ready now'
+        : candidate.state === 'failed' ? 'stopped'
+        : candidate.mode === 'guided' ? 'usually 20–90 sec'
+        : current === 0 ? 'roughly 1–3 min to choose a direction'
+        : current <= 2 ? 'agent may work until tomorrow · heartbeat stays visible'
+        : current <= 5 ? 'roughly 2–5 min'
+        : 'roughly 1–4 min if the playtest passes';
+      const rows = stages.map((stage, index) => {
+        const done = index < current || candidate.state === 'ready';
+        const failed = candidate.state === 'failed' && index === current;
+        return `<li class="${done ? 'ok' : failed ? 'fail' : ''}"><b></b><span>${esc(stage)}${index === current && candidate.state === 'generating' ? ' · now' : ''}</span></li>`;
+      }).join('');
+      const logs = candidate.logs?.slice(-8).map((entry) =>
+        `<div><b>${esc(entry.phase.toUpperCase())}</b> ${esc(entry.message)}</div>`).join('') || '';
+      const health = generatorHealth(candidate.liveness, candidate.state);
+      live.innerHTML = `<div class="isl-progressmeta"><span>Elapsed <b>${elapsed()}</b></span><span>ETA <b>${eta}</b></span></div>
+        <ul class="isl-lablog">${rows}</ul>
+        <div class="isl-pk">${candidate.state === 'failed' ? esc(candidate.error || 'Generation stopped') : `Current: ${esc(candidate.phase || 'queued')}<br>${esc(health)}`}</div>
+        ${logs ? `<div class="isl-progresslog"><div class="isl-choice__label">Worker log</div>${logs}</div>` : ''}`;
+    };
+    paint();
+    progressTimer = window.setInterval(paint, 1000);
+    sheet.querySelector('[data-back-options]')?.addEventListener('click', () => stepCandidates(req));
+  }
+
+  function stepCandidates(req: CreationDraft): void {
+    cur = req;
+    const candidates = req.candidates ?? [];
+    const ready = candidates.filter((candidate) => candidate.state === 'ready').length;
+    const expected = req.tier === 'cheap' ? 2 : 3;
+    const labels: Record<CreationMode, { badge: string; title: string }> = {
+      safe: { badge: 'SAFE', title: 'Parameter roll' },
+      guided: { badge: 'AI', title: 'Guided variation' },
+      wild: { badge: 'WILD', title: 'Code experiment' },
+    };
+    const cards = candidates.map((candidate) => {
+      const label = labels[candidate.mode];
+      const status = candidate.outcome === 'won' ? 'PLAYED · WIN'
+        : candidate.played ? 'PLAYED'
+        : candidate.state === 'ready'
+          ? candidate.mode === 'wild' && candidate.experiment?.autoplayPassed !== true ? 'UNVERIFIED' : 'READY'
+        : candidate.state === 'failed' ? 'FAILED' : candidate.phase || 'GENERATING';
+      const media = candidate.pack
+        ? `<div class="isl-candidate__media">${board(req.tpl, candidate.pack)}</div>`
+        : '<div class="isl-candidate__media isl-candidate__media--pending"><b></b><b></b><b></b></div>';
+      const detail = candidate.state === 'failed'
+        ? candidate.error || 'Generation failed'
+        : candidate.mode === 'wild' && candidate.experiment
+          ? candidate.experiment.pitch
+          : candidate.pack
+            ? `${candidate.pack.difficulty} · ${candidate.pack.motion} · ${candidate.pack.conveyorPath}`
+            : `${candidate.phase || 'Waiting'} · tap for live progress`;
+      const actions = candidate.state === 'ready' ? `<div class="isl-candidate__actions">
+        <button type="button" data-play="${candidate.mode}">${candidate.played ? 'Play again' : 'Play'}</button>
+        <button type="button" data-keep="${candidate.mode}">Keep this</button>
+      </div>` : '';
+      const progressAttrs = candidate.state !== 'ready'
+        ? ` data-progress-card="${candidate.mode}" role="button" tabindex="0" aria-label="Open ${label.title} progress"`
+        : '';
+      return `<div class="isl-candidate isl-candidate--${candidate.state}"${progressAttrs}>
+        ${media}<span class="isl-candidate__head"><span><em>${label.badge}</em><b>${label.title}</b></span><i>${esc(status)}</i></span>
+        <span class="isl-candidate__detail${candidate.outcome === 'won' ? ' isl-candidate__result' : ''}">${esc(detail)}</span>${actions}
+      </div>`;
+    }).join('');
+    const backgroundNote = req.tier === 'expensive' && candidates.some((candidate) => candidate.mode === 'wild'
+      && (candidate.state === 'waiting' || candidate.state === 'generating'))
+      ? ' · creative work continues safely in background for up to 24h'
+      : '';
+    openSheet(`<h3>Choose a mechanic</h3><div class="isl-sub">${ready}/${expected} options ready · only your choice can be built${backgroundNote}</div>
+      <div class="isl-candidates" data-candidates>${cards}</div>
+      <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>
+      <button class="isl-btn isl-btn--ghost" type="button" data-regenerate>Generate this pack again</button>`);
+    sheet.querySelectorAll<HTMLButtonElement>('[data-play]').forEach((button) =>
+      button.addEventListener('click', () => {
+        const candidate = candidateFor(req, button.dataset.play as CreationMode);
+        if (candidate) playCandidate(req, candidate);
+      }));
+    sheet.querySelectorAll<HTMLButtonElement>('[data-keep]').forEach((button) =>
+      button.addEventListener('click', () => {
+        const candidate = candidateFor(req, button.dataset.keep as CreationMode);
+        if (candidate) chooseCandidate(req, candidate);
+      }));
+    sheet.querySelectorAll<HTMLElement>('[data-progress-card]').forEach((card) => {
+      const open = () => {
+        const candidate = candidateFor(req, card.dataset.progressCard as CreationMode);
+        if (candidate) stepCandidateProgress(req, candidate);
+      };
+      card.addEventListener('click', open);
+      card.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+      });
+    });
+    sheet.querySelector('[data-dismiss]')?.addEventListener('click', closeSheet);
+    sheet.querySelector('[data-regenerate]')?.addEventListener('click', () => { cur = req; void generatePackage(); });
+  }
+
+  function repaintCandidates(req: CreationDraft): void {
+    if (ov.isConnected && cur === req && sheet.classList.contains('isl-sheet--show') && sheet.querySelector('[data-candidates]')) {
+      stepCandidates(req);
+    }
+  }
+
+  function experimentBundle(req: CreationDraft): ExperimentBundleSnapshot {
+    const safe = candidateFor(req, 'safe');
+    const guided = candidateFor(req, 'guided');
+    if (!safe?.pack) throw new Error('safe candidate is missing from the experiment bundle');
+    return {
+      schemaVersion: 1,
+      tier: 'expensive',
+      slot: req.slot,
+      prompt: req.prompt,
+      provider: req.provider,
+      difficulty: req.difficulty,
+      motion: req.motion,
+      safePack: safe.pack,
+      guidedPack: guided?.pack,
+      guidedError: guided?.error,
+    };
+  }
+
+  async function generatePackage(): Promise<void> {
+    if (!cur) return;
+    const req = cur;
+    const previousWildJobId = candidateFor(req, 'wild')?.experimentJobId;
+    if (previousWildJobId) void consumeGeneratorJob(previousWildJobId).catch(() => undefined);
+    if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
+    req.mode = 'safe';
+    req.ai = false;
+    req.concepts = undefined;
+    req.concept = undefined;
+    req.experiment = undefined;
+    req.experimentJobId = undefined;
+    const safePack = safeParameterizedPack(req);
+
+    if (req.tier === 'free') {
+      req.pack = safePack;
+      req.candidates = undefined;
+      readyDrafts.set(req.slot, req);
+      stepPreview();
+      return;
+    }
+
+    req.candidates = [
+      { mode: 'safe', state: 'ready', pack: safePack, ai: false },
+      { mode: 'guided', state: 'generating', ai: true, phase: 'ASKING API MODEL', startedAt: Date.now() },
+      ...(req.tier === 'expensive'
+        ? [{ mode: 'wild', state: 'waiting', ai: true, phase: 'STARTING LOCAL JOB', startedAt: Date.now() } as CreationCandidate]
+        : []),
+    ];
+    readyDrafts.set(req.slot, req);
+    const generationId = ++generationSeq;
+    generationBySlot.set(req.slot, generationId);
+    pendingSlots.add(req.slot);
+    setPendingPhase(req.slot, req.tier === 'expensive' ? 'concepts' : 'theme AI');
+    refreshIsland(false);
+    stepCandidates(req);
+
+    const wild = candidateFor(req, 'wild');
+    const conceptTask = wild ? (() => {
+      wild.state = 'generating';
+      wild.phase = 'ROLLING CONCEPT';
+      const recoveryBundle = experimentBundle(req);
+      return experimentConcepts(req.prompt, req.provider, req.slot, recoveryBundle, (job) => {
+        wild.jobId = job.id;
+        wild.logs = job.logs;
+        wild.liveness = job.liveness;
+        wild.phase = (job.message || job.phase || 'ROLLING CONCEPT').toUpperCase().slice(0, 42);
+        setPendingPhase(req.slot, wild.phase);
+        repaintCandidates(req);
+      })
+        .then((value) => ({ value, error: null as unknown }))
+        .catch((error: unknown) => ({ value: null, error }));
+    })() : null;
+
+    const guided = candidateFor(req, 'guided')!;
+    try {
+      const pack = await aiTheme(req.prompt, req.avoid, req.difficulty, req.motion);
+      if (generationBySlot.get(req.slot) !== generationId) return;
+      if (!pack) throw new Error('API model is unavailable');
+      pack.id = `ai-${newJobId()}`;
+      guided.pack = pack;
+      guided.state = 'ready';
+      guided.phase = 'READY';
+    } catch (error) {
+      guided.state = 'failed';
+      guided.error = errorText(error);
+      guided.phase = 'FAILED';
+    }
+    repaintCandidates(req);
+
+    if (req.tier === 'expensive') {
+      const creative = wild!;
+      let conceptJobId = '';
+      try {
+        const rolledTask = await conceptTask!;
+        if (rolledTask.error) throw rolledTask.error;
+        const rolled = rolledTask.value!;
+        conceptJobId = rolled.jobId;
+        if (generationBySlot.get(req.slot) !== generationId) return;
+        const concept = rolled.concepts.find((candidate) => candidate.risk === 'high') ?? rolled.concepts[0];
+        if (!concept) throw new Error('creative model returned no concept');
+        creative.concept = concept;
+        void consumeGeneratorJob(conceptJobId).catch(() => undefined);
+        conceptJobId = '';
+        creative.phase = 'MUTATING CODE';
+        setPendingPhase(req.slot, creative.phase);
+        repaintCandidates(req);
+        const bundle = experimentBundle(req);
+        const jobId = await startExperiment(req.prompt, concept, req.provider, req.slot, undefined, undefined, bundle);
+        creative.experimentJobId = jobId;
+        creative.jobId = jobId;
+        creative.logs = [];
+        let job: ExperimentJob | null = null;
+        for (let poll = 0; poll < 24 * 60 * 60; poll++) {
+          if (generationBySlot.get(req.slot) !== generationId) return;
+          job = await experimentStatus(jobId);
+          creative.logs = job.logs;
+          creative.liveness = job.liveness;
+          creative.phase = (job.message || job.phase || 'GENERATING').toUpperCase().slice(0, 42);
+          setPendingPhase(req.slot, creative.phase);
+          repaintCandidates(req);
+          if (!generatorPending(job.state)) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        }
+        if (!job || generatorPending(job.state)) throw new Error('Experiment reached its 24-hour deadline');
+        if (job.state !== 'ready' || !job.result) throw new Error(job.error || job.message || 'Experiment failed');
+        creative.experiment = job.result;
+        creative.pack = experimentPack(req.prompt, job.result);
+        creative.state = 'ready';
+        creative.phase = job.result.autoplayPassed === true ? 'READY' : 'UNVERIFIED';
+      } catch (error) {
+        if (conceptJobId) void consumeGeneratorJob(conceptJobId).catch(() => undefined);
+        creative.state = 'failed';
+        creative.error = errorText(error);
+        creative.phase = 'FAILED';
+      }
+    }
+
+    if (generationBySlot.get(req.slot) !== generationId) return;
+    generationBySlot.delete(req.slot);
+    pendingSlots.delete(req.slot);
+    pendingPhaseBySlot.delete(req.slot);
+    readyDrafts.set(req.slot, req);
+    refreshIsland(false);
+    if (cur === req && sheet.classList.contains('isl-sheet--show')) stepCandidates(req);
+    else if (ov.isConnected) toast(`${req.tier === 'cheap' ? 'Pair' : 'Trio'} ready · tap the slot to choose`);
+  }
+
+  function installExperimentResult(req: CreationDraft, result: ExperimentResult, jobId: string): void {
+    const localPack = experimentPack(req.prompt, result);
     req.pack = localPack;
     req.ai = true;
     req.experiment = result;
     req.experimentJobId = jobId;
+    const candidate = candidateFor(req, 'wild');
+    if (candidate) {
+      candidate.state = 'ready';
+      candidate.pack = localPack;
+      candidate.experiment = result;
+      candidate.experimentJobId = jobId;
+      candidate.phase = result.autoplayPassed === true ? 'READY' : 'UNVERIFIED';
+      candidate.error = undefined;
+      candidate.played = false;
+      candidate.outcome = undefined;
+    }
     readyDrafts.set(req.slot, req);
     const interactive = ov.isConnected && sheet.classList.contains('isl-sheet--show') && cur === req;
     if (interactive) stepExperimentPreview();
@@ -1223,20 +1801,28 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const generationId = ++generationSeq;
     generationBySlot.set(req.slot, generationId);
     pendingSlots.add(req.slot);
+    setPendingPhase(req.slot, parentId ? 'repair' : 'fork');
     refreshIsland();
     openSheet(`<h3 data-lab-title>${parentId ? 'Tuning the experiment…' : 'Mutating the mechanic…'}</h3>
       <div class="isl-sub">${esc(concept.title)} · persistent ${esc(req.provider)} subscription runner</div>
       <ul class="isl-lablog" data-lablog><li><b></b><span>Queueing an isolated code fork</span></li></ul>
+      <div class="isl-pk" data-lab-health>Durable queue · safe across page reloads</div>
       <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>
-      <div class="isl-pk" style="margin-top:8px">The agent gets up to 3 build/autoplay repair attempts. Failed code is never placed on the island.</div>`);
+      <div class="isl-pk" style="margin-top:8px">This workshop may continue for up to 24 hours. Hard failures get up to 3 repair passes; safe options remain available while it works.</div>`);
     sheet.querySelector('[data-dismiss]')?.addEventListener('click', closeSheet);
 
     const paintJob = (job: ExperimentJob) => {
       if (!ov.isConnected || !sheet.classList.contains('isl-sheet--show') || cur !== req) return;
       const titleEl = sheet.querySelector('[data-lab-title]');
-      if (titleEl) titleEl.textContent = job.state === 'failed' ? 'Experiment failed' : job.state === 'ready' ? 'Autoplay won' : parentId ? 'Tuning the experiment…' : 'Mutating the mechanic…';
+      if (titleEl) titleEl.textContent = job.state === 'failed'
+        ? 'Experiment failed'
+        : job.state === 'ready'
+          ? job.result?.autoplayPassed === false ? 'Build ready · win unverified' : 'Autoplay won'
+          : parentId ? 'Tuning the experiment…' : 'Mutating the mechanic…';
       const log = sheet.querySelector('[data-lablog]');
       if (!log) return;
+      const health = sheet.querySelector('[data-lab-health]');
+      if (health) health.textContent = generatorHealth(job.liveness, job.state, job.pid);
       log.innerHTML = job.logs.map((entry) => {
         const cls = entry.phase === 'failed-attempt' ? 'fail' : entry.phase === 'publish' || entry.phase === 'ready' ? 'ok' : '';
         const attempt = entry.attempt ? `Attempt ${entry.attempt} · ` : '';
@@ -1247,25 +1833,36 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     let jobId = '';
     let job: ExperimentJob | null = null;
     try {
-      jobId = await startExperiment(req.prompt, concept, req.provider, req.slot, parentId, feedback);
-      for (let poll = 0; poll < 1200; poll++) {
+      jobId = await startExperiment(
+        req.prompt,
+        concept,
+        req.provider,
+        req.slot,
+        parentId,
+        feedback,
+        req.candidates?.length ? experimentBundle(req) : undefined,
+      );
+      for (let poll = 0; poll < 24 * 60 * 60; poll++) {
         if (generationBySlot.get(req.slot) !== generationId) return;
         job = await experimentStatus(jobId);
+        setPendingPhase(req.slot, job.phase || job.message);
         paintJob(job);
         if (!generatorPending(job.state)) break;
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
       }
-      if (!job || generatorPending(job.state)) throw new Error('Experiment timed out after 20 minutes');
+      if (!job || generatorPending(job.state)) throw new Error('Experiment reached its 24-hour deadline');
       if (job.state !== 'ready' || !job.result) throw new Error(job.error || job.message || 'Experiment failed');
       if (generationBySlot.get(req.slot) !== generationId) return;
 
       generationBySlot.delete(req.slot);
       pendingSlots.delete(req.slot);
+      pendingPhaseBySlot.delete(req.slot);
       installExperimentResult(req, job.result, jobId);
     } catch (error) {
       if (generationBySlot.get(req.slot) !== generationId) return;
       generationBySlot.delete(req.slot);
       pendingSlots.delete(req.slot);
+      pendingPhaseBySlot.delete(req.slot);
       refreshIsland();
       const message = errorText(error);
       console.error('[island] local experiment failed:', message);
@@ -1282,6 +1879,64 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       sheet.querySelector('[data-concepts]')?.addEventListener('click', stepExperimentChoice);
       sheet.querySelector('[data-back]')?.addEventListener('click', stepPrompt);
     }
+  }
+
+  function restoreExperimentBundle(value: unknown, slot: number): ExperimentBundleSnapshot | null {
+    if (!value || typeof value !== 'object') return null;
+    const raw = value as Partial<ExperimentBundleSnapshot>;
+    if (raw.schemaVersion !== 1 || raw.tier !== 'expensive' || raw.slot !== slot) return null;
+    const restorePack = (candidate: unknown): Pack | null => {
+      if (!candidate || typeof candidate !== 'object') return null;
+      const pack = candidate as Partial<Pack>;
+      const colors = ['ground', 'edge', 'sceneBg', 'boardBg', 'belt', 'outline', 'body', 'roof'] as const;
+      if (typeof pack.id !== 'string' || typeof pack.name !== 'string'
+        || !Array.isArray(pack.items) || pack.items.length !== 6
+        || !pack.items.every((color) => typeof color === 'string')
+        || !colors.every((field) => typeof pack[field] === 'string')) return null;
+      return normalizePack(pack as IslandStoredPack);
+    };
+    const safePack = restorePack(raw.safePack);
+    if (!safePack) return null;
+    const guidedPack = restorePack(raw.guidedPack);
+    const provider: ExperimentProvider = raw.provider === 'claude' || raw.provider === 'codex' ? raw.provider : 'auto';
+    const difficulties: IslandDifficultyPreference[] = ['surprise', 'easy', 'medium', 'hard', 'expert'];
+    const motions: IslandMotionPreference[] = ['surprise', 'calm', 'heavy', 'bouncy', 'chaotic'];
+    return {
+      schemaVersion: 1,
+      tier: 'expensive',
+      slot,
+      prompt: String(raw.prompt || '').slice(0, 500),
+      provider,
+      difficulty: difficulties.includes(raw.difficulty as IslandDifficultyPreference) ? raw.difficulty! : 'surprise',
+      motion: motions.includes(raw.motion as IslandMotionPreference) ? raw.motion! : 'surprise',
+      safePack,
+      guidedPack: guidedPack ?? undefined,
+      guidedError: guidedPack ? undefined : String(raw.guidedError || 'Guided API candidate was unavailable').slice(0, 240),
+    };
+  }
+
+  function draftFromExperimentBundle(bundle: ExperimentBundleSnapshot): CreationDraft {
+    return {
+      slot: bundle.slot,
+      tpl: 'sort',
+      mode: 'safe',
+      tier: 'expensive',
+      provider: bundle.provider,
+      prompt: bundle.prompt,
+      pack: bundle.safePack,
+      presetId: 'surprise',
+      rerolls: 1,
+      difficulty: bundle.difficulty,
+      motion: bundle.motion,
+      ai: false,
+      candidates: [
+        { mode: 'safe', state: 'ready', pack: bundle.safePack, ai: false },
+        bundle.guidedPack
+          ? { mode: 'guided', state: 'ready', pack: bundle.guidedPack, ai: true }
+          : { mode: 'guided', state: 'failed', ai: true, error: bundle.guidedError || 'Guided API candidate was unavailable' },
+        { mode: 'wild', state: 'generating', ai: true, phase: 'RECONNECTING', startedAt: Date.now() },
+      ],
+    };
   }
 
   async function resumeGeneratorExperiments(): Promise<void> {
@@ -1306,6 +1961,120 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         continue;
       }
       claimedSlots.add(slot);
+      const bundle = restoreExperimentBundle(request.bundle, slot);
+      if (bundle) {
+        const req = draftFromExperimentBundle(bundle);
+        const wild = candidateFor(req, 'wild')!;
+        wild.jobId = job.id;
+        wild.logs = job.logs;
+        wild.liveness = job.liveness;
+        wild.startedAt = job.createdAt ? Date.parse(job.createdAt) : Date.now();
+        readyDrafts.set(slot, req);
+        const generationId = ++generationSeq;
+        generationBySlot.set(slot, generationId);
+        pendingSlots.add(slot);
+        setPendingPhase(slot, job.phase || job.message);
+        refreshIsland(false);
+
+        const finish = (keepDraft = true) => {
+          if (generationBySlot.get(slot) === generationId) generationBySlot.delete(slot);
+          pendingSlots.delete(slot);
+          pendingPhaseBySlot.delete(slot);
+          if (keepDraft) readyDrafts.set(slot, req);
+          else readyDrafts.delete(slot);
+          refreshIsland(false);
+        };
+        const failBundle = (message: string, terminalJobId?: string) => {
+          wild.state = 'failed';
+          wild.phase = 'FAILED';
+          wild.error = message;
+          if (terminalJobId) void consumeGeneratorJob(terminalJobId).catch(() => undefined);
+          finish();
+          if (ov.isConnected) toast(`Creative candidate failed · safe options recovered`);
+        };
+        const installBundleResult = (result: ExperimentResult, jobId: string, concept: ExperimentConcept) => {
+          if (localExperiments.buildings.some((building) => localExperimentId(building) === result.id)
+            || S.buildings.some((building) => building.url?.includes(result.id))) {
+            void consumeGeneratorJob(jobId).catch(() => undefined);
+            finish(false);
+            return;
+          }
+          const pack = experimentPack(req.prompt, result);
+          wild.state = 'ready';
+          wild.phase = result.autoplayPassed === true ? 'READY' : 'UNVERIFIED';
+          wild.pack = pack;
+          wild.concept = concept;
+          wild.experiment = result;
+          wild.experimentJobId = jobId;
+          req.concept = concept;
+          req.experiment = result;
+          req.experimentJobId = jobId;
+          finish();
+          if (ov.isConnected) toast('Creative trio recovered · tap the slot to compare');
+        };
+        const pollTerminal = async (initial: LocalGeneratorJob<unknown>): Promise<LocalGeneratorJob<unknown>> => {
+          let current = initial;
+          for (let poll = 0; poll < 24 * 60 * 60 && generatorPending(current.state); poll++) {
+            if (generationBySlot.get(slot) !== generationId) return current;
+            await new Promise((resolve) => window.setTimeout(resolve, 1000));
+            current = await generatorJob<unknown>(current.id);
+            wild.jobId = current.id;
+            wild.logs = current.logs;
+            wild.liveness = current.liveness;
+            wild.phase = (current.message || current.phase || 'GENERATING').toUpperCase().slice(0, 42);
+            setPendingPhase(slot, wild.phase);
+            repaintCandidates(req);
+          }
+          return current;
+        };
+        void (async () => {
+          try {
+            let current = await pollTerminal(job as LocalGeneratorJob<unknown>);
+            if (generationBySlot.get(slot) !== generationId) return;
+            if (current.state !== 'ready' || !current.result) {
+              failBundle(current.error || current.message || 'Persistent generator job failed', current.id);
+              return;
+            }
+            let concept = request.concept as ExperimentConcept | undefined;
+            if (current.type === 'concepts') {
+              const concepts = (current.result as { concepts?: ExperimentConcept[] }).concepts;
+              concept = concepts?.find((candidate) => candidate.risk === 'high') ?? concepts?.[0];
+              if (!concept?.title || !concept.mechanic) {
+                failBundle('Creative model returned no usable concept', current.id);
+                return;
+              }
+              wild.concept = concept;
+              wild.phase = 'MUTATING CODE';
+              void consumeGeneratorJob(current.id).catch(() => undefined);
+              const experimentJobId = await startExperiment(req.prompt, concept, req.provider, slot, undefined, undefined, bundle);
+              wild.experimentJobId = experimentJobId;
+              wild.jobId = experimentJobId;
+              wild.logs = [];
+              current = await pollTerminal(await generatorJob<unknown>(experimentJobId));
+              if (generationBySlot.get(slot) !== generationId) return;
+              if (current.state !== 'ready' || !current.result) {
+                failBundle(current.error || current.message || 'Recovered experiment failed', current.id);
+                return;
+              }
+            }
+            const result = current.result as ExperimentResult;
+            if (!concept?.title || !concept.mechanic || !result?.id || !result.url) {
+              failBundle('Recovered experiment result is incomplete', current.id);
+              return;
+            }
+            installBundleResult(result, current.id, concept);
+          } catch (error) {
+            wild.phase = 'RECONNECT ON RELOAD';
+            if (generationBySlot.get(slot) === generationId) generationBySlot.delete(slot);
+            pendingSlots.delete(slot);
+            pendingPhaseBySlot.delete(slot);
+            readyDrafts.set(slot, req);
+            refreshIsland(false);
+            console.log('[island] bundle reconnect interrupted:', errorText(error));
+          }
+        })();
+        continue;
+      }
       const concept = request.concept as ExperimentConcept | undefined;
       if (job.type === 'experiment' && (!concept?.title || !concept.mechanic)) {
         void consumeGeneratorJob(job.id).catch(() => undefined);
@@ -1315,9 +2084,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         slot,
         tpl: 'sort',
         mode: 'wild',
+        tier: 'expensive',
         provider: request.provider === 'claude' || request.provider === 'codex' ? request.provider : 'auto',
         prompt: String(request.prompt || ''),
         pack: PACKS[0],
+        presetId: 'surprise',
         rerolls: 1,
         difficulty: 'surprise',
         motion: 'surprise',
@@ -1356,6 +2127,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       const generationId = ++generationSeq;
       generationBySlot.set(slot, generationId);
       pendingSlots.add(slot);
+      setPendingPhase(slot, job.phase || job.message);
       refreshIsland(false);
       void (async () => {
         try {
@@ -1363,12 +2135,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           for (let poll = 0; poll < 24 * 60 * 60; poll++) {
             if (generationBySlot.get(slot) !== generationId) return;
             current = await generatorJob<ExperimentResult>(job.id);
+            setPendingPhase(slot, current.phase || current.message);
             if (!generatorPending(current.state)) break;
             await new Promise((resolve) => window.setTimeout(resolve, 1000));
           }
           if (generationBySlot.get(slot) !== generationId) return;
           generationBySlot.delete(slot);
           pendingSlots.delete(slot);
+          pendingPhaseBySlot.delete(slot);
           if (current.state === 'ready' && current.result) {
             if (current.type === 'concepts') {
               if (!installConcepts(current)) void consumeGeneratorJob(current.id).catch(() => undefined);
@@ -1384,6 +2158,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           // reconnect again after the local service comes back.
           generationBySlot.delete(slot);
           pendingSlots.delete(slot);
+          pendingPhaseBySlot.delete(slot);
           refreshIsland(false);
           console.log('[island] generator reconnect interrupted:', errorText(error));
         }
@@ -1497,17 +2272,24 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (!cur || cur.mode !== 'wild' || !cur.experiment || !cur.concept) return;
     const req = cur;
     const result = cur.experiment;
-    openSheet(`<h3>${esc(result.title)}</h3><div class="isl-sub">Local experiment · autoplay won on attempt ${result.attempts}</div>
-      <iframe class="isl-labframe" sandbox="allow-scripts" src="${esc(result.url)}?auto=0" title="${esc(result.title)}"></iframe>
+    const verified = result.autoplayPassed === true;
+    const publish = verified ? '<button class="isl-btn isl-btn--pri" type="button" data-publish-lab>Publish tested artifact</button>' : '';
+    const gate = verified ? '' : `<div class="isl-labnote"><b>Win not proven</b><br>${esc(result.gateError || 'Autoplay could not complete this mechanic. Play it manually or tune it before publishing.')}</div>`;
+    const back = req.candidates?.length
+      ? '<button class="isl-btn isl-btn--ghost" type="button" data-back-candidates>Back to all candidates</button>'
+      : '<button class="isl-btn isl-btn--ghost" type="button" data-concepts>Try another concept</button>';
+    const playUrl = `${result.url}${result.url.includes('?') ? '&' : '?'}auto=0`;
+    openSheet(`<h3>${esc(result.title)}</h3><div class="isl-sub">Local experiment · ${verified ? `autoplay won on attempt ${result.attempts}` : 'runtime passed, passability unverified'}</div>
+      <iframe class="isl-labframe" sandbox="allow-scripts" src="${esc(playUrl)}" title="${esc(result.title)}"></iframe>
       <div class="isl-concept__feeling">${esc(result.feeling)}</div>
       <div class="isl-pk" style="margin-top:5px">${esc(result.pitch)}</div>
-      <button class="isl-btn isl-btn--pri" type="button" data-publish-lab>Publish tested artifact</button>
+      ${gate}${publish}
       <button class="isl-btn isl-btn--ghost" type="button" data-place>Keep as a local overlay</button>
       <div class="isl-choice"><div class="isl-choice__label">What should the agent change?</div>
         <textarea class="isl-in" data-feedback maxlength="500" rows="3" placeholder="e.g. slower, darker, keep the echo visible longer"></textarea>
       </div>
       <button class="isl-btn isl-btn--ghost" type="button" data-tune>Tune this result</button>
-      <button class="isl-btn isl-btn--ghost" type="button" data-concepts>Try another concept</button>
+      ${back}
       <div class="isl-labnote">This artifact and its lineage live only on this dev machine. Placing it creates a local overlay; it never replaces or syncs the hosted building in that slot.</div>`);
     sheet.querySelector('[data-publish-lab]')?.addEventListener('click', () => {
       if (cur !== req || !req.experiment) return;
@@ -1530,6 +2312,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       localExperiments.buildings.push({
         slot, tpl, pack: pack.id, name: req.experiment.title.slice(0, 16), prompt,
         plays: 0, likes: 0, liked: false, fresh: true, publishing: false, url: req.experiment.url,
+        autoplayPassed: req.experiment.autoplayPassed === true,
       });
       if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
       cur = null;
@@ -1550,26 +2333,82 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
       stepExperimentChoice();
     });
+    sheet.querySelector('[data-back-candidates]')?.addEventListener('click', () => stepCandidates(req));
+  }
+
+  async function reviseGuided(req: CreationDraft, feedback: string): Promise<void> {
+    const previousPack = req.pack;
+    const candidate = candidateFor(req, 'guided');
+    const revisedPrompt = `${req.prompt}\nRevision request: ${feedback}`.trim().slice(0, 500);
+    openSheet(`<h3>Revising guided option…</h3><div class="isl-sub">${esc(feedback)}</div>
+      <ul class="isl-lablog"><li><b></b><span>Sending the bounded brief to the API model</span></li><li><b></b><span>Validating theme and gameplay parameters</span></li></ul>
+      <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>`);
+    sheet.querySelector('[data-dismiss]')?.addEventListener('click', closeSheet);
+    try {
+      const pack = await aiTheme(revisedPrompt, variantFingerprint(previousPack), req.difficulty, req.motion);
+      if (!pack) throw new Error('API model returned no validated variant');
+      pack.id = `ai-${newJobId()}`;
+      req.prompt = revisedPrompt;
+      req.pack = pack;
+      req.ai = true;
+      if (candidate) {
+        candidate.pack = pack;
+        candidate.state = 'ready';
+        candidate.phase = 'REVISED';
+        candidate.error = undefined;
+        candidate.played = false;
+        candidate.outcome = undefined;
+      }
+      readyDrafts.set(req.slot, req);
+      if (ov.isConnected) stepPreview();
+    } catch (error) {
+      const message = errorText(error);
+      if (candidate) {
+        candidate.pack = previousPack;
+        candidate.state = 'ready';
+        candidate.error = undefined;
+      }
+      if (!ov.isConnected) return;
+      openSheet(`<h3>Revision failed</h3><div class="isl-sub">${esc(message)}</div>
+        <button class="isl-btn isl-btn--pri" type="button" data-retry>Retry revision</button>
+        <button class="isl-btn isl-btn--ghost" type="button" data-back>Back to option</button>`);
+      sheet.querySelector('[data-retry]')?.addEventListener('click', () => { void reviseGuided(req, feedback); });
+      sheet.querySelector('[data-back]')?.addEventListener('click', stepPreview);
+    }
   }
 
   function stepPreview(): void {
     if (!cur) return;
-    const pk = cur.pack;
-    const nm = cur.ai ? pk.name : (cur.prompt ? cap(cur.prompt) : pk.name);
-    const rl = cur.rerolls > 0 ? 'Reroll · 1 free' : `Reroll · ${REROLL_COST} 🧩`;
-    openSheet(`<h3>Theme preview</h3><div class="isl-sub">Step 3 of 3 · how the mechanic will look</div>
-      <div class="isl-board">${board(cur.tpl, pk)}</div>
-      <div class="isl-pk"><b>${esc(nm)}</b> · ${TPL[cur.tpl].label} · <span style="opacity:.65">${cur.ai ? 'AI theme ✨' : 'preset theme (AI offline)'}</span></div>
+    const req = cur;
+    const pk = req.pack;
+    const nm = pk.name;
+    const modeLabel = req.mode === 'guided' ? 'bounded API variation' : 'safe parameters · no model';
+    const selected = candidateFor(req, req.mode) ?? { mode: req.mode, state: 'ready', pack: pk, ai: Boolean(req.ai) };
+    const compare = req.candidates?.length
+      ? '<button class="isl-btn isl-btn--ghost" type="button" data-back-options>Back to all candidates</button>'
+      : '';
+    const safeActions = req.mode === 'safe' && !req.candidates?.length
+      ? '<button class="isl-btn isl-btn--ghost" type="button" data-roll>Roll another free option</button><button class="isl-btn isl-btn--ghost" type="button" data-adjust>Adjust parameters</button>'
+      : '';
+    const revision = req.mode === 'guided' ? `<div class="isl-choice"><div class="isl-choice__label">What should the model change?</div>
+      <textarea class="isl-in" data-guided-feedback maxlength="300" rows="3" placeholder="e.g. much darker, slower motion, fewer bright accents"></textarea></div>
+      <button class="isl-btn isl-btn--ghost" type="button" data-revise>Ask AI to revise</button>` : '';
+    openSheet(`<h3>Mechanic preview</h3><div class="isl-sub">Play it now; only Build publishes this choice</div>
+      <div class="isl-board">${board(req.tpl, pk)}</div>
+      <div class="isl-pk"><b>${esc(nm)}</b> · ${TPL[req.tpl].label} · <span style="opacity:.65">${modeLabel}</span></div>
       <div class="isl-traits"><span>${pk.difficulty}</span><span>${pk.motion}</span><span>${pk.marbleStyle}</span><span>${pk.targetShape}</span><span>${pk.conveyorPath}</span></div>
       <div class="isl-swrow" style="margin-top:8px">${pk.items.map((c) => `<span class="isl-sw isl-sw--in" style="background:${c}"></span>`).join('')}</div>
+      <button class="isl-btn isl-btn--ghost" type="button" data-play-selected>▶ Play this option</button>
       <button class="isl-btn isl-btn--pri" type="button" data-build>Build on the island</button>
-      <button class="isl-btn isl-btn--ghost" type="button" data-rr>${rl}</button>`);
+      ${compare}${safeActions}${revision}`);
+    sheet.querySelector('[data-play-selected]')?.addEventListener('click', () => playCandidate(req, selected));
     (sheet.querySelector('[data-build]') as HTMLElement).addEventListener('click', () => {
-      if (!cur) return;
-      const { slot, tpl: tplId, prompt } = cur;
+      if (cur !== req) return;
+      const { slot, tpl: tplId, prompt } = req;
       // Slots are the cap: building on an occupied slot replaces its mechanic.
       readyDrafts.delete(slot);
       removeLocalExperiment(slot);
+      if (!PACKS.some((pack) => pack.id === pk.id)) S.aiPacks = { ...(S.aiPacks ?? {}), [pk.id]: pk };
       S.buildings = S.buildings.filter((x) => x.slot !== slot);
       S.buildings.push({
         slot, tpl: tplId, pack: pk.id, name: nm.slice(0, 16), prompt,
@@ -1581,15 +2420,17 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       toast('Publishing…');
       void bakeAndHost(slot, prompt);
     });
-    (sheet.querySelector('[data-rr]') as HTMLElement).addEventListener('click', () => {
-      if (!cur) return;
-      if (cur.rerolls > 0) cur.rerolls--;
-      else if (S.tokens >= REROLL_COST) { S.tokens -= REROLL_COST; save(); }
-      else { toast('Not enough tokens'); return; }
-      readyDrafts.delete(cur.slot);
-      (ov.querySelector('[data-tok]') as HTMLElement).textContent = String(S.tokens);
-      cur.avoid = variantFingerprint(cur.pack);
-      stepGen();
+    sheet.querySelector('[data-back-options]')?.addEventListener('click', () => stepCandidates(req));
+    sheet.querySelector('[data-adjust]')?.addEventListener('click', stepPrompt);
+    sheet.querySelector('[data-roll]')?.addEventListener('click', () => {
+      req.avoid = variantFingerprint(req.pack);
+      void generatePackage();
+    });
+    sheet.querySelector('[data-revise]')?.addEventListener('click', () => {
+      const input = sheet.querySelector('[data-guided-feedback]') as HTMLTextAreaElement;
+      const feedback = input.value.trim();
+      if (!feedback) { toast('Describe what should change first'); return; }
+      void reviseGuided(req, feedback);
     });
   }
 

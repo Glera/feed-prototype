@@ -6,8 +6,10 @@
   "description": "Swipe platform (Telegram Mini App): vertical feed of playable mini-games with a social layer (stars, series, challenges) and generative UGC meta experiments. See README.md and ISLAND.md.",
   "scripts": {
     "dev": "vite",
+    "lint": "tsc --noEmit",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verify:island": "npm run lint && vite build && npm --prefix ../swipe-generator run check && npm --prefix ../swipe-ugc run verify"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
