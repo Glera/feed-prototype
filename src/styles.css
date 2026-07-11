@@ -2406,22 +2406,26 @@ body {
 /* ── Series (W2): slot row + chest ceremony ──────────────────────────────────
    Flat layers only (no runtime glow — Android perf). */
 .series-row {
-  position: absolute; left: 50%; top: calc(var(--safe-top, 0px) + 92px);
-  transform: translate(-50%, -30px); z-index: 1300;
-  display: flex; gap: 7px; align-items: center; justify-content: center;
-  box-sizing: border-box;
-  padding: 6px 10px; border-radius: 999px;
-  background: rgba(8, 12, 20, 0.7);
+  position: absolute; left: 0; right: 0; top: calc(var(--safe-top, 0px) + 92px);
+  transform: translateY(-30px); z-index: 1300;
+  display: flex; justify-content: center;
   opacity: 0;
   transition:
     transform 0.36s cubic-bezier(0.18, 0.88, 0.22, 1),
     opacity 0.14s ease-out;
   pointer-events: none;
 }
-.series-row--in { opacity: 1; transform: translate(-50%, 0); }
+.series-row--in { opacity: 1; transform: translateY(0); }
 .series-row.series-row--manual-hidden {
   opacity: 0;
-  transform: translate(-50%, -24px);
+  transform: translateY(-24px);
+}
+.series-row__pill {
+  width: var(--series-row-w, auto);
+  display: flex; gap: 7px; align-items: center; justify-content: center;
+  box-sizing: border-box;
+  padding: 6px 10px; border-radius: 999px;
+  background: rgba(8, 12, 20, 0.7);
 }
 .series-slot {
   width: 24px; height: 24px; border-radius: 50%;

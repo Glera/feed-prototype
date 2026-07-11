@@ -1005,15 +1005,20 @@ export class Feed {
       && this.levelUpPageState === 'idle' && !this.heldLevelUpOverlay
       && !this.manualRuns.has(idx) && this.collectingRewardIndex === null && !this.seriesWinShown.has(idx);
     if (!active && !showPreview) { this.removeSeriesRow(true); return; }
+    const done = active ? active.done : 0;
+    const len = active ? this.seriesLen() : this.seriesLenFor(id);
+    const rowKey = `${active ? 'active' : 'preview'}:${idx}:${len}`;
+    if (this.seriesRowEl?.dataset.seriesRowKey && this.seriesRowEl.dataset.seriesRowKey !== rowKey) {
+      this.removeSeriesRow(true);
+    }
     if (!this.seriesRowEl) {
       const el = document.createElement('div');
       el.className = 'series-row';
       this.viewport.appendChild(el);
       this.seriesRowEl = el;
     }
-    const done = active ? active.done : 0;
-    const len = active ? this.seriesLen() : this.seriesLenFor(id);
-    this.seriesRowEl.style.width = `${this.seriesRowWidthPx(len)}px`;
+    this.seriesRowEl.dataset.seriesRowKey = rowKey;
+    this.seriesRowEl.style.setProperty('--series-row-w', `${this.seriesRowWidthPx(len)}px`);
     let html = '';
     for (let s = 0; s < len; s++) {
       const pending = s === this.pulsePendingSlot;   // fill held back for pulseSeriesSlot
@@ -1022,7 +1027,7 @@ export class Feed {
       html += `<div class="series-slot series-slot--${state}">${isDone ? '✓' : s + 1}</div>`;
     }
     html += `<div class="series-chest${done >= len ? ' series-chest--ready' : ''}"><img class="series-chest__img" src="${this.rewardIconFor(idx)}" alt="reward" draggable="false"></div>`;
-    this.seriesRowEl.innerHTML = html;
+    this.seriesRowEl.innerHTML = `<div class="series-row__pill">${html}</div>`;
     const hideForManual = !!active && active.playing && this.manualRuns.has(idx) && !options.forceVisible;
     this.seriesRowEl.classList.toggle('series-row--manual-hidden', hideForManual);
     requestAnimationFrame(() => {
