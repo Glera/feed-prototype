@@ -148,7 +148,7 @@ const STARS_PER_LEVEL = 5;    // level-1 base; higher levels need more (starsFor
 // расширением) → jump (прыжок) → fly (полет) → impact + particles + removal. No
 // scatter/decay phase; each star flies straight from its row slot.
 const REWARD_BOUNCE_MS = 620;        // per-star: squash + jump + fly to the counter
-const REWARD_SHOT_MS = 540;          // chest star: pop up (no squash) → shoot into the counter, decelerating
+const REWARD_SHOT_MS = 540;          // chest star: pop up, then accelerate into the counter
 const REWARD_PEEL_STAGGER_MS = 78;   // gap between successive peel-offs (halved from 155 — faster credit)
 const RING_STEP_MS = 180;       // snappy ring growth per star impact (synced to the bump)
 
@@ -346,6 +346,7 @@ export class Feed {
   private pendingEditorLaunch = new Set<number>();
   private rewardSparkTimers = new Map<number, number>();
   private autoplayUiActive = new Set<number>();
+  private platformAudioPrimed = false;
   private likeCounts = new Map<number, number>();
   private likedMechanics = new Set<number>();
   private postedStories = new Set<number>();
@@ -490,6 +491,7 @@ export class Feed {
     this.applyActiveStates();
     window.addEventListener('resize', this.onResize);
     window.addEventListener('message', this.onWindowMessage);
+    window.addEventListener('pointerdown', this.onPlatformPointerDown, { capture: true, passive: true });
     document.addEventListener('visibilitychange', this.onHostVisibilityChange);
     window.addEventListener('pagehide', this.pauseAllFrames);
     (window as any).__feedHostGesture = this.onHostGesture;
@@ -813,8 +815,10 @@ export class Feed {
     const base = (mechanicId || '').replace(/-swipe$/, '');
     if (base === 'pins-l3') return 2;                    // level-3 pins: 2-level series (game level 3 → level 4)
     if (base === 'pins' || base.startsWith('pins-')) return 2;
-    if (base === 'merge-locked-v1' || base === 'marble-sort') return 3;
-    if (base === 'merge-timepress-v1' || base === 'merge-timepress-v2') return 2;
+    if (base === 'merge-locked-v1') return 1;
+    if (base === 'marble-sort') return 3;
+    if (base === 'merge-timepress-v1') return 2;
+    if (base === 'merge-timepress-v2') return 1;
     if (base === 'short-drama') return 6;                // 6 authored clips, one per level (?level=1..6)
     // Mechanics without multi-level content yet run a 1-level "series" (one level →
     // straight to the chest).
@@ -843,7 +847,7 @@ export class Feed {
     if (this.series || !this.seriesEnabled(i)) return;
     this.series = { index: i, done: 0, reward: 0, playing: true };
     track('series_start', { mechanic_id: this.playables[i]?.id });
-    this.renderSeriesRow();
+    this.renderSeriesRow({ forceVisible: true });
   }
 
   private handleSeriesWin(i: number, runId: string, solveMs: number): void {
@@ -854,7 +858,7 @@ export class Feed {
     // out only at the chest).
     this.reportResult(i, runId, solveMs, 0);
     track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
-    this.renderSeriesRow();
+    this.renderSeriesRow({ forceVisible: true });
     this.manualRuns.delete(i);
     // Keep `playing` true through the chest so a stray swipe can't page away
     // mid-ceremony; it's cleared when the end-panel appears.
@@ -862,7 +866,7 @@ export class Feed {
       // Final level: fill the LAST slot FIRST, then launch the chest — sequential,
       // not simultaneous (the slot stamp reads before the gift lifts off the panel).
       this.pulseSeriesSlot(this.series.done - 1);
-      window.setTimeout(() => this.beginChest(i), 560);
+      window.setTimeout(() => this.beginChest(i), 780);
       return;
     }
     // Smooth transition: cover the reboot (which would otherwise flash the mechanic's
@@ -906,7 +910,11 @@ export class Feed {
       if (!this.series || this.series.index !== i) { this.hideSeriesTransition(); return; }
       const elapsed = performance.now() - shownAt;
       const ready = this.frameRevealed.has(i);
-      if ((ready && elapsed >= MIN_MS) || elapsed >= MAX_MS) { this.hideSeriesTransition(); return; }
+      if ((ready && elapsed >= MIN_MS) || elapsed >= MAX_MS) {
+        this.hideSeriesTransition();
+        if (this.series?.index === i && this.manualRuns.has(i)) this.setSeriesRowManualHidden(true);
+        return;
+      }
       window.setTimeout(tick, 120);
     };
     window.setTimeout(tick, MIN_MS);
@@ -969,14 +977,16 @@ export class Feed {
     return ic;
   }
 
-  private renderSeriesRow(): void {
+  private renderSeriesRow(options: { forceVisible?: boolean; giftBounce?: boolean } = {}): void {
     const active = this.series;
     // Autoplay PREVIEW: with no active series, show the same indicator for the
     // on-screen mechanic (done=0) so the player sees how many levels the series has
     // before taking over. Suppressed during reward/chest/win states.
     const idx = active ? active.index : this.shownIndex;
     const id = this.playables[idx]?.id ?? '';
+    const previewReady = !active && this.frameRevealed.has(idx);
     const showPreview = !active && idx >= 0 && !!id && this.seriesEnabled(idx)
+      && previewReady
       && !this.manualRuns.has(idx) && this.collectingRewardIndex === null && !this.seriesWinShown.has(idx);
     if (!active && !showPreview) { this.removeSeriesRow(); return; }
     if (!this.seriesRowEl) {
@@ -994,7 +1004,28 @@ export class Feed {
     }
     html += `<div class="series-chest${done >= len ? ' series-chest--ready' : ''}"><img class="series-chest__img" src="${this.rewardIconFor(idx)}" alt="reward" draggable="false"></div>`;
     this.seriesRowEl.innerHTML = html;
-    requestAnimationFrame(() => this.seriesRowEl?.classList.add('series-row--in'));
+    const hideForManual = !!active && active.playing && this.manualRuns.has(idx) && !options.forceVisible;
+    this.seriesRowEl.classList.toggle('series-row--manual-hidden', hideForManual);
+    requestAnimationFrame(() => {
+      this.seriesRowEl?.classList.add('series-row--in');
+      if (options.giftBounce && !hideForManual) this.bounceSeriesChestOnce();
+    });
+  }
+
+  private setSeriesRowManualHidden(hidden: boolean): void {
+    this.seriesRowEl?.classList.toggle('series-row--manual-hidden', hidden);
+  }
+
+  private bounceSeriesChestOnce(): void {
+    const img = this.seriesRowEl?.querySelector<HTMLElement>('.series-chest__img');
+    if (!img || !img.animate) return;
+    img.animate([
+      { transform: 'translateY(0) scale(1, 1)', offset: 0, easing: 'cubic-bezier(0.2,0.8,0.3,1)' },
+      { transform: 'translateY(-12px) scale(0.96, 1.05)', offset: 0.38, easing: 'cubic-bezier(0.55,0,0.7,1)' },
+      { transform: 'translateY(0) scale(1.24, 0.72)', offset: 0.58, easing: 'cubic-bezier(0.16,1,0.3,1)' },
+      { transform: 'translateY(-3px) scale(0.94, 1.08)', offset: 0.76, easing: 'cubic-bezier(0.2,0.8,0.3,1)' },
+      { transform: 'translateY(0) scale(1, 1)', offset: 1 },
+    ], { duration: 560, fill: 'none' });
   }
 
   // A series level just completed → make its slot "light up": grow + brighten back
@@ -1009,8 +1040,8 @@ export class Feed {
       // Stamp-in: the filled circle appears LARGE + bright, then smoothly eases down
       // to its resting size (longer, gentle ease-out — no jerky bounce).
       slot.animate([
-        { transform: 'scale(1.9)', filter: 'brightness(1.85)', offset: 0 },
-        { transform: 'scale(1.06)', filter: 'brightness(1.12)', offset: 0.72 },
+        { transform: 'scale(2.55)', filter: 'brightness(2.05)', offset: 0 },
+        { transform: 'scale(1.12)', filter: 'brightness(1.18)', offset: 0.72 },
         { transform: 'scale(1)', filter: 'brightness(1)', offset: 1 },
       ], { duration: 720, easing: 'cubic-bezier(0.22,1,0.36,1)' });
     }
@@ -1075,13 +1106,31 @@ export class Feed {
         const dx = (fromRect.left + fromRect.width / 2) - (to.left + to.width / 2);
         const dy = (fromRect.top + fromRect.height / 2) - (to.top + to.height / 2);
         const s = Math.max(0.12, fromRect.width / to.width);   // start at the slot icon's size
-        // ONE continuous phase: the same gift glides from its exact panel spot/size
-        // straight to centre, growing to full size. No mid-point, no squash — a single
-        // smooth motion with a soft landing.
+        chestBtn.style.transformOrigin = '50% 100%';
+        const hop = Math.max(46, Math.min(90, Math.abs(dy) * 0.32));
+        const liftX = dx * 0.9;
+        const liftY = dy - hop * 0.58;
+        const apexX = dx * 0.68;
+        const apexY = dy * 0.58 - hop;
+        const glideX = dx * 0.35;
+        const glideY = dy * 0.34 - hop * 0.62;
+        const dropX = dx * 0.1;
+        const dropY = dy * 0.1 - hop * 0.16;
+        const grow1 = Math.max(0.36, Math.min(1.08, s * 1.28));
+        const grow2 = Math.max(0.58, Math.min(1.16, (s + 1) * 0.54));
+        // Bottom-pinned takeoff: squash on the panel, stretch upward, drift in X
+        // along a soft arc, then accelerate down into the centre and squash on impact.
         chestBtn.animate([
-          { transform: `translate(${dx}px, ${dy}px) scale(${s})`, opacity: 1 },
-          { transform: `translate(0,0) scale(1)`, opacity: 1 },
-        ], { duration: 520, easing: 'cubic-bezier(0.22,0.8,0.28,1)', fill: 'backwards' });
+          { transform: `translate(${dx}px, ${dy}px) scale(${s}, ${s})`, opacity: 1, offset: 0, easing: 'cubic-bezier(0.2,0.72,0.24,1)' },
+          { transform: `translate(${dx}px, ${dy}px) scale(${s * 1.36}, ${s * 0.66})`, opacity: 1, offset: 0.12, easing: 'cubic-bezier(0.18,0.7,0.25,1)' },
+          { transform: `translate(${liftX}px, ${liftY}px) scale(${grow1 * 0.86}, ${grow1 * 1.18})`, opacity: 1, offset: 0.28, easing: 'cubic-bezier(0.15,0.82,0.24,1)' },
+          { transform: `translate(${apexX}px, ${apexY}px) scale(${grow2}, ${grow2})`, opacity: 1, offset: 0.52, easing: 'cubic-bezier(0.33,0,0.66,0.4)' },
+          { transform: `translate(${glideX}px, ${glideY}px) scale(${Math.max(0.78, grow2 * 0.92)}, ${Math.max(0.82, grow2 * 0.94)})`, opacity: 1, offset: 0.7, easing: 'cubic-bezier(0.45,0,0.82,0.48)' },
+          { transform: `translate(${dropX}px, ${dropY}px) scale(1.04,1.08)`, opacity: 1, offset: 0.86, easing: 'cubic-bezier(0.62,0,0.92,0.38)' },
+          { transform: 'translate(0,0) scale(1.24,0.72)', opacity: 1, offset: 0.93, easing: 'cubic-bezier(0.12,0.86,0.25,1)' },
+          { transform: 'translate(0,-3px) scale(0.96,1.07)', opacity: 1, offset: 0.98, easing: 'cubic-bezier(0.2,0.78,0.3,1)' },
+          { transform: 'translate(0,0) scale(1,1)', opacity: 1, offset: 1 },
+        ], { duration: 980, fill: 'backwards' });
       }
     });
     this.startChestSparks(chestBtn);
@@ -1184,6 +1233,49 @@ export class Feed {
     return u;
   }
 
+  private startStarFlightTrail(cx: number, cy: number, toX: number, landY: number, jump: number): void {
+    const start = performance.now();
+    const dur = REWARD_SHOT_MS;
+    const emit = () => {
+      const age = performance.now() - start;
+      const t = Math.max(0, Math.min(1, age / dur));
+      let x = 0, y = 0;
+      if (t < 0.32) {
+        const q = t / 0.32;
+        const e = 1 - Math.pow(1 - q, 3);
+        y = -jump * e;
+      } else {
+        const q = (t - 0.32) / 0.68;
+        const e = q * q;
+        x = toX * e;
+        y = -jump + (landY + jump) * e;
+      }
+      this.spawnStarTrailParticle(cx + x, cy + y);
+      if (age < dur - 80) window.setTimeout(emit, 38 + Math.random() * 18);
+    };
+    emit();
+  }
+
+  private spawnStarTrailParticle(x: number, y: number): void {
+    const p = document.createElement('i');
+    p.className = 'star-trail';
+    const size = 5 + Math.random() * 5;
+    p.style.cssText = `left:${x}px;top:${y}px;width:${size}px;height:${size}px;`;
+    this.viewport.appendChild(p);
+    const ang = Math.random() * Math.PI * 2;
+    const dist = 16 + Math.random() * 30;
+    const dx = Math.cos(ang) * dist;
+    const dy = Math.sin(ang) * dist;
+    const dur = 260 + Math.random() * 220;
+    if (!p.animate) { window.setTimeout(() => p.remove(), dur); return; }
+    p.animate([
+      { transform: 'translate(-50%, -50%) scale(0.45)', opacity: 0 },
+      { transform: 'translate(-50%, -50%) scale(1)', opacity: 0.95, offset: 0.16 },
+      { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0.18)`, opacity: 0 },
+    ], { duration: dur, easing: 'cubic-bezier(0.18,0.72,0.24,1)', fill: 'forwards' })
+      .addEventListener('finish', () => p.remove(), { once: true });
+  }
+
   // Pop one ★ from (cx,cy) to the HUD counter using the SAME 2-phase motion as the
   // old reward collect: squash → jump → accelerate into the counter (no fade), then
   // impact splash (burstRewardCollectParticles) + badge bump + ring step + credit.
@@ -1207,6 +1299,7 @@ export class Feed {
     const toY = badgeY - cy;
     const jump = px * 2.2;   // pop up out of the chest before shooting to the counter
     const landY = toY - px * 0.25;
+    this.startStarFlightTrail(cx, cy, toX, landY, jump);
     let done = false;
     const land = () => {
       if (done) return; done = true;
@@ -1223,16 +1316,22 @@ export class Feed {
       window.setTimeout(land, REWARD_SHOT_MS);
       return;
     }
-    // Phase 1 — pop straight UP to the apex at natural proportions (no squash).
-    // Phase 2 — ACCELERATE from the apex into the counter, shrinking UNIFORMLY (the
-    // star never flattens), removed on impact (land() bursts the splash). No fade,
-    // never at rest on the counter.
-    unit.animate([
-      { transform: 'translate3d(0,0,0) scale(1,1)', opacity: 1, offset: 0,    easing: 'cubic-bezier(0.2,0.8,0.3,1)' },       // launch (natural)
-      { transform: `translate3d(0,${-jump}px,0) scale(1,1)`, opacity: 1, offset: 0.32, easing: 'cubic-bezier(0.55,0,0.7,1)' }, // apex (still natural — no squash)
-      { transform: `translate3d(${toX}px,${landY}px,0) scale(0.6,0.6)`, opacity: 1, offset: 1 },   // slam into the counter, uniform shrink (never flattened)
-    ], { duration: REWARD_SHOT_MS, fill: 'forwards' })
-      .addEventListener('finish', land, { once: true });
+    // Phase 1 — pop UP, swell a touch, then snap tight at the apex.
+    // Phase 2 — grow back above the original size, then arrive at the counter
+    // at the original scale so the star keeps its weight on impact.
+    const flight = unit.animate([
+      { transform: 'translate3d(0,0,0) scale(1,1)', opacity: 1, offset: 0, easing: 'cubic-bezier(0.2,0.8,0.3,1)' },
+      { transform: `translate3d(0,${-jump * 0.82}px,0) scale(1.16,1.16)`, opacity: 1, offset: 0.24, easing: 'cubic-bezier(0.2,0.8,0.3,1)' },
+      { transform: `translate3d(0,${-jump}px,0) scale(0.82,0.82)`, opacity: 1, offset: 0.32, easing: 'cubic-bezier(0.55,0,0.7,1)' },
+      { transform: `translate3d(${toX * 0.34}px,${(-jump + (landY + jump) * 0.12)}px,0) scale(1.18,1.18)`, opacity: 1, offset: 0.54, easing: 'cubic-bezier(0.22,0.78,0.24,1)' },
+      { transform: `translate3d(${toX * 0.76}px,${(-jump + (landY + jump) * 0.55)}px,0) scale(1.08,1.08)`, opacity: 1, offset: 0.82, easing: 'cubic-bezier(0.55,0,0.92,0.35)' },
+      { transform: `translate3d(${toX}px,${landY}px,0) scale(1,1)`, opacity: 1, offset: 1 },
+    ], { duration: REWARD_SHOT_MS, fill: 'none' });
+    const impactTimer = window.setTimeout(land, Math.max(0, REWARD_SHOT_MS - 8));
+    flight.addEventListener('finish', () => {
+      window.clearTimeout(impactTimer);
+      land();
+    }, { once: true });
   }
 
   private persistSeriesReward(i: number): void {
@@ -1399,7 +1498,7 @@ export class Feed {
     });
     // Refresh the series indicator for the newly-shown unit — during autoplay it
     // shows a preview (series length) for THIS mechanic (renderSeriesRow handles it).
-    this.renderSeriesRow();
+    this.renderSeriesRow({ giftBounce: true });
   }
 
   // ── Warm-cost telemetry ──────────────────────────────────────────────────
@@ -2276,9 +2375,10 @@ export class Feed {
       if (this.frames.get(i) !== frame) return;
       this.markWarmTimeline(i, 'loadAt');
       this.disableFrameDoubleTapZoom(frame);
-      this.attachPointerActivityProbe(frame);
+      this.attachPointerActivityProbe(i, frame);
       this.frameLoaded.add(i);
       this.setFramePaused(i, this.shouldPauseFrame(i));
+      if (this.platformAudioPrimed) window.setTimeout(() => this.callPlayableHostGesture(i), 0);
       this.queueFrameReadyFallback(i, frame);
       this.tryRevealFrame(i);
       this.ensureFrameAutoPlay(i);
@@ -2412,12 +2512,13 @@ export class Feed {
   // Autoplay dispatches synthetic pointer events — those must not read as a
   // user finger. Cross-origin frames (none in the feed today) skip the probe;
   // warm prepare simply isn't finger-gated for them.
-  private attachPointerActivityProbe(frame: HTMLIFrameElement) {
+  private attachPointerActivityProbe(i: number, frame: HTMLIFrameElement) {
     try {
       const win = frame.contentWindow;
       if (!win) return;
       const down = (e: PointerEvent) => {
         if (!e.isTrusted) return;
+        this.primePlatformAudio(i);
         this.mechanicPointerDown = true;
         this.mechanicPointerDownAt = performance.now();
       };
@@ -2484,6 +2585,7 @@ export class Feed {
     // A staged current frame stayed host-paused while it prepared. Resume it
     // before the 90ms poster fade so onInteractive runs behind the cover.
     this.applyActiveStates();
+    if (this.platformAudioPrimed) this.callPlayableHostGesture(i);
     this.tryRevealFrame(i);
     this.ensureFrameAutoPlay(i);
     this.applyPendingEditor(i);
@@ -2641,6 +2743,7 @@ export class Feed {
       this.maybeStartSeries(i);
     }
     this.manualRuns.add(i);
+    if (this.series?.index === i && this.series.playing) this.setSeriesRowManualHidden(true);
     this.stopFrameAutoPlay(i);
     this.setAutoplayUi(i, false);
   }
@@ -3678,10 +3781,25 @@ export class Feed {
     catch { return false; }
   }
 
+  private onPlatformPointerDown = (e: PointerEvent) => {
+    if (!e.isTrusted) return;
+    this.primePlatformAudio(this.realIndex());
+  };
+
+  private primePlatformAudio(preferredIndex: number = this.realIndex()): void {
+    this.platformAudioPrimed = true;
+    const ordered = new Set<number>();
+    if (preferredIndex >= 0) ordered.add(preferredIndex);
+    ordered.add(this.realIndex());
+    this.frames.forEach((_frame, i) => ordered.add(i));
+    for (const i of ordered) this.callPlayableHostGesture(i);
+  }
+
   private unlockAudioForCurrentAndNext(fromIndex: number = this.realIndex(), includePrevious = false) {
+    this.platformAudioPrimed = true;
     const current = ((fromIndex % this.N) + this.N) % this.N;
     const next = (current + 1) % this.N;
-    this.callPlayableHostGesture(current);
+    this.primePlatformAudio(current);
     this.callPlayableHostGesture(next);
     if (includePrevious) {
       const prev = ((current - 1) % this.N + this.N) % this.N;
@@ -5337,6 +5455,7 @@ export class Feed {
     const changed = targetPos !== this.pos;
     const pageChanged = targetIndex !== fromIndex;
     if (changed && pageChanged) {
+      if (!this.series) this.removeSeriesRow();
       this.clearWarmTimer();
       this.warmIndex = null;
       this.liveHold = new Set([fromIndex, targetIndex]);
