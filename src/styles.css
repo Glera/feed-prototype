@@ -2408,7 +2408,8 @@ body {
 .series-row {
   position: absolute; left: 50%; top: calc(var(--safe-top, 0px) + 92px);
   transform: translate(-50%, -30px); z-index: 1300;
-  display: flex; gap: 7px; align-items: center;
+  display: flex; gap: 7px; align-items: center; justify-content: center;
+  box-sizing: border-box;
   padding: 6px 10px; border-radius: 999px;
   background: rgba(8, 12, 20, 0.7);
   opacity: 0;

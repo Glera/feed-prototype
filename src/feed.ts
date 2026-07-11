@@ -1013,6 +1013,7 @@ export class Feed {
     }
     const done = active ? active.done : 0;
     const len = active ? this.seriesLen() : this.seriesLenFor(id);
+    this.seriesRowEl.style.width = `${this.seriesRowWidthPx(len)}px`;
     let html = '';
     for (let s = 0; s < len; s++) {
       const pending = s === this.pulsePendingSlot;   // fill held back for pulseSeriesSlot
@@ -1028,6 +1029,14 @@ export class Feed {
       this.seriesRowEl?.classList.add('series-row--in');
       if (options.giftBounce && !hideForManual) this.bounceSeriesChestOnce();
     });
+  }
+
+  private seriesRowWidthPx(len: number): number {
+    const slots = Math.max(1, len);
+    // Keep the pill's outer width stable before it enters. The row has fixed
+    // slot/chest sizes, 7px flex gaps, 10px side padding, and the chest's 3px
+    // visual nudge; reserving all of it avoids center-shift when contents settle.
+    return 20 + slots * 24 + slots * 7 + 30 + 3;
   }
 
   private renderSeriesRowAfterReveal(index: number): void {
