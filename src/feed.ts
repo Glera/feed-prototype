@@ -985,6 +985,11 @@ export class Feed {
   }
 
   private renderSeriesRow(options: { forceVisible?: boolean; giftBounce?: boolean } = {}): void {
+    // The series row must NEVER show on the level-up screen — not the preview and not
+    // an active-series row (after a series win the series is still set while the
+    // level-up rides in). Bail for BOTH; it re-renders when the mechanic arrives
+    // (settleSlide clears the level-up, then markUnitShown → renderSeriesRow).
+    if (this.levelUpPageState !== 'idle' || this.heldLevelUpOverlay) { this.removeSeriesRow(true); return; }
     const active = this.series;
     // Autoplay PREVIEW: with no active series, show the same indicator for the
     // on-screen mechanic (done=0) so the player sees how many levels the series has
