@@ -978,6 +978,7 @@ export class Feed {
   // re-renders of the series row (otherwise it would flicker between icons every tick).
   private seriesRewardIcon = new Map<number, string>();
   private pulsePendingSlot = -1;   // slot index rendered as PENDING (not green) until its pulse plays the green-in
+  private chestStarOrigin: { x: number; y: number } | null = null;   // fixed launch point for all chest stars (captured on first tap)
   private rewardIconFor(idx: number): string {
     let ic = this.seriesRewardIcon.get(idx);
     if (!ic) { ic = REWARD_ICONS[Math.floor(Math.random() * REWARD_ICONS.length)]; this.seriesRewardIcon.set(idx, ic); }
@@ -1114,6 +1115,7 @@ export class Feed {
     this.series.reward = 3 + Math.floor(Math.random() * 7);   // 3..9 (D4)
     let remaining = this.series.reward;
     let paid = false;
+    this.chestStarOrigin = null;   // fresh launch point for this chest's stars
     track('series_complete', { mechanic_id: this.playables[i]?.id, reward: this.series.reward });
     // Does the chest payout cross a level threshold? Capture it now (before the
     // stars fly and nudge totalStars) so the level-up ceremony can ride in when
@@ -1203,11 +1205,15 @@ export class Feed {
         { transform: 'scale(1,1)', offset: 1 },
       ], { duration: 460, easing: 'cubic-bezier(0.33,1,0.68,1)' });
       this.burstStarConfetti();
-      // Pop a real ★ star out of the chest with the OLD reward animation (2-phase
-      // squash→jump then fly, impact + splash on the counter, no fade-out).
-      const r = chestBtn.getBoundingClientRect();
-      const vp = this.viewport.getBoundingClientRect();
-      this.flyOneStar(r.left - vp.left + r.width / 2, r.top - vp.top + r.height * 0.34);
+      // Pop a real ★ star out of the chest. ALWAYS launch from ONE point — the
+      // origin captured on the first tap — so every star leaves the same spot and
+      // only the apex (scattered inside flyOneStar) differs.
+      if (!this.chestStarOrigin) {
+        const r = chestBtn.getBoundingClientRect();
+        const vp = this.viewport.getBoundingClientRect();
+        this.chestStarOrigin = { x: r.left - vp.left + r.width / 2, y: r.top - vp.top + r.height * 0.34 };
+      }
+      this.flyOneStar(this.chestStarOrigin.x, this.chestStarOrigin.y);
       if (remaining <= 0 && !paid) {
         paid = true;
         this.persistSeriesReward(i);
@@ -1388,9 +1394,9 @@ export class Feed {
     // SCALE — 1 → peak (grow, decelerating) → back to 100% by the top of the pop,
     // then hold 100% all the way into the counter so it lands at full weight.
     const flight = unit.animate([
-      { transform: 'scale(1)', offset: 0, easing: 'cubic-bezier(0.12,0.7,0.3,1)' },
-      { transform: `scale(${grow})`, offset: 0.30, easing: 'cubic-bezier(0.5,0,0.6,1)' },
-      { transform: 'scale(1)', offset: 0.52, easing: 'linear' },
+      { transform: 'scale(0.32)', offset: 0, easing: 'cubic-bezier(0.12,0.7,0.3,1)' },   // pops out SMALL
+      { transform: `scale(${grow})`, offset: 0.34, easing: 'cubic-bezier(0.5,0,0.6,1)' }, // grows to the peak (decelerating)
+      { transform: 'scale(1)', offset: 0.56, easing: 'linear' },                          // back to 100% by the top of the pop
       { transform: 'scale(1)', offset: 1 },
     ], { duration: REWARD_SHOT_MS, fill: 'forwards' });
     const impactTimer = window.setTimeout(land, Math.max(0, REWARD_SHOT_MS - 8));
