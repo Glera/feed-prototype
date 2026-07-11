@@ -860,13 +860,16 @@ export class Feed {
     track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
     this.renderSeriesRow({ forceVisible: true });
     this.manualRuns.delete(i);
+    const filledSlot = this.series.done - 1;
     // Keep `playing` true through the chest so a stray swipe can't page away
     // mid-ceremony; it's cleared when the end-panel appears.
     if (this.series.done >= this.seriesLen()) {
       // Final level: fill the LAST slot FIRST, then launch the chest — sequential,
       // not simultaneous (the slot stamp reads before the gift lifts off the panel).
-      this.pulseSeriesSlot(this.series.done - 1);
-      window.setTimeout(() => this.beginChest(i), 780);
+      this.afterSeriesRowEntrance(() => {
+        this.pulseSeriesSlot(filledSlot);
+        window.setTimeout(() => this.beginChest(i), 780);
+      });
       return;
     }
     // Smooth transition: cover the reboot (which would otherwise flash the mechanic's
@@ -875,13 +878,12 @@ export class Feed {
     this.showSeriesTransition(this.series.done);
     // Light up the just-completed slot AFTER the transition dim has faded in — it
     // reads far more clearly against the darkened screen than on the live level.
-    const filledSlot = this.series.done - 1;
-    window.setTimeout(() => this.pulseSeriesSlot(filledSlot), 300);
+    this.afterSeriesRowEntrance(() => this.pulseSeriesSlot(filledSlot));
     window.setTimeout(() => {
       if (!this.series || this.series.index !== i || !this.series.playing) return;
       this.advanceSeriesInPlace(i);
       this.awaitSeriesLevelReady(i);
-    }, 480);
+    }, 980);
   }
 
   // Congratulation overlay that masks the between-levels reload. Sits below the slot
@@ -988,7 +990,7 @@ export class Feed {
     const showPreview = !active && idx >= 0 && !!id && this.seriesEnabled(idx)
       && previewReady
       && !this.manualRuns.has(idx) && this.collectingRewardIndex === null && !this.seriesWinShown.has(idx);
-    if (!active && !showPreview) { this.removeSeriesRow(); return; }
+    if (!active && !showPreview) { this.removeSeriesRow(true); return; }
     if (!this.seriesRowEl) {
       const el = document.createElement('div');
       el.className = 'series-row';
@@ -1016,6 +1018,15 @@ export class Feed {
     this.seriesRowEl?.classList.toggle('series-row--manual-hidden', hidden);
   }
 
+  private afterSeriesRowEntrance(fn: () => void): void {
+    // CSS transform transition is 360ms. Wait a beat past it so the slot stamp
+    // starts when the row has fully landed and is no longer translucent.
+    window.setTimeout(() => {
+      if (!this.seriesRowEl?.classList.contains('series-row--in')) return;
+      fn();
+    }, 430);
+  }
+
   private bounceSeriesChestOnce(): void {
     const img = this.seriesRowEl?.querySelector<HTMLElement>('.series-chest__img');
     if (!img || !img.animate) return;
@@ -1040,20 +1051,22 @@ export class Feed {
       // Stamp-in: the filled circle appears LARGE + bright, then smoothly eases down
       // to its resting size (longer, gentle ease-out — no jerky bounce).
       slot.animate([
-        { transform: 'scale(2.55)', filter: 'brightness(2.05)', offset: 0 },
-        { transform: 'scale(1.12)', filter: 'brightness(1.18)', offset: 0.72 },
-        { transform: 'scale(1)', filter: 'brightness(1)', offset: 1 },
-      ], { duration: 720, easing: 'cubic-bezier(0.22,1,0.36,1)' });
+        { transform: 'scale(3.05)', filter: 'brightness(2.45)', boxShadow: '0 0 0 0 rgba(255, 229, 92, 0)', offset: 0 },
+        { transform: 'scale(1.28)', filter: 'brightness(1.45)', boxShadow: '0 0 0 9px rgba(255, 229, 92, 0.36)', offset: 0.38 },
+        { transform: 'scale(1.08)', filter: 'brightness(1.12)', boxShadow: '0 0 0 14px rgba(255, 229, 92, 0)', offset: 0.78 },
+        { transform: 'scale(1)', filter: 'brightness(1)', boxShadow: '0 0 0 0 rgba(255, 229, 92, 0)', offset: 1 },
+      ], { duration: 840, easing: 'cubic-bezier(0.18,0.88,0.22,1)' });
     }
     const r = slot.getBoundingClientRect();
     const vp = this.viewport.getBoundingClientRect();
     this.burstRewardCollectParticles(r.left - vp.left + r.width / 2, r.top - vp.top + r.height / 2, Math.max(12, r.width / 2));
   }
 
-  private removeSeriesRow(): void {
+  private removeSeriesRow(immediate = false): void {
     const el = this.seriesRowEl;
     if (!el) return;
     this.seriesRowEl = null;
+    if (immediate) { el.remove(); return; }
     el.classList.remove('series-row--in');
     el.addEventListener('transitionend', () => el.remove(), { once: true });
     window.setTimeout(() => el.remove(), 400);
@@ -4165,7 +4178,14 @@ export class Feed {
     // the same mechanic (no unit change). Idempotent.
     if (this.seriesRowDragHidden) {
       this.seriesRowDragHidden = false;
-      window.setTimeout(() => this.renderSeriesRow(), 360);
+      window.setTimeout(() => {
+        const current = this.realIndex();
+        if (!this.series && this.shownIndex !== current && !this.frameRevealed.has(current)) {
+          this.removeSeriesRow(true);
+          return;
+        }
+        this.renderSeriesRow();
+      }, 360);
     }
 
     const dy = e.clientY - this.startY;
@@ -5455,7 +5475,7 @@ export class Feed {
     const changed = targetPos !== this.pos;
     const pageChanged = targetIndex !== fromIndex;
     if (changed && pageChanged) {
-      if (!this.series) this.removeSeriesRow();
+      if (!this.series) this.removeSeriesRow(true);
       this.clearWarmTimer();
       this.warmIndex = null;
       this.liveHold = new Set([fromIndex, targetIndex]);
