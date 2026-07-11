@@ -2918,6 +2918,17 @@ export class Feed {
           }
         } catch { /* cross-origin */ }
       }
+      // Cold arrival: a staged CURRENT frame stays host-paused while it loads,
+      // so the api gate above can't run and the slot sat at scale(1) — the
+      // preloader filled the full frame, then the freshly revealed game
+      // visibly shrank into the 0.92 autoplay frame (the "expands then
+      // squeezes back" report). Pre-scale while loading so the mechanic
+      // reveals INSIDE the frame it will live in. Manual runs keep
+      // full-bleed — they never get the autoplay frame.
+      if (!active && isCurrent && !manual && !this.frameReady.has(i)
+        && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i)) {
+        active = true;
+      }
       // TEMP holdcover: keep the overlay ACTIVE on the held unit so its tap surface
       // stays live (veil hidden via .holdcover CSS), even though the mechanic's own
       // autoplay hasn't started yet — the tap is what releases it.
