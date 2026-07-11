@@ -1356,9 +1356,12 @@ export class Feed {
 
     const toX = badgeX - cx;
     const toY = badgeY - cy;
-    const pop = px * 1.15;   // how high the star pops out of the gift before the arc
+    // Scatter the pop-out point: each star bursts to a DIFFERENT apex — a random
+    // horizontal spread + a higher, varied pop height (the fixed pop read too low).
+    const popH = px * (1.55 + Math.random() * 0.85);              // ~1.55–2.4 × px (higher on average)
+    const apexX = toX * 0.1 + (Math.random() - 0.5) * px * 2.2;   // horizontal scatter (± ~1.1 × px)
     const grow = 1.5;        // peak size mid-pop, then back to 100% by the counter
-    this.startStarFlightTrail(cx, cy, toX, toY, pop);
+    this.startStarFlightTrail(cx, cy, toX, toY, popH);
     let done = false;
     const land = () => {
       if (done) return; done = true;
@@ -1379,7 +1382,7 @@ export class Feed {
     // (accelerate). Smooth across the top; velocity is continuous.
     wrap.animate([
       { transform: 'translate3d(0,0,0)', offset: 0, easing: 'cubic-bezier(0.15,0.72,0.3,1)' },
-      { transform: `translate3d(${toX * 0.12}px,${-pop}px,0)`, offset: 0.34, easing: 'cubic-bezier(0.5,0.02,0.78,0.5)' },
+      { transform: `translate3d(${apexX}px,${-popH}px,0)`, offset: 0.34, easing: 'cubic-bezier(0.5,0.02,0.78,0.5)' },
       { transform: `translate3d(${toX}px,${toY}px,0)`, offset: 1 },
     ], { duration: REWARD_SHOT_MS, fill: 'forwards' });
     // SCALE — 1 → peak (grow, decelerating) → back to 100% by the top of the pop,
