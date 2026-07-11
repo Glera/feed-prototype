@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Instagram/TikTok-style vertical feed of playable mini-games. Phase 1: seamless swipe paging with a dedicated bottom gutter handle that separates in-game gestures from feed-navigation gestures.",
+  "description": "Swipe platform (Telegram Mini App): vertical feed of playable mini-games with a social layer (stars, series, challenges) and generative UGC meta experiments. See README.md and ISLAND.md.",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
