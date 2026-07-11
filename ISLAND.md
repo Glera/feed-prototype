@@ -68,7 +68,10 @@ subscription fallback из клиента удалён: это именно API-
 может изменить правила, interaction, physics, pacing, layout и rendering в
 disposable fork. Результат без доказанной победы разрешено играть/докручивать и
 ставить только как local overlay; гостям он скрыт. `Tune` создаёт дочерний
-lineage job с комментарием игрока. Publish повторяет строгий WIN-гейт.
+lineage job с сообщением игрока. Диалог хранит до 24 последних сообщений,
+переживает reload и доступен как у кандидата, так и у уже поставленного local-lab
+здания; каждое следующее сообщение патчит последнюю дочернюю версию. Publish
+повторяет строгий WIN-гейт.
 
 Safe доступен сразу, guided обычно занимает секунды, wild является фоновой
 «мастерской» с общим бюджетом до 24 часов. Detached runner переживает reload и
@@ -149,7 +152,8 @@ wall time, agent/playtest attempts, model, effort, fixed seed и conformance met
 Явный `Publish tested artifact` доступен только после локального WIN и повторяет
 sandbox autoplay, создаёт отдельный
 worktree `swipe-ugc` от `origin`, коммитит по allowlist только автономный HTML и
-его public meta, пушит и ждёт URL Render. Source patch остаётся локальным;
+реальный gameplay cover PNG вместе с public meta, пушит и ждёт оба URL Render.
+Source patch остаётся локальным;
 `playables` в publish-коммит попасть не может. После push overlay заменяется в
 острове на абсолютный hosted URL и только тогда синхронизируется с backend.
 
@@ -158,7 +162,7 @@ worktree `swipe-ugc` от `origin`, коммитит по allowlist только
 | Режим | До показа кандидата | Перед Build/Publish |
 |---|---|---|
 | Safe | recipe/schema unit tests, hash-locked preview boot | полный bake autoplay WIN |
-| Guided | backend schema + prompt adherence + preview boot | полный bake autoplay WIN |
+| Guided | backend schema + prompt adherence + preview boot | network-deny CSP + полный bake autoplay WIN |
 | Wild local | path/capability scan, new-error `tsc`, build, CSP/network + lifecycle/manual/idle conformance; autoplay WIN мягкий | повторный sandbox autoplay WIN жёсткий |
 
 Локальная команда `npm run verify` в `swipe-ugc` запускает syntax lint, unit
@@ -228,18 +232,21 @@ tests рецепта/hardening, hash generator-base и Chromium preview autoplay
    patches через текущий gate с отчётом совместимости.
 3. **TTL local lab.** Чистить старые `.local-experiments`/`u/local-experiments`,
    сохраняя ancestors живых lineage.
-4. `checkout -B` в `start-bake-runtime.sh` при рестарте молча отбрасывает
+4. **Renderer-aware conformance.** Canvas screenshot/rAF probes корректны для
+   текущего sort baseline; до добавления DOM/WebGL шаблона завести его собственные
+   visual/activity probes вместо требования `canvas`.
+5. `checkout -B` в `start-bake-runtime.sh` при рестарте молча отбрасывает
    незапушенный коммит (безопасно — URL не выдан, но артефакт исчезает);
    логировать факт отбрасывания.
-5. **Закрытый CDN для UGC** — см. «Хостинг и приватность» выше.
-6. **Диплинк `startapp=island`** в main.ts + `requestWriteAccess()` при первой
+6. **Закрытый CDN для UGC** — см. «Хостинг и приватность» выше.
+7. **Диплинк `startapp=island`** в main.ts + `requestWriteAccess()` при первой
    генерации (право бота писать игроку).
-7. Относительный hosted-URL из dev (`ugc/...`) не переключается на
+8. Относительный hosted-URL из dev (`ugc/...`) не переключается на
    `UGC_BASE_URL` задним числом — мигрировать или хранить `rel` вместо URL.
-8. **Level-series jobs.** Очередь и provider adapters уже общие, но отдельные
+9. **Level-series jobs.** Очередь и provider adapters уже общие, но отдельные
    baseline/schema/gate для генерации уровней pins/merge ещё не заведены.
-9. **Рецепты для merge/pins** — арт в атласах, не в константах; это шаг к
+10. **Рецепты для merge/pins** — арт в атласах, не в константах; это шаг к
     настоящим арт-пакам (image-gen: фон + спрайт-лист).
-10. **Разница Safe/Guided.** Следующий слой — externalized image-gen art packs,
+11. **Разница Safe/Guided.** Следующий слой — externalized image-gen art packs,
     иначе средний tier всё ещё в основном продаёт палитру + enum-комбинацию.
-11. После стабилизации распилить `island.ts` на map/create/experiment/api.
+12. После стабилизации распилить `island.ts` на map/create/experiment/api.

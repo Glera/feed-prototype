@@ -64,6 +64,7 @@ interface ExperimentResult {
   feedback: string | null;
   attempts: number;
   url: string;
+  coverUrl?: string;
   agentSummary: string;
   autoplayPassed?: boolean;
   gateError?: string | null;
@@ -75,6 +76,12 @@ interface GeneratorLiveness {
   checkedAt?: string;
   lastSignalAt?: string;
   sourceEdited?: boolean;
+}
+interface ExperimentMessage {
+  role: 'player' | 'agent' | 'system';
+  text: string;
+  at: string;
+  experimentId?: string;
 }
 interface ExperimentJob {
   id: string;
@@ -93,6 +100,7 @@ interface ExperimentPublishResult {
   rel: string;
   meta: string;
   url: string;
+  coverUrl?: string;
   commit: string;
   ready: boolean;
   dryRun: boolean;
@@ -125,6 +133,8 @@ interface CreationDraft {
   concept?: ExperimentConcept;
   experiment?: ExperimentResult;
   experimentJobId?: string;
+  messages?: ExperimentMessage[];
+  sourceLocalSlot?: number;
   candidates?: CreationCandidate[];
 }
 type CandidateState = 'waiting' | 'generating' | 'ready' | 'failed';
@@ -156,10 +166,22 @@ interface ExperimentBundleSnapshot {
   safePack: Pack;
   guidedPack?: Pack;
   guidedError?: string;
+  messages?: ExperimentMessage[];
+}
+interface LocalExperimentThread {
+  placedExperimentId: string;
+  provider: ExperimentProvider;
+  prompt: string;
+  concept: ExperimentConcept;
+  experiment: ExperimentResult;
+  experimentJobId?: string;
+  messages: ExperimentMessage[];
+  updatedAt: string;
 }
 interface LocalExperimentState {
   buildings: Building[];
   packs: Record<string, Pack>;
+  threads: Record<string, LocalExperimentThread>;
 }
 
 const PACKS: Pack[] = [
@@ -282,6 +304,101 @@ function localExperimentId(building: Building): string | null {
   const match = building.url?.match(/\/([^/?]+)\.html(?:\?|$)/);
   return match && /^[a-z0-9-]{8,80}$/.test(match[1]) ? match[1] : null;
 }
+function experimentArtifactId(building: Building): string | null {
+  const match = building.url?.match(/\/u\/local-experiments\/([a-z0-9-]{8,80})\.html(?:[?#]|$)/);
+  return match?.[1] ?? null;
+}
+function hostedExperimentArtifactId(building: Building): string | null {
+  const match = building.url?.match(/\/u\/[^/]+\/([a-z0-9-]{8,80})\.html(?:[?#]|$)/);
+  return match?.[1] ?? null;
+}
+function experimentCoverUrl(result: ExperimentResult): string {
+  return result.coverUrl || result.url.replace(/\.html(?=([?#]|$))/, '.cover.png');
+}
+function buildingExperimentCoverUrl(building: Building, experimentId: string | null): string | null {
+  return experimentId && building.url
+    ? building.url.replace(/\.html(?=([?#]|$))/, '.cover.png')
+    : null;
+}
+function restoreExperimentConcept(value: unknown): ExperimentConcept | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Partial<ExperimentConcept>;
+  const title = String(raw.title || '').trim().slice(0, 60);
+  const mechanic = String(raw.mechanic || '').trim().slice(0, 500);
+  if (!title || !mechanic) return null;
+  return {
+    title,
+    mechanic,
+    feeling: String(raw.feeling || '').trim().slice(0, 240),
+    pitch: String(raw.pitch || '').trim().slice(0, 500),
+    risk: raw.risk === 'low' || raw.risk === 'medium' ? raw.risk : 'high',
+  };
+}
+function restoreExperimentResult(value: unknown): ExperimentResult | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Partial<ExperimentResult>;
+  const id = String(raw.id || '').trim();
+  const url = String(raw.url || '').trim();
+  const rawCoverUrl = String(raw.coverUrl || '').trim();
+  const attempts = Number(raw.attempts || 1);
+  if (!/^[a-z0-9-]{8,80}$/.test(id)
+    || !new RegExp(`^/ugc/u/local-experiments/${id}\\.html(?:[?#]|$)`).test(url)) return null;
+  return {
+    id,
+    parentId: typeof raw.parentId === 'string' ? raw.parentId.slice(0, 80) : null,
+    title: String(raw.title || 'Creative experiment').trim().slice(0, 60),
+    pitch: String(raw.pitch || '').trim().slice(0, 500),
+    mechanic: String(raw.mechanic || '').trim().slice(0, 500),
+    feeling: String(raw.feeling || '').trim().slice(0, 240),
+    prompt: String(raw.prompt || '').trim().slice(0, 500),
+    feedback: typeof raw.feedback === 'string' ? raw.feedback.trim().slice(0, 500) : null,
+    attempts: Number.isFinite(attempts) ? Math.max(1, Math.min(3, attempts)) : 1,
+    url,
+    coverUrl: new RegExp(`^/ugc/u/local-experiments/${id}\\.cover\\.png(?:[?#]|$)`).test(rawCoverUrl)
+      ? rawCoverUrl
+      : `/ugc/u/local-experiments/${id}.cover.png`,
+    agentSummary: String(raw.agentSummary || '').trim().slice(0, 1000),
+    ...(typeof raw.autoplayPassed === 'boolean' ? { autoplayPassed: raw.autoplayPassed } : {}),
+    gateError: typeof raw.gateError === 'string' ? raw.gateError.trim().slice(0, 1000) : null,
+  };
+}
+function restoreExperimentMessages(value: unknown): ExperimentMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ExperimentMessage[] => {
+    if (!entry || typeof entry !== 'object') return [];
+    const raw = entry as Partial<ExperimentMessage>;
+    const role = raw.role === 'player' || raw.role === 'system' ? raw.role : 'agent';
+    const text = String(raw.text || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+    if (!text) return [];
+    const at = typeof raw.at === 'string' && Number.isFinite(Date.parse(raw.at)) ? raw.at : new Date().toISOString();
+    const experimentId = typeof raw.experimentId === 'string' && /^[a-z0-9-]{8,80}$/.test(raw.experimentId)
+      ? raw.experimentId
+      : undefined;
+    return [{ role, text, at, ...(experimentId ? { experimentId } : {}) }];
+  }).slice(-24);
+}
+function restoreLocalExperimentThread(value: unknown): LocalExperimentThread | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Partial<LocalExperimentThread>;
+  const concept = restoreExperimentConcept(raw.concept);
+  const experiment = restoreExperimentResult(raw.experiment);
+  if (!concept || !experiment) return null;
+  const provider: ExperimentProvider = raw.provider === 'claude' || raw.provider === 'codex' ? raw.provider : 'auto';
+  return {
+    placedExperimentId: typeof raw.placedExperimentId === 'string' && /^[a-z0-9-]{8,80}$/.test(raw.placedExperimentId)
+      ? raw.placedExperimentId
+      : experiment.id,
+    provider,
+    prompt: String(raw.prompt || experiment.prompt || '').trim().slice(0, 500),
+    concept,
+    experiment,
+    experimentJobId: typeof raw.experimentJobId === 'string' ? raw.experimentJobId.slice(0, 80) : undefined,
+    messages: restoreExperimentMessages(raw.messages),
+    updatedAt: typeof raw.updatedAt === 'string' && Number.isFinite(Date.parse(raw.updatedAt))
+      ? raw.updatedAt
+      : new Date().toISOString(),
+  };
+}
 function localExperimentStorageKey(): string {
   const userId = (window as unknown as {
     Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
@@ -289,20 +406,29 @@ function localExperimentStorageKey(): string {
   return `island-local-experiments-v1${Number.isSafeInteger(userId) ? `:${userId}` : ''}`;
 }
 function loadLocalExperiments(): LocalExperimentState {
-  if (!IS_DEV) return { buildings: [], packs: {} };
+  if (!IS_DEV) return { buildings: [], packs: {}, threads: {} };
   try {
     const raw = localStorage.getItem(localExperimentStorageKey());
-    if (!raw) return { buildings: [], packs: {} };
+    if (!raw) return { buildings: [], packs: {}, threads: {} };
     const parsed = JSON.parse(raw) as Partial<LocalExperimentState>;
+    const threads: Record<string, LocalExperimentThread> = {};
+    if (parsed.threads && typeof parsed.threads === 'object') {
+      for (const [slot, candidate] of Object.entries(parsed.threads)) {
+        if (!/^\d$/.test(slot) || Number(slot) >= SLOTS.length) continue;
+        const thread = restoreLocalExperimentThread(candidate);
+        if (thread) threads[slot] = thread;
+      }
+    }
     return {
       buildings: Array.isArray(parsed.buildings)
         ? parsed.buildings.filter((building) => building && isLocalExperiment(building)
           && Number.isInteger(building.slot) && building.slot >= 0 && building.slot < SLOTS.length).slice(0, SLOTS.length)
         : [],
       packs: parsed.packs && typeof parsed.packs === 'object' ? parsed.packs : {},
+      threads,
     };
   } catch {
-    return { buildings: [], packs: {} };
+    return { buildings: [], packs: {}, threads: {} };
   }
 }
 function saveLocalExperiments(state: LocalExperimentState): void {
@@ -673,7 +799,7 @@ const CSS = `
 .isl-scrim--show{opacity:1;pointer-events:auto}
 .isl-sheet{position:absolute;left:0;right:0;bottom:0;background:#141d28;border-top:1px solid rgba(255,255,255,.1);color:#fff;
   border-radius:20px 20px 0 0;padding:14px 16px calc(var(--safe-bottom) + 18px);transform:translateY(105%);
-  transition:transform .32s cubic-bezier(.2,.9,.3,1);max-height:86%;overflow-y:auto;z-index:6}
+  transition:transform .32s cubic-bezier(.2,.9,.3,1);max-height:86%;overflow-y:auto;overflow-anchor:none;z-index:6}
 .isl-sheet--show{transform:translateY(0)}
 .isl-grab{width:38px;height:4px;border-radius:2px;background:rgba(255,255,255,.22);margin:0 auto 12px}
 .isl-sheet h3{margin:0 0 3px;font-size:16px;font-weight:800}
@@ -711,7 +837,8 @@ const CSS = `
 .isl-concepts{display:grid;gap:7px;margin:10px 0}.isl-concept{width:100%;text-align:left;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:10px 11px;background:rgba(255,255,255,.045);color:#fff;font:inherit}
 .isl-concept:active{transform:scale(.992)}.isl-concept__head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;font-weight:800}.isl-concept__risk{font-size:9px;text-transform:uppercase;color:#F2B33D}
 .isl-concept__feeling{font-size:11px;color:#8FD8C2;margin-top:4px}.isl-concept__pitch{font-size:11.5px;line-height:1.38;color:rgba(255,255,255,.66);margin-top:5px}
-.isl-candidates{display:grid;gap:8px}.isl-candidate{width:100%;display:block;text-align:left;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:0 0 10px;overflow:hidden;background:rgba(255,255,255,.045);color:#fff}.isl-candidate--ready{border-color:rgba(143,216,194,.48)}.isl-candidate[role=button]{cursor:pointer}.isl-candidate[role=button]:focus-visible{outline:2px solid #8FD8C2;outline-offset:2px}.isl-candidate__media{height:112px;overflow:hidden;background:#090d12}.isl-candidate__media svg{width:100%;height:100%;object-fit:cover}.isl-candidate__media--pending{display:flex;align-items:center;justify-content:center;gap:7px}.isl-candidate__media--pending b{width:7px;height:7px;border-radius:50%;background:#EF9F27;animation:isl-puls 1.2s ease-in-out infinite}.isl-candidate__media--pending b:nth-child(2){animation-delay:.18s}.isl-candidate__media--pending b:nth-child(3){animation-delay:.36s}.isl-candidate__head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 11px 0}.isl-candidate__head>span{display:flex;align-items:center;gap:7px}.isl-candidate__head em{font-style:normal;font-size:8px;font-weight:900;color:#8FD8C2;border:1px solid rgba(143,216,194,.35);padding:3px 5px;border-radius:4px}.isl-candidate__head b{font-size:12.5px}.isl-candidate__head>i{font-style:normal;font-size:8px;font-weight:900;color:#F2B33D;max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.isl-candidate__detail{display:block;padding:6px 11px 0;font-size:10.5px;line-height:1.35;color:rgba(255,255,255,.58)}.isl-candidate__actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:9px 11px 0}.isl-candidate__actions button{min-height:34px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(255,255,255,.07);color:#fff;font:800 11px/1 system-ui,sans-serif}.isl-candidate__actions button[data-keep]{background:#fff;color:#101720;border-color:#fff}.isl-candidate__result{color:#8FD8C2}.isl-progressmeta{display:flex;justify-content:space-between;gap:12px;margin:10px 0;font-size:11px;color:rgba(255,255,255,.62)}.isl-progressmeta b{color:#fff}.isl-progresslog{max-height:148px;overflow:auto;border-top:1px solid rgba(255,255,255,.1);padding-top:8px;margin-top:10px}.isl-progresslog div{font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:rgba(255,255,255,.56);margin-bottom:5px}.isl-progresslog b{color:#8FD8C2;font-weight:800}
+.isl-candidates{display:grid;gap:8px}.isl-candidate{width:100%;display:block;text-align:left;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:0 0 10px;overflow:hidden;background:rgba(255,255,255,.045);color:#fff}.isl-candidate--ready{border-color:rgba(143,216,194,.48)}.isl-candidate[role=button]{cursor:pointer}.isl-candidate[role=button]:focus-visible{outline:2px solid #8FD8C2;outline-offset:2px}.isl-candidate__media{position:relative;height:112px;overflow:hidden;background:#090d12}.isl-candidate__media--capture{height:168px}.isl-candidate__media svg{width:100%;height:100%;object-fit:cover}.isl-candidate__media--pending{display:flex;align-items:center;justify-content:center;gap:7px}.isl-candidate__media--pending b{width:7px;height:7px;border-radius:50%;background:#EF9F27;animation:isl-puls 1.2s ease-in-out infinite}.isl-candidate__media--pending b:nth-child(2){animation-delay:.18s}.isl-candidate__media--pending b:nth-child(3){animation-delay:.36s}.isl-candidate__media [data-real-cover],.isl-board [data-real-cover]{position:absolute;inset:0;width:100%;height:100%;display:block;object-fit:cover;background:#090d12}.isl-candidate__head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 11px 0}.isl-candidate__head>span{display:flex;align-items:center;gap:7px}.isl-candidate__head em{font-style:normal;font-size:8px;font-weight:900;color:#8FD8C2;border:1px solid rgba(143,216,194,.35);padding:3px 5px;border-radius:4px}.isl-candidate__head b{font-size:12.5px}.isl-candidate__head>i{font-style:normal;font-size:8px;font-weight:900;color:#F2B33D;max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.isl-candidate__detail{display:block;padding:6px 11px 0;font-size:10.5px;line-height:1.35;color:rgba(255,255,255,.58)}.isl-candidate__actions{display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:9px 11px 0}.isl-candidate__actions--three{grid-template-columns:repeat(3,minmax(0,1fr))}.isl-candidate__actions button{min-width:0;min-height:34px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(255,255,255,.07);color:#fff;font:800 11px/1 system-ui,sans-serif}.isl-candidate__actions button[data-keep]{background:#fff;color:#101720;border-color:#fff}.isl-candidate__result{color:#8FD8C2}.isl-progressmeta{display:flex;justify-content:space-between;gap:12px;margin:10px 0;font-size:11px;color:rgba(255,255,255,.62)}.isl-progressmeta b{color:#fff}.isl-progresslog{max-height:148px;overflow:auto;border-top:1px solid rgba(255,255,255,.1);padding-top:8px;margin-top:10px}.isl-progresslog div{font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:rgba(255,255,255,.56);margin-bottom:5px}.isl-progresslog b{color:#8FD8C2;font-weight:800}
+.isl-thread{display:flex;flex-direction:column;gap:7px;max-height:112px;overflow:auto;margin:10px 0 4px;padding:9px;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(7,9,15,.34)}.isl-msg{max-width:88%;padding:7px 9px;border-radius:8px;background:rgba(255,255,255,.08);font-size:11.5px;line-height:1.38;color:rgba(255,255,255,.78)}.isl-msg--player{align-self:flex-end;background:rgba(76,195,138,.18);color:#fff}.isl-msg--system{align-self:center;max-width:96%;background:rgba(239,159,39,.1);color:#F4C36E}.isl-msg b{display:block;margin-bottom:2px;font-size:9px;text-transform:uppercase;color:#8FD8C2}.isl-msg--player b{color:#A9E8C8}.isl-msg--system b{color:#F4C36E}
 .isl-lablog{list-style:none;margin:12px 0 6px;padding:0;display:flex;flex-direction:column;gap:7px;min-height:112px}.isl-lablog li{display:flex;gap:8px;font-size:11.5px;line-height:1.35;color:rgba(255,255,255,.55)}.isl-lablog li:last-child{color:#fff}.isl-lablog b{width:7px;height:7px;margin-top:4px;border-radius:50%;background:#EF9F27;flex:0 0 7px}.isl-lablog li.ok b{background:#4CC38A}.isl-lablog li.fail b{background:#E24B4A}
 .isl-labframe{display:block;width:100%;height:min(46vh,360px);border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#000;margin:7px 0 9px}
 .isl-in::placeholder{color:rgba(255,255,255,.35)}
@@ -726,7 +853,7 @@ const CSS = `
 .isl-swrow{display:flex;gap:8px;margin:8px 0 4px;min-height:28px}
 .isl-sw{width:26px;height:26px;border-radius:8px;opacity:0;transform:scale(.5);transition:all .35s}
 .isl-sw--in{opacity:1;transform:scale(1)}
-.isl-board{border-radius:13px;overflow:hidden;border:1px solid rgba(255,255,255,.14);margin:4px 0 9px}
+.isl-board{position:relative;border-radius:13px;overflow:hidden;border:1px solid rgba(255,255,255,.14);margin:4px 0 9px}.isl-board--capture{height:168px;background:#090d12}.isl-board--capture svg{width:100%;height:100%;object-fit:cover}
 .isl-pk{font-size:12.5px;color:rgba(255,255,255,.55)}
 .isl-pk b{color:#fff}
 .isl-play{position:absolute;inset:0;z-index:8;display:flex;flex-direction:column;background:var(--platform-bg)}
@@ -807,6 +934,19 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       .filter((building) => !guest || !isLocalExperiment(building) || building.autoplayPassed === true)
       .sort((a, b) => a.slot - b.slot);
   };
+  const editableExperimentId = (building: Building): string | null => {
+    const localId = experimentArtifactId(building);
+    if (localId) return localId;
+    const hostedId = hostedExperimentArtifactId(building);
+    return hostedId && localExperiments.threads[String(building.slot)]?.placedExperimentId === hostedId
+      ? hostedId
+      : null;
+  };
+  const bindRealCoverFallback = (): void => {
+    sheet.querySelectorAll<HTMLImageElement>('[data-real-cover]').forEach((image) => {
+      image.addEventListener('error', () => image.remove(), { once: true });
+    });
+  };
   const persistLocalExperiments = () => saveLocalExperiments(localExperiments);
   const pendingPhase = (value: string): string => {
     const phase = value.toLowerCase();
@@ -830,11 +970,106 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (!removed) return;
     localExperiments.buildings = localExperiments.buildings.filter((building) => building.slot !== slot);
     if (!localExperiments.buildings.some((building) => building.pack === removed.pack)) delete localExperiments.packs[removed.pack];
+    delete localExperiments.threads[String(slot)];
     persistLocalExperiments();
   };
   const resolvePack = (id: string): Pack => normalizePack(
     PACKS.find((x) => x.id === id) ?? localExperiments.packs[id] ?? S.aiPacks?.[id] ?? PACKS[0],
   );
+  const addExperimentMessage = (
+    req: CreationDraft,
+    role: ExperimentMessage['role'],
+    text: string,
+    experimentId?: string,
+  ): void => {
+    const clean = text.replace(/\s+/g, ' ').trim().slice(0, 1000);
+    if (!clean) return;
+    req.messages = [...(req.messages ?? []), {
+      role,
+      text: clean,
+      at: new Date().toISOString(),
+      ...(experimentId ? { experimentId } : {}),
+    }].slice(-24);
+  };
+  const recordAgentResult = (req: CreationDraft, result: ExperimentResult): void => {
+    if (req.messages?.some((message) => message.role === 'agent' && message.experimentId === result.id)) return;
+    addExperimentMessage(req, 'agent', result.agentSummary || result.pitch || `Version “${result.title}” is ready.`, result.id);
+  };
+  const persistDraftThread = (req: CreationDraft, explicitPlacedExperimentId?: string): void => {
+    if (!req.concept || !req.experiment) return;
+    const placedBuilding = localExperiments.buildings.find((building) => building.slot === req.slot);
+    const placedLocalExperimentId = placedBuilding ? localExperimentId(placedBuilding) : null;
+    localExperiments.threads[String(req.slot)] = {
+      placedExperimentId: explicitPlacedExperimentId || placedLocalExperimentId
+        || localExperiments.threads[String(req.slot)]?.placedExperimentId || req.experiment.id,
+      provider: req.provider,
+      prompt: req.prompt,
+      concept: req.concept,
+      experiment: req.experiment,
+      experimentJobId: req.experimentJobId,
+      messages: restoreExperimentMessages(req.messages),
+      updatedAt: new Date().toISOString(),
+    };
+    persistLocalExperiments();
+  };
+  const draftFromLocalThread = (building: Building, thread: LocalExperimentThread): CreationDraft => {
+    const pack = resolvePack(building.pack);
+    return {
+      slot: building.slot,
+      tpl: building.tpl,
+      mode: 'wild',
+      tier: 'expensive',
+      provider: thread.provider,
+      prompt: thread.prompt,
+      pack,
+      presetId: 'surprise',
+      rerolls: 1,
+      difficulty: pack.difficulty,
+      motion: pack.motion,
+      ai: true,
+      concept: thread.concept,
+      experiment: thread.experiment,
+      experimentJobId: thread.experimentJobId,
+      messages: [...thread.messages],
+      sourceLocalSlot: building.slot,
+    };
+  };
+  const openLocalExperimentEditor = async (building: Building): Promise<void> => {
+    const id = editableExperimentId(building);
+    if (!id) { toast('Local experiment lineage is missing'); return; }
+    let thread = localExperiments.threads[String(building.slot)];
+    if (!thread || thread.placedExperimentId !== id) {
+      try {
+        const jobs = await generatorJobs<ExperimentResult>();
+        const job = jobs.find((candidate) => candidate.type === 'experiment' && candidate.result?.id === id);
+        const concept = restoreExperimentConcept(job?.request?.concept);
+        const experiment = restoreExperimentResult(job?.result);
+        if (!job || !concept || !experiment) throw new Error('The original local job is no longer in generator history');
+        const requestedProvider = job.request?.provider;
+        thread = {
+          placedExperimentId: id,
+          provider: requestedProvider === 'claude' || requestedProvider === 'codex' ? requestedProvider : 'auto',
+          prompt: String(job.request?.prompt || experiment.prompt || '').slice(0, 500),
+          concept,
+          experiment,
+          experimentJobId: job.id,
+          messages: [],
+          updatedAt: new Date().toISOString(),
+        };
+        localExperiments.threads[String(building.slot)] = thread;
+      } catch (error) {
+        openSheet(`<h3>Lineage unavailable</h3><div class="isl-sub">${esc(errorText(error))}</div>
+          <button class="isl-btn isl-btn--ghost" type="button" data-back-building>Back to mechanic</button>`);
+        sheet.querySelector('[data-back-building]')?.addEventListener('click', () => openBuilding(building.slot, true));
+        return;
+      }
+    }
+    const req = draftFromLocalThread(building, thread);
+    recordAgentResult(req, req.experiment!);
+    cur = req;
+    persistDraftThread(req);
+    stepExperimentPreview();
+  };
 
   // Slots with a generation job in flight. Generation never auto-builds: the
   // player returns, plays the candidates, and explicitly keeps one. Wild jobs
@@ -1008,6 +1243,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     delete sheet.dataset.publishRun;
     sheet.innerHTML = '<div class="isl-grab"></div>' + html;
     sheet.classList.add('isl-sheet--show');
+    sheet.scrollTop = 0;
+    window.requestAnimationFrame(() => {
+      if (sheet.classList.contains('isl-sheet--show')) sheet.scrollTop = 0;
+    });
     scrim.classList.add('isl-scrim--show');
   };
   const closeSheet = () => {
@@ -1070,7 +1309,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       // The publish chain keeps running after the building appears — the slot
       // reads as busy (dashed rim + pulsing amber dot); rebuild/delete stay
       // blocked in the building card until it finishes.
-      const busy = Boolean(b.publishing) || pollingSlots.has(i);
+      const busy = Boolean(b.publishing) || pollingSlots.has(i) || pendingSlots.has(i);
       const letterFill = luminance(pk.ground) > 0.55 ? '#1F1E1B' : '#FFFFFF';
       s += `<g class="isl-sector${b.fresh ? ' isl-sector--new' : ''}" data-b="${i}">
         <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
@@ -1416,6 +1655,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     req.concept = candidate.concept;
     req.experiment = candidate.experiment;
     req.experimentJobId = candidate.experimentJobId;
+    if (candidate.mode === 'wild' && candidate.experiment) recordAgentResult(req, candidate.experiment);
     readyDrafts.set(req.slot, req);
     if (candidate.mode === 'wild') stepExperimentPreview();
     else stepPreview();
@@ -1561,9 +1801,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         : candidate.state === 'ready'
           ? candidate.mode === 'wild' && candidate.experiment?.autoplayPassed !== true ? 'UNVERIFIED' : 'READY'
         : candidate.state === 'failed' ? 'FAILED' : candidate.phase || 'GENERATING';
-      const media = candidate.pack
-        ? `<div class="isl-candidate__media">${board(req.tpl, candidate.pack)}</div>`
-        : '<div class="isl-candidate__media isl-candidate__media--pending"><b></b><b></b><b></b></div>';
+      const realCover = candidate.mode === 'wild' && candidate.experiment
+        ? experimentCoverUrl(candidate.experiment)
+        : '';
+      const media = realCover
+        ? `<div class="isl-candidate__media isl-candidate__media--capture">${board(req.tpl, candidate.pack ?? req.pack)}<img data-real-cover src="${esc(realCover)}" alt="Real gameplay preview" decoding="async"></div>`
+        : candidate.pack
+          ? `<div class="isl-candidate__media">${board(req.tpl, candidate.pack)}</div>`
+          : '<div class="isl-candidate__media isl-candidate__media--pending"><b></b><b></b><b></b></div>';
       const detail = candidate.state === 'failed'
         ? candidate.error || 'Generation failed'
         : candidate.mode === 'wild' && candidate.experiment
@@ -1571,8 +1816,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           : candidate.pack
             ? `${candidate.pack.difficulty} · ${candidate.pack.motion} · ${candidate.pack.conveyorPath}`
             : `${candidate.phase || 'Waiting'} · tap for live progress`;
-      const actions = candidate.state === 'ready' ? `<div class="isl-candidate__actions">
+      const actions = candidate.state === 'ready' ? `<div class="isl-candidate__actions${candidate.mode === 'wild' ? ' isl-candidate__actions--three' : ''}">
         <button type="button" data-play="${candidate.mode}">${candidate.played ? 'Play again' : 'Play'}</button>
+        ${candidate.mode === 'wild' ? '<button type="button" data-refine="wild">Refine</button>' : ''}
         <button type="button" data-keep="${candidate.mode}">Keep this</button>
       </div>` : '';
       const progressAttrs = candidate.state !== 'ready'
@@ -1591,6 +1837,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       <div class="isl-candidates" data-candidates>${cards}</div>
       <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>
       <button class="isl-btn isl-btn--ghost" type="button" data-regenerate>Generate this pack again</button>`);
+    bindRealCoverFallback();
     sheet.querySelectorAll<HTMLButtonElement>('[data-play]').forEach((button) =>
       button.addEventListener('click', () => {
         const candidate = candidateFor(req, button.dataset.play as CreationMode);
@@ -1599,6 +1846,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     sheet.querySelectorAll<HTMLButtonElement>('[data-keep]').forEach((button) =>
       button.addEventListener('click', () => {
         const candidate = candidateFor(req, button.dataset.keep as CreationMode);
+        if (candidate) chooseCandidate(req, candidate);
+      }));
+    sheet.querySelectorAll<HTMLButtonElement>('[data-refine]').forEach((button) =>
+      button.addEventListener('click', () => {
+        const candidate = candidateFor(req, button.dataset.refine as CreationMode);
         if (candidate) chooseCandidate(req, candidate);
       }));
     sheet.querySelectorAll<HTMLElement>('[data-progress-card]').forEach((card) => {
@@ -1636,6 +1888,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       safePack: safe.pack,
       guidedPack: guided?.pack,
       guidedError: guided?.error,
+      messages: restoreExperimentMessages(req.messages),
     };
   }
 
@@ -1651,6 +1904,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     req.concept = undefined;
     req.experiment = undefined;
     req.experimentJobId = undefined;
+    req.messages = undefined;
+    req.sourceLocalSlot = undefined;
     const safePack = safeParameterizedPack(req);
 
     if (req.tier === 'free') {
@@ -1746,6 +2001,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         if (!job || generatorPending(job.state)) throw new Error('Experiment reached its 24-hour deadline');
         if (job.state !== 'ready' || !job.result) throw new Error(job.error || job.message || 'Experiment failed');
         creative.experiment = job.result;
+        recordAgentResult(req, job.result);
         creative.pack = experimentPack(req.prompt, job.result);
         creative.state = 'ready';
         creative.phase = job.result.autoplayPassed === true ? 'READY' : 'UNVERIFIED';
@@ -1773,6 +2029,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     req.ai = true;
     req.experiment = result;
     req.experimentJobId = jobId;
+    recordAgentResult(req, result);
     const candidate = candidateFor(req, 'wild');
     if (candidate) {
       candidate.state = 'ready';
@@ -1785,6 +2042,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       candidate.outcome = undefined;
     }
     readyDrafts.set(req.slot, req);
+    if (req.sourceLocalSlot !== undefined) persistDraftThread(req);
     const interactive = ov.isConnected && sheet.classList.contains('isl-sheet--show') && cur === req;
     if (interactive) stepExperimentPreview();
     else if (ov.isConnected) {
@@ -1842,6 +2100,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         feedback,
         req.candidates?.length ? experimentBundle(req) : undefined,
       );
+      req.experimentJobId = jobId;
+      if (req.sourceLocalSlot !== undefined) persistDraftThread(req);
       for (let poll = 0; poll < 24 * 60 * 60; poll++) {
         if (generationBySlot.get(req.slot) !== generationId) return;
         job = await experimentStatus(jobId);
@@ -1866,6 +2126,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       refreshIsland();
       const message = errorText(error);
       console.error('[island] local experiment failed:', message);
+      if (feedback) {
+        const terminal = Boolean(job && !generatorPending(job.state));
+        addExperimentMessage(req, 'system', terminal ? `Revision stopped: ${message}` : `Revision status disconnected: ${message}`);
+        if (req.sourceLocalSlot !== undefined) persistDraftThread(req);
+      }
       if (jobId && job && !generatorPending(job.state)) void consumeGeneratorJob(jobId).catch(() => undefined);
       if (!ov.isConnected || !sheet.classList.contains('isl-sheet--show') || cur !== req) {
         if (ov.isConnected) toast(`Experiment failed · ${message}`);
@@ -1912,6 +2177,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       safePack,
       guidedPack: guidedPack ?? undefined,
       guidedError: guidedPack ? undefined : String(raw.guidedError || 'Guided API candidate was unavailable').slice(0, 240),
+      messages: restoreExperimentMessages(raw.messages),
     };
   }
 
@@ -1929,6 +2195,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       difficulty: bundle.difficulty,
       motion: bundle.motion,
       ai: false,
+      messages: [...(bundle.messages ?? [])],
       candidates: [
         { mode: 'safe', state: 'ready', pack: bundle.safePack, ai: false },
         bundle.guidedPack
@@ -2009,6 +2276,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           req.concept = concept;
           req.experiment = result;
           req.experimentJobId = jobId;
+          recordAgentResult(req, result);
           finish();
           if (ov.isConnected) toast('Creative trio recovered · tap the slot to compare');
         };
@@ -2080,7 +2348,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         void consumeGeneratorJob(job.id).catch(() => undefined);
         continue;
       }
-      const req: CreationDraft = {
+      const placedBuilding = visibleBuildings().find((building) => building.slot === slot);
+      const placedThread = localExperiments.threads[String(slot)];
+      const resumesPlacedRevision = Boolean(job.type === 'experiment' && placedBuilding && placedThread
+        && editableExperimentId(placedBuilding) === placedThread.placedExperimentId
+        && String(request.parentId || '') === placedThread.experiment.id);
+      const req: CreationDraft = resumesPlacedRevision
+        ? draftFromLocalThread(placedBuilding!, placedThread!)
+        : {
         slot,
         tpl: 'sort',
         mode: 'wild',
@@ -2095,6 +2370,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         ai: true,
         concept: job.type === 'experiment' ? concept : undefined,
       };
+      if (resumesPlacedRevision) {
+        req.concept = concept ?? req.concept;
+        req.experimentJobId = job.id;
+      }
       const installConcepts = (current: LocalGeneratorJob<ExperimentResult>) => {
         const concepts = (current.result as unknown as { concepts?: ExperimentConcept[] } | undefined)?.concepts;
         if (!Array.isArray(concepts) || concepts.length !== 3) return false;
@@ -2183,7 +2462,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       <div class="isl-sub">${esc(input.name)} · standalone artifact only</div>
       <ul class="isl-lablog" data-publish-log><li><b></b><span>Queueing sandbox recheck</span></li></ul>
       <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>
-      <div class="isl-labnote" style="margin-top:8px">The temporary source patch stays local. The commit allowlist contains only the self-contained HTML and its public metadata.</div>`);
+      <div class="isl-labnote" style="margin-top:8px">The temporary source patch stays local. The commit allowlist contains only the self-contained HTML, its real gameplay cover, and public metadata.</div>`);
     sheet.dataset.publishRun = publishUiId;
     sheet.querySelector('[data-dismiss]')?.addEventListener('click', closeSheet);
     const publishUiOpen = () => sheet.dataset.publishRun === publishUiId && sheet.classList.contains('isl-sheet--show');
@@ -2226,6 +2505,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       }
 
       const stats = source ?? { plays: 0, likes: 0, liked: false };
+      const preservedThread = localExperiments.threads[String(input.slot)];
       const pack = normalizePack(input.pack);
       removeLocalExperiment(input.slot);
       readyDrafts.delete(input.slot);
@@ -2244,6 +2524,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         publishing: false,
         url: job.result.url,
       });
+      if (input.draft) {
+        persistDraftThread(input.draft, input.id);
+      } else if (preservedThread) {
+        localExperiments.threads[String(input.slot)] = {
+          ...preservedThread,
+          placedExperimentId: input.id,
+          updatedAt: new Date().toISOString(),
+        };
+        persistLocalExperiments();
+      }
       if (input.draft?.experimentJobId) void consumeGeneratorJob(input.draft.experimentJobId).catch(() => undefined);
       if (cur === input.draft) cur = null;
       if (publishUiOpen()) closeSheet();
@@ -2272,23 +2562,32 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (!cur || cur.mode !== 'wild' || !cur.experiment || !cur.concept) return;
     const req = cur;
     const result = cur.experiment;
+    recordAgentResult(req, result);
     const verified = result.autoplayPassed === true;
     const publish = verified ? '<button class="isl-btn isl-btn--pri" type="button" data-publish-lab>Publish tested artifact</button>' : '';
     const gate = verified ? '' : `<div class="isl-labnote"><b>Win not proven</b><br>${esc(result.gateError || 'Autoplay could not complete this mechanic. Play it manually or tune it before publishing.')}</div>`;
-    const back = req.candidates?.length
-      ? '<button class="isl-btn isl-btn--ghost" type="button" data-back-candidates>Back to all candidates</button>'
-      : '<button class="isl-btn isl-btn--ghost" type="button" data-concepts>Try another concept</button>';
+    const back = req.sourceLocalSlot !== undefined
+      ? '<button class="isl-btn isl-btn--ghost" type="button" data-back-building>Back to mechanic</button>'
+      : req.candidates?.length
+        ? '<button class="isl-btn isl-btn--ghost" type="button" data-back-candidates>Back to all candidates</button>'
+        : '<button class="isl-btn isl-btn--ghost" type="button" data-concepts>Try another concept</button>';
+    const conversation = (req.messages ?? []).slice(-10).map((message) => {
+      const who = message.role === 'player' ? 'You' : message.role === 'system' ? 'Worker' : 'Agent';
+      return `<div class="isl-msg isl-msg--${message.role}"><b>${who}</b>${esc(message.text)}</div>`;
+    }).join('');
     const playUrl = `${result.url}${result.url.includes('?') ? '&' : '?'}auto=0`;
     openSheet(`<h3>${esc(result.title)}</h3><div class="isl-sub">Local experiment · ${verified ? `autoplay won on attempt ${result.attempts}` : 'runtime passed, passability unverified'}</div>
-      <iframe class="isl-labframe" sandbox="allow-scripts" src="${esc(playUrl)}" title="${esc(result.title)}"></iframe>
       <div class="isl-concept__feeling">${esc(result.feeling)}</div>
       <div class="isl-pk" style="margin-top:5px">${esc(result.pitch)}</div>
-      ${gate}${publish}
-      <button class="isl-btn isl-btn--ghost" type="button" data-place>Keep as a local overlay</button>
-      <div class="isl-choice"><div class="isl-choice__label">What should the agent change?</div>
-        <textarea class="isl-in" data-feedback maxlength="500" rows="3" placeholder="e.g. slower, darker, keep the echo visible longer"></textarea>
+      ${gate}
+      <div class="isl-choice"><div class="isl-choice__label">Refine with agent</div>
+        <div class="isl-thread">${conversation}</div>
+        <textarea class="isl-in" data-feedback maxlength="500" rows="2" placeholder="e.g. slower, darker, keep the echo visible longer"></textarea>
       </div>
-      <button class="isl-btn isl-btn--ghost" type="button" data-tune>Tune this result</button>
+      <button class="isl-btn isl-btn--pri" type="button" data-tune>Send revision</button>
+      <iframe class="isl-labframe" sandbox="allow-scripts" src="${esc(playUrl)}" title="${esc(result.title)}"></iframe>
+      ${publish}
+      <button class="isl-btn isl-btn--ghost" type="button" data-place>Use this version on the island</button>
       ${back}
       <div class="isl-labnote">This artifact and its lineage live only on this dev machine. Placing it creates a local overlay; it never replaces or syncs the hosted building in that slot.</div>`);
     sheet.querySelector('[data-publish-lab]')?.addEventListener('click', () => {
@@ -2314,6 +2613,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         plays: 0, likes: 0, liked: false, fresh: true, publishing: false, url: req.experiment.url,
         autoplayPassed: req.experiment.autoplayPassed === true,
       });
+      persistDraftThread(req);
       if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
       cur = null;
       closeSheet();
@@ -2321,19 +2621,26 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       refreshIsland(false);
       toast('Local experiment placed · not synced or published');
     });
-    sheet.querySelector('[data-tune]')?.addEventListener('click', () => {
+    const feedbackInput = sheet.querySelector('[data-feedback]') as HTMLTextAreaElement | null;
+    const sendRevision = () => {
       if (cur !== req || !req.experiment) return;
-      const input = sheet.querySelector('[data-feedback]') as HTMLTextAreaElement;
-      const nextFeedback = input.value.trim();
+      const nextFeedback = feedbackInput?.value.trim() || '';
       if (!nextFeedback) { toast('Describe what should change first'); return; }
+      addExperimentMessage(req, 'player', nextFeedback, req.experiment.id);
+      if (req.sourceLocalSlot !== undefined) persistDraftThread(req);
       if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
       void runExperiment(req.experiment.id, nextFeedback);
+    };
+    sheet.querySelector('[data-tune]')?.addEventListener('click', sendRevision);
+    feedbackInput?.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); sendRevision(); }
     });
     sheet.querySelector('[data-concepts]')?.addEventListener('click', () => {
       if (req.experimentJobId) void consumeGeneratorJob(req.experimentJobId).catch(() => undefined);
       stepExperimentChoice();
     });
     sheet.querySelector('[data-back-candidates]')?.addEventListener('click', () => stepCandidates(req));
+    sheet.querySelector('[data-back-building]')?.addEventListener('click', () => openBuilding(req.slot, true));
   }
 
   async function reviseGuided(req: CreationDraft, feedback: string): Promise<void> {
@@ -2436,16 +2743,24 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
 
   // ── building card + play (real mechanic in an iframe) ──────────────────────
 
-  function openBuilding(slot: number): void {
+  function openBuilding(slot: number, ignoreReadyDraft = false): void {
     const b = visibleBuildings().find((x) => x.slot === slot);
     if (!b) return;
     if (guest) { playSeries(b); return; }
+    const readyRevision = readyDrafts.get(slot);
+    if (readyRevision && !ignoreReadyDraft) { openCreate(slot); return; }
     const pk = resolvePack(b.pack);
     // The slot is "busy" for the whole publish chain — block actions that would
     // start a second job (rebuild) or orphan the running one (delete).
-    const busy = Boolean(b.publishing) || pollingSlots.has(slot);
+    const busy = Boolean(b.publishing) || pollingSlots.has(slot) || pendingSlots.has(slot);
     // Status badge mirrors the map dots (same colors) — one visual language.
     const localLab = isLocalExperiment(b);
+    const editableId = editableExperimentId(b);
+    const editableExperiment = IS_DEV && Boolean(editableId);
+    const realCover = buildingExperimentCoverUrl(b, editableId);
+    const buildingPreview = realCover
+      ? `<div class="isl-board isl-board--capture">${board(b.tpl, pk)}<img data-real-cover src="${esc(realCover)}" alt="Real gameplay preview" decoding="async"></div>`
+      : `<div class="isl-board">${board(b.tpl, pk)}</div>`;
     const st = localLab
       ? { c: '#58A6FF', t: 'local lab' }
       : hostedUrl(b)
@@ -2459,28 +2774,42 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const retry = !hostedUrl(b) && !busy
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-publish>Retry publish</button>'
       : '';
-    const publishLab = localLab
-      ? '<button class="isl-btn isl-btn--pri" type="button" data-publish-lab>Publish tested artifact</button>'
+    const publishLab = localLab && b.autoplayPassed === true
+      ? `<button class="isl-btn isl-btn--pri" type="button" data-publish-lab${busy ? ' disabled' : ''}>Publish tested artifact</button>`
+      : '';
+    const refineLab = editableExperiment
+      ? `<button class="isl-btn isl-btn--ghost" type="button" data-refine-lab${busy ? ' disabled' : ''}>Refine with agent</button>`
+      : '';
+    const revisionProgress = editableExperiment && pendingSlots.has(slot)
+      ? '<button class="isl-btn isl-btn--ghost" type="button" data-revision-progress>View revision progress</button>'
       : '';
     openSheet(`<h3>${esc(b.name)}</h3>
       <div class="isl-sub">${TPL[b.tpl].label} · Lv ${levelOf(b)} · ${b.plays} plays · ♥ ${b.likes} ${badge}</div>
-      <div class="isl-board">${board(b.tpl, pk)}</div>
+      ${buildingPreview}
       <button class="isl-btn isl-btn--pri" type="button" data-play>▶ Play the series</button>
+      ${revisionProgress}
+      ${refineLab}
       ${publishLab}
       ${retry}
       <button class="isl-btn isl-btn--ghost" type="button" data-rebuild${busy ? ' disabled' : ''}>Rebuild slot · replace this mechanic</button>
       <button class="isl-btn isl-btn--ghost" type="button" data-delete${busy ? ' disabled' : ''}>Delete mechanic</button>
       <div class="isl-pk" style="margin-top:10px">${busy
-        ? 'Publishing in progress 🏗️ — rebuild and delete unlock when it finishes'
+        ? 'Work in progress 🏗️ — rebuild and delete unlock when it finishes'
         : 'Guests like it after they beat it — switch to guest mode to feel it'}</div>`);
+    bindRealCoverFallback();
     (sheet.querySelector('[data-play]') as HTMLElement).addEventListener('click', () => { closeSheet(); playSeries(b); });
+    sheet.querySelector('[data-revision-progress]')?.addEventListener('click', () => stepPendingSlot(slot));
+    sheet.querySelector('[data-refine-lab]')?.addEventListener('click', () => {
+      if (pendingSlots.has(slot)) { stepPendingSlot(slot); return; }
+      void openLocalExperimentEditor(b);
+    });
     sheet.querySelector('[data-publish]')?.addEventListener('click', () => {
       closeSheet();
       toast('Publishing…');
       void bakeAndHost(slot, b.prompt ?? '');
     });
     sheet.querySelector('[data-publish-lab]')?.addEventListener('click', () => {
-      const experimentId = localExperimentId(b);
+      const experimentId = editableExperimentId(b);
       if (!experimentId) { toast('Local experiment source is missing'); return; }
       void publishExperiment({
         id: experimentId,
@@ -2506,6 +2835,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         refreshIsland(false);
       } else {
         S.buildings = S.buildings.filter((x) => x.slot !== slot);
+        if (editableExperiment) {
+          delete localExperiments.threads[String(slot)];
+          persistLocalExperiments();
+        }
         refreshIsland(true);
       }
       toast('Mechanic removed from the island');

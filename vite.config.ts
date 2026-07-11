@@ -279,7 +279,16 @@ function islandThemeApi(): Plugin {
         const rel = decodeURIComponent((req.url || '/').split('?')[0]);
         const file = path.join(ugcRoot, rel);
         if (!file.startsWith(ugcRoot) || !fs.existsSync(file) || !fs.statSync(file).isFile()) { next(); return; }
-        res.setHeader('content-type', file.endsWith('.html') ? 'text/html; charset=utf-8' : 'application/javascript; charset=utf-8');
+        const contentType: Record<string, string> = {
+          '.html': 'text/html; charset=utf-8',
+          '.js': 'application/javascript; charset=utf-8',
+          '.json': 'application/json; charset=utf-8',
+          '.png': 'image/png',
+          '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg',
+          '.webp': 'image/webp',
+        };
+        res.setHeader('content-type', contentType[path.extname(file).toLowerCase()] || 'application/octet-stream');
         res.end(fs.readFileSync(file));
       });
 
