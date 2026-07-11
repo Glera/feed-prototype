@@ -989,6 +989,9 @@ export class Feed {
     const previewReady = !active && this.frameRevealed.has(idx);
     const showPreview = !active && idx >= 0 && !!id && this.seriesEnabled(idx)
       && previewReady
+      // Never on the level-up screen — wait for the next mechanic to actually arrive
+      // (settleSlide clears the level-up page → markUnitShown re-renders this then).
+      && this.levelUpPageState === 'idle' && !this.heldLevelUpOverlay
       && !this.manualRuns.has(idx) && this.collectingRewardIndex === null && !this.seriesWinShown.has(idx);
     if (!active && !showPreview) { this.removeSeriesRow(true); return; }
     if (!this.seriesRowEl) {
@@ -2253,6 +2256,7 @@ export class Feed {
     this.attachSwipeSurface(page, () => this.levelUpPageState === 'settled');
     this.spawnConfetti(page);
     this.renderLevelUpPage(false);
+    this.renderSeriesRow();   // level-up is up now → drop any preview panel behind it
   }
 
   private animateLevelUpPageIn() {
@@ -5386,6 +5390,7 @@ export class Feed {
     this.heldLevelUpOverlay = overlay;
     this.heldLevelUpIndex = i;
     this.gutters[i]?.classList.add('gutter--levelup-prompt');
+    this.renderSeriesRow();   // level-up overlay is up → drop any preview panel behind it
   }
 
   private releaseHeldLevelUp(animate: boolean = true) {
