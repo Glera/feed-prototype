@@ -1047,19 +1047,21 @@ export class Feed {
     if (!row || slotIdx < 0) return;
     const slot = row.querySelectorAll<HTMLElement>('.series-slot')[slotIdx];
     if (!slot) return;
-    if (slot.animate) {
-      // Stamp-in: the filled circle appears LARGE + bright, then smoothly eases down
-      // to its resting size (longer, gentle ease-out — no jerky bounce).
-      slot.animate([
-        { transform: 'scale(3.05)', filter: 'brightness(2.45)', boxShadow: '0 0 0 0 rgba(255, 229, 92, 0)', offset: 0 },
-        { transform: 'scale(1.28)', filter: 'brightness(1.45)', boxShadow: '0 0 0 9px rgba(255, 229, 92, 0.36)', offset: 0.38 },
-        { transform: 'scale(1.08)', filter: 'brightness(1.12)', boxShadow: '0 0 0 14px rgba(255, 229, 92, 0)', offset: 0.78 },
-        { transform: 'scale(1)', filter: 'brightness(1)', boxShadow: '0 0 0 0 rgba(255, 229, 92, 0)', offset: 1 },
-      ], { duration: 840, easing: 'cubic-bezier(0.18,0.88,0.22,1)' });
-    }
     const r = slot.getBoundingClientRect();
     const vp = this.viewport.getBoundingClientRect();
-    this.burstRewardCollectParticles(r.left - vp.left + r.width / 2, r.top - vp.top + r.height / 2, Math.max(12, r.width / 2));
+    const cx = r.left - vp.left + r.width / 2, cy = r.top - vp.top + r.height / 2;
+    const DUR = 560;
+    if (slot.animate) {
+      // The green circle ARRIVES from large + transparent and eases down into its
+      // slot (a single ease-out — no jerky bounce), settling with a soft tap.
+      slot.animate([
+        { transform: 'scale(2.9)', opacity: 0, filter: 'brightness(1.9)', offset: 0 },
+        { transform: 'scale(1.14)', opacity: 1, filter: 'brightness(1.3)', offset: 0.62 },
+        { transform: 'scale(1)', opacity: 1, filter: 'brightness(1)', offset: 1 },
+      ], { duration: DUR, easing: 'cubic-bezier(0.16,0.86,0.24,1)', fill: 'backwards' });
+    }
+    // Particles splash the instant the circle lands in its place (not at launch).
+    window.setTimeout(() => this.burstRewardCollectParticles(cx, cy, Math.max(12, r.width / 2)), Math.round(DUR * 0.6));
   }
 
   private removeSeriesRow(immediate = false): void {
@@ -1119,31 +1121,35 @@ export class Feed {
         const dx = (fromRect.left + fromRect.width / 2) - (to.left + to.width / 2);
         const dy = (fromRect.top + fromRect.height / 2) - (to.top + to.height / 2);
         const s = Math.max(0.12, fromRect.width / to.width);   // start at the slot icon's size
-        chestBtn.style.transformOrigin = '50% 100%';
-        const hop = Math.max(46, Math.min(90, Math.abs(dy) * 0.32));
-        const liftX = dx * 0.9;
-        const liftY = dy - hop * 0.58;
-        const apexX = dx * 0.68;
-        const apexY = dy * 0.58 - hop;
-        const glideX = dx * 0.35;
-        const glideY = dy * 0.34 - hop * 0.62;
-        const dropX = dx * 0.1;
-        const dropY = dy * 0.1 - hop * 0.16;
-        const grow1 = Math.max(0.36, Math.min(1.08, s * 1.28));
-        const grow2 = Math.max(0.58, Math.min(1.16, (s + 1) * 0.54));
-        // Bottom-pinned takeoff: squash on the panel, stretch upward, drift in X
-        // along a soft arc, then accelerate down into the centre and squash on impact.
+        // Decoupled jump: POSITION on the button, SQUASH/STRETCH on the img (whose
+        // transform-origin is the bottom, so squashes keep the gift's base planted).
+        // Two clean lines → velocity only jumps at push-off + impact, never mid-flight.
+        const img = chestBtn.querySelector<HTMLElement>('.chest-ov__chest__img');
+        const JUMP = Math.max(96, Math.min(180, Math.abs(dy) * 0.42));
+        const DUR = 940;
+        const SQ = 0.28;               // squash depth
+        const g1 = s + (1 - s) * 0.45; // partway grown at the launch stretch
+        // POSITION — hold on the panel through the push-off, LAUNCH (decelerate to the
+        // apex), then FALL (accelerate) into the centre and stop on impact.
         chestBtn.animate([
-          { transform: `translate(${dx}px, ${dy}px) scale(${s}, ${s})`, opacity: 1, offset: 0, easing: 'cubic-bezier(0.2,0.72,0.24,1)' },
-          { transform: `translate(${dx}px, ${dy}px) scale(${s * 1.36}, ${s * 0.66})`, opacity: 1, offset: 0.12, easing: 'cubic-bezier(0.18,0.7,0.25,1)' },
-          { transform: `translate(${liftX}px, ${liftY}px) scale(${grow1 * 0.86}, ${grow1 * 1.18})`, opacity: 1, offset: 0.28, easing: 'cubic-bezier(0.15,0.82,0.24,1)' },
-          { transform: `translate(${apexX}px, ${apexY}px) scale(${grow2}, ${grow2})`, opacity: 1, offset: 0.52, easing: 'cubic-bezier(0.33,0,0.66,0.4)' },
-          { transform: `translate(${glideX}px, ${glideY}px) scale(${Math.max(0.78, grow2 * 0.92)}, ${Math.max(0.82, grow2 * 0.94)})`, opacity: 1, offset: 0.7, easing: 'cubic-bezier(0.45,0,0.82,0.48)' },
-          { transform: `translate(${dropX}px, ${dropY}px) scale(1.04,1.08)`, opacity: 1, offset: 0.86, easing: 'cubic-bezier(0.62,0,0.92,0.38)' },
-          { transform: 'translate(0,0) scale(1.24,0.72)', opacity: 1, offset: 0.93, easing: 'cubic-bezier(0.12,0.86,0.25,1)' },
-          { transform: 'translate(0,-3px) scale(0.96,1.07)', opacity: 1, offset: 0.98, easing: 'cubic-bezier(0.2,0.78,0.3,1)' },
-          { transform: 'translate(0,0) scale(1,1)', opacity: 1, offset: 1 },
-        ], { duration: 980, fill: 'backwards' });
+          { transform: `translate(${dx}px, ${dy}px)`, offset: 0, easing: 'linear' },
+          { transform: `translate(${dx}px, ${dy}px)`, offset: 0.15, easing: 'cubic-bezier(0.10,0.68,0.30,1)' },
+          { transform: `translate(${dx * 0.32}px, ${-JUMP}px)`, offset: 0.54, easing: 'cubic-bezier(0.52,0.02,0.9,0.38)' },
+          { transform: 'translate(0px, 0px)', offset: 0.88, easing: 'linear' },
+          { transform: 'translate(0px, 0px)', offset: 1 },
+        ], { duration: DUR, fill: 'backwards' });
+        // SQUASH — grow s→1 with a push-off squash (short+wide), a launch stretch
+        // (tall+thin), then an impact squash on landing → settle to 1:1.
+        img?.animate([
+          { transform: `scale(${s}, ${s})`, offset: 0, easing: 'cubic-bezier(0.3,0,0.5,1)' },
+          { transform: `scale(${s * (1 + SQ * 0.5)}, ${s * (1 - SQ)})`, offset: 0.13, easing: 'cubic-bezier(0.2,0.7,0.3,1)' },
+          { transform: `scale(${g1 * (1 - SQ * 0.4)}, ${g1 * (1 + SQ * 0.6)})`, offset: 0.27, easing: 'cubic-bezier(0.35,0,0.6,1)' },
+          { transform: 'scale(1, 1)', offset: 0.55, easing: 'cubic-bezier(0.4,0,0.7,0.5)' },
+          { transform: 'scale(1.02, 0.99)', offset: 0.85, easing: 'cubic-bezier(0.5,0,0.85,0.4)' },
+          { transform: `scale(${1 + SQ * 0.55}, ${1 - SQ * 0.9})`, offset: 0.92, easing: 'cubic-bezier(0.15,0.85,0.3,1)' },
+          { transform: 'scale(0.96, 1.05)', offset: 0.97, easing: 'ease-out' },
+          { transform: 'scale(1, 1)', offset: 1 },
+        ], { duration: DUR, fill: 'backwards' });
       }
     });
     this.startChestSparks(chestBtn);
@@ -1154,10 +1160,15 @@ export class Feed {
       remaining -= 1;
       // Haptic tick on every tap (Telegram Mini App; no-op elsewhere).
       try { (window as unknown as { Telegram?: { WebApp?: { HapticFeedback?: { impactOccurred: (s: string) => void } } } }).Telegram?.WebApp?.HapticFeedback?.impactOccurred('medium'); } catch { /* noop */ }
-      // Elastic squash→stretch bounce (like a merged item) + a confetti spray.
-      chestBtn.classList.remove('chest-ov__chest--squish');
-      void chestBtn.offsetWidth;               // restart the animation
-      chestBtn.classList.add('chest-ov__chest--squish');
+      // Elastic squash→stretch on the IMG (bottom-pinned) — the button owns position,
+      // so the squash lives on the img and never fights the fly-in transform.
+      chestBtn.querySelector<HTMLElement>('.chest-ov__chest__img')?.animate([
+        { transform: 'scale(1,1)', offset: 0 },
+        { transform: 'scale(1.16,0.86)', offset: 0.26 },
+        { transform: 'scale(0.9,1.16)', offset: 0.56 },
+        { transform: 'scale(1.05,0.96)', offset: 0.8 },
+        { transform: 'scale(1,1)', offset: 1 },
+      ], { duration: 460, easing: 'cubic-bezier(0.33,1,0.68,1)' });
       this.burstStarConfetti();
       // Pop a real ★ star out of the chest with the OLD reward animation (2-phase
       // squash→jump then fly, impact + splash on the counter, no fade-out).
@@ -1299,47 +1310,52 @@ export class Feed {
     const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
     const badgeRadius = badge ? Math.min(badge.width, badge.height) / 2 : 28;
     const px = 54;
-    const unit = this.makeStarUnit(px);
-    unit.style.position = 'absolute';
-    unit.style.left = `${cx - px / 2}px`;
-    unit.style.top = `${cy - px / 2}px`;
-    unit.style.margin = '0';
-    unit.style.zIndex = '2720';
-    unit.style.pointerEvents = 'none';
-    this.viewport.appendChild(unit);
+    // Decoupled: POSITION on the wrapper, SCALE on the ★ inside — so the grow/return
+    // never fights the flight path (that fighting was the jerk).
+    const unit = this.makeStarUnit(px);       // inner = the scaler
+    unit.style.transformOrigin = '50% 50%';   // grow from centre for the pop
+    const wrap = document.createElement('div');
+    wrap.style.cssText = `position:absolute;left:${cx - px / 2}px;top:${cy - px / 2}px;` +
+      'margin:0;z-index:2720;pointer-events:none;will-change:transform;';
+    wrap.appendChild(unit);
+    this.viewport.appendChild(wrap);
 
     const toX = badgeX - cx;
     const toY = badgeY - cy;
-    const jump = px * 2.2;   // pop up out of the chest before shooting to the counter
-    const landY = toY - px * 0.25;
-    this.startStarFlightTrail(cx, cy, toX, landY, jump);
+    const pop = px * 1.15;   // how high the star pops out of the gift before the arc
+    const grow = 1.5;        // peak size mid-pop, then back to 100% by the counter
+    this.startStarFlightTrail(cx, cy, toX, toY, pop);
     let done = false;
     const land = () => {
       if (done) return; done = true;
-      unit.remove();
-      this.burstRewardCollectParticles(badgeX, badgeY, Math.max(22, badgeRadius - 2));   // splash
+      wrap.remove();
+      this.burstRewardCollectParticles(badgeX, badgeY, Math.max(22, badgeRadius - 2));   // splash (KEEP)
       this.bumpLevelBadge();
       this.totalStars += 1;
       this.updateHud(false);
       const lvl = this.levelForStars(this.totalStars);
       this.setLevelProgress(this.starsIntoLevel(this.totalStars) / this.starsForLevel(lvl), true, RING_STEP_MS);
     };
-    if (!unit.animate) {
-      unit.style.transform = `translate3d(${toX}px,${landY}px,0) scale(0.5,0.5)`;
+    if (!wrap.animate) {
+      wrap.style.transform = `translate3d(${toX}px,${toY}px,0)`;
       window.setTimeout(land, REWARD_SHOT_MS);
       return;
     }
-    // Phase 1 — pop UP, swell a touch, then snap tight at the apex.
-    // Phase 2 — grow back above the original size, then arrive at the counter
-    // at the original scale so the star keeps its weight on impact.
+    // POSITION — pop up out of the gift (decelerate), then arc into the counter
+    // (accelerate). Smooth across the top; velocity is continuous.
+    wrap.animate([
+      { transform: 'translate3d(0,0,0)', offset: 0, easing: 'cubic-bezier(0.15,0.72,0.3,1)' },
+      { transform: `translate3d(${toX * 0.12}px,${-pop}px,0)`, offset: 0.34, easing: 'cubic-bezier(0.5,0.02,0.78,0.5)' },
+      { transform: `translate3d(${toX}px,${toY}px,0)`, offset: 1 },
+    ], { duration: REWARD_SHOT_MS, fill: 'forwards' });
+    // SCALE — 1 → peak (grow, decelerating) → back to 100% by the top of the pop,
+    // then hold 100% all the way into the counter so it lands at full weight.
     const flight = unit.animate([
-      { transform: 'translate3d(0,0,0) scale(1,1)', opacity: 1, offset: 0, easing: 'cubic-bezier(0.2,0.8,0.3,1)' },
-      { transform: `translate3d(0,${-jump * 0.82}px,0) scale(1.16,1.16)`, opacity: 1, offset: 0.24, easing: 'cubic-bezier(0.2,0.8,0.3,1)' },
-      { transform: `translate3d(0,${-jump}px,0) scale(0.82,0.82)`, opacity: 1, offset: 0.32, easing: 'cubic-bezier(0.55,0,0.7,1)' },
-      { transform: `translate3d(${toX * 0.34}px,${(-jump + (landY + jump) * 0.12)}px,0) scale(1.18,1.18)`, opacity: 1, offset: 0.54, easing: 'cubic-bezier(0.22,0.78,0.24,1)' },
-      { transform: `translate3d(${toX * 0.76}px,${(-jump + (landY + jump) * 0.55)}px,0) scale(1.08,1.08)`, opacity: 1, offset: 0.82, easing: 'cubic-bezier(0.55,0,0.92,0.35)' },
-      { transform: `translate3d(${toX}px,${landY}px,0) scale(1,1)`, opacity: 1, offset: 1 },
-    ], { duration: REWARD_SHOT_MS, fill: 'none' });
+      { transform: 'scale(1)', offset: 0, easing: 'cubic-bezier(0.12,0.7,0.3,1)' },
+      { transform: `scale(${grow})`, offset: 0.30, easing: 'cubic-bezier(0.5,0,0.6,1)' },
+      { transform: 'scale(1)', offset: 0.52, easing: 'linear' },
+      { transform: 'scale(1)', offset: 1 },
+    ], { duration: REWARD_SHOT_MS, fill: 'forwards' });
     const impactTimer = window.setTimeout(land, Math.max(0, REWARD_SHOT_MS - 8));
     flight.addEventListener('finish', () => {
       window.clearTimeout(impactTimer);

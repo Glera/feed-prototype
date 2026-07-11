@@ -2449,12 +2449,11 @@ body {
 .chest-ov__hint { color: #cfe0ff; font: 800 18px/1.2 system-ui, sans-serif; }
 .chest-ov__chest {
   font-size: 108px; line-height: 0; background: none; border: 0; padding: 0; cursor: pointer;
-  transform: scale(0.7); transition: transform 0.24s cubic-bezier(0.2,1.4,0.4,1);
-  transform-origin: 50% 100%;
+  /* Position (translate) is driven by the fly-in WAAPI on this button; scale/squash
+     lives on the img below. No CSS transform/transition here — they'd fight it. */
   -webkit-tap-highlight-color: transparent;
 }
-.chest-ov__chest__img { width: 128px; height: 128px; object-fit: contain; display: block; transform-origin: 50% 100%; }
-.chest-ov--in .chest-ov__chest { transform: scale(1); }
+.chest-ov__chest__img { width: 128px; height: 128px; object-fit: contain; display: block; transform-origin: 50% 100%; will-change: transform; }
 /* Elastic squash→stretch on tap, like a merged item settling. */
 .chest-ov__chest--squish { animation: chest-squish 0.52s cubic-bezier(0.33,1,0.68,1); }
 @keyframes chest-squish {
