@@ -212,10 +212,18 @@ const TPL: Record<TplId, { label: string; ds: string; playableId: string }> = {
   pins:  { label: 'Pins',    ds: 'pull the pins, catch it all',   playableId: 'pins-swipe' },
 };
 const CREATABLE_TPLS: TplId[] = ['sort'];
-// Blueprint geometry: symmetric 2×2 slots around a central hub. Future art
-// reskins these exact coordinates — keep them stable.
-const SLOTS = [{ x: 105, y: 155 }, { x: 285, y: 155 }, { x: 105, y: 385 }, { x: 285, y: 385 }];
-const HUB = { x: 195, y: 270 };
+// Island map: 10 slots scattered over a field LARGER than the viewBox window
+// (390×540) so the player pans the map with a finger to reach them. The first
+// UNLOCKED_SLOTS are playable; the rest are locked (🔒, decorative for now).
+const SLOTS = [
+  { x: 130, y: 210 }, { x: 292, y: 176 }, { x: 108, y: 402 }, { x: 300, y: 420 },   // 0–3 unlocked
+  { x: 468, y: 300 }, { x: 214, y: 588 }, { x: 430, y: 560 }, { x: 66, y: 592 },     // 4–7 locked
+  { x: 352, y: 726 }, { x: 156, y: 760 },                                             // 8–9 locked
+];
+const HUB = { x: 210, y: 300 };
+const UNLOCKED_SLOTS = 4;
+// The pannable world extent (max slot reach + margin), and the visible window.
+const WORLD_W = 540, WORLD_H = 830, VIEW_W = 390, VIEW_H = 540;
 const GUEST_REWARD = 25;
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
 const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
@@ -783,7 +791,8 @@ const CSS = `
 .isl-mode{flex:1;font:inherit;font-size:12.5px;padding:8px 0;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:rgba(255,255,255,.7)}
 .isl-mode--on{background:rgba(255,255,255,.18);color:#fff;font-weight:700}
 .isl-worldbox{flex:1;min-height:0;position:relative}
-.isl-worldbox svg{position:absolute;inset:0;width:100%;height:100%}
+.isl-worldbox svg{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:grab}
+.isl-worldbox svg:active{cursor:grabbing}
 .isl-legend{position:absolute;left:14px;bottom:10px;display:flex;gap:12px;pointer-events:none}
 .isl-legend span{display:flex;align-items:center;gap:5px;font-size:10.5px;color:rgba(255,255,255,.55)}
 .isl-legend b{width:8px;height:8px;border-radius:50%;display:inline-block}
@@ -1225,6 +1234,45 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   const sheet = ov.querySelector('[data-sheet]') as HTMLElement;
   const scrim = ov.querySelector('[data-scrim]') as HTMLElement;
 
+  // ── Finger-pan the map ──────────────────────────────────────────────────
+  // The world (WORLD_W×WORLD_H) is larger than the viewBox window (VIEW_*), and
+  // all content lives in a `[data-pan]` group translated by (-panX,-panY). A
+  // drag moves it; a small tap doesn't (panMoved guards the slot/lock clicks).
+  let panX = 0, panY = 0, panMoved = false;
+  {
+    let sx = 0, sy = 0, px0 = 0, py0 = 0, dragging = false;
+    const clamp = () => {
+      panX = Math.max(0, Math.min(WORLD_W - VIEW_W, panX));
+      panY = Math.max(0, Math.min(WORLD_H - VIEW_H, panY));
+    };
+    const apply = () => {
+      const g = svg.querySelector('[data-pan]');
+      if (g) g.setAttribute('transform', `translate(${(-panX).toFixed(1)},${(-panY).toFixed(1)})`);
+    };
+    svg.addEventListener('pointerdown', (e) => {
+      dragging = true; panMoved = false;
+      sx = e.clientX; sy = e.clientY; px0 = panX; py0 = panY;
+      try { svg.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    });
+    svg.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const rect = svg.getBoundingClientRect();
+      const scale = Math.max(rect.width / VIEW_W, rect.height / VIEW_H) || 1;   // slice: uniform cover-scale
+      panX = px0 - (e.clientX - sx) / scale;
+      panY = py0 - (e.clientY - sy) / scale;
+      clamp();
+      if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 6) panMoved = true;
+      apply();
+    });
+    const end = (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      try { svg.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+    };
+    svg.addEventListener('pointerup', end);
+    svg.addEventListener('pointercancel', end);
+  }
+
   // Toasts sit at the BOTTOM (the top slides under the phone notch) and fade
   // in place instead of flying off-screen. Long error details are truncated —
   // the full text lives on the building card (publishError) and in the console —
@@ -1266,12 +1314,13 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     let s =
       '<defs><pattern id="isl-dots" width="20" height="20" patternUnits="userSpaceOnUse">' +
       '<circle cx="1.5" cy="1.5" r="1.1" fill="rgba(255,255,255,.10)"/></pattern></defs>' +
-      '<rect width="390" height="540" fill="url(#isl-dots)"/>' +
-      '<rect x="28" y="46" width="334" height="448" rx="92" fill="none" stroke="rgba(255,255,255,.30)" stroke-width="1.3"/>';
-    for (const p of SLOTS) {
-      // Trim connectors to the circle edges (hub r=22, slot r=40) so lines
-      // don't cut through the shapes.
-      const dx = p.x - HUB.x, dy = p.y - HUB.y, len = Math.hypot(dx, dy);
+      // All world content lives in this pan group (translated by the drag handler).
+      `<g data-pan transform="translate(${(-panX).toFixed(1)},${(-panY).toFixed(1)})">` +
+      `<rect width="${WORLD_W}" height="${WORLD_H}" fill="url(#isl-dots)"/>`;
+    // Connectors from the hub to the UNLOCKED slots only.
+    for (let i = 0; i < UNLOCKED_SLOTS; i++) {
+      const p = SLOTS[i];
+      const dx = p.x - HUB.x, dy = p.y - HUB.y, len = Math.hypot(dx, dy) || 1;
       const x1 = HUB.x + (dx / len) * 24, y1 = HUB.y + (dy / len) * 24;
       const x2 = p.x - (dx / len) * 42, y2 = p.y - (dy / len) * 42;
       s += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="rgba(255,255,255,.14)" stroke-width="1"/>`;
@@ -1281,6 +1330,13 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const buildings = visibleBuildings();
     let localFreshChanged = false;
     SLOTS.forEach((p, i) => {
+      if (i >= UNLOCKED_SLOTS) {
+        // Locked slot — decorative for now (tap → toast).
+        s += `<g class="isl-lock" data-lock="${i}">` +
+          `<circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.16)" stroke-width="1.4" stroke-dasharray="3 5"/>` +
+          `<text x="${p.x}" y="${p.y + 11}" text-anchor="middle" font-size="30" fill="rgba(255,255,255,.4)">🔒</text></g>`;
+        return;
+      }
       const b = buildings.find((x) => x.slot === i);
       if (!b) {
         if (pendingSlots.has(i)) {
@@ -1325,6 +1381,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         if (isLocalExperiment(b)) localFreshChanged = true;
       }
     });
+    s += '</g>';   // close the pan group
     svg.innerHTML = s;
     // Status legend — owner mode only (the guest CTA occupies the bottom edge).
     const legend = ov.querySelector('[data-legend]') as HTMLElement;
@@ -1333,10 +1390,13 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       (IS_DEV ? '<span><b style="background:#58A6FF"></b>local lab</span>' : '') +
       '<span><b style="background:#EF9F27"></b>publishing</span>' +
       '<span><b style="background:#E24B4A"></b>error</span>';
+    // A drag pans the map — suppress the tap-through on slots/locks/buildings.
     svg.querySelectorAll<SVGElement>('[data-slot]').forEach((g) =>
-      g.addEventListener('click', () => openCreate(Number(g.dataset.slot))));
+      g.addEventListener('click', () => { if (!panMoved) openCreate(Number(g.dataset.slot)); }));
     svg.querySelectorAll<SVGElement>('[data-b]').forEach((g) =>
-      g.addEventListener('click', () => openBuilding(Number(g.dataset.b))));
+      g.addEventListener('click', () => { if (!panMoved) openBuilding(Number(g.dataset.b)); }));
+    svg.querySelectorAll<SVGElement>('[data-lock]').forEach((g) =>
+      g.addEventListener('click', () => { if (!panMoved) toast('Слот откроется позже'); }));
     const likes = buildings.reduce((a, b) => a + b.likes, 0);
     (ov.querySelector('[data-stat]') as HTMLElement).textContent =
       `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;
