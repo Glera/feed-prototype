@@ -20,7 +20,15 @@ import STAR_GOLDEN from './assets/rarity_star_golden.png';
 // Puzzle piece — meta-currency dropped from the series chest (1–5 per win). Flies
 // up-right into the puzzle counter on the friends panel.
 import PUZZLE_ICON from './assets/puzzle-icon-28387.png';
-import { makeCollectionCard, randomCard, type CollectionCard } from './collections';
+import {
+  COLLECTIONS,
+  collectedCardIndexes,
+  collectionById,
+  loadCollectionsProgressState,
+  makeCollectionCard,
+  randomCard,
+  type CollectionCard,
+} from './collections';
 import {
   apiSession, apiMe, variantIdForMechanic,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
@@ -293,11 +301,10 @@ export class Feed {
   private frameRevealTimers = new Map<number, number>();
 
   private totalStars = 0;
-  // Meta-currency + collections, dropped from the series chest (prototype-local; no
-  // backend persistence yet). Puzzles fly up-right into the HUD puzzle counter;
-  // collection cards fly down into the bar's collections button.
+  // Puzzles fly up-right into the HUD counter. Collection progress is its own
+  // persisted state; chest cards are deliberately only a visual drop for now.
   private totalPuzzles = 0;
-  private totalCards = 0;
+  private collectionProgress = loadCollectionsProgressState();
   private puzzleBadgeEl: HTMLElement | null = null;
   private puzzleValueEl: HTMLElement | null = null;
   private puzzleBadgeSquash: Animation | null = null;
@@ -2416,7 +2423,7 @@ export class Feed {
       },
       {
         name: 'collections', label: 'Коллекции',
-        svg: '<rect x="8" y="4.5" width="12" height="15" rx="2.5"/><path d="M4.5 8 v9.5 a2.5 2.5 0 0 0 2.5 2.5 h8.5"/>',
+        svg: '<path d="M12 3 L21 12 L12 21 L3 12 Z"/>',
         onTap: () => { this.hideDailyPanel(); this.showComingSoon('Коллекции'); },
       },
     ];
