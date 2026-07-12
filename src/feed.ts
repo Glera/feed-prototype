@@ -21,10 +21,6 @@ import STAR_GOLDEN from './assets/rarity_star_golden.png';
 // up-right into the puzzle counter on the friends panel.
 import PUZZLE_ICON from './assets/puzzle-icon-28387.png';
 import {
-  COLLECTIONS,
-  collectedCardIndexes,
-  collectionById,
-  loadCollectionsProgressState,
   makeCollectionCard,
   randomCard,
   type CollectionCard,
@@ -304,12 +300,10 @@ export class Feed {
   // Puzzles fly up-right into the HUD counter. Collection progress is its own
   // persisted state; chest cards are deliberately only a visual drop for now.
   private totalPuzzles = 0;
-  private collectionProgress = loadCollectionsProgressState();
   private puzzleBadgeEl: HTMLElement | null = null;
   private puzzleValueEl: HTMLElement | null = null;
   private puzzleBadgeSquash: Animation | null = null;
   private collectionsBtnEl: HTMLElement | null = null;
-  private collectionsCountEl: HTMLElement | null = null;
   private feedBarEl: HTMLElement | null = null;
   private dailyState: DailyStateResp | null = null;
   private dailyPanelEl: HTMLElement | null = null;
@@ -1830,8 +1824,9 @@ export class Feed {
     const land = () => {
       if (done) return; done = true;
       wrap.remove();
-      this.totalCards += 1;
-      this.updateCollectionsCount();
+      // The chest drop is presentation-only for this iteration. Collection
+      // progress changes only through the dedicated persisted state, never from
+      // this random animation (which may also contain duplicates).
       this.bumpCollectionsBtn();
     };
     const DUR = REWARD_SHOT_MS + 60;
@@ -2398,10 +2393,9 @@ export class Feed {
     bar.className = 'feed-bar';
     // Four fixed sections, left→right: Daily tasks · Meta · Mechanics feed ·
     // Collections. Tapping one makes it active (a soft pill slides under it).
-    // "Лента механик" is the default view. "Ежедневные задания" and "Коллекции"
-    // are placeholders for now (a coming-soon toast). Collections is also the
-    // card-drop target from the chest and carries a count badge. Paging is via
-    // swipe (attachSwipeSurface below); these buttons don't page.
+    // "Лента механик" is the default view. Collections opens its own full-screen
+    // catalog and remains the visual card-drop target from the chest. Paging is
+    // via swipe (attachSwipeSurface below); these buttons don't page.
     type BarTab = { name: string; label: string; svg: string; onTap: () => void };
     const TABS: BarTab[] = [
       {
@@ -2424,7 +2418,7 @@ export class Feed {
       {
         name: 'collections', label: 'Коллекции',
         svg: '<path d="M12 3 L21 12 L12 21 L3 12 Z"/>',
-        onTap: () => { this.hideDailyPanel(); this.showComingSoon('Коллекции'); },
+        onTap: () => { this.hideDailyPanel(); this.openCollections(); },
       },
     ];
     const DEFAULT_TAB = 'feed';
@@ -2436,15 +2430,10 @@ export class Feed {
       icon.type = 'button';
       icon.className = 'feed-bar__icon' + (tab.name === DEFAULT_TAB ? ' feed-bar__icon--active' : '');
       icon.setAttribute('aria-label', tab.label);
+      icon.dataset.barTab = tab.name;
       icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${tab.svg}</svg>`;
       if (tab.name === 'collections') {
         this.collectionsBtnEl = icon;
-        const badge = document.createElement('span');
-        badge.className = 'feed-bar__count';
-        badge.hidden = true;
-        badge.textContent = '0';
-        icon.appendChild(badge);
-        this.collectionsCountEl = badge;
       }
       icon.addEventListener('pointerdown', (e) => e.stopPropagation());
       icon.addEventListener('click', (e) => {
@@ -2491,6 +2480,10 @@ export class Feed {
   // Placeholder for bar sections that aren't built yet (Daily tasks, Collections):
   // a brief centred toast that fades on its own.
   private comingSoonEl: HTMLElement | null = null;
+  private openCollections(): void {
+    this.showComingSoon('Коллекции');
+  }
+
   private showComingSoon(title: string) {
     this.comingSoonEl?.remove();
     const toast = document.createElement('div');
@@ -5907,14 +5900,7 @@ export class Feed {
     ], { duration: 220, easing: 'linear' });
   }
 
-  // Collections button (bottom bar): count badge + a scale-pop when a card tucks in.
-  private updateCollectionsCount() {
-    const badge = this.collectionsCountEl;
-    if (!badge) return;
-    badge.textContent = String(this.totalCards);
-    badge.hidden = this.totalCards <= 0;
-  }
-
+  // Collections button (bottom bar): scale-pop when a card tucks in.
   private bumpCollectionsBtn() {
     const el = this.collectionsBtnEl;
     if (!el) return;
