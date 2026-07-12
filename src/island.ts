@@ -1234,43 +1234,93 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   const sheet = ov.querySelector('[data-sheet]') as HTMLElement;
   const scrim = ov.querySelector('[data-scrim]') as HTMLElement;
 
-  // ── Finger-pan the map ──────────────────────────────────────────────────
-  // The world (WORLD_W×WORLD_H) is larger than the viewBox window (VIEW_*), and
-  // all content lives in a `[data-pan]` group translated by (-panX,-panY). A
-  // drag moves it; a small tap doesn't (panMoved guards the slot/lock clicks).
-  let panX = 0, panY = 0, panMoved = false;
+  // ── Finger-pan + pinch-zoom the map (with a little pan inertia) ──────────
+  // All world content lives in a `[data-pan]` group transformed by
+  // `scale(zoom) translate(-panX,-panY)`. One finger pans (momentum on release);
+  // two fingers pinch-zoom around their midpoint. panMoved guards tap-through.
+  let panX = 0, panY = 0, zoom = 1, panMoved = false;
+  const Z_MIN = 0.62, Z_MAX = 2.2;
   {
-    let sx = 0, sy = 0, px0 = 0, py0 = 0, dragging = false;
+    const pts = new Map<number, { x: number; y: number }>();
+    let mode: 'idle' | 'pan' | 'pinch' = 'idle';
+    let sx = 0, sy = 0, px0 = 0, py0 = 0;                       // pan baseline
+    let pinchD0 = 1, pinchZ0 = 1, pinchWX = 0, pinchWY = 0;     // pinch baseline
+    let vX = 0, vY = 0, lastT = 0, raf = 0;                     // inertia
+
+    const disp = () => { const r = svg.getBoundingClientRect(); return { r, s: Math.max(r.width / VIEW_W, r.height / VIEW_H) || 1 }; };
+    const clientToView = (cx: number, cy: number) => {
+      const { r, s } = disp();
+      return { vx: (cx - r.left - (r.width - VIEW_W * s) / 2) / s, vy: (cy - r.top - (r.height - VIEW_H * s) / 2) / s };
+    };
     const clamp = () => {
-      panX = Math.max(0, Math.min(WORLD_W - VIEW_W, panX));
-      panY = Math.max(0, Math.min(WORLD_H - VIEW_H, panY));
+      const maxX = WORLD_W - VIEW_W / zoom, maxY = WORLD_H - VIEW_H / zoom;
+      panX = maxX <= 0 ? maxX / 2 : Math.max(0, Math.min(maxX, panX));
+      panY = maxY <= 0 ? maxY / 2 : Math.max(0, Math.min(maxY, panY));
     };
     const apply = () => {
       const g = svg.querySelector('[data-pan]');
-      if (g) g.setAttribute('transform', `translate(${(-panX).toFixed(1)},${(-panY).toFixed(1)})`);
+      if (g) g.setAttribute('transform', `scale(${zoom.toFixed(3)}) translate(${(-panX).toFixed(1)},${(-panY).toFixed(1)})`);
     };
+    const mid = () => { const a = [...pts.values()]; return a.length >= 2 ? { x: (a[0].x + a[1].x) / 2, y: (a[0].y + a[1].y) / 2 } : { x: a[0]?.x || 0, y: a[0]?.y || 0 }; };
+    const spread = () => { const a = [...pts.values()]; return a.length >= 2 ? Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) : 0; };
+    const stopInertia = () => { if (raf) cancelAnimationFrame(raf); raf = 0; };
+
+    const startPan = () => { mode = 'pan'; const m = mid(); sx = m.x; sy = m.y; px0 = panX; py0 = panY; vX = 0; vY = 0; lastT = performance.now(); };
+    const startPinch = () => {
+      mode = 'pinch'; pinchD0 = spread() || 1; pinchZ0 = zoom;
+      const v = clientToView(mid().x, mid().y);
+      pinchWX = v.vx / zoom + panX; pinchWY = v.vy / zoom + panY;   // world point under the midpoint
+    };
+
     svg.addEventListener('pointerdown', (e) => {
-      dragging = true; panMoved = false;
-      sx = e.clientX; sy = e.clientY; px0 = panX; py0 = panY;
+      stopInertia();
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
       try { svg.setPointerCapture(e.pointerId); } catch { /* noop */ }
+      panMoved = false;
+      if (pts.size === 1) startPan();
+      else if (pts.size === 2) startPinch();
     });
     svg.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const rect = svg.getBoundingClientRect();
-      const scale = Math.max(rect.width / VIEW_W, rect.height / VIEW_H) || 1;   // slice: uniform cover-scale
-      panX = px0 - (e.clientX - sx) / scale;
-      panY = py0 - (e.clientY - sy) / scale;
-      clamp();
-      if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 6) panMoved = true;
-      apply();
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (mode === 'pinch' && pts.size >= 2) {
+        zoom = Math.max(Z_MIN, Math.min(Z_MAX, pinchZ0 * (spread() / pinchD0)));
+        const v = clientToView(mid().x, mid().y);
+        panX = pinchWX - v.vx / zoom; panY = pinchWY - v.vy / zoom;   // keep the pinch point put
+        clamp(); apply(); panMoved = true;
+      } else if (mode === 'pan') {
+        const m = mid(), { s } = disp(), now = performance.now(), dt = Math.max(1, now - lastT);
+        const nx = px0 - (m.x - sx) / (s * zoom), ny = py0 - (m.y - sy) / (s * zoom);
+        vX = (nx - panX) / dt; vY = (ny - panY) / dt;
+        panX = nx; panY = ny; clamp(); apply(); lastT = now;
+        if (Math.abs(m.x - sx) + Math.abs(m.y - sy) > 6) panMoved = true;
+      }
     });
-    const end = (e: PointerEvent) => {
-      if (!dragging) return;
-      dragging = false;
+    const onUp = (e: PointerEvent) => {
+      if (!pts.has(e.pointerId)) return;
+      const wasPan = mode === 'pan';
+      pts.delete(e.pointerId);
       try { svg.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+      if (pts.size === 1) { startPan(); return; }   // dropped a pinch finger → keep panning with the other
+      if (pts.size === 0) {
+        mode = 'idle';
+        if (wasPan && (Math.abs(vX) > 0.02 || Math.abs(vY) > 0.02)) {
+          let last = performance.now();
+          const step = () => {
+            const now = performance.now(), dt = now - last; last = now;
+            panX += vX * dt; panY += vY * dt;
+            const f = Math.pow(0.93, dt / 16); vX *= f; vY *= f;      // friction → small glide
+            const bx = panX, by = panY; clamp();
+            if (panX !== bx) vX = 0; if (panY !== by) vY = 0;         // hit an edge → stop that axis
+            apply();
+            raf = (Math.abs(vX) > 0.004 || Math.abs(vY) > 0.004) ? requestAnimationFrame(step) : 0;
+          };
+          raf = requestAnimationFrame(step);
+        }
+      }
     };
-    svg.addEventListener('pointerup', end);
-    svg.addEventListener('pointercancel', end);
+    svg.addEventListener('pointerup', onUp);
+    svg.addEventListener('pointercancel', onUp);
   }
 
   // Toasts sit at the BOTTOM (the top slides under the phone notch) and fade
@@ -1314,8 +1364,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     let s =
       '<defs><pattern id="isl-dots" width="20" height="20" patternUnits="userSpaceOnUse">' +
       '<circle cx="1.5" cy="1.5" r="1.1" fill="rgba(255,255,255,.10)"/></pattern></defs>' +
-      // All world content lives in this pan group (translated by the drag handler).
-      `<g data-pan transform="translate(${(-panX).toFixed(1)},${(-panY).toFixed(1)})">` +
+      // All world content lives in this pan group (pan/zoom driven by the drag handler).
+      `<g data-pan transform="scale(${zoom.toFixed(3)}) translate(${(-panX).toFixed(1)},${(-panY).toFixed(1)})">` +
       `<rect width="${WORLD_W}" height="${WORLD_H}" fill="url(#isl-dots)"/>`;
     // Connectors from the hub to the UNLOCKED slots only.
     for (let i = 0; i < UNLOCKED_SLOTS; i++) {
