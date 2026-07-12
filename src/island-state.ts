@@ -75,8 +75,8 @@ function normaliseState(value: IslandPersistedState): IslandPersistedState {
   if (!Number.isFinite(state.tokens) || state.tokens < 0) state.tokens = 120;
   if (!Array.isArray(state.buildings)) state.buildings = [];
   state.buildings = state.buildings
-    .filter((building) => building && Number.isInteger(building.slot) && building.slot >= 0 && building.slot <= 3)
-    .slice(0, 4);
+    .filter((building) => building && Number.isInteger(building.slot) && building.slot >= 0 && building.slot <= 9)
+    .slice(0, 10);
   state.buildings.forEach((building) => {
     if (building.publishing && !building.jobId) {
       building.publishing = false;
@@ -180,10 +180,11 @@ export function mergeIslandStates(
     if (value) aiPacks[id] = clone(value);
   });
 
-  const tokenDelta = local.tokens - base.tokens;
   const aiSeq = Math.max(base.aiSeq || 0, local.aiSeq || 0, remote.aiSeq || 0);
   const merged: IslandPersistedState = {
-    tokens: Math.max(0, remote.tokens + tokenDelta),
+    // Puzzle currency belongs to the server ledger. A stale/offline island may
+    // merge buildings and packs, but never replay a client-side token delta.
+    tokens: remote.tokens,
     buildings,
   };
   if (Object.keys(aiPacks).length) merged.aiPacks = aiPacks;

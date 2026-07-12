@@ -2673,22 +2673,21 @@ body {
 
 /* Daily quests panel. */
 .daily-panel {
+  /* Central-area screen — feed HUD + nav bar stay put; navigation is via the bar,
+     so there's no close button (see collections/island for the same shell). */
   position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: calc(var(--bar-reserve) + 12px);
+  inset: var(--top-zone-h) 0 var(--bar-reserve) 0;
   z-index: 2600;
-  padding: 14px;
-  border-radius: 18px;
-  background: linear-gradient(180deg, rgba(28, 34, 45, 0.98), rgba(12, 15, 22, 0.98));
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  padding: 16px 14px 20px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: linear-gradient(180deg, #111526 0%, #090b13 55%, #07090f 100%);
   opacity: 0;
-  transform: translateY(18px);
-  transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.26, 0.9, 0.3, 1);
+  transition: opacity 0.2s ease;
   pointer-events: auto;
 }
-.daily-panel--in { opacity: 1; transform: translateY(0); }
+.daily-panel::-webkit-scrollbar { display: none; }
+.daily-panel--in { opacity: 1; }
 .daily-panel__head {
   display: flex;
   align-items: center;
@@ -2802,7 +2801,7 @@ body {
 /* ── Collections catalog ────────────────────────────────────────────────────── */
 .collections-view {
   position: absolute;
-  inset: 0;
+  inset: var(--top-zone-h) 0 var(--bar-reserve) 0;   /* central area only — feed HUD + nav bar stay put */
   z-index: 3000;
   display: flex;
   flex-direction: column;
@@ -2832,12 +2831,11 @@ body {
   position: relative;
   z-index: 2;
   flex: 0 0 auto;
-  min-height: calc(var(--safe-top) + 86px);
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
-  padding: calc(var(--safe-top) + 18px) 18px 14px;
+  padding: 16px 18px 12px;
   background: linear-gradient(180deg, rgba(8, 10, 18, 0.8), rgba(8, 10, 18, 0));
 }
 .collections-view__header--detail {

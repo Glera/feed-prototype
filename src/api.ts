@@ -147,6 +147,8 @@ export interface ResultResp {
   is_best: boolean;
   stars_awarded: number;
   balance: number;
+  puzzles_awarded?: number;
+  puzzle_balance?: number;
 }
 
 export function apiSession(): Promise<SessionResp | null> {
@@ -159,12 +161,15 @@ export interface ResultIn {
   run_id: string;
   metric_key: string;
   metric_value: number;
-  stars?: number;   // stars this win grants (client reward roll 1–5); server clamps
+  stars?: number;   // display hint; zero marks an intermediate series level
+  expected_puzzles?: number; // local outbox reconciliation only; never sent
   tz_offset_minutes?: number;
 }
 
 export function apiPostResult(payload: ResultIn): Promise<ResultResp | null> {
-  return post<ResultResp>('/api/results', payload);
+  const { expected_puzzles, ...body } = payload;
+  void expected_puzzles;
+  return post<ResultResp>('/api/results', body);
 }
 
 export interface DailyQuestView {

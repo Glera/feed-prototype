@@ -35,7 +35,7 @@ import {
   apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge, apiChallengeInbox,
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp,
 } from './api';
-import { queueResult, flushResults } from './outbox';
+import { queueResult, flushResults, pendingPuzzles, type ConfirmedBalances } from './outbox';
 import { track } from './telemetry';
 import { getStartParam, shareChallenge, getInitData } from './telegram';
 
@@ -134,6 +134,23 @@ const SERVER_SEED_CAP_MS = 2500;   // max the preloader waits for the first /ses
 function runUid(): string {
   try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch { /* older webview */ }
   return `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function rewardHash(value: string): number {
+  let hash = 2166136261;
+  for (const byte of new TextEncoder().encode(value)) hash = Math.imul(hash ^ byte, 16777619);
+  return hash >>> 0;
+}
+
+function levelStarReward(runId: string): number {
+  return 1 + rewardHash(`level:${runId}`) % 5;
+}
+
+function seriesRewards(runId: string): { stars: number; puzzles: number } {
+  return {
+    stars: 3 + rewardHash(`series-stars:${runId}`) % 7,
+    puzzles: 1 + rewardHash(`series-puzzles:${runId}`) % 5,
+  };
 }
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
 const FRAME_READY_FALLBACK_MS = 900;
@@ -303,7 +320,7 @@ export class Feed {
   private totalStars = 0;
   // Puzzles fly up-right into the HUD counter. Collection progress is its own
   // persisted state; chest cards are deliberately only a visual drop for now.
-  private totalPuzzles = 0;
+  private totalPuzzles = 120;
   private collectionProgress = loadCollectionsProgressState();
   private puzzleBadgeEl: HTMLElement | null = null;
   private puzzleValueEl: HTMLElement | null = null;
@@ -361,7 +378,14 @@ export class Feed {
   // completing the whole series, via the chest ceremony. A LOSS on a level just
   // retries THAT level (cleared levels are kept), see handleSeriesFail.
   private readonly SERIES_LEN = 5;   // default length (mechanics without an override)
-  private series: { index: number; done: number; reward: number; playing: boolean } | null = null;
+  private series: {
+    index: number;
+    done: number;
+    reward: number;
+    puzzles: number;
+    payoutRunId: string;
+    playing: boolean;
+  } | null = null;
   private seriesRowEl: HTMLElement | null = null;
   private chestEl: HTMLElement | null = null;
   private seriesTransitionEl: HTMLElement | null = null;
@@ -569,8 +593,7 @@ export class Feed {
       if (typeof s.puzzles === 'number') this.applyServerPuzzles(s.puzzles);
       await this.syncDaily(false);
       if (s.backend_version) { this.backendVersion = s.backend_version; this.renderVersionLabel(); }
-      const b = await flushResults();
-      if (b != null) this.applyServerBalance(b);
+      this.applyConfirmedBalances(await flushResults());
       await this.syncDaily(false);
       void this.refreshChallengeRail();
       return;
@@ -580,8 +603,7 @@ export class Feed {
 
   // Foreground: push wins queued while away/offline, then re-read the balance.
   private async onForeground(): Promise<void> {
-    const b = await flushResults();
-    if (b != null) this.applyServerBalance(b);
+    this.applyConfirmedBalances(await flushResults());
     const m = await apiMe();
     if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);
     if (m && typeof m.puzzles === 'number') this.applyServerPuzzles(m.puzzles);
@@ -621,8 +643,16 @@ export class Feed {
     this.renderLevelUpPage(false);
   }
 
+  private applyConfirmedBalances(confirmed: ConfirmedBalances | null): void {
+    if (!confirmed) return;
+    this.applyServerBalance(confirmed.stars);
+    if (confirmed.puzzles != null) this.applyServerPuzzles(confirmed.puzzles);
+  }
+
   private applyServerPuzzles(puzzles: number): void {
-    const next = Math.max(this.totalPuzzles, puzzles);
+    // The server ledger is authoritative. Add only the durable outbox entries
+    // that have not reached it yet, rather than preserving arbitrary local state.
+    const next = Math.max(0, puzzles + pendingPuzzles());
     if (next === this.totalPuzzles) return;
     this.totalPuzzles = next;
     this.updatePuzzleCounter();
@@ -703,14 +733,9 @@ export class Feed {
     panel.innerHTML =
       '<div class="daily-panel__head">' +
         '<div><div class="daily-panel__title">Ежедневные задания</div><div class="daily-panel__timer">--:--:--</div></div>' +
-        '<button type="button" class="daily-panel__close" aria-label="Закрыть">×</button>' +
       '</div>' +
       `<div class="daily-panel__list">${loading ? '<div class="daily-panel__loading">Загружаем…</div>' : ''}</div>`;
     panel.addEventListener('pointerdown', (e) => e.stopPropagation());
-    panel.querySelector<HTMLButtonElement>('.daily-panel__close')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.hideDailyPanel();
-    });
     this.viewport.appendChild(panel);
     this.dailyPanelEl = panel;
     this.dailyTimerEl = panel.querySelector('.daily-panel__timer');
@@ -884,15 +909,14 @@ export class Feed {
   private reportResult(i: number, runId: string, solveMs: number, starsOverride?: number): void {
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return;
-    // Persist the SAME star count the reward row grants locally (rollReward = 1–5),
-    // so the server balance matches the on-screen counter across reopen. Reading
-    // rewardStarsFor here rolls it once; handleWin shows the same value. During a
-    // series, per-level wins grant 0 (the chest pays out the whole series).
+    // Use the same deterministic run-id roll as the backend, so the reward row
+    // and authoritative ledger agree. During a series, per-level wins grant 0
+    // and the final chest owns the payout.
     const stars = starsOverride ?? this.rewardStarsFor(i);
     // Durable: queue to localStorage + retry until the server confirms (survives
     // cold backend / reload). Idempotent by run_id server-side. Metric = solve time
     // (ms), lower is better — the same number that decides a challenge.
-    queueResult({
+    void queueResult({
       mechanic_id: mechanicId,
       variant_id: variantIdForMechanic(mechanicId),
       run_id: runId,
@@ -1142,7 +1166,16 @@ export class Feed {
   // First takeover of a mechanic starts its series (level 1 in progress).
   private maybeStartSeries(i: number): void {
     if (this.series || !this.seriesEnabled(i)) return;
-    this.series = { index: i, done: 0, reward: 0, playing: true };
+    const payoutRunId = `series-${runUid()}`;
+    const payout = seriesRewards(payoutRunId);
+    this.series = {
+      index: i,
+      done: 0,
+      reward: payout.stars,
+      puzzles: payout.puzzles,
+      payoutRunId,
+      playing: true,
+    };
     track('series_start', { mechanic_id: this.playables[i]?.id });
     this.renderSeriesRow({ forceVisible: true });
   }
@@ -1430,7 +1463,6 @@ export class Feed {
   //    after the last, advance to the next mechanic. ─────────────────────────
   private beginChest(i: number): void {
     if (!this.series) return;
-    this.series.reward = 3 + Math.floor(Math.random() * 7);   // 3..9 stars (D4)
     // The chest drops a MIX of three item types (W-collections): stars (fly up-left
     // into the level counter), puzzles (meta-currency, up-right into the puzzle
     // counter) and collection cards (down into the collections button). Counts:
@@ -1439,7 +1471,8 @@ export class Feed {
     type DropItem = { type: 'star' } | { type: 'puzzle' } | { type: 'card'; card: CollectionCard };
     const queue: DropItem[] = [];
     for (let n = 0; n < this.series.reward; n++) queue.push({ type: 'star' });
-    const puzzleCount = 1 + Math.floor(Math.random() * 5);   // 1..5
+    const puzzleCount = this.series.puzzles;
+    const puzzleTargetBalance = this.totalPuzzles + puzzleCount;
     for (let n = 0; n < puzzleCount; n++) queue.push({ type: 'puzzle' });
     const cardCount = 1 + Math.floor(Math.random() * 3);     // 1..3
     for (let n = 0; n < cardCount; n++) queue.push({ type: 'card', card: randomCard() });
@@ -1551,7 +1584,16 @@ export class Feed {
 
     const dispatch = (item: DropItem, up: { x: number; y: number }) => {
       if (item.type === 'star') this.flyOneStar(up.x, up.y);
-      else if (item.type === 'puzzle') this.flyOnePuzzle(up.x, up.y);
+      else if (item.type === 'puzzle') {
+        this.flyOnePuzzle(up.x, up.y, () => {
+          // A fast /results response may already have reconciled the full chest
+          // while pieces are still flying. Never credit those arrivals twice.
+          if (this.totalPuzzles < puzzleTargetBalance) {
+            this.totalPuzzles += 1;
+            this.updatePuzzleCounter();
+          }
+        }, false);
+      }
       else this.flyOneCard(up.x, up.y, item.card);
     };
 
@@ -1970,12 +2012,14 @@ export class Feed {
   }
 
   private persistSeriesReward(i: number): void {
-    const reward = this.series?.reward ?? 0;
+    const series = this.series;
+    const reward = series?.reward ?? 0;
     const mechanicId = this.playables[i]?.id;
-    if (reward > 0 && mechanicId) {
-      queueResult({
+    if (series && reward > 0 && mechanicId) {
+      void queueResult({
         mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId),
-        run_id: `series-${runUid()}`, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
+        run_id: series.payoutRunId, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
+        expected_puzzles: series.puzzles,
         tz_offset_minutes: currentTzOffsetMinutes(),
       });
       this.bumpDailyProgress('stars_50', reward);
@@ -2647,7 +2691,6 @@ export class Feed {
           '<div class="collections-view__eyebrow">Альбом сезона</div>' +
           '<h1 class="collections-view__title">Коллекции</h1>' +
         '</div>' +
-        '<button class="collections-view__close" type="button" aria-label="Закрыть">✕</button>' +
       '</header>' +
       '<main class="collections-view__body">' +
         '<section class="collections-intro">' +
@@ -2706,8 +2749,6 @@ export class Feed {
       tile.addEventListener('click', () => this.renderCollectionDetails(ov, collection.id));
       list?.appendChild(tile);
     });
-
-    ov.querySelector('.collections-view__close')?.addEventListener('click', () => this.closeOverlay());
   }
 
   private renderCollectionDetails(ov: HTMLElement, collectionId: string): void {
@@ -2725,7 +2766,7 @@ export class Feed {
           '<div class="collections-view__eyebrow">Коллекция</div>' +
           `<h1 class="collections-view__title">${collection.title}</h1>` +
         '</div>' +
-        '<button class="collections-view__close" type="button" aria-label="Закрыть">✕</button>' +
+        '<span class="collections-view__spacer" aria-hidden="true"></span>' +
       '</header>' +
       '<main class="collections-view__body collections-view__body--detail">' +
         '<section class="collection-detail__summary">' +
@@ -2780,7 +2821,6 @@ export class Feed {
     });
 
     ov.querySelector('.collections-view__back')?.addEventListener('click', () => this.renderCollectionsOverview(ov));
-    ov.querySelector('.collections-view__close')?.addEventListener('click', () => this.closeOverlay());
     ov.querySelector('.collections-view__body')?.scrollTo({ top: 0 });
     track('collection_open', { collection_id: collection.id, collected: count, total: collection.cards.length });
   }
@@ -2816,7 +2856,7 @@ export class Feed {
       // Chest puzzle drops fly up-right into it.
       '<div class="hud__puzzles" aria-label="Puzzles">' +
         `<img src="${PUZZLE_ICON}" alt="" draggable="false">` +
-        '<span class="hud__puzzles-value">0</span>' +
+        `<span class="hud__puzzles-value">${this.totalPuzzles}</span>` +
       '</div>';
     this.viewport.appendChild(hud);
     this.hudEl = hud;
@@ -3227,13 +3267,13 @@ export class Feed {
 
   private mount(i: number) {
     if (this.frames.has(i)) return;
-    this.rollReward(i);
     this.resetFrameReadiness(i);
     this.games[i].classList.add('game--loading');
     this.games[i].classList.remove('game--ready');
     const frame = document.createElement('iframe');
     frame.className = 'game__frame';
-    frame.dataset.runId = runUid();
+    const runId = runUid();
+    frame.dataset.runId = runId;
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('title', this.playables[i].id);
     frame.setAttribute('allow', 'autoplay');
@@ -3251,6 +3291,7 @@ export class Feed {
       this.applyPendingEditor(i);
     });
     this.frames.set(i, frame);
+    this.rollReward(i, runId);
     const seriesParam = this.pendingSeriesParams.get(i);
     this.pendingSeriesParams.delete(i);   // one-shot: consumed by this mount
     // Level for this mount: the pending (series-advance) value, else the mechanic's
@@ -4161,7 +4202,11 @@ export class Feed {
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
     const islandLevel = this.levelForStars(this.totalStars);
-    void import('./island').then((m) => m.renderIslandWorld(ov, { close: () => this.closeOverlay(), level: islandLevel }));
+    void import('./island').then((m) => m.renderIslandWorld(ov, {
+      close: () => this.closeOverlay(),
+      level: islandLevel,
+      puzzles: () => this.totalPuzzles,
+    }));
     if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
   }
 
@@ -5679,13 +5724,13 @@ export class Feed {
 
   // Current star reward for this frame's CURRENT appearance.
   private rewardStarsFor(i: number): number {
-    if (!this.rewardStars[i]) this.rollReward(i);
-    return this.rewardStars[i];
+    if (!this.rewardStars[i]) this.rollReward(i, this.frames.get(i)?.dataset.runId);
+    return this.rewardStars[i] || 1;
   }
 
-  // A won mechanic awards a RANDOM 1–5 stars (re-rolled fresh each appearance).
-  private rollReward(i: number): void {
-    this.rewardStars[i] = 1 + Math.floor(Math.random() * 5);
+  // The visual roll mirrors the backend's deterministic 1–5 reward for this run.
+  private rollReward(i: number, runId?: string): void {
+    this.rewardStars[i] = runId ? levelStarReward(runId) : 1;
     const el = this.rewardEls[i];
     if (el) el.innerHTML = '<span class="game__reward-star">★</span>'.repeat(this.rewardStars[i]);
   }
