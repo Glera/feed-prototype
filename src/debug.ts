@@ -4,7 +4,7 @@
  * pending-results outbox or reset your own server state. QA tool; no-op unless
  * explicitly opened.
  */
-import { apiDiagnose, apiReset, apiSeedChallenge } from './api';
+import { apiDiagnose, apiReset, apiResetDaily, apiSeedChallenge } from './api';
 import { getEventLog } from './telemetry';
 import { pendingCount, pendingStars, starsEverQueued, flushResults, clearOutbox } from './outbox';
 
@@ -62,6 +62,28 @@ export async function mountDebugPanel(): Promise<void> {
     location.reload();
   });
 
+  let dailyArmed = false;
+  const resetDailyBtn = mkBtn('Reset dailies (next day)', async (b) => {
+    if (!dailyArmed) {
+      dailyArmed = true;
+      b.textContent = 'Tap again to reset dailies';
+      setTimeout(() => {
+        dailyArmed = false;
+        b.textContent = 'Reset dailies (next day)';
+      }, 3000);
+      return;
+    }
+    b.textContent = 'resetting dailies…';
+    const state = await apiResetDaily();
+    if (!state) {
+      dailyArmed = false;
+      b.textContent = 'daily reset failed';
+      setTimeout(() => { b.textContent = 'Reset dailies (next day)'; }, 1800);
+      return;
+    }
+    location.reload();
+  });
+
   const copyBtn = mkBtn('📋 Copy log', async (b) => {
     const text = `${head.textContent}\n\n--- events ---\n${logEl.textContent}`;
     let ok = false;
@@ -91,6 +113,7 @@ export async function mountDebugPanel(): Promise<void> {
     copyBtn,
     seedBtn,
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),
+    resetDailyBtn,
     resetBtn,
     mkBtn('✕ Close', () => { clearInterval(iv); wrap.remove(); }),
   );

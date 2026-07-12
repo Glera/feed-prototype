@@ -315,6 +315,9 @@ export class Feed {
   private dailyTimerEl: HTMLElement | null = null;
   private dailyTickTimer: number | null = null;
   private dailySyncing = false;
+  private dailyClaiming = new Set<string>();
+  private dailyNavBtnEl: HTMLButtonElement | null = null;
+  private dailyNavAlertEl: HTMLElement | null = null;
   // Telemetry (D3) state: which unit is on-screen, since when, and per-show guards.
   private shownIndex = -1;
   private shownAt = 0;
@@ -633,6 +636,7 @@ export class Feed {
       if (!state) return;
       this.dailyState = state;
       this.applyServerPuzzles(state.puzzle_balance);
+      this.updateDailyNavAlert();
       this.renderDailyPanel();
       this.startDailyTimer();
       if (showPanel) this.showDailyPanel();
@@ -648,7 +652,20 @@ export class Feed {
     if (!quest || quest.claimed) return;
     quest.progress = Math.min(quest.target, quest.progress + amount);
     quest.completed = quest.progress >= quest.target;
+    this.updateDailyNavAlert();
     this.renderDailyPanel();
+  }
+
+  private updateDailyNavAlert(): void {
+    const ready = !!this.dailyState?.quests.some((quest) => quest.completed && !quest.claimed);
+    if (this.dailyNavAlertEl) this.dailyNavAlertEl.hidden = !ready;
+    if (this.dailyNavBtnEl) {
+      this.dailyNavBtnEl.classList.toggle('feed-bar__icon--attention', ready);
+      this.dailyNavBtnEl.setAttribute(
+        'aria-label',
+        ready ? 'Ежедневные задания, награда готова' : 'Ежедневные задания',
+      );
+    }
   }
 
   private showDailyPanel(): void {
@@ -733,11 +750,12 @@ export class Feed {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'daily-panel__claim';
-      btn.disabled = !quest.completed || quest.claimed;
-      btn.textContent = quest.claimed ? 'Получено' : quest.completed ? 'Забрать' : 'В процессе';
+      const claiming = this.dailyClaiming.has(quest.id);
+      btn.disabled = !quest.completed || quest.claimed || claiming;
+      btn.textContent = claiming ? 'Начисляем' : quest.claimed ? 'Получено' : quest.completed ? 'Забрать' : 'В процессе';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        void this.claimDailyQuest(quest.id, btn);
+        void this.claimDailyQuest(quest.id, btn, reward);
       });
 
       row.append(text, reward, btn);
@@ -766,25 +784,98 @@ export class Feed {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
-  private async claimDailyQuest(questId: string, button: HTMLButtonElement): Promise<void> {
+  private async claimDailyQuest(
+    questId: string,
+    button: HTMLButtonElement,
+    rewardEl: HTMLElement,
+  ): Promise<void> {
+    if (this.dailyClaiming.has(questId)) return;
     const before = this.dailyState?.quests.find((q) => q.id === questId);
     const reward = before && before.completed && !before.claimed ? before.reward_puzzles : 0;
+    if (reward <= 0) return;
+    const puzzleBalanceBeforeClaim = this.totalPuzzles;
+    const sourceIcon = rewardEl.querySelector<HTMLElement>('img') ?? rewardEl;
+    const sourceRect = sourceIcon.getBoundingClientRect();
+    const viewportRect = this.viewport.getBoundingClientRect();
+    const origin = {
+      x: sourceRect.left - viewportRect.left + sourceRect.width / 2,
+      y: sourceRect.top - viewportRect.top + sourceRect.height / 2,
+    };
+    this.dailyClaiming.add(questId);
     button.disabled = true;
-    button.textContent = '...';
+    button.textContent = 'Начисляем';
     const state = await apiDailyClaim(questId);
     if (!state) {
+      this.dailyClaiming.delete(questId);
       button.textContent = 'Ошибка';
       window.setTimeout(() => this.renderDailyPanel(), 700);
       return;
     }
     this.dailyState = state;
-    if (reward > 0) {
-      this.totalPuzzles += reward;
-      this.updatePuzzleCounter();
+    this.updateDailyNavAlert();
+    this.launchDailyPuzzleReward(rewardEl, origin, reward, puzzleBalanceBeforeClaim + reward, () => {
+      this.dailyClaiming.delete(questId);
+      this.applyServerPuzzles(state.puzzle_balance);
+      this.renderDailyPanel();
+      this.updateDailyNavAlert();
+    });
+  }
+
+  private launchDailyPuzzleReward(
+    source: HTMLElement,
+    origin: { x: number; y: number },
+    count: number,
+    targetBalance: number,
+    onDone: () => void,
+  ): void {
+    const icon = source.querySelector<HTMLElement>('img') ?? source;
+    const { x: cx, y: cy } = origin;
+    const total = Math.max(0, Math.floor(count));
+    if (total === 0 || !Number.isFinite(cx) || !Number.isFinite(cy)) {
+      onDone();
+      return;
     }
-    this.applyServerPuzzles(state.puzzle_balance);
-    this.bumpPuzzleBadge();
-    this.renderDailyPanel();
+
+    // The source reward gives the same bottom-pinned squash/stretch cue as the
+    // series gift before the individual puzzle pieces peel away from it.
+    const previousOrigin = icon.style.transformOrigin;
+    icon.style.transformOrigin = '50% 100%';
+    const sourceAnimation = icon.animate?.([
+      { transform: 'scale(1,1)', offset: 0 },
+      { transform: 'scale(1.18,0.84)', offset: 0.24 },
+      { transform: 'scale(0.88,1.18)', offset: 0.54 },
+      { transform: 'scale(1.05,0.96)', offset: 0.8 },
+      { transform: 'scale(1,1)', offset: 1 },
+    ], { duration: 460, easing: 'cubic-bezier(0.33,1,0.68,1)' });
+    if (sourceAnimation) {
+      sourceAnimation.addEventListener('finish', () => {
+        icon.style.transformOrigin = previousOrigin;
+      }, { once: true });
+    } else {
+      icon.style.transformOrigin = previousOrigin;
+    }
+
+    let landed = 0;
+    const STAGGER_MS = 85;
+    const onLand = () => {
+      // A foreground sync may already have applied the claimed server balance
+      // while pieces are in flight. Never add the same reward twice in that case.
+      if (this.totalPuzzles < targetBalance) {
+        this.totalPuzzles += 1;
+        this.updatePuzzleCounter();
+      }
+      landed += 1;
+      if (landed === total) onDone();
+    };
+    for (let index = 0; index < total; index++) {
+      window.setTimeout(() => {
+        try {
+          (window as unknown as { Telegram?: { WebApp?: { HapticFeedback?: { impactOccurred: (style: string) => void } } } })
+            .Telegram?.WebApp?.HapticFeedback?.impactOccurred('light');
+        } catch { /* noop */ }
+        this.flyOnePuzzle(cx, cy, onLand, false);
+      }, index * STAGGER_MS);
+    }
   }
 
   // Persist a manual win to the server (idempotent by run_id) — the ledger is the
@@ -1750,7 +1841,7 @@ export class Feed {
 
   // Pop one puzzle piece from (cx,cy) UP-RIGHT into the puzzle counter — the same
   // pop→arc→shrink motion as flyOneStar, just aimed at the top-right badge.
-  private flyOnePuzzle(cx: number, cy: number): void {
+  private flyOnePuzzle(cx: number, cy: number, onLand?: () => void, credit = true): void {
     const vp = this.viewport.getBoundingClientRect();
     const badge = this.puzzleBadgeEl?.getBoundingClientRect();
     const badgeX = badge ? badge.left - vp.left + badge.width / 2 : vp.width - 40;
@@ -1780,8 +1871,11 @@ export class Feed {
       if (done) return; done = true;
       wrap.remove();
       this.burstRewardCollectParticles(badgeX, badgeY, 20);
-      this.totalPuzzles += 1;
-      this.updatePuzzleCounter();
+      if (credit) {
+        this.totalPuzzles += 1;
+        this.updatePuzzleCounter();
+      }
+      onLand?.();
       this.bumpPuzzleBadge();
     };
     if (!wrap.animate) {
@@ -2440,6 +2534,17 @@ export class Feed {
       icon.setAttribute('aria-label', tab.label);
       icon.dataset.barTab = tab.name;
       icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${tab.svg}</svg>`;
+      if (tab.name === 'daily') {
+        const alert = document.createElement('span');
+        alert.className = 'feed-bar__daily-alert';
+        alert.textContent = '!';
+        alert.hidden = true;
+        alert.setAttribute('aria-hidden', 'true');
+        icon.appendChild(alert);
+        this.dailyNavBtnEl = icon;
+        this.dailyNavAlertEl = alert;
+        this.updateDailyNavAlert();
+      }
       if (tab.name === 'collections') {
         this.collectionsBtnEl = icon;
       }

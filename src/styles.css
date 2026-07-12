@@ -428,6 +428,31 @@ body {
 }
 .feed-bar__icon--active svg * { stroke: rgba(255, 255, 255, 0.96); }
 .feed-bar__icon:active { background: rgba(255, 255, 255, 0.18); }
+.feed-bar__daily-alert {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  border: 1.5px solid #0b0d14;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #ffe36e, #f39a2d);
+  color: #2a1700;
+  font: 950 12px/14px system-ui, sans-serif;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.48);
+  pointer-events: none;
+  animation: daily-alert-in 0.42s cubic-bezier(0.2, 1.5, 0.35, 1) both;
+}
+.feed-bar__daily-alert[hidden] { display: none; }
+.feed-bar__icon--attention svg * { stroke: #ffd85f; }
+@keyframes daily-alert-in {
+  0% { transform: scale(0); }
+  62% { transform: scale(1.28); }
+  100% { transform: scale(1); }
+}
 
 /* Slowly-blinking hint text, floating ABOVE the dark bar (the bar itself stays
    empty for future buttons). Purely visual. */

@@ -201,6 +201,11 @@ export function apiDailyClaim(questId: string): Promise<DailyStateResp | null> {
   return post<DailyStateResp>('/api/daily/claim', { quest_id: questId, tz_offset_minutes: tzOffsetMinutes() });
 }
 
+/** QA only: begin a fresh daily cycle while preserving already-earned puzzles. */
+export function apiResetDaily(): Promise<(DailyStateResp & { ok: boolean }) | null> {
+  return post<DailyStateResp & { ok: boolean }>('/api/reset-daily', { tz_offset_minutes: tzOffsetMinutes() });
+}
+
 // ── Challenges (W2) ─────────────────────────────────────────────────────────
 // "Beat my time?" — metric is solve time (ms), lower is better (server-authoritative).
 
