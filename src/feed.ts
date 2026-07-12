@@ -1998,7 +1998,7 @@ export class Feed {
 
   // Pop one puzzle piece from (cx,cy) UP-RIGHT into the puzzle counter — the same
   // pop→arc→shrink motion as flyOneStar, just aimed at the top-right badge.
-  private flyOnePuzzle(cx: number, cy: number, onLand?: () => void, credit = true, z = 2720): void {
+  private flyOnePuzzle(cx: number, cy: number, onLand?: () => void, credit = true): void {
     const vp = this.viewport.getBoundingClientRect();
     const badge = this.puzzleBadgeEl?.getBoundingClientRect();
     const badgeX = badge ? badge.left - vp.left + badge.width / 2 : vp.width - 40;
@@ -2014,7 +2014,7 @@ export class Feed {
       'filter:drop-shadow(0 8px 16px rgba(140,90,220,0.45));';
     const wrap = document.createElement('div');
     wrap.style.cssText = `position:absolute;left:${cx - px / 2}px;top:${cy - px / 2}px;` +
-      `margin:0;z-index:${z};pointer-events:none;will-change:transform;`;
+      'margin:0;z-index:2720;pointer-events:none;will-change:transform;';
     wrap.appendChild(unit);
     this.viewport.appendChild(wrap);
 
@@ -2055,27 +2055,11 @@ export class Feed {
     flight.addEventListener('finish', () => { window.clearTimeout(impactTimer); land(); }, { once: true });
   }
 
-  // Collecting puzzles that piled up over a mechanic on the island: fan `n` pucks
-  // out of the tapped point (scatter), each arcing into the ONE HUD counter — the
-  // coin-to-counter feel. Rendered above the island overlay (z 3200) so they read
-  // over the mechanic, not behind it.
-  private addPuzzlesFromMeta(n: number, from?: { x: number; y: number }): void {
-    const vp = this.viewport.getBoundingClientRect();
-    const cx = from ? from.x - vp.left : vp.width / 2;
-    const cy = from ? from.y - vp.top : vp.height / 2;
-    const count = Math.max(1, Math.min(9, Math.round(n)));
-    for (let k = 0; k < count; k++) {
-      const jx = (Math.random() - 0.5) * 30;
-      const jy = (Math.random() - 0.5) * 22;
-      window.setTimeout(() => this.flyOnePuzzle(cx + jx, cy + jy, undefined, true, 3200), k * 85);
-    }
-  }
-
   // ── "Someone played your mechanic" — global activity sim ─────────────────────
   // Runs on EVERY tab (the notifier must appear on the feed too), independent of
-  // the island overlay. Each tick simulates a visit (plays/likes + accrued puzzles
-  // over the mechanic), slides a notifier above the top panel, and pings any open
-  // island so it can re-render its pucks. The sim state lives in ./island-sim.
+  // the island overlay. Each tick simulates a visit (plays/likes), slides a notifier
+  // above the top panel, and pings any open
+  // island so it can re-render its counters. The sim state lives in ./island-sim.
   private startIslandActivity(): void {
     const buildings = (): SimBuildingRef[] =>
       loadIslandState().buildings.map((b) => ({ slot: b.slot, name: b.name }));
@@ -4379,7 +4363,6 @@ export class Feed {
       close: () => this.closeOverlay(),
       level: islandLevel,
       puzzles: () => this.totalPuzzles,
-      addPuzzles: (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from),
     }));
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
