@@ -801,7 +801,7 @@ const CSS = `
 .isl-wallet{display:flex;align-items:center;gap:5px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:6px 12px;font-size:13px;font-weight:700;color:#FFD98A;flex:0 0 auto}
 .isl-level{display:flex;align-items:center;gap:4px;background:rgba(110,168,255,.14);border:1px solid rgba(110,168,255,.34);border-radius:999px;padding:6px 11px;font-size:13px;font-weight:800;color:#BBD3FF;flex:0 0 auto}
 .isl-puz{transform-box:fill-box;transform-origin:center;animation:isl-wobble 1.05s ease-in-out infinite;cursor:pointer}
-@keyframes isl-wobble{0%,100%{transform:translateY(0) rotate(-8deg)}50%{transform:translateY(-3px) rotate(8deg)}}
+@keyframes isl-wobble{0%,100%{transform:translateY(3px)}50%{transform:translateY(-4px)}}
 .isl-close{width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.1);border:none;color:#fff;font-size:15px;flex:0 0 34px}
 .isl-modes{flex:0 0 auto;display:flex;gap:8px;padding:4px 14px 10px}
 .isl-mode{flex:1;font:inherit;font-size:12.5px;padding:8px 0;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:rgba(255,255,255,.7)}
@@ -1239,10 +1239,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       '<div class="isl-wallet">🧩 <span data-tok></span></div>' +
       '<button class="isl-close" type="button" aria-label="Close">✕</button>' +
     '</div>' +
-    '<div class="isl-modes">' +
-      '<button class="isl-mode isl-mode--on" type="button" data-mode="owner">My island</button>' +
-      '<button class="isl-mode" type="button" data-mode="guest">As a guest</button>' +
-    '</div>' +
     '<div class="isl-worldbox"><svg viewBox="0 0 390 540" preserveAspectRatio="xMidYMid slice"></svg><div class="isl-legend" data-legend></div></div>' +
     '<button class="isl-cta" type="button" data-guest-cta hidden>Play a series here · +' + GUEST_REWARD + ' 🧩</button>' +
     '<div class="isl-scrim" data-scrim></div>' +
@@ -1507,12 +1503,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       puck.textContent = '🧩';
       puck.style.cssText = `position:absolute;left:${fx}px;top:${fy}px;font-size:24px;z-index:20;pointer-events:none;will-change:transform;`;
       ov.appendChild(puck);
-      const jx = (Math.random() - 0.5) * 26, jy = -18 - Math.random() * 20;
+      // Two phases, like coins bursting from an order then flying to the counter:
+      // 1) SCATTER — burst outward to a random point (decelerating);
+      // 2) FLY — accelerate from there into the puzzle wallet, shrinking on arrival.
+      const ang = Math.random() * Math.PI * 2, rad = 34 + Math.random() * 48;
+      const scx = Math.cos(ang) * rad, scy = Math.sin(ang) * rad - 8;
       puck.animate([
-        { transform: 'translate(-50%,-50%) scale(0.5)', opacity: 0, offset: 0 },
-        { transform: `translate(calc(-50% + ${jx}px),calc(-50% + ${jy}px)) scale(1.15)`, opacity: 1, offset: 0.22 },
-        { transform: `translate(calc(-50% + ${tx - fx}px),calc(-50% + ${ty - fy}px)) scale(0.42)`, opacity: 1, offset: 1 },
-      ], { duration: 560 + k * 40, delay: k * 55, easing: 'cubic-bezier(0.5,0.02,0.75,1)', fill: 'forwards' })
+        { transform: 'translate(-50%,-50%) scale(0.4)', opacity: 0, offset: 0, easing: 'cubic-bezier(0.14,0.72,0.3,1)' },
+        { transform: `translate(calc(-50% + ${scx.toFixed(1)}px),calc(-50% + ${scy.toFixed(1)}px)) scale(1.12)`, opacity: 1, offset: 0.34, easing: 'cubic-bezier(0.5,0,0.75,1)' },
+        { transform: `translate(calc(-50% + ${(tx - fx).toFixed(1)}px),calc(-50% + ${(ty - fy).toFixed(1)}px)) scale(0.4)`, opacity: 1, offset: 1 },
+      ], { duration: 720, delay: k * 45, fill: 'forwards' })
         .addEventListener('finish', () => {
           puck.remove();
           wallet.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.22)', offset: 0.4 }, { transform: 'scale(1)' }], { duration: 320, easing: 'cubic-bezier(.3,1.5,.5,1)' });
