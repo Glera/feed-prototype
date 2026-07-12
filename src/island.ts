@@ -32,7 +32,7 @@ import {
   type PublicIslandView,
 } from './api';
 import { IslandStateSync, cacheIslandState, loadIslandState, replaceIslandState } from './island-state';
-import { ISLAND_SIM_EVENT, loadIslandSim, saveIslandSim } from './island-sim';
+import { ISLAND_SIM_EVENT, islandSocialMode, loadIslandSim, saveIslandSim } from './island-sim';
 import { coverUrl, playableUrl } from './playables';
 import { shareTelegramLink, showConfirm } from './telegram';
 
@@ -1404,6 +1404,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
 
   function refreshIsland(persist = false): void {
     if (!guest) sim = loadIslandSim();   // the feed loop may have accrued new puzzle pucks since last render
+    // Fake social data (simulated plays/likes overlay + collectible pucks) shows only
+    // on the owner's own island with the 'fake' toggle on; 'real' shows pure backend data.
+    const fake = !guest && islandSocialMode() === 'fake';
     // Blueprint scheme (design variant B): dot grid, thin island outline,
     // central hub with connectors, slots as theme-filled circles with the
     // template initial. Status lives in rim DOTS (legend at the bottom);
@@ -1474,11 +1477,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       }
       s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
         <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text>
-        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays)}   ♥ ${fmtNum(b.likes)}</text></g>`;
+        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays + (fake ? (sim.plays[i] || 0) : 0))}   ♥ ${fmtNum(b.likes + (fake ? (sim.likes[i] || 0) : 0))}</text></g>`;
       // Uncollected puzzles earned from simulated plays — a gently bobbing token over
-      // the mechanic; tap to collect (scatter → fly into the counter). Owner only.
+      // the mechanic; tap to collect (scatter → fly into the counter). Fake mode only.
       // A per-slot negative animation-delay desyncs the bob so they don't move in unison.
-      const rew = guest ? 0 : (sim.reward[i] || 0);
+      const rew = fake ? (sim.reward[i] || 0) : 0;
       if (rew > 0) {
         const px = p.x, py = p.y - 52;
         const delay = -((i * 0.67) % 2.4).toFixed(2);   // desync the bob per slot (period = 2.4s, see .isl-puz)
@@ -1512,7 +1515,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       g.addEventListener('click', () => { if (!panMoved) toast('Слот откроется позже'); }));
     svg.querySelectorAll<SVGElement>('[data-collect]').forEach((g) =>
       g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) collectReward(Number(g.dataset.collect), g); }));
-    const likes = buildings.reduce((a, b) => a + b.likes, 0);
+    const likes = buildings.reduce((a, b) => a + b.likes + (fake ? (sim.likes[b.slot] || 0) : 0), 0);
     const statEl = ov.querySelector('[data-stat]');
     if (statEl) statEl.textContent = `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;
     const tokEl = ov.querySelector('[data-tok]');

@@ -6,6 +6,7 @@
  */
 import { apiDiagnose, apiReset, apiResetDaily, apiSeedChallenge } from './api';
 import { getEventLog } from './telemetry';
+import { islandSocialMode, setIslandSocialMode } from './island-sim';
 import { pendingCount, pendingStars, starsEverQueued, flushResults, clearOutbox } from './outbox';
 
 export async function mountDebugPanel(): Promise<void> {
@@ -100,6 +101,14 @@ export async function mountDebugPanel(): Promise<void> {
     setTimeout(() => { b.textContent = '📋 Copy log'; }, 1500);
   });
 
+  // Island social data: FAKE (simulated plays/likes/notifier/collectible pucks) vs
+  // REAL (sim off — genuine backend likes + shares only). Persisted; reload applies it.
+  const socialLabel = () => `Island data: ${islandSocialMode() === 'fake' ? 'FAKE (simulated)' : 'REAL (backend)'}`;
+  const socialBtn = mkBtn(socialLabel(), () => {
+    setIslandSocialMode(islandSocialMode() === 'fake' ? 'real' : 'fake');
+    location.reload();
+  });
+
   const seedBtn = mkBtn('⚡ Seed test challenge', async (b) => {
     b.textContent = 'seeding…';
     const r = await apiSeedChallenge();
@@ -110,6 +119,7 @@ export async function mountDebugPanel(): Promise<void> {
 
   btns.append(
     mkBtn('↻ Refresh', () => { void refreshHead(); refreshLog(); }),
+    socialBtn,
     copyBtn,
     seedBtn,
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),

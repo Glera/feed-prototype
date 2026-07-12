@@ -16,6 +16,19 @@ export interface IslandSim {
 const ISLAND_SIM_KEY = 'p4g-island-sim-v1';
 export const REWARD_CAP = 9;   // puzzles waiting over one building before it stops accruing
 
+// Island social data source, toggled by the owner (debug panel). Until there are
+// real players, 'fake' shows the simulated plays/likes/notifier/pucks; 'real' turns
+// the sim off entirely so genuine backend likes + shares can be tested clean.
+// Defaults to 'fake' (anything but the literal 'real').
+export type IslandSocialMode = 'fake' | 'real';
+const SOCIAL_MODE_KEY = 'p4g-island-social-mode';
+export function islandSocialMode(): IslandSocialMode {
+  try { return localStorage.getItem(SOCIAL_MODE_KEY) === 'real' ? 'real' : 'fake'; } catch { return 'fake'; }
+}
+export function setIslandSocialMode(m: IslandSocialMode): void {
+  try { localStorage.setItem(SOCIAL_MODE_KEY, m); } catch { /* noop */ }
+}
+
 export function loadIslandSim(): IslandSim {
   try {
     const s = JSON.parse(localStorage.getItem(ISLAND_SIM_KEY) || 'null');

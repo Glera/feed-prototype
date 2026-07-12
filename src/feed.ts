@@ -37,7 +37,7 @@ import {
 } from './api';
 import { queueResult, flushResults, pendingPuzzles, type ConfirmedBalances } from './outbox';
 import { loadIslandState } from './island-state';
-import { simulateActivity, ISLAND_SIM_EVENT, type SimBuildingRef } from './island-sim';
+import { simulateActivity, islandSocialMode, ISLAND_SIM_EVENT, type SimBuildingRef } from './island-sim';
 import { levelStarReward, seriesRewards } from './rewards.mjs';
 import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
@@ -45,7 +45,6 @@ import { getStartParam, shareChallenge, getInitData } from './telegram';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
-const IS_DEV = Boolean((import.meta as any).env?.DEV);
 
 /**
  * Infinite vertical feed pager (Instagram-Reels / TikTok style) over real playables.
@@ -538,7 +537,10 @@ export class Feed {
     this.updateMechanicStates();
     this.updateHud(false);
     this.mountPreloader();
-    if (IS_DEV) this.startIslandActivity(); // local presentation demo; production social data is server-owned
+    // Fake island social data (plays/likes/notifier/pucks) runs whenever the owner
+    // has the 'fake' toggle on (default until real players exist); 'real' turns it off
+    // so genuine backend likes/shares can be tested. Toggle lives in the debug panel.
+    if (islandSocialMode() === 'fake') this.startIslandActivity();
     if (this.publicIsland) window.setTimeout(() => this.openIslandWorld(), 0);
 
     // After a slide settles: normalise the ring position, resume the arrived
