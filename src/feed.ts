@@ -33,7 +33,7 @@ import {
   apiSession, apiMe, variantIdForMechanic,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox, apiStartRun,
-  type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type RunTicketRequest,
+  type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
 } from './api';
 import { queueResult, flushResults, pendingPuzzles, type ConfirmedBalances } from './outbox';
 import { loadIslandState } from './island-state';
@@ -45,6 +45,7 @@ import { getStartParam, shareChallenge, getInitData } from './telegram';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
+const IS_DEV = Boolean((import.meta as any).env?.DEV);
 
 /**
  * Infinite vertical feed pager (Instagram-Reels / TikTok style) over real playables.
@@ -378,6 +379,7 @@ export class Feed {
   private manualStartMs = new Map<number, number>();
   private runTickets = new Map<string, RunTicketRequest>();
   private activeChallenge: ChallengeView | null = null;
+  private publicIsland: PublicIslandView | null = null;
   private inboxChallenges: ChallengeInboxItem[] = [];   // top-rail: friends' challenges to play
   private challengeCompleted = false;
   // Series (W2): taking over a mechanic starts a multi-level run. Most mechanics run
@@ -510,12 +512,19 @@ export class Feed {
   private lastT = 0;
   private velocity = 0;
 
-  constructor(viewport: HTMLElement, feedEl: HTMLElement, playables: Playable[], challenge: ChallengeView | null = null) {
+  constructor(
+    viewport: HTMLElement,
+    feedEl: HTMLElement,
+    playables: Playable[],
+    challenge: ChallengeView | null = null,
+    publicIsland: PublicIslandView | null = null,
+  ) {
     this.viewport = viewport;
     this.feedEl = feedEl;
     this.playables = playables;
     this.N = playables.length;
     this.activeChallenge = challenge;
+    this.publicIsland = publicIsland;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     this.pickCoverBucket();   // decide tall/compact cover aspect BEFORE any cover loads
@@ -529,7 +538,8 @@ export class Feed {
     this.updateMechanicStates();
     this.updateHud(false);
     this.mountPreloader();
-    this.startIslandActivity();   // "someone played your mechanic" notifier + puzzle accrual, on every tab
+    if (IS_DEV) this.startIslandActivity(); // local presentation demo; production social data is server-owned
+    if (this.publicIsland) window.setTimeout(() => this.openIslandWorld(), 0);
 
     // After a slide settles: normalise the ring position, resume the arrived
     // game and pause the rest. transitionend bubbles up from the pages.
@@ -1660,7 +1670,7 @@ export class Feed {
     // Tap-and-release (before HOLD_MS): drop ONE item. Press-and-HOLD for HOLD_MS:
     // the gift smoothly grows + trembles, then pops and drops ALL remaining items
     // at once. Release early → the gift settles back and drops one.
-    const HOLD_MS = 1000;
+    const HOLD_MS = 500;   // hold-to-burst: shorter shake (~half a second is enough)
     const img = chestBtn.querySelector<HTMLElement>('.chest-ov__chest__img');
     let spent = false;
     let charging = false;
@@ -1709,17 +1719,10 @@ export class Feed {
       window.setTimeout(() => this.showSeriesWinScreen(i), winDelay);
     };
 
-    const vanishGift = (fromScale: number) => {
-      if (chestBtn.animate) {
-        chestBtn.animate([
-          { transform: `scale(${fromScale})`, opacity: 1, offset: 0 },
-          { transform: `scale(${fromScale * 1.14})`, opacity: 1, offset: 0.28 },
-          { transform: 'scale(0.18)', opacity: 0, offset: 1 },
-        ], { duration: 240, easing: 'cubic-bezier(0.4,0,1,0.7)', fill: 'forwards' });
-        window.setTimeout(() => { chestBtn.style.visibility = 'hidden'; }, 240);
-      } else {
-        chestBtn.style.visibility = 'hidden';
-      }
+    // Remove the gift INSTANTLY once it bursts — no shrink/fade. The prizes have
+    // already launched from the captured origin, so the gift just vanishes.
+    const vanishGift = (_fromScale?: number) => {
+      chestBtn.style.visibility = 'hidden';
     };
 
     // Drop ONE item (tap / early release).
@@ -1998,7 +2001,7 @@ export class Feed {
 
   // Pop one puzzle piece from (cx,cy) UP-RIGHT into the puzzle counter — the same
   // pop→arc→shrink motion as flyOneStar, just aimed at the top-right badge.
-  private flyOnePuzzle(cx: number, cy: number, onLand?: () => void, credit = true): void {
+  private flyOnePuzzle(cx: number, cy: number, onLand?: () => void, credit = true, z = 2720): void {
     const vp = this.viewport.getBoundingClientRect();
     const badge = this.puzzleBadgeEl?.getBoundingClientRect();
     const badgeX = badge ? badge.left - vp.left + badge.width / 2 : vp.width - 40;
@@ -2014,7 +2017,7 @@ export class Feed {
       'filter:drop-shadow(0 8px 16px rgba(140,90,220,0.45));';
     const wrap = document.createElement('div');
     wrap.style.cssText = `position:absolute;left:${cx - px / 2}px;top:${cy - px / 2}px;` +
-      'margin:0;z-index:2720;pointer-events:none;will-change:transform;';
+      `margin:0;z-index:${z};pointer-events:none;will-change:transform;`;
     wrap.appendChild(unit);
     this.viewport.appendChild(wrap);
 
@@ -2056,10 +2059,10 @@ export class Feed {
   }
 
   // ── "Someone played your mechanic" — global activity sim ─────────────────────
-  // Runs on EVERY tab (the notifier must appear on the feed too), independent of
+  // Dev-only presentation demo. Runs on every local tab, independent of
   // the island overlay. Each tick simulates a visit (plays/likes), slides a notifier
-  // above the top panel, and pings any open
-  // island so it can re-render its counters. The sim state lives in ./island-sim.
+  // above the top panel. Production never starts this loop; real island plays
+  // and likes are counted by the backend visit API.
   private startIslandActivity(): void {
     const buildings = (): SimBuildingRef[] =>
       loadIslandState().buildings.map((b) => ({ slot: b.slot, name: b.name }));
@@ -2096,6 +2099,21 @@ export class Feed {
       () => el?.classList.remove('activity-toast--show'),
       Math.min(6000, Math.max(3000, text.length * 55)),
     );
+  }
+
+  // Collect puzzles piled over a mechanic on the island: fan `n` pucks out of the
+  // tapped point (scatter), each arcing into the ONE HUD counter. Rendered above the
+  // island overlay (z 3200) so they read over the mechanic, not behind it.
+  private addPuzzlesFromMeta(n: number, from?: { x: number; y: number }): void {
+    const vp = this.viewport.getBoundingClientRect();
+    const cx = from ? from.x - vp.left : vp.width / 2;
+    const cy = from ? from.y - vp.top : vp.height / 2;
+    const count = Math.max(1, Math.min(9, Math.round(n)));
+    for (let k = 0; k < count; k++) {
+      const jx = (Math.random() - 0.5) * 30;
+      const jy = (Math.random() - 0.5) * 22;
+      window.setTimeout(() => this.flyOnePuzzle(cx + jx, cy + jy, undefined, true, 3200), k * 85);
+    }
   }
 
   // Drop one collection card. Like stars/puzzles it pops UP OUT of the gift first
@@ -4359,10 +4377,14 @@ export class Feed {
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
     const islandLevel = this.levelForStars(this.totalStars);
+    const ownIsland = !this.publicIsland;
     void import('./island').then((m) => m.renderIslandWorld(ov, {
       close: () => this.closeOverlay(),
       level: islandLevel,
       puzzles: () => this.totalPuzzles,
+      publicIsland: this.publicIsland ?? undefined,
+      // Collecting puzzles credits the shared counter — only on the player's OWN island.
+      addPuzzles: ownIsland ? (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from) : undefined,
     }));
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
@@ -6649,7 +6671,12 @@ export class Feed {
   };
 }
 
-export function createFeed(viewport: HTMLElement, feedEl: HTMLElement, challenge: ChallengeView | null = null) {
+export function createFeed(
+  viewport: HTMLElement,
+  feedEl: HTMLElement,
+  challenge: ChallengeView | null = null,
+  publicIsland: PublicIslandView | null = null,
+) {
   let order = PLAYABLES;
   let ch = challenge;
   // Arriving via a challenge deep-link: put the challenged mechanic first so the
@@ -6660,5 +6687,5 @@ export function createFeed(viewport: HTMLElement, feedEl: HTMLElement, challenge
     if (idx > 0) order = [PLAYABLES[idx], ...PLAYABLES.slice(0, idx), ...PLAYABLES.slice(idx + 1)];
     else if (idx < 0) ch = null;
   }
-  return new Feed(viewport, feedEl, order, ch);
+  return new Feed(viewport, feedEl, order, ch, publicIsland);
 }

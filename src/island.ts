@@ -14,21 +14,27 @@
  */
 import {
   ApiRequestError,
+  apiCompleteIslandVisit,
   apiIslandBake,
   apiIslandBakeJob,
   apiIslandTheme,
+  apiPublicIsland,
+  apiSetIslandLike,
+  apiStartIslandVisit,
   type IslandBakeJob,
   type IslandBuildingState,
   type IslandDifficultyPreference,
   type IslandMotionPreference,
   type IslandPersistedState,
+  type IslandSocialView,
   type IslandStoredPack,
   type IslandTemplateId,
+  type PublicIslandView,
 } from './api';
 import { IslandStateSync, cacheIslandState, loadIslandState, replaceIslandState } from './island-state';
-import { ISLAND_SIM_EVENT, loadIslandSim } from './island-sim';
+import { ISLAND_SIM_EVENT, loadIslandSim, saveIslandSim } from './island-sim';
 import { coverUrl, playableUrl } from './playables';
-import { showConfirm } from './telegram';
+import { shareTelegramLink, showConfirm } from './telegram';
 
 declare const __ISLAND_SORT_RECIPE__: {
   baseBuild: string;
@@ -40,6 +46,10 @@ export interface IslandHostCtx {
   close(): void;
   level?: number;
   puzzles?: () => number;
+  publicIsland?: PublicIslandView;
+  // Collecting puzzles piled over a mechanic adds them to the ONE shared HUD counter.
+  // `from` is the tap point in viewport px so the feed can fly the pucks into it.
+  addPuzzles?: (n: number, from?: { x: number; y: number }) => void;
 }
 
 type TplId = IslandTemplateId;
@@ -230,8 +240,8 @@ const UNLOCKED_SLOTS = 4;
 // The pannable world extent (max slot reach + margin), and the visible window.
 const WORLD_W = 540, WORLD_H = 830, VIEW_W = 390, VIEW_H = 540;
 
-// The "other players played my mechanic" sim now lives in ./island-sim (the FEED
-// drives the loop so it runs on every tab); the island only reads + collects.
+// Local activity simulation is a dev-only feed presentation. Island counters
+// always render the backend-owned values from the persisted/public snapshot.
 function fmtNum(n: number): string { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
 const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
@@ -788,8 +798,10 @@ const CSS = `
 .island-world{position:absolute;top:var(--top-zone-h);left:0;right:0;bottom:var(--bar-reserve);z-index:3000;display:flex;flex-direction:column;overflow:hidden;
   background:linear-gradient(180deg,#122231 0%,#0d1118 46%,#07090f 100%);color:#fff}
 .isl-head{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:calc(var(--safe-top) + 12px) 14px 8px}
-.isl-namebar{flex:0 0 auto;display:flex;justify-content:center;padding:9px 14px 3px}
-.isl-namebar__pill{background:rgba(0,0,0,.38);border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:5px 15px;font-size:12.5px;font-weight:700;color:rgba(255,255,255,.84)}
+.isl-namebar{position:relative;flex:0 0 auto;display:flex;justify-content:center;padding:9px 54px 3px}
+.isl-namebar__pill{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(0,0,0,.38);border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:5px 15px;font-size:12.5px;font-weight:700;color:rgba(255,255,255,.84)}
+.isl-share{position:absolute;right:14px;top:6px;width:32px;height:32px;border:1px solid rgba(255,255,255,.14);border-radius:50%;background:rgba(0,0,0,.32);color:#fff;font:700 18px/1 system-ui;display:grid;place-items:center}
+.isl-share:disabled{opacity:.45}
 .isl-ava{width:38px;height:38px;border-radius:50%;background:#2E6E86;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;flex:0 0 38px}
 .isl-who{flex:1;min-width:0}
 .isl-eyebrow{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.45)}
@@ -812,6 +824,10 @@ const CSS = `
 @keyframes isl-pop{from{opacity:0;transform:scale(.65)}}
 .isl-plus{animation:isl-puls 2.4s ease-in-out infinite}
 @keyframes isl-puls{0%,100%{opacity:.95}50%{opacity:.55}}
+/* Collectible puzzle over a mechanic: a slow, smooth vertical bob. Each puck gets a
+   per-slot negative animation-delay (inline) so they don't bob in unison. */
+.isl-puz{transform-box:fill-box;transform-origin:center;animation:isl-wobble 2.4s ease-in-out infinite;cursor:pointer}
+@keyframes isl-wobble{0%,100%{transform:translateY(-3px)}50%{transform:translateY(3px)}}
 .isl-cta{position:absolute;left:14px;right:14px;bottom:calc(var(--safe-bottom) + 14px);border:none;border-radius:14px;
   padding:14px;font:inherit;font-size:15px;font-weight:800;color:#112011;background:linear-gradient(180deg,#8ff0a3,#3ccc78);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.36)}
@@ -915,21 +931,34 @@ function ensureStyles(): void {
 
 export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   ensureStyles();
-  const S: IslandState = loadIslandState();
-  if (ctx.puzzles) S.tokens = Math.max(0, ctx.puzzles());
-  // The FEED owns the sim loop; we reload this on every refresh so plays/likes and
-  // freshly-arrived puzzle pucks stay current. Refresh when the loop fires elsewhere.
+  const publicIsland = ctx.publicIsland;
+  const guest = Boolean(publicIsland);
+  const S: IslandState = publicIsland
+    ? {
+        tokens: 0,
+        buildings: publicIsland.buildings.map((building) => ({ ...building })),
+        ...(publicIsland.aiPacks
+          ? { aiPacks: Object.fromEntries(Object.entries(publicIsland.aiPacks).map(([id, pack]) => [id, { ...pack }])) }
+          : {}),
+      }
+    : loadIslandState();
+  if (!guest && ctx.puzzles) S.tokens = Math.max(0, ctx.puzzles());
+  // Local presentation sim (owner island only): puzzles pile up over the player's
+  // own mechanics from simulated plays. The FEED drives the loop; here we just read
+  // it to render + collect, and refresh when it fires. Guest/public islands ignore it.
   let sim = loadIslandSim();
   const onSimTick = () => {
     if (!ov.isConnected) { window.removeEventListener(ISLAND_SIM_EVENT, onSimTick); return; }
-    refreshIsland();
+    if (!guest) refreshIsland();
   };
-  window.addEventListener(ISLAND_SIM_EVENT, onSimTick);
-  const localExperiments = loadLocalExperiments();
+  if (!guest) window.addEventListener(ISLAND_SIM_EVENT, onSimTick);
+  const localExperiments: LocalExperimentState = guest
+    ? { buildings: [], packs: {}, threads: {} }
+    : loadLocalExperiments();
   // One-time migration from the first lab prototype, which stored local-only
   // buildings in the shared island cache. Pull them into the isolated overlay
   // before IslandStateSync can observe or upload that cache.
-  const legacyLocalBuildings = S.buildings.filter(isLocalExperiment);
+  const legacyLocalBuildings = guest ? [] : S.buildings.filter(isLocalExperiment);
   if (legacyLocalBuildings.length) {
     const bySlot = new Map(localExperiments.buildings.map((building) => [building.slot, building]));
     legacyLocalBuildings.forEach((building) => {
@@ -948,7 +977,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     saveLocalExperiments(localExperiments);
     cacheIslandState(S);
   }
-  let guest = false;
   let cur: CreationDraft | null = null;
   let toastTimer = 0;
   let progressTimer = 0;
@@ -1212,6 +1240,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   }
 
   const save = () => {
+    if (guest) return;
     if (stateSync) stateSync.changed();
     else cacheIslandState(S);
   };
@@ -1222,22 +1251,28 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       .forEach((building) => { void bakeAndHost(building.slot, building.prompt ?? ''); });
   }
 
-  stateSync = new IslandStateSync({
-    read: () => S,
-    apply: (state) => {
-      replaceIslandState(S, state);
-      refreshIsland(false);
-      cacheIslandState(S);
-    },
-    onHydrated: resumePendingBakes,
-  });
+  if (!guest) {
+    stateSync = new IslandStateSync({
+      read: () => S,
+      apply: (state) => {
+        replaceIslandState(S, state);
+        refreshIsland(false);
+        cacheIslandState(S);
+      },
+      onHydrated: resumePendingBakes,
+    });
+  }
+
+  const islandLabel = publicIsland
+    ? `${publicIsland.owner.first_name || (publicIsland.owner.username ? `@${publicIsland.owner.username}` : 'Player')}'s Island`
+    : 'My Island';
 
   ov.innerHTML =
     // The top HUD (level + puzzle counter) and the bottom nav bar are the feed's —
     // they stay put across views. The island only labels itself on a small backing.
-    '<div class="isl-namebar"><span class="isl-namebar__pill">🏝️ My Island</span></div>' +
+    `<div class="isl-namebar"><span class="isl-namebar__pill">🏝️ ${esc(islandLabel)}</span>${guest ? '' : '<button class="isl-share" type="button" data-share-island aria-label="Share island" title="Share island">↗</button>'}</div>` +
     '<div class="isl-worldbox"><svg viewBox="0 0 390 540" preserveAspectRatio="xMidYMid slice"></svg><div class="isl-legend" data-legend></div></div>' +
-    '<button class="isl-cta" type="button" data-guest-cta hidden>Play a series here</button>' +
+    `<button class="isl-cta" type="button" data-guest-cta${guest ? '' : ' hidden'}>Play a series here</button>` +
     '<div class="isl-scrim" data-scrim></div>' +
     '<div class="isl-sheet" data-sheet></div>' +
     '<div class="isl-toast" data-toast></div>';
@@ -1368,7 +1403,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   scrim.addEventListener('click', closeSheet);
 
   function refreshIsland(persist = false): void {
-    sim = loadIslandSim();   // the feed loop may have added plays/likes/rewards since last render
+    if (!guest) sim = loadIslandSim();   // the feed loop may have accrued new puzzle pucks since last render
     // Blueprint scheme (design variant B): dot grid, thin island outline,
     // central hub with connectors, slots as theme-filled circles with the
     // template initial. Status lives in rim DOTS (legend at the bottom);
@@ -1437,11 +1472,23 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (dot) {
         s += `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`;
       }
-      const bPlays = b.plays + (sim.plays[i] || 0);
-      const bLikes = b.likes + (sim.likes[i] || 0);
       s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
         <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text>
-        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(bPlays)}   ♥ ${fmtNum(bLikes)}</text></g>`;
+        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays)}   ♥ ${fmtNum(b.likes)}</text></g>`;
+      // Uncollected puzzles earned from simulated plays — a gently bobbing token over
+      // the mechanic; tap to collect (scatter → fly into the counter). Owner only.
+      // A per-slot negative animation-delay desyncs the bob so they don't move in unison.
+      const rew = guest ? 0 : (sim.reward[i] || 0);
+      if (rew > 0) {
+        const px = p.x, py = p.y - 52;
+        const delay = -((i * 0.67) % 2.4).toFixed(2);   // desync the bob per slot (period = 2.4s, see .isl-puz)
+        s += `<g class="isl-puz" data-collect="${i}" style="animation-delay:${delay}s">` +
+          `<circle cx="${px}" cy="${py}" r="15.5" fill="rgba(58,42,102,.97)" stroke="#fff" stroke-width="1.6"/>` +
+          `<text x="${px}" y="${py + 5.5}" text-anchor="middle" font-size="16">🧩</text>` +
+          `<circle cx="${px + 13}" cy="${py - 11}" r="8" fill="#4CC38A" stroke="rgba(13,17,24,.9)" stroke-width="1.5"/>` +
+          `<text x="${px + 13}" y="${py - 7.6}" text-anchor="middle" font-size="9.5" font-weight="800" fill="#08210F">${rew}</text>` +
+          '</g>';
+      }
       if (b.fresh) {
         b.fresh = false;
         if (isLocalExperiment(b)) localFreshChanged = true;
@@ -1463,13 +1510,29 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       g.addEventListener('click', () => { if (!panMoved) openBuilding(Number(g.dataset.b)); }));
     svg.querySelectorAll<SVGElement>('[data-lock]').forEach((g) =>
       g.addEventListener('click', () => { if (!panMoved) toast('Слот откроется позже'); }));
-    const likes = buildings.reduce((a, b) => a + b.likes + (sim.likes[b.slot] || 0), 0);
+    svg.querySelectorAll<SVGElement>('[data-collect]').forEach((g) =>
+      g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) collectReward(Number(g.dataset.collect), g); }));
+    const likes = buildings.reduce((a, b) => a + b.likes, 0);
     const statEl = ov.querySelector('[data-stat]');
     if (statEl) statEl.textContent = `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;
     const tokEl = ov.querySelector('[data-tok]');
     if (tokEl) tokEl.textContent = String(ctx.puzzles?.() ?? S.tokens);
     if (localFreshChanged) persistLocalExperiments();
     if (persist) save();
+  }
+
+  // Collect the puzzles bobbing over a mechanic: clear the local reward, then hand
+  // the amount + tap point to the feed, which flies the pucks into the ONE shared
+  // HUD counter (scatter → arc into it).
+  function collectReward(slot: number, el: SVGElement): void {
+    if (guest) return;
+    const amount = sim.reward[slot] || 0;
+    if (amount <= 0) return;
+    sim.reward[slot] = 0;
+    saveIslandSim(sim);
+    const r = el.getBoundingClientRect();
+    ctx.addPuzzles?.(amount, { x: r.left + r.width / 2, y: r.top + r.height / 2 });
+    refreshIsland();
   }
 
   // ── creation flow ──────────────────────────────────────────────────────────
@@ -2631,7 +2694,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         return;
       }
 
-      const stats = source ?? { plays: 0, likes: 0, liked: false };
       const preservedThread = localExperiments.threads[String(input.slot)];
       const pack = normalizePack(input.pack);
       removeLocalExperiment(input.slot);
@@ -2639,17 +2701,18 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       S.aiPacks = { ...(S.aiPacks ?? {}), [pack.id]: pack };
       S.buildings = S.buildings.filter((building) => building.slot !== input.slot);
       S.buildings.push({
+        buildingId: newJobId(),
         slot: input.slot,
         tpl: input.tpl,
         pack: pack.id,
         name: input.name.slice(0, 16),
         prompt: input.prompt,
-        plays: stats.plays,
-        likes: stats.likes,
-        liked: stats.liked,
+        plays: 0,
+        likes: 0,
+        liked: false,
         fresh: true,
         publishing: false,
-        url: job.result.url,
+        rel: job.result.rel,
       });
       if (input.draft) {
         persistDraftThread(input.draft, input.id);
@@ -2845,6 +2908,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (!PACKS.some((pack) => pack.id === pk.id)) S.aiPacks = { ...(S.aiPacks ?? {}), [pk.id]: pk };
       S.buildings = S.buildings.filter((x) => x.slot !== slot);
       S.buildings.push({
+        buildingId: newJobId(),
         slot, tpl: tplId, pack: pk.id, name: nm.slice(0, 16), prompt,
         plays: 0, likes: 0, liked: false, fresh: true, publishing: true,
       });
@@ -2869,6 +2933,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   }
 
   // ── building card + play (real mechanic in an iframe) ──────────────────────
+
+  function applySocial(building: Building, social: IslandSocialView): void {
+    const current = S.buildings.find((candidate) => candidate.buildingId === social.building_id);
+    const targets = current && current !== building ? [building, current] : [building];
+    targets.forEach((target) => {
+      target.plays = social.plays;
+      target.likes = social.likes;
+      target.liked = social.liked;
+    });
+  }
 
   function openBuilding(slot: number, ignoreReadyDraft = false): void {
     const b = visibleBuildings().find((x) => x.slot === slot);
@@ -2984,7 +3058,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const frame = document.createElement('iframe');
     frame.setAttribute('scrolling', 'no');
     frame.setAttribute('allow', 'autoplay');
-    if (isLocalExperiment(b)) frame.setAttribute('sandbox', 'allow-scripts');
+    if (guest) frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    else if (isLocalExperiment(b)) frame.setAttribute('sandbox', 'allow-scripts');
     play.appendChild(frame);
     ov.appendChild(play);
 
@@ -3003,6 +3078,22 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       play.appendChild(panel);
     });
     dbg(`launch: "${b.name}" tpl=${b.tpl} pack=${b.pack} guest=${guest}`);
+
+    const visitId = guest && publicIsland && b.buildingId ? newJobId() : null;
+    const visitStartedAt = performance.now();
+    const visitStart = visitId && publicIsland && b.buildingId
+      ? apiStartIslandVisit({
+          visit_id: visitId,
+          owner_id: publicIsland.owner.id,
+          building_id: b.buildingId,
+        })
+      : null;
+    if (visitStart) {
+      void visitStart.then((visit) => {
+        applySocial(b, visit.social);
+        dbg(`visit started: ${visit.visit_id}`);
+      }).catch((error) => dbg(`visit start failed: ${errorText(error)}`));
+    }
 
     // The canonical playable is never transformed in the client. Generated
     // mechanics exist only as tested hosted/local-lab artifacts.
@@ -3026,29 +3117,79 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       try { frame.src = 'about:blank'; } catch { /* noop */ }
       play.remove();
     };
+    let winShown = false;
+    let visitCompleted = false;
     const showWin = () => {
-      b.plays++;
+      if (winShown) return;
+      winShown = true;
       const win = document.createElement('div');
       win.className = 'isl-win';
       win.innerHTML =
         '<div class="isl-win__t">Round won! 🎉</div>' +
-        (guest ? '<div class="isl-win__m">Thanks for playing on this island</div>'
+        (guest ? '<div class="isl-win__m" data-visit-status>Verifying this visit…</div>'
                : '<div class="isl-win__m">Your own build — no tokens for self-plays</div>') +
-        (guest ? `<button class="isl-like${b.liked ? ' isl-like--on' : ''}" type="button" data-like>${b.liked ? '♥ Liked' : '♡ Like this mechanic'}</button>` : '') +
+        (guest ? `<button class="isl-like${b.liked ? ' isl-like--on' : ''}" type="button" data-like disabled>${b.liked ? '♥ Liked' : '♡ Like this mechanic'}</button>` : '') +
         '<button class="isl-win__home" type="button" data-home>Back to island</button>';
       play.appendChild(win);
-      win.querySelector('[data-like]')?.addEventListener('click', (e) => {
-        const btn = e.currentTarget as HTMLElement;
-        b.liked = !b.liked;
-        b.likes += b.liked ? 1 : -1;
-        btn.classList.toggle('isl-like--on', b.liked);
-        btn.textContent = b.liked ? '♥ Liked' : '♡ Like this mechanic';
-        if (isLocalExperiment(b)) persistLocalExperiments();
-        else save();
+      const likeButton = win.querySelector('[data-like]') as HTMLButtonElement | null;
+      const paintLike = () => {
+        if (!likeButton) return;
+        const current = S.buildings.find((candidate) => candidate.buildingId === b.buildingId) ?? b;
+        likeButton.classList.toggle('isl-like--on', current.liked);
+        likeButton.textContent = current.liked ? '♥ Liked' : '♡ Like this mechanic';
+      };
+      likeButton?.addEventListener('click', async () => {
+        if (!visitCompleted || !publicIsland || !b.buildingId || !likeButton) return;
+        const current = S.buildings.find((candidate) => candidate.buildingId === b.buildingId) ?? b;
+        const nextLiked = !current.liked;
+        likeButton.disabled = true;
+        try {
+          const social = await apiSetIslandLike(b.buildingId, publicIsland.owner.id, nextLiked);
+          applySocial(b, social);
+          paintLike();
+          refreshIsland(false);
+        } catch (error) {
+          toast(`Like failed · ${errorText(error)}`);
+        } finally {
+          if (play.isConnected) likeButton.disabled = false;
+        }
       });
       (win.querySelector('[data-home]') as HTMLElement).addEventListener('click', () => { cleanup(); refreshIsland(); });
-      if (isLocalExperiment(b)) { persistLocalExperiments(); refreshIsland(false); }
-      else refreshIsland(true);
+      refreshIsland(false);
+
+      if (!guest) return;
+      const status = win.querySelector('[data-visit-status]') as HTMLElement;
+      void (async () => {
+        if (!visitStart || !visitId) throw new Error('This building has no server visit identity');
+        await visitStart;
+        const waitMs = Math.max(0, 850 - (performance.now() - visitStartedAt));
+        if (waitMs) await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+        let completed;
+        try {
+          completed = await apiCompleteIslandVisit(visitId);
+        } catch (error) {
+          if (!(error instanceof ApiRequestError) || error.status !== 425) throw error;
+          await new Promise((resolve) => window.setTimeout(resolve, 1100));
+          completed = await apiCompleteIslandVisit(visitId);
+        }
+        applySocial(b, completed.social);
+        visitCompleted = true;
+        dbg(`visit completed: plays=${completed.social.plays}`);
+        if (play.isConnected) {
+          status.textContent = 'Visit counted · you can leave a like';
+          if (likeButton) likeButton.disabled = false;
+          paintLike();
+        }
+        if (ov.isConnected) refreshIsland(false);
+      })().catch((error) => {
+        dbg(`visit completion failed: ${errorText(error)}`);
+        if (!play.isConnected) return;
+        status.textContent = 'Played successfully · visit could not be verified';
+        if (likeButton) {
+          likeButton.disabled = true;
+          likeButton.textContent = 'Like unavailable';
+        }
+      });
     };
     const onMsg = (e: MessageEvent) => {
       if (!ov.isConnected) { cleanup(); return; }
@@ -3066,16 +3207,33 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // ── header / modes ─────────────────────────────────────────────────────────
 
   ov.querySelector('.isl-close')?.addEventListener('click', () => ctx.close());
-  ov.querySelectorAll<HTMLElement>('[data-mode]').forEach((btn) =>
-    btn.addEventListener('click', () => {
-      guest = btn.dataset.mode === 'guest';
-      ov.querySelectorAll('[data-mode]').forEach((el) =>
-        el.classList.toggle('isl-mode--on', (el as HTMLElement).dataset.mode === (guest ? 'guest' : 'owner')));
-      (ov.querySelector('[data-guest-cta]') as HTMLElement).hidden = !guest;
-      (ov.querySelector('.isl-title') as HTMLElement).textContent = guest ? "Gleb's Island" : 'My Island';
-      refreshIsland();
-    }));
-  (ov.querySelector('[data-guest-cta]') as HTMLElement).addEventListener('click', () => {
+  ov.querySelector('[data-share-island]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const ownerId = Number((window as unknown as {
+      Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
+    }).Telegram?.WebApp?.initDataUnsafe?.user?.id);
+    if (!Number.isSafeInteger(ownerId) || ownerId <= 0) {
+      toast('Open the island in Telegram to share it');
+      return;
+    }
+    button.disabled = true;
+    try {
+      const view = await apiPublicIsland(ownerId);
+      if (!view.buildings.length) {
+        toast('Publish a mechanic before sharing the island');
+        return;
+      }
+      const fallback = new URL(location.href);
+      fallback.searchParams.delete('c');
+      fallback.searchParams.set('island', String(ownerId));
+      shareTelegramLink(view.share_url, view.deep_link || fallback.toString(), `Play on ${islandLabel}`);
+    } catch (error) {
+      toast(`Share unavailable · ${errorText(error)}`);
+    } finally {
+      if (ov.isConnected) button.disabled = false;
+    }
+  });
+  ov.querySelector('[data-guest-cta]')?.addEventListener('click', () => {
     const buildings = visibleBuildings();
     const b = buildings[Math.floor(Math.random() * buildings.length)];
     if (b) playSeries(b);
@@ -3084,14 +3242,31 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // Paint the local cache immediately, then replace it with the authoritative
   // server snapshot. Polling keeps an already-open island fresh across devices.
   refreshIsland(false);
-  if (IS_DEV) void resumeGeneratorExperiments();
-  // Wait for the first server read before resuming jobs so a stale device cache
-  // cannot revive a bake that another client has already replaced.
-  void stateSync.hydrate().finally(resumePendingBakes);
-  const pollState = async () => {
-    if (!ov.isConnected) return;
-    await stateSync?.refresh();
+  if (!guest) {
+    if (IS_DEV) void resumeGeneratorExperiments();
+    // Wait for the first server read before resuming jobs so a stale device cache
+    // cannot revive a bake that another client has already replaced.
+    void stateSync?.hydrate().finally(resumePendingBakes);
+    const pollState = async () => {
+      if (!ov.isConnected) return;
+      await stateSync?.refresh();
+      window.setTimeout(pollState, 10000);
+    };
     window.setTimeout(pollState, 10000);
-  };
-  window.setTimeout(pollState, 10000);
+  } else if (publicIsland) {
+    const pollPublicIsland = async () => {
+      if (!ov.isConnected) return;
+      try {
+        const next = await apiPublicIsland(publicIsland.owner.id);
+        S.buildings = next.buildings.map((building) => ({ ...building }));
+        if (next.aiPacks) S.aiPacks = Object.fromEntries(
+          Object.entries(next.aiPacks).map(([id, pack]) => [id, { ...pack }]),
+        );
+        else delete S.aiPacks;
+        refreshIsland(false);
+      } catch { /* keep the last good public snapshot */ }
+      window.setTimeout(pollPublicIsland, 10000);
+    };
+    window.setTimeout(pollPublicIsland, 10000);
+  }
 }

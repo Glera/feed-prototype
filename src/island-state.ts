@@ -116,7 +116,7 @@ export function replaceIslandState(target: IslandPersistedState, source: IslandP
 }
 
 function buildingIdentity(building: IslandBuildingState): string {
-  return building.jobId || [building.tpl, building.pack, building.name, building.prompt || ''].join('\u0000');
+  return building.buildingId || building.jobId || [building.tpl, building.pack, building.name, building.prompt || ''].join('\u0000');
 }
 
 function mergeBuilding(
@@ -142,16 +142,18 @@ function mergeBuilding(
   if (remoteId !== baseId) return clone(remote);
 
   // Same mechanic changed on both devices. Preserve remote publish completion
-  // while applying this client's field edits and additive counters.
+  // while applying this client's content edits. Social counters are owned by
+  // their dedicated backend tables and always come from the remote snapshot.
   const out = clone(remote) as unknown as Record<string, unknown>;
   const baseRecord = base as unknown as Record<string, unknown>;
   const localRecord = local as unknown as Record<string, unknown>;
   for (const key of Object.keys(localRecord)) {
-    if (key === 'plays' || key === 'likes') continue;
+    if (key === 'plays' || key === 'likes' || key === 'liked') continue;
     if (!same(localRecord[key], baseRecord[key])) out[key] = clone(localRecord[key]);
   }
-  out.plays = Math.max(0, remote.plays + (local.plays - base.plays));
-  out.likes = Math.max(0, remote.likes + (local.likes - base.likes));
+  out.plays = remote.plays;
+  out.likes = remote.likes;
+  out.liked = remote.liked;
   return out as unknown as IslandBuildingState;
 }
 

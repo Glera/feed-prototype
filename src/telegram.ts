@@ -50,9 +50,17 @@ export function isChallengeParam(p: string | null): boolean {
   return /^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$/.test(p);
 }
 
-/** Open the Telegram share sheet for a challenge. Inside Telegram uses
+/** Public island deep links use a compact `i_<telegram user id>` start param. */
+export function islandOwnerFromParam(p: string | null): number | null {
+  const match = p?.match(/^i_([1-9][0-9]{0,18})$/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/** Open the Telegram share sheet for a deep link. Inside Telegram uses
  *  openTelegramLink (native chooser); falls back to a new tab elsewhere. */
-export function shareChallenge(shareUrl: string, deepLink: string, text: string): void {
+export function shareTelegramLink(shareUrl: string, deepLink: string, text: string): void {
   const link = deepLink
     ? `https://t.me/share/url?url=${encodeURIComponent(deepLink)}&text=${encodeURIComponent(text)}`
     : shareUrl;
@@ -62,6 +70,10 @@ export function shareChallenge(shareUrl: string, deepLink: string, text: string)
     if (tg && typeof tg.openTelegramLink === 'function') { tg.openTelegramLink(link); return; }
   } catch { /* fall through */ }
   try { window.open(link, '_blank'); } catch { /* blocked */ }
+}
+
+export function shareChallenge(shareUrl: string, deepLink: string, text: string): void {
+  shareTelegramLink(shareUrl, deepLink, text);
 }
 
 /** Native Telegram confirmation where available; browser fallback elsewhere. */

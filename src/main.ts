@@ -1,9 +1,9 @@
 import './styles.css';
 import { createFeed } from './feed';
 import { setMechanicVersions } from './playables';
-import { initTelegram, getStartParam, isChallengeParam } from './telegram';
+import { initTelegram, getStartParam, islandOwnerFromParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
-import { apiGetChallenge, type ChallengeView } from './api';
+import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
@@ -28,13 +28,19 @@ async function boot(): Promise<void> {
   } catch { /* missing/offline → fall back to the feed build tag */ }
 
   let challenge: ChallengeView | null = null;
+  let publicIsland: PublicIslandView | null = null;
   // Telegram deep-link start_param OR ?c=<id> (set when tapping an inbox card, which
   // reloads — reusing the same landing path).
   const sp = getStartParam() || new URLSearchParams(location.search).get('c');
   if (isChallengeParam(sp)) {
     challenge = await apiGetChallenge(sp!);   // null if offline / not found → boots normally
   }
-  createFeed(viewport, feedEl, challenge);
+  const queryOwner = Number(new URLSearchParams(location.search).get('island'));
+  const ownerId = islandOwnerFromParam(sp) || (Number.isSafeInteger(queryOwner) && queryOwner > 0 ? queryOwner : null);
+  if (ownerId != null) {
+    try { publicIsland = await apiPublicIsland(ownerId); } catch { /* unavailable/private → normal feed */ }
+  }
+  createFeed(viewport, feedEl, challenge, publicIsland);
 }
 void boot();
 

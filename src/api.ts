@@ -365,6 +365,7 @@ export interface IslandStoredPack extends IslandThemePack {
 export type IslandTemplateId = 'sort' | 'merge' | 'pins';
 
 export interface IslandBuildingState {
+  buildingId?: string;
   slot: number;
   tpl: IslandTemplateId;
   pack: string;
@@ -403,6 +404,54 @@ export function apiSaveIslandState(state: IslandPersistedState, expectedRevision
   return putRequired<IslandStateResponse>('/api/island/state', {
     state,
     expected_revision: expectedRevision,
+  });
+}
+
+export interface PublicIslandView {
+  owner: { id: number; first_name: string | null; username: string | null };
+  buildings: IslandBuildingState[];
+  aiPacks?: Record<string, IslandStoredPack> | null;
+  deep_link: string;
+  share_url: string;
+}
+
+export interface IslandSocialView {
+  building_id: string;
+  plays: number;
+  likes: number;
+  liked: boolean;
+  changed?: boolean;
+}
+
+export interface IslandVisitView {
+  visit_id: string;
+  building_id: string;
+  owner_id: number;
+  state: 'active' | 'completed';
+  expires_at: string;
+  social: IslandSocialView;
+}
+
+export function apiPublicIsland(ownerId: number): Promise<PublicIslandView> {
+  return getRequired<PublicIslandView>(`/api/island/public/${encodeURIComponent(ownerId)}`);
+}
+
+export function apiStartIslandVisit(payload: {
+  visit_id: string;
+  owner_id: number;
+  building_id: string;
+}): Promise<IslandVisitView> {
+  return postRequired<IslandVisitView>('/api/island/visits/start', payload);
+}
+
+export function apiCompleteIslandVisit(visitId: string): Promise<IslandVisitView> {
+  return postRequired<IslandVisitView>(`/api/island/visits/${encodeURIComponent(visitId)}/complete`);
+}
+
+export function apiSetIslandLike(buildingId: string, ownerId: number, liked: boolean): Promise<IslandSocialView> {
+  return putRequired<IslandSocialView>(`/api/island/buildings/${encodeURIComponent(buildingId)}/like`, {
+    owner_id: ownerId,
+    liked,
   });
 }
 
