@@ -35,7 +35,26 @@
   initial-value: 0deg;
 }
 
-* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+  /* This is a tap-driven game UI: never let a tap / long-press select text or pop
+     the iOS callout (e.g. holding the chest was selecting it like a text field, and
+     the series panel would sometimes show a selection). */
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* …but keep genuine editable fields selectable/editable (e.g. the island prompt). */
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+}
 
 html, body {
   margin: 0;
