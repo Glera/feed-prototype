@@ -17,10 +17,15 @@ import REWARD_ICON_3 from './assets/reward_lvl3.png';
 import REWARD_ICON_4 from './assets/reward_lvl4.png';
 const REWARD_ICONS = [REWARD_ICON_1, REWARD_ICON_2, REWARD_ICON_3, REWARD_ICON_4];
 import STAR_GOLDEN from './assets/rarity_star_golden.png';
+// Puzzle piece — meta-currency dropped from the series chest (1–5 per win). Flies
+// up-right into the puzzle counter on the friends panel.
+import PUZZLE_ICON from './assets/puzzle-icon-28387.png';
+import { makeCollectionCard, randomCard, type CollectionCard } from './collections';
 import {
   apiSession, apiMe, variantIdForMechanic,
+  apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge, apiChallengeInbox,
-  type ChallengeView, type ChallengeInboxItem,
+  type ChallengeView, type ChallengeInboxItem, type DailyStateResp,
 } from './api';
 import { queueResult, flushResults } from './outbox';
 import { track } from './telemetry';
@@ -288,6 +293,22 @@ export class Feed {
   private frameRevealTimers = new Map<number, number>();
 
   private totalStars = 0;
+  // Meta-currency + collections, dropped from the series chest (prototype-local; no
+  // backend persistence yet). Puzzles fly up-right into the HUD puzzle counter;
+  // collection cards fly down into the bar's collections button.
+  private totalPuzzles = 0;
+  private totalCards = 0;
+  private puzzleBadgeEl: HTMLElement | null = null;
+  private puzzleValueEl: HTMLElement | null = null;
+  private puzzleBadgeSquash: Animation | null = null;
+  private collectionsBtnEl: HTMLElement | null = null;
+  private collectionsCountEl: HTMLElement | null = null;
+  private feedBarEl: HTMLElement | null = null;
+  private dailyState: DailyStateResp | null = null;
+  private dailyPanelEl: HTMLElement | null = null;
+  private dailyTimerEl: HTMLElement | null = null;
+  private dailyTickTimer: number | null = null;
+  private dailySyncing = false;
   // Telemetry (D3) state: which unit is on-screen, since when, and per-show guards.
   private shownIndex = -1;
   private shownAt = 0;
@@ -536,9 +557,12 @@ export class Feed {
       const s = await apiSession();
       if (!s) continue;
       this.applyServerBalance(s.balance);
+      if (typeof s.puzzles === 'number') this.applyServerPuzzles(s.puzzles);
+      await this.syncDaily(false);
       if (s.backend_version) { this.backendVersion = s.backend_version; this.renderVersionLabel(); }
       const b = await flushResults();
       if (b != null) this.applyServerBalance(b);
+      await this.syncDaily(false);
       void this.refreshChallengeRail();
       return;
     }
@@ -551,6 +575,8 @@ export class Feed {
     if (b != null) this.applyServerBalance(b);
     const m = await apiMe();
     if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);
+    if (m && typeof m.puzzles === 'number') this.applyServerPuzzles(m.puzzles);
+    void this.syncDaily(false);
     void this.refreshChallengeRail();
   }
 
@@ -586,6 +612,175 @@ export class Feed {
     this.renderLevelUpPage(false);
   }
 
+  private applyServerPuzzles(puzzles: number): void {
+    const next = Math.max(this.totalPuzzles, puzzles);
+    if (next === this.totalPuzzles) return;
+    this.totalPuzzles = next;
+    this.updatePuzzleCounter();
+  }
+
+  private async syncDaily(showPanel = false): Promise<void> {
+    if (this.dailySyncing) return;
+    this.dailySyncing = true;
+    try {
+      const state = await apiDailySync();
+      if (!state) return;
+      this.dailyState = state;
+      this.applyServerPuzzles(state.puzzle_balance);
+      this.renderDailyPanel();
+      this.startDailyTimer();
+      if (showPanel) this.showDailyPanel();
+    } finally {
+      this.dailySyncing = false;
+    }
+  }
+
+  private bumpDailyProgress(questId: string, amount: number): void {
+    const state = this.dailyState;
+    if (!state || amount <= 0) return;
+    const quest = state.quests.find((q) => q.id === questId);
+    if (!quest || quest.claimed) return;
+    quest.progress = Math.min(quest.target, quest.progress + amount);
+    quest.completed = quest.progress >= quest.target;
+    this.renderDailyPanel();
+  }
+
+  private showDailyPanel(): void {
+    if (!this.dailyState) {
+      this.mountDailyPanel(true);
+      void this.syncDaily(true);
+      return;
+    }
+    this.mountDailyPanel(false);
+    this.renderDailyPanel();
+    this.startDailyTimer();
+  }
+
+  private hideDailyPanel(): void {
+    const panel = this.dailyPanelEl;
+    if (!panel) return;
+    panel.classList.remove('daily-panel--in');
+    if (this.dailyTickTimer != null) {
+      window.clearInterval(this.dailyTickTimer);
+      this.dailyTickTimer = null;
+    }
+    window.setTimeout(() => {
+      if (this.dailyPanelEl === panel) this.dailyPanelEl = null;
+      if (this.dailyTimerEl && panel.contains(this.dailyTimerEl)) this.dailyTimerEl = null;
+      panel.remove();
+    }, 240);
+  }
+
+  private mountDailyPanel(loading: boolean): void {
+    if (this.dailyPanelEl) return;
+    this.comingSoonEl?.remove();
+    this.comingSoonEl = null;
+    const panel = document.createElement('div');
+    panel.className = 'daily-panel';
+    panel.innerHTML =
+      '<div class="daily-panel__head">' +
+        '<div><div class="daily-panel__title">Ежедневные задания</div><div class="daily-panel__timer">--:--:--</div></div>' +
+        '<button type="button" class="daily-panel__close" aria-label="Закрыть">×</button>' +
+      '</div>' +
+      `<div class="daily-panel__list">${loading ? '<div class="daily-panel__loading">Загружаем…</div>' : ''}</div>`;
+    panel.addEventListener('pointerdown', (e) => e.stopPropagation());
+    panel.querySelector<HTMLButtonElement>('.daily-panel__close')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.hideDailyPanel();
+    });
+    this.viewport.appendChild(panel);
+    this.dailyPanelEl = panel;
+    this.dailyTimerEl = panel.querySelector('.daily-panel__timer');
+    requestAnimationFrame(() => panel.classList.add('daily-panel--in'));
+  }
+
+  private renderDailyPanel(): void {
+    const state = this.dailyState;
+    const panel = this.dailyPanelEl;
+    if (!state || !panel) return;
+    this.updateDailyTimer();
+    const list = panel.querySelector<HTMLElement>('.daily-panel__list');
+    if (!list) return;
+    list.replaceChildren(...state.quests.map((quest) => {
+      const row = document.createElement('div');
+      row.className = 'daily-panel__quest' + (quest.completed ? ' daily-panel__quest--done' : '');
+
+      const text = document.createElement('div');
+      text.className = 'daily-panel__quest-text';
+      const title = document.createElement('div');
+      title.className = 'daily-panel__quest-title';
+      title.textContent = quest.title;
+      const progress = document.createElement('div');
+      progress.className = 'daily-panel__progress';
+      progress.textContent = `${Math.min(quest.progress, quest.target)} / ${quest.target}`;
+      const bar = document.createElement('div');
+      bar.className = 'daily-panel__bar';
+      const fill = document.createElement('i');
+      fill.style.width = `${Math.max(0, Math.min(100, (quest.progress / quest.target) * 100))}%`;
+      bar.appendChild(fill);
+      text.append(title, progress, bar);
+
+      const reward = document.createElement('div');
+      reward.className = 'daily-panel__reward';
+      reward.innerHTML = `<img src="${PUZZLE_ICON}" alt="" draggable="false"><span>+${quest.reward_puzzles}</span>`;
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'daily-panel__claim';
+      btn.disabled = !quest.completed || quest.claimed;
+      btn.textContent = quest.claimed ? 'Получено' : quest.completed ? 'Забрать' : 'В процессе';
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this.claimDailyQuest(quest.id, btn);
+      });
+
+      row.append(text, reward, btn);
+      return row;
+    }));
+  }
+
+  private startDailyTimer(): void {
+    if (!this.dailyTimerEl) return;
+    if (this.dailyTickTimer != null) window.clearInterval(this.dailyTickTimer);
+    this.updateDailyTimer();
+    this.dailyTickTimer = window.setInterval(() => this.updateDailyTimer(), 1000);
+  }
+
+  private updateDailyTimer(): void {
+    if (!this.dailyTimerEl || !this.dailyState) return;
+    const left = Math.max(0, Math.ceil((Date.parse(this.dailyState.reset_at) - Date.now()) / 1000));
+    this.dailyTimerEl.textContent = `Обновление через ${this.formatDailyTime(left)}`;
+    if (left <= 0) void this.syncDaily(false);
+  }
+
+  private formatDailyTime(totalSeconds: number): string {
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+
+  private async claimDailyQuest(questId: string, button: HTMLButtonElement): Promise<void> {
+    const before = this.dailyState?.quests.find((q) => q.id === questId);
+    const reward = before && before.completed && !before.claimed ? before.reward_puzzles : 0;
+    button.disabled = true;
+    button.textContent = '...';
+    const state = await apiDailyClaim(questId);
+    if (!state) {
+      button.textContent = 'Ошибка';
+      window.setTimeout(() => this.renderDailyPanel(), 700);
+      return;
+    }
+    this.dailyState = state;
+    if (reward > 0) {
+      this.totalPuzzles += reward;
+      this.updatePuzzleCounter();
+    }
+    this.applyServerPuzzles(state.puzzle_balance);
+    this.bumpPuzzleBadge();
+    this.renderDailyPanel();
+  }
+
   // Persist a manual win to the server (idempotent by run_id) — the ledger is the
   // source of truth for balance across sessions. Fire-and-forget; the local
   // counter already reflects the win optimistically.
@@ -607,7 +802,10 @@ export class Feed {
       metric_key: 'time_ms',
       metric_value: solveMs,
       stars,
+      tz_offset_minutes: currentTzOffsetMinutes(),
     });
+    this.bumpDailyProgress('levels_10', 1);
+    if (stars > 0) this.bumpDailyProgress('stars_50', stars);
   }
 
   // Solve time for this unit's current manual run (takeover → now), ms. Falls back
@@ -638,6 +836,7 @@ export class Feed {
     const res = await apiCompleteChallenge(ch.id, solveMs);
     track('challenge_complete', { challenge_id: ch.id, time_ms: solveMs, beat: res?.beat ?? null });
     if (res && typeof res.balance === 'number') this.applyServerBalance(res.balance);
+    if (res?.stars_awarded) this.bumpDailyProgress('stars_50', res.stars_awarded);
     this.showChallengeResult(ch, solveMs, res?.beat ?? (solveMs < ch.challenger_value), res?.stars_awarded ?? 0);
   }
 
@@ -817,7 +1016,7 @@ export class Feed {
     if (base === 'pins-l3') return 2;                    // level-3 pins: 2-level series (game level 3 → level 4)
     if (base === 'pins' || base.startsWith('pins-')) return 2;
     if (base === 'merge-locked-v1') return 1;
-    if (base === 'marble-sort') return 3;
+    if (base === 'marble-sort') return 2;                // 2-level series: rects 4 → 16 (old level 1 + 3, middle dropped)
     if (base === 'merge-timepress-v1') return 2;
     if (base === 'merge-timepress-v2') return 1;
     if (base === 'short-drama') return 6;                // 6 authored clips, one per level (?level=1..6)
@@ -978,7 +1177,6 @@ export class Feed {
   // re-renders of the series row (otherwise it would flicker between icons every tick).
   private seriesRewardIcon = new Map<number, string>();
   private pulsePendingSlot = -1;   // slot index rendered as PENDING (not green) until its pulse plays the green-in
-  private chestStarOrigin: { x: number; y: number } | null = null;   // fixed launch point for all chest stars (captured on first tap)
   private rewardIconFor(idx: number): string {
     let ic = this.seriesRewardIcon.get(idx);
     if (!ic) { ic = REWARD_ICONS[Math.floor(Math.random() * REWARD_ICONS.length)]; this.seriesRewardIcon.set(idx, ic); }
@@ -1135,10 +1333,23 @@ export class Feed {
   //    after the last, advance to the next mechanic. ─────────────────────────
   private beginChest(i: number): void {
     if (!this.series) return;
-    this.series.reward = 3 + Math.floor(Math.random() * 7);   // 3..9 (D4)
-    let remaining = this.series.reward;
-    let paid = false;
-    this.chestStarOrigin = null;   // fresh launch point for this chest's stars
+    this.series.reward = 3 + Math.floor(Math.random() * 7);   // 3..9 stars (D4)
+    // The chest drops a MIX of three item types (W-collections): stars (fly up-left
+    // into the level counter), puzzles (meta-currency, up-right into the puzzle
+    // counter) and collection cards (down into the collections button). Counts:
+    // stars = the series reward; puzzles 1–5; cards 1–3 (temporary: always drops
+    // cards for now). The queue is shuffled so types interleave as you tap.
+    type DropItem = { type: 'star' } | { type: 'puzzle' } | { type: 'card'; card: CollectionCard };
+    const queue: DropItem[] = [];
+    for (let n = 0; n < this.series.reward; n++) queue.push({ type: 'star' });
+    const puzzleCount = 1 + Math.floor(Math.random() * 5);   // 1..5
+    for (let n = 0; n < puzzleCount; n++) queue.push({ type: 'puzzle' });
+    const cardCount = 1 + Math.floor(Math.random() * 3);     // 1..3
+    for (let n = 0; n < cardCount; n++) queue.push({ type: 'card', card: randomCard() });
+    for (let n = queue.length - 1; n > 0; n--) {             // Fisher–Yates shuffle
+      const m = Math.floor(Math.random() * (n + 1));
+      [queue[n], queue[m]] = [queue[m], queue[n]];
+    }
     track('series_complete', { mechanic_id: this.playables[i]?.id, reward: this.series.reward });
     // Does the chest payout cross a level threshold? Capture it now (before the
     // stars fly and nudge totalStars) so the level-up ceremony can ride in when
@@ -1151,6 +1362,9 @@ export class Feed {
     // goes (showSeriesWinScreen / clearSeriesUi). The whole HUD moves because it's
     // the stacking-context root — a child's z-index can't escape it.
     this.hudEl?.classList.add('hud--chest-lift');
+    // Same lift for the bottom bar so the collections button (the card-drop target)
+    // is visible above the scrim and cards tuck into it. Cleared in showSeriesWinScreen.
+    this.feedBarEl?.classList.add('feed-bar--chest-lift');
 
     // The chest flies IN from the slot-row chest icon and scales up to centre; the
     // slot panel fades out as it launches.
@@ -1212,15 +1426,68 @@ export class Feed {
     });
     this.startChestSparks(chestBtn);
 
-    const onTap = (e: Event) => {
-      e.stopPropagation();
-      if (remaining <= 0) return;
-      remaining -= 1;
-      // Haptic tick on every tap (Telegram Mini App; no-op elsewhere).
-      try { (window as unknown as { Telegram?: { WebApp?: { HapticFeedback?: { impactOccurred: (s: string) => void } } } }).Telegram?.WebApp?.HapticFeedback?.impactOccurred('medium'); } catch { /* noop */ }
-      // Elastic squash→stretch on the IMG (bottom-pinned) — the button owns position,
-      // so the squash lives on the img and never fights the fly-in transform.
-      chestBtn.querySelector<HTMLElement>('.chest-ov__chest__img')?.animate([
+    // ── Interaction ──────────────────────────────────────────────────────────
+    // Tap-and-release (before HOLD_MS): drop ONE item. Press-and-HOLD for HOLD_MS:
+    // the gift smoothly grows + trembles, then pops and drops ALL remaining items
+    // at once. Release early → the gift settles back and drops one.
+    const HOLD_MS = 1500;
+    const img = chestBtn.querySelector<HTMLElement>('.chest-ov__chest__img');
+    let spent = false;
+    let charging = false;
+    let holdTimer = 0;
+    let growAnim: Animation | null = null;
+    let shakeAnim: Animation | null = null;
+
+    const haptic = (kind: string) => {
+      try { (window as unknown as { Telegram?: { WebApp?: { HapticFeedback?: { impactOccurred: (s: string) => void } } } }).Telegram?.WebApp?.HapticFeedback?.impactOccurred(kind); } catch { /* noop */ }
+    };
+
+    // Launch origins captured from the CURRENT chest position: stars/puzzles pop from
+    // the upper body (fly up), cards drop from UNDER the gift (fly down).
+    const originAt = (frac: number) => {
+      const r = chestBtn.getBoundingClientRect();
+      const vp = this.viewport.getBoundingClientRect();
+      return { x: r.left - vp.left + r.width / 2, y: r.top - vp.top + r.height * frac };
+    };
+
+    const dispatch = (item: DropItem, up: { x: number; y: number }, down: { x: number; y: number }) => {
+      if (item.type === 'star') this.flyOneStar(up.x, up.y);
+      else if (item.type === 'puzzle') this.flyOnePuzzle(up.x, up.y);
+      else this.flyOneCard(down.x, down.y, item.card);
+    };
+
+    const spendAndFinish = () => {
+      if (spent) return;
+      spent = true;
+      this.persistSeriesReward(i);
+      this.stopChestSparks();
+      chestBtn.style.pointerEvents = 'none';
+      const hint = scrim.querySelector<HTMLElement>('.chest-ov__hint');
+      if (hint) hint.style.opacity = '0';
+      // Hand off to the REAL win screen after the last items have flown.
+      window.setTimeout(() => this.showSeriesWinScreen(i), 760);
+    };
+
+    const vanishGift = (fromScale: number) => {
+      if (chestBtn.animate) {
+        chestBtn.animate([
+          { transform: `scale(${fromScale})`, opacity: 1, offset: 0 },
+          { transform: `scale(${fromScale * 1.14})`, opacity: 1, offset: 0.28 },
+          { transform: 'scale(0.18)', opacity: 0, offset: 1 },
+        ], { duration: 240, easing: 'cubic-bezier(0.4,0,1,0.7)', fill: 'forwards' });
+        window.setTimeout(() => { chestBtn.style.visibility = 'hidden'; }, 240);
+      } else {
+        chestBtn.style.visibility = 'hidden';
+      }
+    };
+
+    // Drop ONE item (tap / early release).
+    const dropOne = () => {
+      if (spent || !queue.length) return;
+      const item = queue.shift()!;
+      haptic('medium');
+      // Elastic squash→stretch on the img (bottom-pinned) as the item pops out.
+      img?.animate([
         { transform: 'scale(1,1)', offset: 0 },
         { transform: 'scale(1.16,0.86)', offset: 0.26 },
         { transform: 'scale(0.9,1.16)', offset: 0.56 },
@@ -1228,39 +1495,83 @@ export class Feed {
         { transform: 'scale(1,1)', offset: 1 },
       ], { duration: 460, easing: 'cubic-bezier(0.33,1,0.68,1)' });
       this.burstStarConfetti();
-      // Pop a real ★ star out of the chest. ALWAYS launch from ONE point — the
-      // origin captured on the first tap — so every star leaves the same spot and
-      // only the apex (scattered inside flyOneStar) differs.
-      if (!this.chestStarOrigin) {
-        const r = chestBtn.getBoundingClientRect();
-        const vp = this.viewport.getBoundingClientRect();
-        this.chestStarOrigin = { x: r.left - vp.left + r.width / 2, y: r.top - vp.top + r.height * 0.34 };
-      }
-      this.flyOneStar(this.chestStarOrigin.x, this.chestStarOrigin.y);
-      if (remaining <= 0 && !paid) {
-        paid = true;
-        this.persistSeriesReward(i);
-        // The last star has launched — REMOVE the chest right now (don't wait for it
-        // to reach the counter): the gift is spent the moment its last star pops out.
-        this.stopChestSparks();
-        chestBtn.style.pointerEvents = 'none';
-        const hint = scrim.querySelector<HTMLElement>('.chest-ov__hint');
-        if (hint) hint.style.opacity = '0';
-        if (chestBtn.animate) {
-          chestBtn.animate([
-            { transform: 'scale(1)', opacity: 1 },
-            { transform: 'scale(0.2)', opacity: 0 },
-          ], { duration: 200, easing: 'cubic-bezier(0.4,0,1,0.7)', fill: 'forwards' });
-          window.setTimeout(() => { chestBtn.style.visibility = 'hidden'; }, 200);
-        } else {
-          chestBtn.style.visibility = 'hidden';
-        }
-        // After the last star lands, hand off to the REAL win screen (old buttons +
-        // swipe), not a bespoke panel.
-        window.setTimeout(() => this.showSeriesWinScreen(i), 720);
+      dispatch(item, originAt(0.34), originAt(0.72));
+      if (!queue.length) {
+        vanishGift(1);
+        spendAndFinish();
       }
     };
-    chestBtn.addEventListener('click', onTap);
+
+    // Hold completed: pop the gift and drop EVERYTHING remaining simultaneously.
+    const dropAll = () => {
+      if (spent) return;
+      charging = false;
+      window.clearTimeout(holdTimer);
+      if (!queue.length) { vanishGift(1); spendAndFinish(); return; }
+      haptic('heavy');
+      // Capture origins BEFORE the gift pops (they read the enlarged rect, which is
+      // fine — it's roughly centred). Fan every remaining item out at once.
+      const up = originAt(0.34), down = originAt(0.72);
+      const items = queue.splice(0);
+      this.burstStarConfetti();
+      growAnim?.cancel();
+      shakeAnim?.cancel();
+      vanishGift(1.32);
+      items.forEach((item) => dispatch(item, up, down));
+      spendAndFinish();
+    };
+
+    const startCharge = () => {
+      if (spent || charging || !queue.length) return;
+      charging = true;
+      if (chestBtn.animate) {
+        growAnim = chestBtn.animate(
+          [{ transform: 'scale(1)' }, { transform: 'scale(1.32)' }],
+          { duration: HOLD_MS, easing: 'cubic-bezier(0.42,0.06,0.5,1)', fill: 'forwards' },
+        );
+        // Tremble on the img — a fast alternating jitter whose amplitude ramps up
+        // toward the release point (reads as the gift straining to burst).
+        const shakeKf: Keyframe[] = [];
+        const STEPS = 34;
+        for (let k = 0; k <= STEPS; k++) {
+          const t = k / STEPS;
+          const amp = t * t;                       // ramps up, gentle at first
+          const dir = k % 2 === 0 ? 1 : -1;
+          shakeKf.push({ transform: `translateX(${dir * amp * 3.2}px) rotate(${dir * amp * 3.4}deg)`, offset: t });
+        }
+        shakeAnim = img?.animate(shakeKf, { duration: HOLD_MS, easing: 'linear', fill: 'forwards' }) ?? null;
+      }
+      holdTimer = window.setTimeout(dropAll, HOLD_MS);
+    };
+
+    const endCharge = () => {
+      if (!charging) return;
+      charging = false;
+      window.clearTimeout(holdTimer);
+      // Smoothly settle the gift back to rest from wherever the grow/shake reached,
+      // then drop a single item.
+      const cur = getComputedStyle(chestBtn).transform;
+      growAnim?.cancel();
+      shakeAnim?.cancel();
+      if (chestBtn.animate && cur && cur !== 'none') {
+        chestBtn.animate(
+          [{ transform: cur }, { transform: 'none' }],
+          { duration: 200, easing: 'cubic-bezier(0.34,1.5,0.5,1)', fill: 'none' },
+        );
+      }
+      dropOne();
+    };
+
+    chestBtn.addEventListener('pointerdown', (e: PointerEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (spent) return;
+      try { chestBtn.setPointerCapture(e.pointerId); } catch { /* noop */ }
+      startCharge();
+    });
+    const release = (e: Event) => { e.stopPropagation(); endCharge(); };
+    chestBtn.addEventListener('pointerup', release);
+    chestBtn.addEventListener('pointercancel', release);
   }
 
   private startChestSparks(anchor: HTMLElement): void {
@@ -1387,7 +1698,7 @@ export class Feed {
     const toY = badgeY - cy;
     // Scatter the pop-out point: each star bursts to a DIFFERENT apex — a random
     // horizontal spread + a higher, varied pop height (the fixed pop read too low).
-    const popH = px * (1.55 + Math.random() * 0.85);              // ~1.55–2.4 × px (higher on average)
+    const popH = px * (2.05 + Math.random() * 0.9);               // ~2.05–2.95 × px — longer first-phase rise from the gift
     const apexX = toX * 0.1 + (Math.random() - 0.5) * px * 2.2;   // horizontal scatter (± ~1.1 × px)
     const grow = 1.5;        // peak size mid-pop, then back to 100% by the counter
     this.startStarFlightTrail(cx, cy, toX, toY, popH);
@@ -1429,6 +1740,116 @@ export class Feed {
     }, { once: true });
   }
 
+  // Pop one puzzle piece from (cx,cy) UP-RIGHT into the puzzle counter — the same
+  // pop→arc→shrink motion as flyOneStar, just aimed at the top-right badge.
+  private flyOnePuzzle(cx: number, cy: number): void {
+    const vp = this.viewport.getBoundingClientRect();
+    const badge = this.puzzleBadgeEl?.getBoundingClientRect();
+    const badgeX = badge ? badge.left - vp.left + badge.width / 2 : vp.width - 40;
+    const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
+    const px = 46;
+    const unit = document.createElement('img');
+    unit.src = PUZZLE_ICON;
+    unit.draggable = false;
+    unit.alt = '';
+    unit.style.cssText =
+      `display:block;width:${px}px;height:${px}px;object-fit:contain;` +
+      'transform-origin:50% 50%;will-change:transform;' +
+      'filter:drop-shadow(0 8px 16px rgba(140,90,220,0.45));';
+    const wrap = document.createElement('div');
+    wrap.style.cssText = `position:absolute;left:${cx - px / 2}px;top:${cy - px / 2}px;` +
+      'margin:0;z-index:2720;pointer-events:none;will-change:transform;';
+    wrap.appendChild(unit);
+    this.viewport.appendChild(wrap);
+
+    const toX = badgeX - cx;
+    const toY = badgeY - cy;
+    const popH = px * (1.9 + Math.random() * 0.9);
+    const apexX = toX * 0.12 + (Math.random() - 0.5) * px * 2.0;
+    const grow = 1.4;
+    let done = false;
+    const land = () => {
+      if (done) return; done = true;
+      wrap.remove();
+      this.burstRewardCollectParticles(badgeX, badgeY, 20);
+      this.totalPuzzles += 1;
+      this.updatePuzzleCounter();
+      this.bumpPuzzleBadge();
+    };
+    if (!wrap.animate) {
+      wrap.style.transform = `translate3d(${toX}px,${toY}px,0)`;
+      window.setTimeout(land, REWARD_SHOT_MS);
+      return;
+    }
+    wrap.animate([
+      { transform: 'translate3d(0,0,0)', offset: 0, easing: 'cubic-bezier(0.15,0.72,0.3,1)' },
+      { transform: `translate3d(${apexX}px,${-popH}px,0)`, offset: 0.34, easing: 'cubic-bezier(0.5,0.02,0.78,0.5)' },
+      { transform: `translate3d(${toX}px,${toY}px,0)`, offset: 1 },
+    ], { duration: REWARD_SHOT_MS, fill: 'forwards' });
+    const flight = unit.animate([
+      { transform: 'scale(0.32)', offset: 0, easing: 'cubic-bezier(0.12,0.7,0.3,1)' },
+      { transform: `scale(${grow})`, offset: 0.34, easing: 'cubic-bezier(0.5,0,0.6,1)' },
+      { transform: 'scale(1)', offset: 0.56, easing: 'linear' },
+      { transform: 'scale(0.9)', offset: 1 },
+    ], { duration: REWARD_SHOT_MS, fill: 'forwards' });
+    const impactTimer = window.setTimeout(land, Math.max(0, REWARD_SHOT_MS - 8));
+    flight.addEventListener('finish', () => { window.clearTimeout(impactTimer); land(); }, { once: true });
+  }
+
+  // Drop one collection card DOWN into the collections button. Unlike stars/puzzles
+  // it emerges from UNDER the gift (added to the chest scrim below the gift, z 1 vs
+  // the gift's z 2) and falls into the bar, shrinking as it tucks in.
+  private flyOneCard(cx: number, cy: number, card: CollectionCard): void {
+    const host = this.chestEl ?? this.viewport;
+    const vp = this.viewport.getBoundingClientRect();
+    const target = this.collectionsBtnEl?.getBoundingClientRect();
+    const toCX = target ? target.left - vp.left + target.width / 2 : 60;
+    const toCY = target ? target.top - vp.top + target.height / 2 : vp.height - 30;
+    const w = 96;
+    const cardEl = makeCollectionCard(card, w);
+    const wrap = document.createElement('div');
+    // Centre the card on (cx,cy); z 1 keeps it UNDER the gift (z 2) but above the scrim.
+    wrap.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;z-index:1;` +
+      'margin:0;pointer-events:none;will-change:transform;transform:translate(-50%,-50%);';
+    cardEl.style.transformOrigin = '50% 50%';
+    wrap.appendChild(cardEl);
+    host.appendChild(wrap);
+
+    const toX = toCX - cx;
+    const toY = toCY - cy;
+    const emergeX = toX * 0.12 + (Math.random() - 0.5) * w * 0.8;
+    const emergeY = w * (0.45 + Math.random() * 0.3);   // pushes DOWN out from under the gift
+    let done = false;
+    const land = () => {
+      if (done) return; done = true;
+      wrap.remove();
+      this.totalCards += 1;
+      this.updateCollectionsCount();
+      this.bumpCollectionsBtn();
+    };
+    const DUR = REWARD_SHOT_MS + 60;
+    if (!wrap.animate) {
+      wrap.style.transform = `translate(-50%,-50%) translate3d(${toX}px,${toY}px,0)`;
+      window.setTimeout(land, DUR);
+      return;
+    }
+    // POSITION — emerge below the gift, then accelerate down into the button.
+    wrap.animate([
+      { transform: 'translate(-50%,-50%) translate3d(0,0,0)', offset: 0, easing: 'cubic-bezier(0.2,0.7,0.35,1)' },
+      { transform: `translate(-50%,-50%) translate3d(${emergeX}px,${emergeY}px,0)`, offset: 0.3, easing: 'cubic-bezier(0.5,0.02,0.8,0.5)' },
+      { transform: `translate(-50%,-50%) translate3d(${toX}px,${toY}px,0)`, offset: 1 },
+    ], { duration: DUR, fill: 'forwards' });
+    // SCALE — pop out small→full as it emerges, then shrink as it tucks into the bar.
+    const flight = cardEl.animate([
+      { transform: 'scale(0.36) rotate(-6deg)', offset: 0, easing: 'cubic-bezier(0.12,0.7,0.3,1)' },
+      { transform: 'scale(1) rotate(0deg)', offset: 0.3, easing: 'cubic-bezier(0.4,0,0.6,1)' },
+      { transform: 'scale(0.9) rotate(0deg)', offset: 0.7, easing: 'linear' },
+      { transform: 'scale(0.32) rotate(4deg)', offset: 1 },
+    ], { duration: DUR, fill: 'forwards' });
+    const impactTimer = window.setTimeout(land, Math.max(0, DUR - 8));
+    flight.addEventListener('finish', () => { window.clearTimeout(impactTimer); land(); }, { once: true });
+  }
+
   private persistSeriesReward(i: number): void {
     const reward = this.series?.reward ?? 0;
     const mechanicId = this.playables[i]?.id;
@@ -1436,7 +1857,9 @@ export class Feed {
       queueResult({
         mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId),
         run_id: `series-${runUid()}`, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
+        tz_offset_minutes: currentTzOffsetMinutes(),
       });
+      this.bumpDailyProgress('stars_50', reward);
     }
   }
 
@@ -1448,6 +1871,7 @@ export class Feed {
   private showSeriesWinScreen(i: number): void {
     // Fade the chest overlay out.
     this.hudEl?.classList.remove('hud--chest-lift');   // scrim gone → drop the HUD lift
+    this.feedBarEl?.classList.remove('feed-bar--chest-lift');
     this.stopChestSparks();
     const chest = this.chestEl;
     if (chest) {
@@ -1516,6 +1940,7 @@ export class Feed {
     this.pulsePendingSlot = -1;
     this.dismissChallengePill();
     this.hudEl?.classList.remove('hud--chest-lift');
+    this.feedBarEl?.classList.remove('feed-bar--chest-lift');
     // Restore normal arrival-poster behaviour (a future feed arrival at this unit
     // should show its cover again).
     this.feedEl?.querySelectorAll('.game--series-reload').forEach((el) => el.classList.remove('game--series-reload'));
@@ -1964,32 +2389,62 @@ export class Feed {
   private mountFeedBar() {
     const bar = document.createElement('div');
     bar.className = 'feed-bar';
-    // Cosmetic tab switcher (no functionality yet): a row of simple line-drawn
-    // geometric icons. Tapping one makes it active — a soft translucent pill
-    // slides under it. Paging is via swipe (attachSwipeSurface below); these
-    // icons don't page. Shapes kept elementary on purpose.
-    const SWITCH_SHAPES: [string, string][] = [
-      ['circle',   '<circle cx="12" cy="12" r="8"/>'],
-      ['square',   '<rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/>'],
-      ['triangle', '<path d="M12 3.5 L20.5 19 L3.5 19 Z"/>'],
-      ['diamond',  '<path d="M12 3 L21 12 L12 21 L3 12 Z"/>'],
+    // Four fixed sections, left→right: Daily tasks · Meta · Mechanics feed ·
+    // Collections. Tapping one makes it active (a soft pill slides under it).
+    // "Лента механик" is the default view. "Ежедневные задания" and "Коллекции"
+    // are placeholders for now (a coming-soon toast). Collections is also the
+    // card-drop target from the chest and carries a count badge. Paging is via
+    // swipe (attachSwipeSurface below); these buttons don't page.
+    type BarTab = { name: string; label: string; svg: string; onTap: () => void };
+    const TABS: BarTab[] = [
+      {
+        name: 'daily', label: 'Ежедневные задания',
+        svg: '<circle cx="12" cy="12" r="8"/>',
+        onTap: () => this.showDailyPanel(),
+      },
+      {
+        name: 'meta', label: 'Мета',
+        svg: '<rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/>',
+        // The island-world meta experiment. The other meta prototype (openMetaWorld)
+        // stays reachable via ?metaworld=1 for testing.
+        onTap: () => { this.hideDailyPanel(); if (new URLSearchParams(location.search).has('metaworld')) this.openMetaWorld(); else this.openIslandWorld(); },
+      },
+      {
+        name: 'feed', label: 'Лента механик',
+        svg: '<path d="M12 3.5 L20.5 19 L3.5 19 Z"/>',
+        onTap: () => { this.hideDailyPanel(); },
+      },
+      {
+        name: 'collections', label: 'Коллекции',
+        svg: '<rect x="8" y="4.5" width="12" height="15" rx="2.5"/><path d="M4.5 8 v9.5 a2.5 2.5 0 0 0 2.5 2.5 h8.5"/>',
+        onTap: () => { this.hideDailyPanel(); this.showComingSoon('Коллекции'); },
+      },
     ];
+    const DEFAULT_TAB = 'feed';
     const switcher = document.createElement('div');
     switcher.className = 'feed-bar__switch';
     switcher.setAttribute('role', 'tablist');
-    SWITCH_SHAPES.forEach(([name, inner], idx) => {
+    TABS.forEach((tab) => {
       const icon = document.createElement('button');
       icon.type = 'button';
-      icon.className = 'feed-bar__icon' + (idx === 0 ? ' feed-bar__icon--active' : '');
-      icon.setAttribute('aria-label', name);
-      icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${inner}</svg>`;
+      icon.className = 'feed-bar__icon' + (tab.name === DEFAULT_TAB ? ' feed-bar__icon--active' : '');
+      icon.setAttribute('aria-label', tab.label);
+      icon.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${tab.svg}</svg>`;
+      if (tab.name === 'collections') {
+        this.collectionsBtnEl = icon;
+        const badge = document.createElement('span');
+        badge.className = 'feed-bar__count';
+        badge.hidden = true;
+        badge.textContent = '0';
+        icon.appendChild(badge);
+        this.collectionsCountEl = badge;
+      }
       icon.addEventListener('pointerdown', (e) => e.stopPropagation());
       icon.addEventListener('click', (e) => {
         e.stopPropagation();
         switcher.querySelectorAll('.feed-bar__icon--active').forEach((el) => el.classList.remove('feed-bar__icon--active'));
         icon.classList.add('feed-bar__icon--active');
-        if (name === 'diamond') this.openMetaWorld();
-        if (name === 'triangle') this.openIslandWorld();
+        tab.onTap();
       });
       switcher.appendChild(icon);
     });
@@ -2023,6 +2478,24 @@ export class Feed {
     // and .feed-bar has touch-action:none (styles.css) so the browser never scrolls.
     this.attachSwipeSurface(bar);
     this.feedEl.appendChild(bar);
+    this.feedBarEl = bar;
+  }
+
+  // Placeholder for bar sections that aren't built yet (Daily tasks, Collections):
+  // a brief centred toast that fades on its own.
+  private comingSoonEl: HTMLElement | null = null;
+  private showComingSoon(title: string) {
+    this.comingSoonEl?.remove();
+    const toast = document.createElement('div');
+    toast.className = 'coming-soon';
+    toast.innerHTML = `<div class="coming-soon__title">${title}</div><div class="coming-soon__sub">скоро</div>`;
+    this.viewport.appendChild(toast);
+    this.comingSoonEl = toast;
+    requestAnimationFrame(() => toast.classList.add('coming-soon--in'));
+    window.setTimeout(() => {
+      toast.classList.remove('coming-soon--in');
+      window.setTimeout(() => { if (this.comingSoonEl === toast) this.comingSoonEl = null; toast.remove(); }, 260);
+    }, 1400);
   }
 
   // private makeGutter(i: number): HTMLElement {
@@ -2051,12 +2524,20 @@ export class Feed {
           '</div>' +
           '<div class="story__name">You</div>' +
         '</div>' +
+      '</div>' +
+      // Puzzle counter (meta-currency), pinned top-right of the friends panel.
+      // Chest puzzle drops fly up-right into it.
+      '<div class="hud__puzzles" aria-label="Puzzles">' +
+        `<img src="${PUZZLE_ICON}" alt="" draggable="false">` +
+        '<span class="hud__puzzles-value">0</span>' +
       '</div>';
     this.viewport.appendChild(hud);
     this.hudEl = hud;
     this.levelBadgeEl = hud.querySelector('.hud__level');
     this.levelEl = hud.querySelector('.hud__level-value');
     this.levelProgressEl = hud.querySelector('.hud__level-ring');
+    this.puzzleBadgeEl = hud.querySelector('.hud__puzzles');
+    this.puzzleValueEl = hud.querySelector('.hud__puzzles-value');
     const stories = hud.querySelector<HTMLElement>('.stories');
     this.storiesEl = stories;
     if (stories) this.attachStoryScroller(stories);
@@ -5390,6 +5871,50 @@ export class Feed {
   private pulseLevelUp() {
     this.hudEl?.classList.add('hud--level-up');
     window.setTimeout(() => this.hudEl?.classList.remove('hud--level-up'), 420);
+  }
+
+  // Puzzle counter (top-right): value + a squash pulse when a puzzle lands, matching
+  // the level badge's absorb reaction.
+  private updatePuzzleCounter() {
+    if (this.puzzleValueEl) this.puzzleValueEl.textContent = String(this.totalPuzzles);
+  }
+
+  private bumpPuzzleBadge() {
+    const el = this.puzzleBadgeEl;
+    if (!el) return;
+    if (!el.animate) {
+      el.classList.remove('hud__puzzles--bump');
+      void el.offsetWidth;
+      el.classList.add('hud__puzzles--bump');
+      window.setTimeout(() => el.classList.remove('hud__puzzles--bump'), 440);
+      return;
+    }
+    const P = 0.16, H = 0.707 * P;
+    this.puzzleBadgeSquash?.cancel();
+    this.puzzleBadgeSquash = el.animate([
+      { transform: 'scale(1, 1)' },
+      { transform: `scale(${1 + H}, ${1 - H})`, offset: 0.25 },
+      { transform: `scale(${1 + P}, ${1 - P})`, offset: 0.5 },
+      { transform: `scale(${1 + H}, ${1 - H})`, offset: 0.75 },
+      { transform: 'scale(1, 1)' },
+    ], { duration: 220, easing: 'linear' });
+  }
+
+  // Collections button (bottom bar): count badge + a scale-pop when a card tucks in.
+  private updateCollectionsCount() {
+    const badge = this.collectionsCountEl;
+    if (!badge) return;
+    badge.textContent = String(this.totalCards);
+    badge.hidden = this.totalCards <= 0;
+  }
+
+  private bumpCollectionsBtn() {
+    const el = this.collectionsBtnEl;
+    if (!el) return;
+    el.classList.remove('feed-bar__icon--bump');
+    void el.offsetWidth;
+    el.classList.add('feed-bar__icon--bump');
+    window.setTimeout(() => el.classList.remove('feed-bar__icon--bump'), 440);
   }
 
   private finishStarReward(i: number): boolean {

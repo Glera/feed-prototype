@@ -116,6 +116,7 @@ async function get<T>(path: string): Promise<T | null> {
 export interface MeResp {
   user: ({ id: number; ref_code: string | null } & Record<string, unknown>) | null;
   balance: number;
+  puzzles?: number;
   needs_session?: boolean;
 }
 
@@ -137,6 +138,7 @@ export interface SessionResp {
   user: { id: number; ref_code: string | null } & Record<string, unknown>;
   ref_code: string | null;
   balance: number;
+  puzzles?: number;
   is_new: boolean;
   backend_version?: string;
 }
@@ -158,10 +160,45 @@ export interface ResultIn {
   metric_key: string;
   metric_value: number;
   stars?: number;   // stars this win grants (client reward roll 1–5); server clamps
+  tz_offset_minutes?: number;
 }
 
 export function apiPostResult(payload: ResultIn): Promise<ResultResp | null> {
   return post<ResultResp>('/api/results', payload);
+}
+
+export interface DailyQuestView {
+  id: string;
+  title: string;
+  progress: number;
+  target: number;
+  reward_puzzles: number;
+  completed: boolean;
+  claimed: boolean;
+}
+
+export interface DailyStateResp {
+  day: string;
+  reset_at: string;
+  seconds_remaining: number;
+  puzzle_balance: number;
+  quests: DailyQuestView[];
+}
+
+function tzOffsetMinutes(): number {
+  return -new Date().getTimezoneOffset();
+}
+
+export function currentTzOffsetMinutes(): number {
+  return tzOffsetMinutes();
+}
+
+export function apiDailySync(): Promise<DailyStateResp | null> {
+  return post<DailyStateResp>('/api/daily/sync', { tz_offset_minutes: tzOffsetMinutes() });
+}
+
+export function apiDailyClaim(questId: string): Promise<DailyStateResp | null> {
+  return post<DailyStateResp>('/api/daily/claim', { quest_id: questId, tz_offset_minutes: tzOffsetMinutes() });
 }
 
 // ── Challenges (W2) ─────────────────────────────────────────────────────────
@@ -214,7 +251,10 @@ export function apiAcceptChallenge(id: string): Promise<ChallengeView | null> {
 
 /** Recipient finishes → beat? + two-sided reward. `metric_value` = their solve time (ms). */
 export function apiCompleteChallenge(id: string, metricValue: number): Promise<ChallengeComplete | null> {
-  return post<ChallengeComplete>(`/api/challenges/${encodeURIComponent(id)}/complete`, { metric_value: metricValue });
+  return post<ChallengeComplete>(`/api/challenges/${encodeURIComponent(id)}/complete`, {
+    metric_value: metricValue,
+    tz_offset_minutes: tzOffsetMinutes(),
+  });
 }
 
 // ── Island UGC generation / bake ─────────────────────────────────────────────

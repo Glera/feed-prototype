@@ -2451,9 +2451,11 @@ body {
   opacity: 0; transition: opacity 0.22s ease;
 }
 .chest-ov--in { opacity: 1; }
-.chest-ov__hint { color: #cfe0ff; font: 800 18px/1.2 system-ui, sans-serif; }
+.chest-ov__hint { color: #cfe0ff; font: 800 18px/1.2 system-ui, sans-serif; position: relative; z-index: 2; }
 .chest-ov__chest {
+  position: relative; z-index: 2;   /* above card drops (z 1), which fall out from UNDER the gift */
   font-size: 108px; line-height: 0; background: none; border: 0; padding: 0; cursor: pointer;
+  touch-action: none;   /* press-and-hold must not scroll/select */
   /* Position (translate) is driven by the fly-in WAAPI on this button; scale/squash
      lives on the img below. No CSS transform/transition here — they'd fight it. */
   -webkit-tap-highlight-color: transparent;
@@ -2488,4 +2490,286 @@ body {
   background: linear-gradient(180deg, #6ea8ff, #3f78e0);
   border-color: rgba(255,255,255,0.28);
   color: #08122a;
+}
+
+
+/* ── Collections ─────────────────────────────────────────────────────────────
+   A collection card: stretchable cream frame (bg_cards, 9-sliced via border-image
+   so the uniform interior fills any size), the themed picture, and a ribbon at the
+   bottom carrying the title. border-image-source is set inline (the bg is an
+   imported data URL). */
+.coll-card {
+  position: relative;
+  box-sizing: border-box;
+  container-type: inline-size;   /* enables cqw sizing for the title */
+  aspect-ratio: 33 / 43;
+  border: 18px solid transparent;
+  border-image-slice: 70 fill;
+  border-image-repeat: stretch;
+  /* border-image-source: url(<bg data-uri>) — set by makeCollectionCard() */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.45));
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.coll-card__pic {
+  width: 100%;
+  line-height: 0;
+}
+.coll-card__pic img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 9px;
+}
+
+/* Ribbon banner overlapping the bottom of the picture; its ends flare past the
+   card edges (the source art is a wide banner). */
+.coll-card__ribbon {
+  position: relative;
+  width: 118%;
+  margin-left: -9%;
+  margin-top: -13%;
+  line-height: 0;
+}
+.coll-card__ribbon-bg {
+  display: block;
+  width: 100%;
+  height: auto;
+  filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.35));
+}
+.coll-card__title {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 8%;
+  bottom: 22%;
+  display: grid;
+  place-items: center;
+  padding: 0 12%;
+  line-height: 1;
+  color: #fff;
+  font-weight: 900;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: clamp(9px, 12cqw, 15px);
+  letter-spacing: 0.2px;
+  text-shadow: 0 1px 2px rgba(0, 40, 90, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Puzzle counter (top-right of the HUD / friends panel) ───────────────────
+   Meta-currency counter. Pinned to the right of the stories rail so it stays
+   visible while the rail scrolls; puzzle drops fly up-right into it. */
+.hud__puzzles {
+  position: absolute;
+  top: var(--top-zone-pad-top);
+  right: 10px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 11px 0 8px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(40, 30, 58, 0.94), rgba(18, 12, 28, 0.94));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  pointer-events: none;
+  transform-origin: center;
+}
+.hud__puzzles img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
+}
+.hud__puzzles-value {
+  font: 900 16px/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+.hud__puzzles--bump { animation: hud-bump 0.42s; }
+/* Reserve room on the right of the rail so scrolling challenge cards never slide
+   under the pinned puzzle counter. */
+.stories { padding-right: 78px; }
+
+/* Lift the bottom bar above the chest scrim (like .hud--chest-lift) so the
+   collections button is visible as cards fly down and tuck into it. */
+.feed-bar--chest-lift { z-index: 2706; }
+
+/* Collections button count badge on the bar icon. */
+.feed-bar__icon { position: relative; }
+.feed-bar__count {
+  position: absolute;
+  top: -3px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffcf4a, #f5972a);
+  border: 1.5px solid #0b0d14;
+  color: #241400;
+  font: 900 10px/16px system-ui, sans-serif;
+  text-align: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  transform-origin: center;
+}
+.feed-bar__count[hidden] { display: none; }
+.feed-bar__icon--bump { animation: hud-bump 0.42s; }
+
+/* Coming-soon toast for placeholder bar sections. */
+.coming-soon {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--bar-reserve) + 22px);
+  z-index: 2600;
+  transform: translate(-50%, 12px);
+  padding: 12px 22px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(30, 34, 48, 0.98), rgba(14, 16, 24, 0.98));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.24s ease, transform 0.24s cubic-bezier(0.34, 1.4, 0.5, 1);
+  pointer-events: none;
+}
+.coming-soon--in { opacity: 1; transform: translate(-50%, 0); }
+.coming-soon__title { font: 800 15px/1.2 system-ui, sans-serif; color: #fff; }
+.coming-soon__sub { margin-top: 2px; font: 700 12px/1.2 system-ui, sans-serif; color: #8fa2c6; text-transform: uppercase; letter-spacing: 1px; }
+
+/* Daily quests panel. */
+.daily-panel {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(var(--bar-reserve) + 12px);
+  z-index: 2600;
+  padding: 14px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(28, 34, 45, 0.98), rgba(12, 15, 22, 0.98));
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.22s ease, transform 0.26s cubic-bezier(0.26, 0.9, 0.3, 1);
+  pointer-events: auto;
+}
+.daily-panel--in { opacity: 1; transform: translateY(0); }
+.daily-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.daily-panel__title {
+  color: #fff;
+  font: 900 18px/1.1 system-ui, -apple-system, sans-serif;
+}
+.daily-panel__timer {
+  margin-top: 4px;
+  color: #aeb8c9;
+  font: 750 12px/1.2 system-ui, -apple-system, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.daily-panel__close {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font: 900 20px/32px system-ui, sans-serif;
+  text-align: center;
+}
+.daily-panel__list {
+  display: grid;
+  gap: 8px;
+}
+.daily-panel__loading {
+  padding: 18px 0;
+  text-align: center;
+  color: #c7d0df;
+  font: 800 14px/1.2 system-ui, sans-serif;
+}
+.daily-panel__quest {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 94px;
+  align-items: center;
+  gap: 10px;
+  min-height: 66px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.daily-panel__quest--done {
+  background: rgba(71, 199, 133, 0.12);
+  border-color: rgba(96, 231, 159, 0.28);
+}
+.daily-panel__quest-text {
+  min-width: 0;
+}
+.daily-panel__quest-title {
+  overflow: hidden;
+  color: #fff;
+  font: 850 14px/1.2 system-ui, -apple-system, sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.daily-panel__progress {
+  margin-top: 4px;
+  color: #aeb8c9;
+  font: 800 11px/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.daily-panel__bar {
+  height: 5px;
+  margin-top: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+.daily-panel__bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #58d58f, #ffd86a);
+}
+.daily-panel__reward {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: #fff;
+  font: 900 13px/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.daily-panel__reward img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.38));
+}
+.daily-panel__claim {
+  height: 34px;
+  border: 0;
+  border-radius: 17px;
+  background: linear-gradient(180deg, #ffe078, #f3a92f);
+  color: #2a1700;
+  font: 900 12px/1 system-ui, sans-serif;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.28);
+}
+.daily-panel__claim:disabled {
+  background: rgba(255, 255, 255, 0.11);
+  color: rgba(255, 255, 255, 0.6);
+  box-shadow: none;
 }
