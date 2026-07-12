@@ -777,7 +777,7 @@ function board(tpl: TplId, pk: Pack): string {
 // ── styles (self-injected, namespaced .isl-*) ───────────────────────────────
 
 const CSS = `
-.island-world{position:absolute;inset:0;z-index:3000;display:flex;flex-direction:column;overflow:hidden;
+.island-world{position:absolute;top:0;left:0;right:0;bottom:var(--bar-reserve);z-index:3000;display:flex;flex-direction:column;overflow:hidden;
   background:linear-gradient(180deg,#122231 0%,#0d1118 46%,#07090f 100%);color:#fff}
 .isl-head{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:calc(var(--safe-top) + 12px) 14px 8px}
 .isl-ava{width:38px;height:38px;border-radius:50%;background:#2E6E86;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;flex:0 0 38px}

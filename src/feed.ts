@@ -21,6 +21,10 @@ import STAR_GOLDEN from './assets/rarity_star_golden.png';
 // up-right into the puzzle counter on the friends panel.
 import PUZZLE_ICON from './assets/puzzle-icon-28387.png';
 import {
+  COLLECTIONS,
+  collectedCardIndexes,
+  collectionById,
+  loadCollectionsProgressState,
   makeCollectionCard,
   randomCard,
   type CollectionCard,
@@ -300,6 +304,7 @@ export class Feed {
   // Puzzles fly up-right into the HUD counter. Collection progress is its own
   // persisted state; chest cards are deliberately only a visual drop for now.
   private totalPuzzles = 0;
+  private collectionProgress = loadCollectionsProgressState();
   private puzzleBadgeEl: HTMLElement | null = null;
   private puzzleValueEl: HTMLElement | null = null;
   private puzzleBadgeSquash: Animation | null = null;
@@ -1443,18 +1448,20 @@ export class Feed {
       try { (window as unknown as { Telegram?: { WebApp?: { HapticFeedback?: { impactOccurred: (s: string) => void } } } }).Telegram?.WebApp?.HapticFeedback?.impactOccurred(kind); } catch { /* noop */ }
     };
 
-    // Launch origins captured from the CURRENT chest position: stars/puzzles pop from
-    // the upper body (fly up), cards drop from UNDER the gift (fly down).
+    // Single launch origin captured from the CURRENT chest position. EVERYTHING —
+    // stars, puzzles and collection cards — pops UP out of the gift first, then in a
+    // second phase peels off to its own counter (stars → level, puzzles → puzzle
+    // counter, cards → collections button).
     const originAt = (frac: number) => {
       const r = chestBtn.getBoundingClientRect();
       const vp = this.viewport.getBoundingClientRect();
       return { x: r.left - vp.left + r.width / 2, y: r.top - vp.top + r.height * frac };
     };
 
-    const dispatch = (item: DropItem, up: { x: number; y: number }, down: { x: number; y: number }) => {
+    const dispatch = (item: DropItem, up: { x: number; y: number }) => {
       if (item.type === 'star') this.flyOneStar(up.x, up.y);
       else if (item.type === 'puzzle') this.flyOnePuzzle(up.x, up.y);
-      else this.flyOneCard(down.x, down.y, item.card);
+      else this.flyOneCard(up.x, up.y, item.card);
     };
 
     const spendAndFinish = () => {
@@ -1496,7 +1503,7 @@ export class Feed {
         { transform: 'scale(1,1)', offset: 1 },
       ], { duration: 460, easing: 'cubic-bezier(0.33,1,0.68,1)' });
       this.burstStarConfetti();
-      dispatch(item, originAt(0.34), originAt(0.72));
+      dispatch(item, originAt(0.34));
       if (!queue.length) {
         vanishGift(1);
         spendAndFinish();
@@ -1510,15 +1517,15 @@ export class Feed {
       window.clearTimeout(holdTimer);
       if (!queue.length) { vanishGift(1); spendAndFinish(); return; }
       haptic('heavy');
-      // Capture origins BEFORE the gift pops (they read the enlarged rect, which is
+      // Capture the origin BEFORE the gift pops (reads the enlarged rect, which is
       // fine — it's roughly centred). Fan every remaining item out at once.
-      const up = originAt(0.34), down = originAt(0.72);
+      const up = originAt(0.34);
       const items = queue.splice(0);
       this.burstStarConfetti();
       growAnim?.cancel();
       shakeAnim?.cancel();
       vanishGift(1.32);
-      items.forEach((item) => dispatch(item, up, down));
+      items.forEach((item) => dispatch(item, up));
       spendAndFinish();
     };
 
@@ -1748,7 +1755,7 @@ export class Feed {
     const badge = this.puzzleBadgeEl?.getBoundingClientRect();
     const badgeX = badge ? badge.left - vp.left + badge.width / 2 : vp.width - 40;
     const badgeY = badge ? badge.top - vp.top + badge.height / 2 : 40;
-    const px = 46;
+    const px = 58;   // comparable to / slightly larger than the star (54); the puzzle art has more transparent padding
     const unit = document.createElement('img');
     unit.src = PUZZLE_ICON;
     unit.draggable = false;
@@ -1797,29 +1804,30 @@ export class Feed {
     flight.addEventListener('finish', () => { window.clearTimeout(impactTimer); land(); }, { once: true });
   }
 
-  // Drop one collection card DOWN into the collections button. Unlike stars/puzzles
-  // it emerges from UNDER the gift (added to the chest scrim below the gift, z 1 vs
-  // the gift's z 2) and falls into the bar, shrinking as it tucks in.
+  // Drop one collection card. Like stars/puzzles it pops UP OUT of the gift first
+  // (phase 1, above the gift), then in phase 2 arcs DOWN into the collections button
+  // on the bar, shrinking as it tucks in. Rendered above the gift/scrim (z 2720).
   private flyOneCard(cx: number, cy: number, card: CollectionCard): void {
-    const host = this.chestEl ?? this.viewport;
     const vp = this.viewport.getBoundingClientRect();
     const target = this.collectionsBtnEl?.getBoundingClientRect();
     const toCX = target ? target.left - vp.left + target.width / 2 : 60;
     const toCY = target ? target.top - vp.top + target.height / 2 : vp.height - 30;
-    const w = 96;
+    const w = 84;
     const cardEl = makeCollectionCard(card, w);
     const wrap = document.createElement('div');
-    // Centre the card on (cx,cy); z 1 keeps it UNDER the gift (z 2) but above the scrim.
-    wrap.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;z-index:1;` +
+    // Above the gift (z 2, in the scrim at 2700) AND the lifted bar (2706), so it
+    // flies over the gift and lands visibly on the collections icon.
+    wrap.style.cssText = `position:absolute;left:${cx}px;top:${cy}px;z-index:2720;` +
       'margin:0;pointer-events:none;will-change:transform;transform:translate(-50%,-50%);';
     cardEl.style.transformOrigin = '50% 50%';
     wrap.appendChild(cardEl);
-    host.appendChild(wrap);
+    this.viewport.appendChild(wrap);
 
     const toX = toCX - cx;
     const toY = toCY - cy;
-    const emergeX = toX * 0.12 + (Math.random() - 0.5) * w * 0.8;
-    const emergeY = w * (0.45 + Math.random() * 0.3);   // pushes DOWN out from under the gift
+    // Phase 1: pop UP to an apex above the gift (like stars/puzzles), scattered.
+    const popH = w * (1.7 + Math.random() * 0.7);
+    const apexX = toX * 0.12 + (Math.random() - 0.5) * w * 1.6;
     let done = false;
     const land = () => {
       if (done) return; done = true;
@@ -1829,23 +1837,23 @@ export class Feed {
       // this random animation (which may also contain duplicates).
       this.bumpCollectionsBtn();
     };
-    const DUR = REWARD_SHOT_MS + 60;
+    const DUR = REWARD_SHOT_MS + 80;
     if (!wrap.animate) {
       wrap.style.transform = `translate(-50%,-50%) translate3d(${toX}px,${toY}px,0)`;
       window.setTimeout(land, DUR);
       return;
     }
-    // POSITION — emerge below the gift, then accelerate down into the button.
+    // POSITION — rise to the apex (decelerate), then arc DOWN into the button (accelerate).
     wrap.animate([
-      { transform: 'translate(-50%,-50%) translate3d(0,0,0)', offset: 0, easing: 'cubic-bezier(0.2,0.7,0.35,1)' },
-      { transform: `translate(-50%,-50%) translate3d(${emergeX}px,${emergeY}px,0)`, offset: 0.3, easing: 'cubic-bezier(0.5,0.02,0.8,0.5)' },
+      { transform: 'translate(-50%,-50%) translate3d(0,0,0)', offset: 0, easing: 'cubic-bezier(0.15,0.72,0.3,1)' },
+      { transform: `translate(-50%,-50%) translate3d(${apexX}px,${-popH}px,0)`, offset: 0.34, easing: 'cubic-bezier(0.5,0.02,0.78,0.5)' },
       { transform: `translate(-50%,-50%) translate3d(${toX}px,${toY}px,0)`, offset: 1 },
     ], { duration: DUR, fill: 'forwards' });
-    // SCALE — pop out small→full as it emerges, then shrink as it tucks into the bar.
+    // SCALE — pop small→full during the rise, then shrink as it tucks into the bar.
     const flight = cardEl.animate([
-      { transform: 'scale(0.36) rotate(-6deg)', offset: 0, easing: 'cubic-bezier(0.12,0.7,0.3,1)' },
-      { transform: 'scale(1) rotate(0deg)', offset: 0.3, easing: 'cubic-bezier(0.4,0,0.6,1)' },
-      { transform: 'scale(0.9) rotate(0deg)', offset: 0.7, easing: 'linear' },
+      { transform: 'scale(0.34) rotate(-6deg)', offset: 0, easing: 'cubic-bezier(0.12,0.7,0.3,1)' },
+      { transform: 'scale(1) rotate(0deg)', offset: 0.34, easing: 'cubic-bezier(0.5,0,0.6,1)' },
+      { transform: 'scale(0.92) rotate(0deg)', offset: 0.72, easing: 'linear' },
       { transform: 'scale(0.32) rotate(4deg)', offset: 1 },
     ], { duration: DUR, fill: 'forwards' });
     const impactTimer = window.setTimeout(land, Math.max(0, DUR - 8));
@@ -2438,6 +2446,10 @@ export class Feed {
       icon.addEventListener('pointerdown', (e) => e.stopPropagation());
       icon.addEventListener('click', (e) => {
         e.stopPropagation();
+        // Bottom nav stays available on the meta: re-tapping the open meta is a
+        // no-op; tapping any other tab closes the current overlay first, then opens.
+        if (tab.name === 'meta' && this.overlayEl?.classList.contains('island-world')) return;
+        if (this.overlayOpen) this.closeOverlay();
         switcher.querySelectorAll('.feed-bar__icon--active').forEach((el) => el.classList.remove('feed-bar__icon--active'));
         icon.classList.add('feed-bar__icon--active');
         tab.onTap();
@@ -2477,25 +2489,161 @@ export class Feed {
     this.feedBarEl = bar;
   }
 
-  // Placeholder for bar sections that aren't built yet (Daily tasks, Collections):
-  // a brief centred toast that fades on its own.
+  // Kept while the daily panel transitions from its old toast implementation.
   private comingSoonEl: HTMLElement | null = null;
+
+  // Catalog and progress come from static metadata + a compact persisted index
+  // state. The random chest drop deliberately never mutates this state.
   private openCollections(): void {
-    this.showComingSoon('Коллекции');
+    if (this.overlayOpen) return;
+    this.overlayOpen = true;
+    this.applyActiveStates();
+
+    const ov = document.createElement('section');
+    ov.className = 'collections-view';
+    ov.setAttribute('aria-label', 'Коллекции');
+    this.viewport.appendChild(ov);
+    this.overlayEl = ov;
+    this.renderCollectionsOverview(ov);
+    track('collections_open', { collections: COLLECTIONS.length });
+    if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
   }
 
-  private showComingSoon(title: string) {
-    this.comingSoonEl?.remove();
-    const toast = document.createElement('div');
-    toast.className = 'coming-soon';
-    toast.innerHTML = `<div class="coming-soon__title">${title}</div><div class="coming-soon__sub">скоро</div>`;
-    this.viewport.appendChild(toast);
-    this.comingSoonEl = toast;
-    requestAnimationFrame(() => toast.classList.add('coming-soon--in'));
-    window.setTimeout(() => {
-      toast.classList.remove('coming-soon--in');
-      window.setTimeout(() => { if (this.comingSoonEl === toast) this.comingSoonEl = null; toast.remove(); }, 260);
-    }, 1400);
+  private renderCollectionsOverview(ov: HTMLElement): void {
+    const totalCollected = COLLECTIONS.reduce(
+      (sum, collection) => sum + collectedCardIndexes(this.collectionProgress, collection.id).size,
+      0,
+    );
+    const totalCards = COLLECTIONS.reduce((sum, collection) => sum + collection.cards.length, 0);
+    ov.innerHTML =
+      '<header class="collections-view__header">' +
+        '<div>' +
+          '<div class="collections-view__eyebrow">Альбом сезона</div>' +
+          '<h1 class="collections-view__title">Коллекции</h1>' +
+        '</div>' +
+        '<button class="collections-view__close" type="button" aria-label="Закрыть">✕</button>' +
+      '</header>' +
+      '<main class="collections-view__body">' +
+        '<section class="collections-intro">' +
+          '<div class="collections-intro__copy">' +
+            '<strong>Собери все карточки</strong>' +
+            '<span>Открывай коллекции и следи за прогрессом.</span>' +
+          '</div>' +
+          `<div class="collections-intro__total"><strong>${totalCollected}</strong><span>из ${totalCards}</span></div>` +
+        '</section>' +
+        '<div class="collections-list" aria-label="Альбомы"></div>' +
+      '</main>';
+
+    const list = ov.querySelector<HTMLElement>('.collections-list');
+    COLLECTIONS.forEach((collection) => {
+      const collected = collectedCardIndexes(this.collectionProgress, collection.id);
+      const count = collected.size;
+      const percent = collection.cards.length ? Math.round(count / collection.cards.length * 100) : 0;
+      const tile = document.createElement('button');
+      tile.type = 'button';
+      tile.className = 'collection-tile';
+      tile.setAttribute('aria-label', `${collection.title}: собрано ${count} из ${collection.cards.length}`);
+      tile.innerHTML =
+        '<div class="collection-tile__art" aria-hidden="true"></div>' +
+        '<div class="collection-tile__copy">' +
+          `<span class="collection-tile__kicker">Коллекция · ${collection.cards.length} карт</span>` +
+          `<strong class="collection-tile__title">${collection.title}</strong>` +
+          `<span class="collection-tile__subtitle">${collection.subtitle}</span>` +
+          '<div class="collection-tile__progress-line">' +
+            `<span>Собрано</span><strong>${count}/${collection.cards.length}</strong>` +
+          '</div>' +
+          `<div class="collection-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${collection.cards.length}" aria-valuenow="${count}">` +
+            `<i style="width:${percent}%"></i>` +
+          '</div>' +
+          '<span class="collection-tile__open">Открыть <b aria-hidden="true">→</b></span>' +
+        '</div>';
+
+      const art = tile.querySelector<HTMLElement>('.collection-tile__art');
+      collection.cards.slice(0, 3).forEach((card) => {
+        const preview = makeCollectionCard(card, 94);
+        preview.classList.add('collection-tile__preview');
+        if (!collected.has(card.index)) {
+          preview.classList.add('coll-card--locked');
+          const title = preview.querySelector<HTMLElement>('.coll-card__title');
+          if (title) title.textContent = '???';
+        }
+        art?.appendChild(preview);
+      });
+      tile.addEventListener('click', () => this.renderCollectionDetails(ov, collection.id));
+      list?.appendChild(tile);
+    });
+
+    ov.querySelector('.collections-view__close')?.addEventListener('click', () => this.closeOverlay());
+  }
+
+  private renderCollectionDetails(ov: HTMLElement, collectionId: string): void {
+    const collection = collectionById(collectionId);
+    if (!collection) { this.renderCollectionsOverview(ov); return; }
+    const collected = collectedCardIndexes(this.collectionProgress, collection.id);
+    const count = collected.size;
+    const percent = collection.cards.length ? Math.round(count / collection.cards.length * 100) : 0;
+    ov.innerHTML =
+      '<header class="collections-view__header collections-view__header--detail">' +
+        '<button class="collections-view__back" type="button" aria-label="К списку коллекций">' +
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 5 L8.5 12 L15.5 19"/></svg>' +
+        '</button>' +
+        '<div class="collections-view__heading">' +
+          '<div class="collections-view__eyebrow">Коллекция</div>' +
+          `<h1 class="collections-view__title">${collection.title}</h1>` +
+        '</div>' +
+        '<button class="collections-view__close" type="button" aria-label="Закрыть">✕</button>' +
+      '</header>' +
+      '<main class="collections-view__body collections-view__body--detail">' +
+        '<section class="collection-detail__summary">' +
+          '<div>' +
+            `<span>${collection.subtitle}</span>` +
+            `<strong>${count} из ${collection.cards.length} собрано</strong>` +
+          '</div>' +
+          `<b>${percent}%</b>` +
+          `<div class="collection-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${collection.cards.length}" aria-valuenow="${count}">` +
+            `<i style="width:${percent}%"></i>` +
+          '</div>' +
+        '</section>' +
+        '<div class="collection-card-grid" aria-label="Карточки коллекции"></div>' +
+      '</main>';
+
+    const grid = ov.querySelector<HTMLElement>('.collection-card-grid');
+    collection.cards.forEach((card) => {
+      const isCollected = collected.has(card.index);
+      const slot = document.createElement('article');
+      slot.className = `collection-card-slot collection-card-slot--${isCollected ? 'collected' : 'missing'}`;
+      slot.setAttribute('aria-label', isCollected
+        ? `Карточка ${card.index}: ${card.title}, собрана`
+        : `Карточка ${card.index}: не собрана`);
+      const cardEl = makeCollectionCard(card);
+      cardEl.style.width = '100%';
+      if (!isCollected) {
+        cardEl.classList.add('coll-card--locked');
+        const title = cardEl.querySelector<HTMLElement>('.coll-card__title');
+        if (title) title.textContent = 'Не собрано';
+        const lock = document.createElement('span');
+        lock.className = 'collection-card-slot__lock';
+        lock.setAttribute('aria-hidden', 'true');
+        lock.innerHTML = '<svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8.5 10 V7.5 a3.5 3.5 0 0 1 7 0 V10"/></svg>';
+        slot.append(cardEl, lock);
+      } else {
+        const picture = cardEl.querySelector<HTMLImageElement>('.coll-card__pic img');
+        if (picture) picture.alt = card.title;
+        slot.appendChild(cardEl);
+      }
+      const status = document.createElement('div');
+      status.className = 'collection-card-slot__status';
+      status.innerHTML = isCollected
+        ? '<span aria-hidden="true">✓</span> Собрана'
+        : `<span aria-hidden="true">${String(card.index).padStart(2, '0')}</span> Не найдена`;
+      slot.appendChild(status);
+      grid?.appendChild(slot);
+    });
+
+    ov.querySelector('.collections-view__back')?.addEventListener('click', () => this.renderCollectionsOverview(ov));
+    ov.querySelector('.collections-view__close')?.addEventListener('click', () => this.closeOverlay());
+    ov.querySelector('.collections-view__body')?.scrollTo({ top: 0 });
+    track('collection_open', { collection_id: collection.id, collected: count, total: collection.cards.length });
   }
 
   // private makeGutter(i: number): HTMLElement {
@@ -4350,6 +4498,10 @@ export class Feed {
     } else if (ov) {
       ov.remove();
     }
+    this.feedBarEl?.querySelectorAll('.feed-bar__icon--active')
+      .forEach((el) => el.classList.remove('feed-bar__icon--active'));
+    this.feedBarEl?.querySelector<HTMLElement>('[data-bar-tab="feed"]')
+      ?.classList.add('feed-bar__icon--active');
     this.applyActiveStates();   // resume the background feed game
   }
 
