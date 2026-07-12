@@ -1527,7 +1527,7 @@ export class Feed {
     // Tap-and-release (before HOLD_MS): drop ONE item. Press-and-HOLD for HOLD_MS:
     // the gift smoothly grows + trembles, then pops and drops ALL remaining items
     // at once. Release early → the gift settles back and drops one.
-    const HOLD_MS = 1500;
+    const HOLD_MS = 1000;
     const img = chestBtn.querySelector<HTMLElement>('.chest-ov__chest__img');
     let spent = false;
     let charging = false;
@@ -1555,7 +1555,7 @@ export class Feed {
       else this.flyOneCard(up.x, up.y, item.card);
     };
 
-    const spendAndFinish = () => {
+    const spendAndFinish = (winDelay = 760) => {
       if (spent) return;
       spent = true;
       this.persistSeriesReward(i);
@@ -1564,7 +1564,7 @@ export class Feed {
       const hint = scrim.querySelector<HTMLElement>('.chest-ov__hint');
       if (hint) hint.style.opacity = '0';
       // Hand off to the REAL win screen after the last items have flown.
-      window.setTimeout(() => this.showSeriesWinScreen(i), 760);
+      window.setTimeout(() => this.showSeriesWinScreen(i), winDelay);
     };
 
     const vanishGift = (fromScale: number) => {
@@ -1609,15 +1609,30 @@ export class Feed {
       if (!queue.length) { vanishGift(1); spendAndFinish(); return; }
       haptic('heavy');
       // Capture the origin BEFORE the gift pops (reads the enlarged rect, which is
-      // fine — it's roughly centred). Fan every remaining item out at once.
+      // fine — it's roughly centred).
       const up = originAt(0.34);
       const items = queue.splice(0);
       this.burstStarConfetti();
       growAnim?.cancel();
       shakeAnim?.cancel();
       vanishGift(1.32);
-      items.forEach((item) => dispatch(item, up));
-      spendAndFinish();
+      // Peel the items off ONE AT A TIME (not all at once) so they form three
+      // flowing "queue strips" — stars streaming to the level counter, puzzles to
+      // the puzzle counter, cards to the collections button. Round-robin across the
+      // types so all three strips build together.
+      const byType: Record<DropItem['type'], DropItem[]> = { star: [], puzzle: [], card: [] };
+      items.forEach((it) => byType[it.type].push(it));
+      const sequence: DropItem[] = [];
+      for (let more = true; more; ) {
+        more = false;
+        (['star', 'puzzle', 'card'] as DropItem['type'][]).forEach((t) => {
+          const next = byType[t].shift();
+          if (next) { sequence.push(next); more = true; }
+        });
+      }
+      const STAGGER_MS = 85;
+      sequence.forEach((item, idx) => window.setTimeout(() => { dispatch(item, up); haptic('light'); }, idx * STAGGER_MS));
+      spendAndFinish((sequence.length - 1) * STAGGER_MS + 760);
     };
 
     const startCharge = () => {
@@ -2647,13 +2662,21 @@ export class Feed {
       const tile = document.createElement('button');
       tile.type = 'button';
       tile.className = 'collection-tile';
-      tile.setAttribute('aria-label', `${collection.title}: собрано ${count} из ${collection.cards.length}`);
+      tile.setAttribute(
+        'aria-label',
+        `${collection.title}: собрано ${count} из ${collection.cards.length}, награда ${collection.rewardPuzzles} пазлов`,
+      );
       tile.innerHTML =
         '<div class="collection-tile__art" aria-hidden="true"></div>' +
         '<div class="collection-tile__copy">' +
           `<span class="collection-tile__kicker">Коллекция · ${collection.cards.length} карт</span>` +
           `<strong class="collection-tile__title">${collection.title}</strong>` +
           `<span class="collection-tile__subtitle">${collection.subtitle}</span>` +
+          '<div class="collection-reward collection-reward--tile">' +
+            `<img src="${PUZZLE_ICON}" alt="" draggable="false" aria-hidden="true">` +
+            '<span>Награда за сбор</span>' +
+            `<strong>${collection.rewardPuzzles} пазлов</strong>` +
+          '</div>' +
           '<div class="collection-tile__progress-line">' +
             `<span>Собрано</span><strong>${count}/${collection.cards.length}</strong>` +
           '</div>' +
@@ -2707,6 +2730,11 @@ export class Feed {
           `<b>${percent}%</b>` +
           `<div class="collection-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${collection.cards.length}" aria-valuenow="${count}">` +
             `<i style="width:${percent}%"></i>` +
+          '</div>' +
+          '<div class="collection-reward collection-reward--detail" aria-label="Награда за полную коллекцию">' +
+            `<img src="${PUZZLE_ICON}" alt="" draggable="false" aria-hidden="true">` +
+            '<span>Награда за полный сбор</span>' +
+            `<strong>${collection.rewardPuzzles} пазлов</strong>` +
           '</div>' +
         '</section>' +
         '<div class="collection-card-grid" aria-label="Карточки коллекции"></div>' +
@@ -4126,7 +4154,8 @@ export class Feed {
     ov.className = 'island-world';
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
-    void import('./island').then((m) => m.renderIslandWorld(ov, { close: () => this.closeOverlay() }));
+    const islandLevel = this.levelForStars(this.totalStars);
+    void import('./island').then((m) => m.renderIslandWorld(ov, { close: () => this.closeOverlay(), level: islandLevel }));
     if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
   }
 

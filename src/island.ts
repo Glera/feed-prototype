@@ -35,7 +35,7 @@ declare const __ISLAND_SORT_RECIPE__: {
 
 const SORT_RECIPE = __ISLAND_SORT_RECIPE__;
 
-export interface IslandHostCtx { close(): void; }
+export interface IslandHostCtx { close(): void; level?: number; }
 
 type TplId = IslandTemplateId;
 type VariantKeys = 'sceneBg' | 'belt' | 'outline' | 'seed' | 'difficulty' | 'motion' | 'marbleStyle'
@@ -224,6 +224,19 @@ const HUB = { x: 210, y: 300 };
 const UNLOCKED_SLOTS = 4;
 // The pannable world extent (max slot reach + margin), and the visible window.
 const WORLD_W = 540, WORLD_H = 830, VIEW_W = 390, VIEW_H = 540;
+
+// ── "Other players played my mechanic" simulation (no real players yet) ──────
+// LOCAL-ONLY overlay (never synced to the server): per-slot extra plays/likes
+// dealt by the sim, plus `reward` = uncollected puzzles waiting on the mechanic.
+interface IslandSim { reward: Record<number, number>; plays: Record<number, number>; likes: Record<number, number>; }
+const ISLAND_SIM_KEY = 'p4g-island-sim-v1';
+function loadIslandSim(): IslandSim {
+  try { const s = JSON.parse(localStorage.getItem(ISLAND_SIM_KEY) || 'null'); if (s && typeof s === 'object') return { reward: s.reward || {}, plays: s.plays || {}, likes: s.likes || {} }; } catch { /* noop */ }
+  return { reward: {}, plays: {}, likes: {} };
+}
+function saveIslandSim(sim: IslandSim): void { try { localStorage.setItem(ISLAND_SIM_KEY, JSON.stringify(sim)); } catch { /* noop */ } }
+const SIM_NAMES = ['Артём', 'Лена', 'Кирилл', 'Соня', 'Максим', 'Дана', 'Игорь', 'Вика', 'Паша', 'Настя', 'Рома', 'Юля', 'Гоша', 'Мила'];
+function fmtNum(n: number): string { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
 const GUEST_REWARD = 25;
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
 const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
@@ -786,6 +799,9 @@ const CSS = `
 .isl-title{font-size:16px;font-weight:800;line-height:1.25}
 .isl-stat{font-size:11.5px;color:rgba(255,255,255,.6)}
 .isl-wallet{display:flex;align-items:center;gap:5px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:6px 12px;font-size:13px;font-weight:700;color:#FFD98A;flex:0 0 auto}
+.isl-level{display:flex;align-items:center;gap:4px;background:rgba(110,168,255,.14);border:1px solid rgba(110,168,255,.34);border-radius:999px;padding:6px 11px;font-size:13px;font-weight:800;color:#BBD3FF;flex:0 0 auto}
+.isl-puz{transform-box:fill-box;transform-origin:center;animation:isl-wobble 1.05s ease-in-out infinite;cursor:pointer}
+@keyframes isl-wobble{0%,100%{transform:translateY(0) rotate(-8deg)}50%{transform:translateY(-3px) rotate(8deg)}}
 .isl-close{width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.1);border:none;color:#fff;font-size:15px;flex:0 0 34px}
 .isl-modes{flex:0 0 auto;display:flex;gap:8px;padding:4px 14px 10px}
 .isl-mode{flex:1;font:inherit;font-size:12.5px;padding:8px 0;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:rgba(255,255,255,.7)}
@@ -902,6 +918,8 @@ function ensureStyles(): void {
 export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   ensureStyles();
   const S: IslandState = loadIslandState();
+  const sim = loadIslandSim();
+  startSimLoop();   // schedule simulated visits (hoisted fn; first tick is deferred)
   const localExperiments = loadLocalExperiments();
   // One-time migration from the first lab prototype, which stored local-only
   // buildings in the shared island cache. Pull them into the isolated overlay
@@ -1217,6 +1235,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         '<div class="isl-title">My Island</div>' +
         '<div class="isl-stat" data-stat></div>' +
       '</div>' +
+      `<div class="isl-level" title="Уровень">★ <span>${ctx.level ?? 1}</span></div>` +
       '<div class="isl-wallet">🧩 <span data-tok></span></div>' +
       '<button class="isl-close" type="button" aria-label="Close">✕</button>' +
     '</div>' +
@@ -1424,8 +1443,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (dot) {
         s += `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`;
       }
+      const bPlays = b.plays + (sim.plays[i] || 0);
+      const bLikes = b.likes + (sim.likes[i] || 0);
       s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
-        <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text></g>`;
+        <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text>
+        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(bPlays)}   ♥ ${fmtNum(bLikes)}</text></g>`;
+      // Uncollected reward → a wobbling puzzle to tap (its own group, so the tap
+      // collects the reward instead of opening the building card).
+      if ((sim.reward[i] || 0) > 0) {
+        s += `<g class="isl-puz" data-collect="${i}"><circle cx="${p.x}" cy="${p.y - 56}" r="15" fill="rgba(16,24,34,.94)" stroke="#FFD98A" stroke-width="1.6"/><text x="${p.x}" y="${p.y - 49}" text-anchor="middle" font-size="17">🧩</text></g>`;
+      }
       if (b.fresh) {
         b.fresh = false;
         if (isLocalExperiment(b)) localFreshChanged = true;
@@ -1447,12 +1474,70 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       g.addEventListener('click', () => { if (!panMoved) openBuilding(Number(g.dataset.b)); }));
     svg.querySelectorAll<SVGElement>('[data-lock]').forEach((g) =>
       g.addEventListener('click', () => { if (!panMoved) toast('Слот откроется позже'); }));
-    const likes = buildings.reduce((a, b) => a + b.likes, 0);
+    svg.querySelectorAll<SVGElement>('[data-collect]').forEach((g) =>
+      g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) collectReward(Number(g.dataset.collect), g); }));
+    const likes = buildings.reduce((a, b) => a + b.likes + (sim.likes[b.slot] || 0), 0);
     (ov.querySelector('[data-stat]') as HTMLElement).textContent =
       `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;
     (ov.querySelector('[data-tok]') as HTMLElement).textContent = String(S.tokens);
     if (localFreshChanged) persistLocalExperiments();
     if (persist) save();
+  }
+
+  // ── "someone played my mechanic" reward loop ────────────────────────────────
+  function collectReward(slot: number, fromEl: SVGElement): void {
+    const amount = sim.reward[slot] || 0;
+    if (amount <= 0) return;
+    sim.reward[slot] = 0; saveIslandSim(sim);
+    S.tokens += amount; save();               // award the puzzles (the wallet currency)
+    flyPuzzleToWallet(fromEl, amount);
+    refreshIsland();
+  }
+
+  function flyPuzzleToWallet(fromEl: Element, amount: number): void {
+    const wallet = ov.querySelector('.isl-wallet') as HTMLElement | null;
+    if (!wallet) return;
+    const wr = wallet.getBoundingClientRect();
+    const fr = fromEl.getBoundingClientRect(), ovr = ov.getBoundingClientRect();
+    const fx = fr.left + fr.width / 2 - ovr.left, fy = fr.top + fr.height / 2 - ovr.top;
+    const tx = wr.left + wr.width / 2 - ovr.left, ty = wr.top + wr.height / 2 - ovr.top;
+    const n = Math.min(6, Math.max(1, amount));   // a few pucks fly for a bigger haul
+    for (let k = 0; k < n; k++) {
+      const puck = document.createElement('div');
+      puck.textContent = '🧩';
+      puck.style.cssText = `position:absolute;left:${fx}px;top:${fy}px;font-size:24px;z-index:20;pointer-events:none;will-change:transform;`;
+      ov.appendChild(puck);
+      const jx = (Math.random() - 0.5) * 26, jy = -18 - Math.random() * 20;
+      puck.animate([
+        { transform: 'translate(-50%,-50%) scale(0.5)', opacity: 0, offset: 0 },
+        { transform: `translate(calc(-50% + ${jx}px),calc(-50% + ${jy}px)) scale(1.15)`, opacity: 1, offset: 0.22 },
+        { transform: `translate(calc(-50% + ${tx - fx}px),calc(-50% + ${ty - fy}px)) scale(0.42)`, opacity: 1, offset: 1 },
+      ], { duration: 560 + k * 40, delay: k * 55, easing: 'cubic-bezier(0.5,0.02,0.75,1)', fill: 'forwards' })
+        .addEventListener('finish', () => {
+          puck.remove();
+          wallet.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.22)', offset: 0.4 }, { transform: 'scale(1)' }], { duration: 320, easing: 'cubic-bezier(.3,1.5,.5,1)' });
+        }, { once: true });
+    }
+  }
+
+  function startSimLoop(): void {
+    const tick = () => {
+      if (!ov.isConnected) return;   // overlay closed → stop (self-cleaning, no reschedule)
+      const bs = visibleBuildings();
+      if (bs.length) {
+        const b = bs[Math.floor(Math.random() * bs.length)];
+        const visitors = 1 + Math.floor(Math.random() * 4);   // this batch of "other players"
+        sim.plays[b.slot] = (sim.plays[b.slot] || 0) + visitors;
+        if (Math.random() < 0.6) sim.likes[b.slot] = (sim.likes[b.slot] || 0) + 1 + Math.floor(Math.random() * 2);
+        sim.reward[b.slot] = (sim.reward[b.slot] || 0) + visitors;   // 1 puzzle per play
+        saveIslandSim(sim);
+        const who = SIM_NAMES[Math.floor(Math.random() * SIM_NAMES.length)];
+        toast(visitors > 1 ? `${who} и ещё ${visitors - 1} играли в «${b.name}»` : `${who} играл в «${b.name}»`);
+        refreshIsland();
+      }
+      window.setTimeout(tick, 5000 + Math.random() * 4000);   // frequent: every ~5–9s
+    };
+    window.setTimeout(tick, 2600 + Math.random() * 1800);     // first visit soon after opening
   }
 
   // ── creation flow ──────────────────────────────────────────────────────────
