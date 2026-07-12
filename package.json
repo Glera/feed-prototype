@@ -6,7 +6,9 @@
   "description": "Swipe platform (Telegram Mini App): vertical feed of playable mini-games with a social layer (stars, series, challenges) and generative UGC meta experiments. See README.md and ISLAND.md.",
   "scripts": {
     "dev": "vite",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && npm run check:rewards && npm run check:series",
+    "check:rewards": "node scripts/check-reward-vectors.mjs",
+    "check:series": "node scripts/check-series-policy.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "verify:island": "npm run lint && vite build && npm --prefix ../swipe-generator run check && npm --prefix ../swipe-ugc run verify"

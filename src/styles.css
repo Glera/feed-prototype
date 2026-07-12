@@ -2623,6 +2623,34 @@ body {
   text-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
 }
 .hud__puzzles--bump { animation: hud-bump 0.42s; }
+
+/* "Someone played your mechanic" — a global notifier that slides down from the very
+   top, ABOVE the HUD/top panel, on every view (feed included). Transient and
+   click-through so it never blocks the mechanic below. Sits in the empty center of
+   the top zone, between the level ring (left) and puzzle counter (right). */
+.activity-toast {
+  position: absolute;
+  top: calc(var(--safe-top) + 7px);
+  left: 50%;
+  transform: translate(-50%, -150%);
+  z-index: 3400;
+  max-width: 68%;
+  padding: 7px 15px;
+  border-radius: 999px;
+  background: rgba(20, 22, 30, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.42);
+  color: #fff;
+  font: 650 12.5px/1.25 system-ui, -apple-system, sans-serif;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.34s cubic-bezier(0.25, 0.9, 0.3, 1), opacity 0.3s ease;
+}
+.activity-toast--show { transform: translate(-50%, 0); opacity: 1; }
 /* Reserve room on the right of the rail so scrolling challenge cards never slide
    under the pinned puzzle counter. */
 .stories { padding-right: 78px; }

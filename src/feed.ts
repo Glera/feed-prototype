@@ -32,10 +32,14 @@ import {
 import {
   apiSession, apiMe, variantIdForMechanic,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
-  apiCreateChallenge, apiAcceptChallenge, apiCompleteChallenge, apiChallengeInbox,
-  type ChallengeView, type ChallengeInboxItem, type DailyStateResp,
+  apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox, apiStartRun,
+  type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type RunTicketRequest,
 } from './api';
 import { queueResult, flushResults, pendingPuzzles, type ConfirmedBalances } from './outbox';
+import { loadIslandState } from './island-state';
+import { simulateActivity, ISLAND_SIM_EVENT, type SimBuildingRef } from './island-sim';
+import { levelStarReward, seriesRewards } from './rewards.mjs';
+import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
 import { getStartParam, shareChallenge, getInitData } from './telegram';
 
@@ -136,22 +140,18 @@ function runUid(): string {
   return `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function rewardHash(value: string): number {
-  let hash = 2166136261;
-  for (const byte of new TextEncoder().encode(value)) hash = Math.imul(hash ^ byte, 16777619);
-  return hash >>> 0;
+function ticketUid(): string {
+  try { if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID(); } catch { /* older webview */ }
+  const bytes = new Uint8Array(16);
+  try { crypto.getRandomValues(bytes); } catch {
+    for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function levelStarReward(runId: string): number {
-  return 1 + rewardHash(`level:${runId}`) % 5;
-}
-
-function seriesRewards(runId: string): { stars: number; puzzles: number } {
-  return {
-    stars: 3 + rewardHash(`series-stars:${runId}`) % 7,
-    puzzles: 1 + rewardHash(`series-puzzles:${runId}`) % 5,
-  };
-}
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
 const FRAME_READY_FALLBACK_MS = 900;
 const STAGED_READY_FALLBACK_MS = 7000;
@@ -329,6 +329,14 @@ export class Feed {
   private feedBarEl: HTMLElement | null = null;
   private dailyState: DailyStateResp | null = null;
   private dailyPanelEl: HTMLElement | null = null;
+  // Daily is a central view (like meta/collections) but not part of the overlay
+  // system; this flag lets shouldPauseFrame() freeze + mute the feed mechanic
+  // while daily is up. Cleared synchronously in hideDailyPanel so the frame can
+  // resume the instant we return to the feed (before the panel's fade-out ends).
+  private dailyOpen = false;
+  // Global "someone played your mechanic" activity sim (runs on every tab).
+  private activityNotifierEl: HTMLElement | null = null;
+  private activityNotifierTimer: number | null = null;
   private dailyTimerEl: HTMLElement | null = null;
   private dailyTickTimer: number | null = null;
   private dailySyncing = false;
@@ -368,6 +376,7 @@ export class Feed {
   // when arriving via a deep-link; its completion is armed on the first manual win
   // of the challenged mechanic. challengePillEl is the "send a challenge" CTA.
   private manualStartMs = new Map<number, number>();
+  private runTickets = new Map<string, RunTicketRequest>();
   private activeChallenge: ChallengeView | null = null;
   private inboxChallenges: ChallengeInboxItem[] = [];   // top-rail: friends' challenges to play
   private challengeCompleted = false;
@@ -377,13 +386,14 @@ export class Feed {
   // manual, no autoplay between them; only the × exits. Stars are paid ONLY on
   // completing the whole series, via the chest ceremony. A LOSS on a level just
   // retries THAT level (cleared levels are kept), see handleSeriesFail.
-  private readonly SERIES_LEN = 5;   // default length (mechanics without an override)
   private series: {
     index: number;
     done: number;
     reward: number;
     puzzles: number;
     payoutRunId: string;
+    ticket: RunTicketRequest;
+    lastRunId: string | null;
     playing: boolean;
   } | null = null;
   private seriesRowEl: HTMLElement | null = null;
@@ -519,6 +529,7 @@ export class Feed {
     this.updateMechanicStates();
     this.updateHud(false);
     this.mountPreloader();
+    this.startIslandActivity();   // "someone played your mechanic" notifier + puzzle accrual, on every tab
 
     // After a slide settles: normalise the ring position, resume the arrived
     // game and pause the rest. transitionend bubbles up from the pages.
@@ -699,6 +710,8 @@ export class Feed {
   }
 
   private showDailyPanel(): void {
+    this.dailyOpen = true;
+    this.applyActiveStates();   // freeze + mute the feed mechanic behind daily
     if (!this.dailyState) {
       this.mountDailyPanel(true);
       void this.syncDaily(true);
@@ -710,6 +723,12 @@ export class Feed {
   }
 
   private hideDailyPanel(): void {
+    // Clear the pause flag first; if we're returning to the feed, applyActiveStates
+    // resumes the mechanic now (not after the fade). If another view is opening,
+    // its own open path re-pauses in the same tick, so no audible resume blip.
+    const wasOpen = this.dailyOpen;
+    this.dailyOpen = false;
+    if (wasOpen) this.applyActiveStates();
     const panel = this.dailyPanelEl;
     if (!panel) return;
     panel.classList.remove('daily-panel--in');
@@ -903,12 +922,56 @@ export class Feed {
     }
   }
 
-  // Persist a manual win to the server (idempotent by run_id) — the ledger is the
-  // source of truth for balance across sessions. Fire-and-forget; the local
-  // counter already reflects the win optimistically.
-  private reportResult(i: number, runId: string, solveMs: number, starsOverride?: number): void {
+  private makeRunTicket(
+    i: number,
+    runId: string,
+    kind: RunTicketRequest['kind'],
+    challengeId?: string,
+  ): RunTicketRequest | null {
     const mechanicId = this.playables[i]?.id;
-    if (!mechanicId) return;
+    if (!mechanicId) return null;
+    return {
+      ticket_id: ticketUid(),
+      run_id: runId,
+      mechanic_id: mechanicId,
+      variant_id: variantIdForMechanic(mechanicId),
+      kind,
+      challenge_id: challengeId,
+    };
+  }
+
+  private warmRunTicket(ticket: RunTicketRequest): void {
+    if (!getInitData()) return;
+    void apiStartRun(ticket).then((started) => {
+      if (started) void flushResults();
+    });
+  }
+
+  private ticketForRun(i: number, runId: string): RunTicketRequest | null {
+    if (this.series?.index === i) return this.series.ticket;
+    const existing = this.runTickets.get(runId);
+    if (existing) return existing;
+    const mechanicId = this.playables[i]?.id;
+    const challengeId = this.activeChallenge?.mechanic_id === mechanicId
+      ? this.activeChallenge.id
+      : undefined;
+    const ticket = this.makeRunTicket(i, runId, 'single', challengeId);
+    if (!ticket) return null;
+    this.runTickets.set(runId, ticket);
+    this.warmRunTicket(ticket);
+    return ticket;
+  }
+
+  // Persist a manual win to the server (idempotent by run_id). The durable
+  // outbox carries the run-ticket start intent and any challenge completion.
+  private reportResult(
+    i: number,
+    runId: string,
+    solveMs: number,
+    starsOverride?: number,
+  ): Promise<ConfirmedBalances | null> {
+    const mechanicId = this.playables[i]?.id;
+    if (!mechanicId) return Promise.resolve(null);
     // Use the same deterministic run-id roll as the backend, so the reward row
     // and authoritative ledger agree. During a series, per-level wins grant 0
     // and the final chest owns the payout.
@@ -916,17 +979,28 @@ export class Feed {
     // Durable: queue to localStorage + retry until the server confirms (survives
     // cold backend / reload). Idempotent by run_id server-side. Metric = solve time
     // (ms), lower is better — the same number that decides a challenge.
-    void queueResult({
+    const ticket = this.ticketForRun(i, runId);
+    const seriesLevel = this.series?.index === i && starsOverride === 0
+      ? this.series.done
+      : undefined;
+    const challengeId = this.activeChallenge?.mechanic_id === mechanicId
+      ? this.activeChallenge.id
+      : undefined;
+    const queued = queueResult({
       mechanic_id: mechanicId,
       variant_id: variantIdForMechanic(mechanicId),
       run_id: runId,
       metric_key: 'time_ms',
       metric_value: solveMs,
       stars,
+      run_ticket: ticket ?? undefined,
+      series_level: seriesLevel,
+      complete_challenge_id: challengeId,
       tz_offset_minutes: currentTzOffsetMinutes(),
     });
     this.bumpDailyProgress('levels_10', 1);
     if (stars > 0) this.bumpDailyProgress('stars_50', stars);
+    return queued;
   }
 
   // Solve time for this unit's current manual run (takeover → now), ms. Falls back
@@ -940,35 +1014,55 @@ export class Feed {
   // A manual win either COMPLETES the active challenge (recipient, on the
   // challenged mechanic) or OFFERS to start one (sender). All social calls no-op
   // gracefully outside Telegram (no initData → api returns null).
-  private onManualWinChallenge(i: number, solveMs: number): void {
+  private onManualWinChallenge(
+    i: number,
+    solveMs: number,
+    runId: string,
+    resultPromise: Promise<ConfirmedBalances | null>,
+  ): void {
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return;
     const ch = this.activeChallenge;
     if (ch && !this.challengeCompleted && ch.mechanic_id === mechanicId) {
       this.challengeCompleted = true;
-      void this.completeActiveChallenge(solveMs);
+      void this.completeActiveChallenge(solveMs, runId, resultPromise);
       return;
     }
-    this.showChallengePill(mechanicId, solveMs);
+    this.showChallengePill(mechanicId, solveMs, runId);
   }
 
-  private async completeActiveChallenge(solveMs: number): Promise<void> {
+  private async completeActiveChallenge(
+    solveMs: number,
+    runId: string,
+    resultPromise: Promise<ConfirmedBalances | null>,
+  ): Promise<void> {
     const ch = this.activeChallenge!;
-    const res = await apiCompleteChallenge(ch.id, solveMs);
+    const confirmed = await resultPromise;
+    const res = confirmed?.challenge ?? null;
     track('challenge_complete', { challenge_id: ch.id, time_ms: solveMs, beat: res?.beat ?? null });
     if (res && typeof res.balance === 'number') this.applyServerBalance(res.balance);
     if (res?.stars_awarded) this.bumpDailyProgress('stars_50', res.stars_awarded);
-    this.showChallengeResult(ch, solveMs, res?.beat ?? (solveMs < ch.challenger_value), res?.stars_awarded ?? 0);
+    this.showChallengeResult(
+      ch,
+      solveMs,
+      runId,
+      res?.beat ?? (solveMs < ch.challenger_value),
+      res?.stars_awarded ?? 0,
+    );
   }
 
-  private async doCreateChallenge(mechanicId: string, solveMs: number): Promise<void> {
+  private async doCreateChallenge(mechanicId: string, solveMs: number, runId: string): Promise<boolean> {
+    await flushResults();
     const res = await apiCreateChallenge({
-      mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId), challenger_value: solveMs,
+      mechanic_id: mechanicId,
+      variant_id: variantIdForMechanic(mechanicId),
+      source_run_id: runId,
     });
     track('share_tap', { mechanic_id: mechanicId, time_ms: solveMs, ok: !!res });
-    if (!res) return;
+    if (!res) return false;
     const secs = (solveMs / 1000).toFixed(1);
     shareChallenge(res.share_url, res.deep_link, `Обгонишь меня? Я прошёл за ${secs}s ⚡`);
+    return true;
   }
 
   private dismissChallengePill(): void {
@@ -984,7 +1078,7 @@ export class Feed {
   // create + share; auto-dismisses on the next swipe (markUnitShown) or after 8s.
   // `persist` keeps it up (no auto-timeout) — used by the series win screen, where
   // the pill IS the win-screen challenge CTA and must live as long as the screen.
-  private showChallengePill(mechanicId: string, solveMs: number, persist = false): void {
+  private showChallengePill(mechanicId: string, solveMs: number, runId: string, persist = false): void {
     if (!getInitData()) return;   // no Telegram identity → sharing can't work
     this.dismissChallengePill();
     const secs = (solveMs / 1000).toFixed(1);
@@ -993,11 +1087,16 @@ export class Feed {
     pill.className = 'challenge-pill';
     pill.textContent = `⚡ Бросить вызов · ${secs}s`;
     pill.addEventListener('pointerdown', (e) => e.stopPropagation());
-    pill.addEventListener('click', (e) => {
+    pill.addEventListener('click', async (e) => {
       e.stopPropagation();
       pill.disabled = true;
       pill.textContent = '⚡ Отправляю…';
-      void this.doCreateChallenge(mechanicId, solveMs).finally(() => this.dismissChallengePill());
+      if (await this.doCreateChallenge(mechanicId, solveMs, runId)) {
+        this.dismissChallengePill();
+      } else {
+        pill.disabled = false;
+        pill.textContent = 'Нет сети · повторить';
+      }
     });
     this.viewport.appendChild(pill);
     this.challengePillEl = pill;
@@ -1024,7 +1123,13 @@ export class Feed {
     card.show();
   }
 
-  private showChallengeResult(ch: ChallengeView, solveMs: number, beat: boolean, stars: number): void {
+  private showChallengeResult(
+    ch: ChallengeView,
+    solveMs: number,
+    runId: string,
+    beat: boolean,
+    stars: number,
+  ): void {
     const name = ch.challenger.first_name || ch.challenger.username || 'соперника';
     const you = (solveMs / 1000).toFixed(1);
     const them = (ch.challenger_value / 1000).toFixed(1);
@@ -1036,7 +1141,7 @@ export class Feed {
       (stars > 0 ? `<div class="challenge-ov__stars">+${stars} ⭐</div>` : '');
     const again = this.overlayButton('Ответный вызов ⚡', () => {
       card.close();
-      void this.doCreateChallenge(ch.mechanic_id, solveMs);
+      void this.doCreateChallenge(ch.mechanic_id, solveMs, runId);
     });
     const close = this.overlayButton('Играть дальше', () => card.close(), true);
     card.actions.append(again, close);
@@ -1133,18 +1238,7 @@ export class Feed {
   // else keeps the default 5-level (param-varied) run. Add mechanics here as they
   // get real multi-level content.
   private seriesLenFor(mechanicId: string): number {
-    const base = (mechanicId || '').replace(/-swipe$/, '');
-    if (base === 'pins-l3') return 2;                    // level-3 pins: 2-level series (game level 3 → level 4)
-    if (base === 'pins' || base.startsWith('pins-')) return 2;
-    if (base === 'merge-locked-v1') return 1;
-    if (base === 'marble-sort') return 2;                // 2-level series: rects 4 → 16 (old level 1 + 3, middle dropped)
-    if (base === 'merge-timepress-v1') return 2;
-    if (base === 'merge-timepress-v2') return 1;
-    if (base === 'short-drama') return 6;                // 6 authored clips, one per level (?level=1..6)
-    // Mechanics without multi-level content yet run a 1-level "series" (one level →
-    // straight to the chest).
-    if (base.includes('no-orders') || base.includes('second-board')) return 1;
-    return this.SERIES_LEN;
+    return seriesLength(mechanicId);
   }
 
   // Length of the CURRENT series (based on the mechanic being played).
@@ -1168,14 +1262,19 @@ export class Feed {
     if (this.series || !this.seriesEnabled(i)) return;
     const payoutRunId = `series-${runUid()}`;
     const payout = seriesRewards(payoutRunId);
+    const ticket = this.makeRunTicket(i, payoutRunId, 'series');
+    if (!ticket) return;
     this.series = {
       index: i,
       done: 0,
       reward: payout.stars,
       puzzles: payout.puzzles,
       payoutRunId,
+      ticket,
+      lastRunId: null,
       playing: true,
     };
+    this.warmRunTicket(ticket);
     track('series_start', { mechanic_id: this.playables[i]?.id });
     this.renderSeriesRow({ forceVisible: true });
   }
@@ -1183,10 +1282,11 @@ export class Feed {
   private handleSeriesWin(i: number, runId: string, solveMs: number): void {
     if (!this.series || this.series.index !== i) return;
     this.series.done += 1;
+    this.series.lastRunId = runId;
     this.lastSolveMs = solveMs;   // shown on the series win screen + used for the challenge
     // Persist the run for time/telemetry but grant NO stars per level (series pays
     // out only at the chest).
-    this.reportResult(i, runId, solveMs, 0);
+    void this.reportResult(i, runId, solveMs, 0);
     track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
     const filledSlot = this.series.done - 1;
     // Hold the just-cleared slot as PENDING (not yet green) so the panel arrives
@@ -1898,7 +1998,7 @@ export class Feed {
 
   // Pop one puzzle piece from (cx,cy) UP-RIGHT into the puzzle counter — the same
   // pop→arc→shrink motion as flyOneStar, just aimed at the top-right badge.
-  private flyOnePuzzle(cx: number, cy: number, onLand?: () => void, credit = true): void {
+  private flyOnePuzzle(cx: number, cy: number, onLand?: () => void, credit = true, z = 2720): void {
     const vp = this.viewport.getBoundingClientRect();
     const badge = this.puzzleBadgeEl?.getBoundingClientRect();
     const badgeX = badge ? badge.left - vp.left + badge.width / 2 : vp.width - 40;
@@ -1914,7 +2014,7 @@ export class Feed {
       'filter:drop-shadow(0 8px 16px rgba(140,90,220,0.45));';
     const wrap = document.createElement('div');
     wrap.style.cssText = `position:absolute;left:${cx - px / 2}px;top:${cy - px / 2}px;` +
-      'margin:0;z-index:2720;pointer-events:none;will-change:transform;';
+      `margin:0;z-index:${z};pointer-events:none;will-change:transform;`;
     wrap.appendChild(unit);
     this.viewport.appendChild(wrap);
 
@@ -1955,6 +2055,65 @@ export class Feed {
     flight.addEventListener('finish', () => { window.clearTimeout(impactTimer); land(); }, { once: true });
   }
 
+  // Collecting puzzles that piled up over a mechanic on the island: fan `n` pucks
+  // out of the tapped point (scatter), each arcing into the ONE HUD counter — the
+  // coin-to-counter feel. Rendered above the island overlay (z 3200) so they read
+  // over the mechanic, not behind it.
+  private addPuzzlesFromMeta(n: number, from?: { x: number; y: number }): void {
+    const vp = this.viewport.getBoundingClientRect();
+    const cx = from ? from.x - vp.left : vp.width / 2;
+    const cy = from ? from.y - vp.top : vp.height / 2;
+    const count = Math.max(1, Math.min(9, Math.round(n)));
+    for (let k = 0; k < count; k++) {
+      const jx = (Math.random() - 0.5) * 30;
+      const jy = (Math.random() - 0.5) * 22;
+      window.setTimeout(() => this.flyOnePuzzle(cx + jx, cy + jy, undefined, true, 3200), k * 85);
+    }
+  }
+
+  // ── "Someone played your mechanic" — global activity sim ─────────────────────
+  // Runs on EVERY tab (the notifier must appear on the feed too), independent of
+  // the island overlay. Each tick simulates a visit (plays/likes + accrued puzzles
+  // over the mechanic), slides a notifier above the top panel, and pings any open
+  // island so it can re-render its pucks. The sim state lives in ./island-sim.
+  private startIslandActivity(): void {
+    const buildings = (): SimBuildingRef[] =>
+      loadIslandState().buildings.map((b) => ({ slot: b.slot, name: b.name }));
+    const tick = () => {
+      const ev = simulateActivity(buildings());
+      if (ev) {
+        this.showActivityNotifier(
+          ev.visitors > 1
+            ? `${ev.who} и ещё ${ev.visitors - 1} играли в «${ev.name}»`
+            : `${ev.who} играл в «${ev.name}»`,
+        );
+        window.dispatchEvent(new CustomEvent(ISLAND_SIM_EVENT));
+      }
+      window.setTimeout(tick, 6000 + Math.random() * 5000);   // ~6–11s
+    };
+    window.setTimeout(tick, 3400 + Math.random() * 2200);     // first soon after boot
+  }
+
+  private showActivityNotifier(text: string): void {
+    let el = this.activityNotifierEl;
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'activity-toast';
+      this.viewport.appendChild(el);
+      this.activityNotifierEl = el;
+    }
+    el.textContent = text;
+    // restart the slide-in + auto-hide
+    el.classList.remove('activity-toast--show');
+    void el.offsetWidth;   // reflow so the animation replays
+    el.classList.add('activity-toast--show');
+    if (this.activityNotifierTimer != null) window.clearTimeout(this.activityNotifierTimer);
+    this.activityNotifierTimer = window.setTimeout(
+      () => el?.classList.remove('activity-toast--show'),
+      Math.min(6000, Math.max(3000, text.length * 55)),
+    );
+  }
+
   // Drop one collection card. Like stars/puzzles it pops UP OUT of the gift first
   // (phase 1, above the gift), then in phase 2 arcs DOWN into the collections button
   // on the bar, shrinking as it tucks in. Rendered above the gift/scrim (z 2720).
@@ -1977,8 +2136,12 @@ export class Feed {
     const toX = toCX - cx;
     const toY = toCY - cy;
     // Phase 1: pop UP to an apex above the gift (like stars/puzzles), scattered.
-    const popH = w * (1.7 + Math.random() * 0.7);
+    // The card is much bigger than a star/puzzle, so it gets a HIGHER apex and a
+    // LONGER launch phase (apex at offset 0.44, not 0.34) — it reads slower, so it
+    // wants more air time flying out over the gift before arcing into the bar.
+    const popH = w * (2.15 + Math.random() * 0.75);
     const apexX = toX * 0.12 + (Math.random() - 0.5) * w * 1.6;
+    const APEX = 0.44;
     let done = false;
     const land = () => {
       if (done) return; done = true;
@@ -1988,7 +2151,7 @@ export class Feed {
       // this random animation (which may also contain duplicates).
       this.bumpCollectionsBtn();
     };
-    const DUR = REWARD_SHOT_MS + 80;
+    const DUR = REWARD_SHOT_MS + 170;
     if (!wrap.animate) {
       wrap.style.transform = `translate(-50%,-50%) translate3d(${toX}px,${toY}px,0)`;
       window.setTimeout(land, DUR);
@@ -1997,14 +2160,14 @@ export class Feed {
     // POSITION — rise to the apex (decelerate), then arc DOWN into the button (accelerate).
     wrap.animate([
       { transform: 'translate(-50%,-50%) translate3d(0,0,0)', offset: 0, easing: 'cubic-bezier(0.15,0.72,0.3,1)' },
-      { transform: `translate(-50%,-50%) translate3d(${apexX}px,${-popH}px,0)`, offset: 0.34, easing: 'cubic-bezier(0.5,0.02,0.78,0.5)' },
+      { transform: `translate(-50%,-50%) translate3d(${apexX}px,${-popH}px,0)`, offset: APEX, easing: 'cubic-bezier(0.5,0.02,0.78,0.5)' },
       { transform: `translate(-50%,-50%) translate3d(${toX}px,${toY}px,0)`, offset: 1 },
     ], { duration: DUR, fill: 'forwards' });
     // SCALE — pop small→full during the rise, then shrink as it tucks into the bar.
     const flight = cardEl.animate([
       { transform: 'scale(0.34) rotate(-6deg)', offset: 0, easing: 'cubic-bezier(0.12,0.7,0.3,1)' },
-      { transform: 'scale(1) rotate(0deg)', offset: 0.34, easing: 'cubic-bezier(0.5,0,0.6,1)' },
-      { transform: 'scale(0.92) rotate(0deg)', offset: 0.72, easing: 'linear' },
+      { transform: 'scale(1) rotate(0deg)', offset: APEX, easing: 'cubic-bezier(0.5,0,0.6,1)' },
+      { transform: 'scale(0.92) rotate(0deg)', offset: 0.78, easing: 'linear' },
       { transform: 'scale(0.32) rotate(4deg)', offset: 1 },
     ], { duration: DUR, fill: 'forwards' });
     const impactTimer = window.setTimeout(land, Math.max(0, DUR - 8));
@@ -2020,6 +2183,7 @@ export class Feed {
         mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId),
         run_id: series.payoutRunId, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
         expected_puzzles: series.puzzles,
+        run_ticket: series.ticket,
         tz_offset_minutes: currentTzOffsetMinutes(),
       });
       this.bumpDailyProgress('stars_50', reward);
@@ -2086,7 +2250,8 @@ export class Feed {
     // action) — same style/placement as the post-win pill, so it reads as a
     // distinct call-to-action. Persistent while the win screen is up; cleared
     // when the player leaves the unit (markUnitShown → dismissChallengePill).
-    this.showChallengePill(mechanicId, this.lastSolveMs || 5000, true);
+    const lastRunId = this.series?.lastRunId;
+    if (lastRunId) this.showChallengePill(mechanicId, this.lastSolveMs || 5000, lastRunId, true);
   }
 
   // × (or any exit) mid-series: break it, no reward.
@@ -2569,7 +2734,9 @@ export class Feed {
         svg: '<rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/>',
         // The island-world meta experiment. The other meta prototype (openMetaWorld)
         // stays reachable via ?metaworld=1 for testing.
-        onTap: () => { this.hideDailyPanel(); if (new URLSearchParams(location.search).has('metaworld')) this.openMetaWorld(); else this.openIslandWorld(); },
+        // Open the opaque view FIRST (it pauses + covers the feed), THEN hide daily —
+        // so the feed mechanic never resumes or shows during the daily→meta swap.
+        onTap: () => { if (new URLSearchParams(location.search).has('metaworld')) this.openMetaWorld(); else this.openIslandWorld(); this.hideDailyPanel(); },
       },
       {
         name: 'feed', label: 'Лента механик',
@@ -2579,7 +2746,7 @@ export class Feed {
       {
         name: 'collections', label: 'Коллекции',
         svg: '<path d="M12 3 L21 12 L12 21 L3 12 Z"/>',
-        onTap: () => { this.hideDailyPanel(); this.openCollections(); },
+        onTap: () => { this.openCollections(); this.hideDailyPanel(); },
       },
     ];
     const DEFAULT_TAB = 'feed';
@@ -2676,7 +2843,9 @@ export class Feed {
     this.overlayEl = ov;
     this.renderCollectionsOverview(ov);
     track('collections_open', { collections: COLLECTIONS.length });
-    if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+    // No opacity fade-in: the view is opaque and must cover the feed the instant
+    // it mounts, otherwise switching between central views (e.g. daily→collections)
+    // shows the feed mechanic through the fading-in layer.
   }
 
   private renderCollectionsOverview(ov: HTMLElement): void {
@@ -3292,6 +3461,7 @@ export class Feed {
     });
     this.frames.set(i, frame);
     this.rollReward(i, runId);
+    if (this.manualRuns.has(i)) this.ticketForRun(i, runId);
     const seriesParam = this.pendingSeriesParams.get(i);
     this.pendingSeriesParams.delete(i);   // one-shot: consumed by this mount
     // Level for this mount: the pending (series-advance) value, else the mechanic's
@@ -3650,6 +3820,8 @@ export class Feed {
       this.maybeStartSeries(i);
     }
     this.manualRuns.add(i);
+    const runId = this.frames.get(i)?.dataset.runId;
+    if (runId) this.ticketForRun(i, runId);
     if (this.series?.index === i && this.series.playing) this.setSeriesRowManualHidden(true);
     this.stopFrameAutoPlay(i);
     this.setAutoplayUi(i, false);
@@ -3735,6 +3907,7 @@ export class Feed {
   private shouldPauseFrame(i: number): boolean {
     if (document.hidden) return true;
     if (this.overlayOpen) return true;   // a story / editor is up — freeze the whole feed
+    if (this.dailyOpen) return true;     // daily central view is up — freeze + mute like any other non-feed tab
     if (this.collectingRewardIndex !== null) return true;   // star credit in flight — freeze EVERY frame behind the cover so nothing competes for the main thread
     if (this.frameUsesStagedReady.has(i) && !this.frameReady.has(i)) return true;
     if (this.settlingTargetIndex === i) return true;
@@ -4206,8 +4379,10 @@ export class Feed {
       close: () => this.closeOverlay(),
       level: islandLevel,
       puzzles: () => this.totalPuzzles,
+      addPuzzles: (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from),
     }));
-    if (ov.animate) ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: 'forwards' });
+    // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
+    // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
   }
 
   private metaTemplates(): MetaTemplate[] {
@@ -5398,9 +5573,9 @@ export class Feed {
       if (this.series && this.series.index === i) {
         this.handleSeriesWin(i, runId, solveMs);
       } else {
-        this.reportResult(i, runId, solveMs);
+        const resultPromise = this.reportResult(i, runId, solveMs);
         this.handleWin(i);
-        this.onManualWinChallenge(i, solveMs);
+        this.onManualWinChallenge(i, solveMs, runId, resultPromise);
       }
     } else {
       track('lose', { mechanic_id: mechanicId, mode: 'manual' }, runId);
@@ -5564,7 +5739,9 @@ export class Feed {
       if (frame) {
         const oldRun = frame.dataset.runId;
         if (oldRun) this.completedRunIds.delete(oldRun);
-        frame.dataset.runId = runUid();
+        const runId = runUid();
+        frame.dataset.runId = runId;
+        this.ticketForRun(i, runId);
       }
       try { swipe.restart({ instant: true }); } catch { /* cross-origin */ }
     } else {

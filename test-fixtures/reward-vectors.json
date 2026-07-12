@@ -1,0 +1,40 @@
+{
+  "algorithm": "fnv1a-32-utf8",
+  "vectors": [
+    {
+      "run_id": "abc",
+      "hash": 440920331,
+      "level_stars": 3,
+      "series_stars": 8,
+      "series_puzzles": 4
+    },
+    {
+      "run_id": "00000000-0000-4000-8000-000000000001",
+      "hash": 3480239522,
+      "level_stars": 2,
+      "series_stars": 3,
+      "series_puzzles": 1
+    },
+    {
+      "run_id": "r-lucky-42",
+      "hash": 1409899921,
+      "level_stars": 4,
+      "series_stars": 6,
+      "series_puzzles": 3
+    },
+    {
+      "run_id": "run-199",
+      "hash": 3437685970,
+      "level_stars": 4,
+      "series_stars": 7,
+      "series_puzzles": 2
+    },
+    {
+      "run_id": "unicode-ю",
+      "hash": 2090219988,
+      "level_stars": 3,
+      "series_stars": 4,
+      "series_puzzles": 2
+    }
+  ]
+}

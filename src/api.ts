@@ -163,13 +163,64 @@ export interface ResultIn {
   metric_value: number;
   stars?: number;   // display hint; zero marks an intermediate series level
   expected_puzzles?: number; // local outbox reconciliation only; never sent
+  run_ticket?: RunTicketRequest; // durable local start intent; API receives ticket_id only
+  series_level?: number;
+  complete_challenge_id?: string; // durable post-result action; never sent to /results
+  server_confirmed?: boolean; // local outbox state; never sent
   tz_offset_minutes?: number;
 }
 
-export function apiPostResult(payload: ResultIn): Promise<ResultResp | null> {
-  const { expected_puzzles, ...body } = payload;
+function resultPayload(payload: ResultIn): Record<string, unknown> {
+  const {
+    expected_puzzles,
+    run_ticket,
+    complete_challenge_id,
+    server_confirmed,
+    ...body
+  } = payload;
   void expected_puzzles;
-  return post<ResultResp>('/api/results', body);
+  void complete_challenge_id;
+  void server_confirmed;
+  return {
+    ...body,
+    ticket_id: run_ticket?.ticket_id,
+  };
+}
+
+export function apiPostResult(payload: ResultIn): Promise<ResultResp | null> {
+  return post<ResultResp>('/api/results', resultPayload(payload));
+}
+
+export function apiPostResultRequired(payload: ResultIn): Promise<ResultResp> {
+  return postRequired<ResultResp>('/api/results', resultPayload(payload));
+}
+
+export interface RunTicketRequest {
+  ticket_id: string;
+  run_id: string;
+  mechanic_id: string;
+  variant_id: string;
+  kind: 'single' | 'series';
+  challenge_id?: string;
+}
+
+export interface RunTicketView {
+  ticket_id: string;
+  run_id: string;
+  kind: 'single' | 'series';
+  expected_levels: number;
+  completed_levels: number;
+  next_result_at: string;
+  expires_at: string;
+  state: 'active' | 'consumed' | 'expired';
+}
+
+export function apiStartRun(payload: RunTicketRequest): Promise<RunTicketView | null> {
+  return post<RunTicketView>('/api/runs/start', payload);
+}
+
+export function apiStartRunRequired(payload: RunTicketRequest): Promise<RunTicketView> {
+  return postRequired<RunTicketView>('/api/runs/start', payload);
 }
 
 export interface DailyQuestView {
@@ -242,9 +293,9 @@ export interface ChallengeComplete {
   balance: number;
 }
 
-/** Challenger records their run → a shareable challenge. `challenger_value` = solve time (ms). */
+/** Create a shareable challenge from an immutable verified solve-time run. */
 export function apiCreateChallenge(payload: {
-  mechanic_id: string; variant_id: string; metric_key?: string; challenger_value: number;
+  mechanic_id: string; variant_id: string; metric_key?: string; source_run_id: string;
 }): Promise<ChallengeCreated | null> {
   return post<ChallengeCreated>('/api/challenges', { metric_key: 'time_ms', ...payload });
 }
@@ -259,10 +310,17 @@ export function apiAcceptChallenge(id: string): Promise<ChallengeView | null> {
   return post<ChallengeView>(`/api/challenges/${encodeURIComponent(id)}/accept`);
 }
 
-/** Recipient finishes → beat? + two-sided reward. `metric_value` = their solve time (ms). */
-export function apiCompleteChallenge(id: string, metricValue: number): Promise<ChallengeComplete | null> {
+/** Complete a challenge from its challenge-bound verified run. */
+export function apiCompleteChallenge(id: string, sourceRunId: string): Promise<ChallengeComplete | null> {
   return post<ChallengeComplete>(`/api/challenges/${encodeURIComponent(id)}/complete`, {
-    metric_value: metricValue,
+    source_run_id: sourceRunId,
+    tz_offset_minutes: tzOffsetMinutes(),
+  });
+}
+
+export function apiCompleteChallengeRequired(id: string, sourceRunId: string): Promise<ChallengeComplete> {
+  return postRequired<ChallengeComplete>(`/api/challenges/${encodeURIComponent(id)}/complete`, {
+    source_run_id: sourceRunId,
     tz_offset_minutes: tzOffsetMinutes(),
   });
 }

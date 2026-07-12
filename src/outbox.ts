@@ -5,7 +5,14 @@
  * (dedup by run_id), so replays are safe. Flushed on boot, on foreground, and
  * right after enqueue.
  */
-import { apiPostResult, type ResultIn } from './api';
+import {
+  apiCompleteChallengeRequired,
+  apiPostResultRequired,
+  apiStartRunRequired,
+  ApiRequestError,
+  type ChallengeComplete,
+  type ResultIn,
+} from './api';
 
 const LEGACY_KEY = 'swipe_pending_results_v1';
 const LEGACY_EVER_KEY = 'swipe_stars_ever_v1';
@@ -16,6 +23,7 @@ const migratedScopes = new Set<string>();
 export interface ConfirmedBalances {
   stars: number;
   puzzles: number | null;
+  challenge?: ChallengeComplete;
 }
 
 function telegramUserId(): string | null {
@@ -59,11 +67,14 @@ export function starsEverQueued(): number {
 
 /** Sum of stars still waiting to be confirmed by the server. */
 export function pendingStars(): number {
-  return load().reduce((s, r) => s + (r.stars ?? 1), 0);
+  return load().reduce((s, r) => s + (r.server_confirmed ? 0 : (r.stars ?? 1)), 0);
 }
 
 export function pendingPuzzles(): number {
-  return load().reduce((sum, result) => sum + Math.max(0, result.expected_puzzles ?? 0), 0);
+  return load().reduce(
+    (sum, result) => sum + (result.server_confirmed ? 0 : Math.max(0, result.expected_puzzles ?? 0)),
+    0,
+  );
 }
 
 function load(): ResultIn[] {
@@ -113,15 +124,71 @@ async function flushLoop(): Promise<ConfirmedBalances | null> {
   while (true) {
     const result = load()[0];
     if (!result) break;
-    const response = await apiPostResult(result);
-    if (!response) break; // keep it queued; try again next time
-    save(load().filter((candidate) => candidate.run_id !== result.run_id));
+    if (result.run_ticket) {
+      let ticket;
+      try {
+        ticket = await apiStartRunRequired(result.run_ticket);
+      } catch (error) {
+        if (dropTerminalResult(result, error, 'ticket start')) continue;
+        break;
+      }
+      if (ticket.state === 'expired') {
+        console.warn(`[results] dropping expired run ticket ${ticket.ticket_id}`);
+        dropResult(result.run_id);
+        continue;
+      }
+      const waitMs = Date.parse(ticket.next_result_at) - Date.now();
+      if (waitMs > 0) await new Promise((resolve) => window.setTimeout(resolve, Math.min(waitMs + 25, 5000)));
+    }
+    let response;
+    try {
+      response = await apiPostResultRequired(result);
+    } catch (error) {
+      if (dropTerminalResult(result, error, 'result submit')) continue;
+      break;
+    }
+    const afterResult = load();
+    const stored = afterResult.find((candidate) => candidate.run_id === result.run_id);
+    if (stored) {
+      stored.server_confirmed = true;
+      save(afterResult);
+    }
     confirmed = {
       stars: response.balance,
       puzzles: typeof response.puzzle_balance === 'number' ? response.puzzle_balance : null,
     };
+    if (result.complete_challenge_id) {
+      let challenge;
+      try {
+        challenge = await apiCompleteChallengeRequired(result.complete_challenge_id, result.run_id);
+      } catch (error) {
+        if (dropTerminalResult(result, error, 'challenge completion')) continue;
+        break; // result is safe; retain only the durable social action
+      }
+      confirmed = {
+        stars: challenge.balance,
+        puzzles: confirmed.puzzles,
+        challenge,
+      };
+    }
+    save(load().filter((candidate) => candidate.run_id !== result.run_id));
   }
   return confirmed;
+}
+
+function dropResult(runId: string): void {
+  save(load().filter((candidate) => candidate.run_id !== runId));
+}
+
+function dropTerminalResult(result: ResultIn, error: unknown, stage: string): boolean {
+  if (!(error instanceof ApiRequestError)) return false;
+  // These statuses cannot heal through another retry. In particular, 428 is
+  // how the backend retires ticketless entries left by an old client build.
+  // Network/auth/rate-limit/too-early failures remain durable in the queue.
+  if (![400, 404, 409, 410, 422, 428].includes(error.status)) return false;
+  console.warn(`[results] dropping rejected outbox item ${result.run_id} at ${stage}: ${error.message}`);
+  dropResult(result.run_id);
+  return true;
 }
 
 /** Clear the queue (used by the debug reset). */

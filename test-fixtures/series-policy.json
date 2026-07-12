@@ -1,0 +1,15 @@
+{
+  "vectors": [
+    { "mechanic_id": "pins-swipe", "levels": 2 },
+    { "mechanic_id": "pins-l3-swipe", "levels": 2 },
+    { "mechanic_id": "pins-special-swipe", "levels": 2 },
+    { "mechanic_id": "merge-locked-v1-swipe", "levels": 1 },
+    { "mechanic_id": "marble-sort-swipe", "levels": 2 },
+    { "mechanic_id": "merge-timepress-v1-swipe", "levels": 2 },
+    { "mechanic_id": "merge-timepress-v2-swipe", "levels": 1 },
+    { "mechanic_id": "short-drama-swipe", "levels": 6 },
+    { "mechanic_id": "merge-timepress-no-orders-v1-swipe", "levels": 1 },
+    { "mechanic_id": "merge-second-board-v1-swipe", "levels": 1 },
+    { "mechanic_id": "unknown-swipe", "levels": 5 }
+  ]
+}
