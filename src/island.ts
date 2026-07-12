@@ -899,9 +899,12 @@ const CSS = `
 .isl-like{border:2px solid #E8603C;background:transparent;color:#fff;border-radius:999px;padding:11px 22px;font:inherit;font-size:14.5px}
 .isl-like--on{background:#E8603C;font-weight:800}
 .isl-win__home{background:#fff;color:#10222C;border:none;border-radius:13px;padding:12px 30px;font:inherit;font-size:14.5px;font-weight:800}
-.isl-toast{position:absolute;bottom:calc(var(--safe-bottom) + 84px);left:50%;transform:translate(-50%,24px);opacity:0;
-  background:rgba(255,255,255,.95);color:#10222C;border-radius:12px;padding:10px 16px;font-size:12.5px;font-weight:600;
-  transition:transform .3s,opacity .3s;max-width:86%;text-align:center;z-index:10;pointer-events:none}
+/* "someone played my mechanic" — pinned to the TOP of the view (just under the feed
+   HUD), sliding down from above; never blocks the mechanic/map below. */
+.isl-toast{position:absolute;top:44px;left:50%;transform:translate(-50%,-24px);opacity:0;
+  background:rgba(255,255,255,.95);color:#10222C;border-radius:12px;padding:9px 16px;font-size:12.5px;font-weight:600;
+  transition:transform .3s,opacity .3s;max-width:86%;text-align:center;z-index:10;pointer-events:none;
+  box-shadow:0 8px 22px rgba(0,0,0,.32)}
 .isl-toast--show{transform:translate(-50%,0);opacity:1}
 @media (prefers-reduced-motion: reduce){.island-world *{animation:none!important;transition:none!important}}
 `;
