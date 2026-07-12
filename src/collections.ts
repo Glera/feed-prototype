@@ -33,7 +33,7 @@ export interface CollectionCard {
   /** stable id within its collection, 1-based */
   index: number;
   img: string;
-  /** placeholder title until real per-card copy exists */
+  /** label rendered on the card ribbon */
   title: string;
 }
 
@@ -41,6 +41,8 @@ export interface Collection {
   id: string;
   title: string;
   subtitle: string;
+  /** reward granted after every card in the collection is gathered */
+  rewardPuzzles: number;
   cards: CollectionCard[];
 }
 
@@ -67,6 +69,7 @@ export const COLLECTIONS: Collection[] = [
     id: 'collection_1',
     title: 'Золотые хиты',
     subtitle: 'Музыка сквозь время',
+    rewardPuzzles: 150,
     cards: COLLECTION_1_PICS.map((img, i) => ({
       index: i + 1,
       img,
