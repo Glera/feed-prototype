@@ -1621,7 +1621,7 @@ export class Feed {
     const scrim = document.createElement('div');
     scrim.className = 'chest-ov';
     scrim.innerHTML =
-      '<div class="chest-ov__hint">Тапай сундук!</div>' +
+      '<div class="chest-ov__hint">Tap or hold!</div>' +
       // Same random gift icon as the series-row panel (rewardIconFor(i) is cached per
       // mechanic) — the one that lifts off the panel is the one you tap in the centre.
       `<button type="button" class="chest-ov__chest" aria-label="Open chest"><img class="chest-ov__chest__img" src="${this.rewardIconFor(i)}" alt="" draggable="false"></button>`;
