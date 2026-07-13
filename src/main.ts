@@ -42,14 +42,25 @@ async function boot(): Promise<void> {
   }
   createFeed(viewport, feedEl, challenge, publicIsland);
 }
-void boot();
+const query = new URLSearchParams(location.search);
+const startParam = getStartParam();
+const labAuthLaunch = startParam === 'lab_auth'
+  || (Boolean((import.meta as any).env?.DEV) && query.get('labAuth') === '1');
+
+if (labAuthLaunch) {
+  // Focused device approval flow: do not mount or warm the playable feed under
+  // a security decision. The backend remains the authority for dev allowlisting
+  // and feature availability.
+  void import('./lab-auth').then((module) => module.mountCatalogLabAuth());
+} else {
+  void boot();
+}
 
 // On-device backend diagnostics: ?diag=1, or open in Telegram via
 // t.me/<bot>?startapp=diag (start_param='diag') — shows initData + /session status
 // right on screen (no desktop console in Telegram).
 // Debug panel lives on the feed bar (right of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
-const startParam = (window as any).Telegram?.WebApp?.initDataUnsafe?.start_param;
-if (new URLSearchParams(location.search).get('diag') === '1' || startParam === 'diag') {
+if (!labAuthLaunch && (query.get('diag') === '1' || startParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
 }

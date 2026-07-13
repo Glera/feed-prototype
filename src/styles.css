@@ -29,6 +29,285 @@
   --dev-phone-aspect-h: 844;
 }
 
+/* ── Catalog Lab device authorization ──────────────────────────────────────
+   A focused, auth-gated launch surface. It deliberately replaces the feed
+   instead of floating over a live playable, so the permission decision cannot
+   be confused with game UI. */
+body.lab-auth-open {
+  display: block;
+  background:
+    radial-gradient(circle at 50% -10%, rgba(73, 131, 255, 0.22), transparent 42%),
+    var(--platform-bg);
+}
+body.lab-auth-open #viewport { display: none; }
+
+.lab-auth [hidden] { display: none !important; }
+.lab-auth {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding:
+    max(18px, calc(var(--safe-top) + 12px))
+    max(16px, calc(var(--safe-right) + 16px))
+    max(24px, calc(var(--safe-bottom) + 18px))
+    max(16px, calc(var(--safe-left) + 16px));
+  background:
+    radial-gradient(circle at 50% -10%, rgba(73, 131, 255, 0.22), transparent 42%),
+    linear-gradient(180deg, #090d18 0%, #07090f 58%);
+  color: #f8faff;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.lab-auth__shell {
+  width: min(100%, 560px);
+  min-height: 100%;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.lab-auth__header,
+.lab-auth__section-header,
+.lab-auth__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lab-auth__header,
+.lab-auth__section-header { justify-content: space-between; }
+.lab-auth__brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #d9e3ff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.lab-auth__brand-mark {
+  display: grid;
+  place-items: center;
+  min-width: 38px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid rgba(130, 167, 255, 0.5);
+  border-radius: 7px;
+  background: rgba(80, 121, 226, 0.18);
+  color: #a9c0ff;
+  font: 800 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em;
+}
+
+.lab-auth__intro { padding: 20px 2px 4px; }
+.lab-auth__intro h1 {
+  max-width: 430px;
+  margin: 0;
+  font-size: clamp(30px, 8vw, 42px);
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+}
+.lab-auth__intro p {
+  max-width: 480px;
+  margin: 14px 0 0;
+  color: #aab5ce;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.lab-auth__card,
+.lab-auth__grant,
+.lab-auth__notice--unavailable {
+  border: 1px solid rgba(148, 169, 220, 0.18);
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(26, 34, 54, 0.94), rgba(15, 20, 34, 0.96));
+  box-shadow: 0 14px 45px rgba(0, 0, 0, 0.25);
+}
+.lab-auth__card { padding: 18px; }
+.lab-auth__form { display: grid; gap: 11px; }
+.lab-auth__label {
+  font-size: 13px;
+  font-weight: 750;
+  color: #dce5fb;
+}
+.lab-auth__input {
+  width: 100%;
+  height: 58px;
+  border: 1px solid rgba(140, 166, 230, 0.32);
+  border-radius: 13px;
+  outline: 0;
+  padding: 0 15px;
+  background: rgba(5, 8, 16, 0.74);
+  color: #fff;
+  font: 750 23px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.lab-auth__input::placeholder { color: rgba(184, 198, 230, 0.28); }
+.lab-auth__input:focus {
+  border-color: #7da4ff;
+  box-shadow: 0 0 0 3px rgba(87, 132, 241, 0.18);
+}
+.lab-auth__input:disabled { opacity: 0.62; }
+.lab-auth__help,
+.lab-auth__status,
+.lab-auth__empty,
+.lab-auth__privacy {
+  margin: 0;
+  color: #8997b5;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.lab-auth__status {
+  min-height: 18px;
+  color: #ffcf85;
+}
+
+.lab-auth__button {
+  min-height: 46px;
+  border: 0;
+  border-radius: 12px;
+  padding: 0 16px;
+  font: 750 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.lab-auth__button:focus-visible {
+  outline: 3px solid rgba(126, 166, 255, 0.55);
+  outline-offset: 2px;
+}
+.lab-auth__button:disabled { cursor: wait; opacity: 0.52; }
+.lab-auth__button--primary {
+  width: 100%;
+  color: #071028;
+  background: linear-gradient(135deg, #9bb8ff, #6e99ff);
+  box-shadow: 0 8px 22px rgba(73, 119, 238, 0.24);
+}
+.lab-auth__button--approve {
+  flex: 1;
+  color: #061a13;
+  background: linear-gradient(135deg, #77e8ba, #47c995);
+}
+.lab-auth__button--danger {
+  flex: 1;
+  color: #ffd9de;
+  border: 1px solid rgba(255, 116, 136, 0.3);
+  background: rgba(131, 39, 57, 0.25);
+}
+.lab-auth__button--quiet {
+  color: #bfcae2;
+  border: 1px solid rgba(151, 170, 213, 0.2);
+  background: rgba(89, 109, 154, 0.12);
+}
+.lab-auth__button--small { min-height: 36px; padding: 0 12px; font-size: 12px; }
+.lab-auth__close { min-height: 38px; }
+
+.lab-auth__eyebrow {
+  margin-bottom: 7px;
+  color: #86a8ff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.lab-auth__request h2,
+.lab-auth__success h2,
+.lab-auth__section-header h2,
+.lab-auth__grant h3 {
+  margin: 0;
+  color: #f7f9ff;
+}
+.lab-auth__request h2,
+.lab-auth__success h2 { font-size: 22px; line-height: 1.2; }
+.lab-auth__details,
+.lab-auth__grant-details {
+  display: grid;
+  gap: 10px;
+  margin: 17px 0;
+}
+.lab-auth__detail {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.42fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.lab-auth__detail-label { color: #8290ad; font-size: 12px; }
+.lab-auth__detail-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #dce4f6;
+  font: 600 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lab-auth__notice {
+  margin: 14px 0;
+  border-left: 2px solid #739dff;
+  padding: 3px 0 3px 12px;
+  color: #aebbd4;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.lab-auth__notice--unavailable {
+  display: grid;
+  gap: 6px;
+  border-left: 1px solid rgba(255, 153, 94, 0.45);
+  padding: 18px;
+  color: #c2cce1;
+}
+.lab-auth__notice--unavailable strong { color: #ffcf9d; font-size: 15px; }
+.lab-auth__success { text-align: center; }
+.lab-auth__success-mark {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  margin: 2px auto 13px;
+  border-radius: 50%;
+  background: rgba(62, 207, 149, 0.17);
+  color: #6fe4b3;
+  font-size: 25px;
+  font-weight: 800;
+}
+.lab-auth__success p { margin: 10px auto 17px; color: #aab6ce; font-size: 13px; line-height: 1.5; }
+
+.lab-auth__grants { display: grid; gap: 10px; margin-top: 4px; }
+.lab-auth__section-header h2 { font-size: 16px; }
+.lab-auth__grant-list { display: grid; gap: 10px; }
+.lab-auth__grant { padding: 15px; }
+.lab-auth__grant h3 { font-size: 14px; }
+.lab-auth__grant-details { margin: 12px 0; }
+.lab-auth__grant .lab-auth__button { width: 100%; }
+.lab-auth__empty {
+  padding: 17px;
+  border: 1px dashed rgba(144, 164, 207, 0.2);
+  border-radius: 13px;
+  text-align: center;
+}
+.lab-auth__privacy { padding: 2px 8px 8px; text-align: center; }
+
+@media (max-width: 380px) {
+  .lab-auth { padding-left: 12px; padding-right: 12px; }
+  .lab-auth__card { padding: 15px; }
+  .lab-auth__detail { grid-template-columns: 1fr; gap: 3px; }
+  .lab-auth__actions { flex-direction: column-reverse; }
+  .lab-auth__actions .lab-auth__button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .lab-auth__card,
+  .lab-auth__notice--unavailable {
+    animation: lab-auth-rise 180ms ease-out both;
+  }
+  @keyframes lab-auth-rise {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
 @property --level-progress {
   syntax: "<angle>";
   inherits: false;

@@ -496,6 +496,64 @@ export async function apiChallengeInbox(): Promise<ChallengeInboxItem[]> {
   return r?.items ?? [];
 }
 
+// ── Catalog Lab device authorization (dev users only) ──────────────────────
+
+export type CatalogLabDeviceState = 'pending' | 'approved' | 'denied' | 'consumed';
+
+export interface CatalogLabDeviceAuthorization {
+  authorizationId: string;
+  clientName: string;
+  clientInstanceId: string;
+  scopes: string[];
+  state: CatalogLabDeviceState;
+  expiresAt: string;
+  decisionVersion: number;
+}
+
+export interface CatalogLabGrantView {
+  jti: string;
+  clientInstanceId: string;
+  clientName: string;
+  scopes: string[];
+  issuedAt: string;
+  expiresAt: string;
+  revocationEpoch: number;
+  revokedAt: string | null;
+  active: boolean;
+}
+
+/** Resolve a short user code entered by an allowlisted Telegram dev. */
+export function apiCatalogLabLookup(userCode: string): Promise<CatalogLabDeviceAuthorization> {
+  return postRequired<CatalogLabDeviceAuthorization>('/api/admin/device-auth/lookup', { userCode });
+}
+
+/** Approve or deny exactly the authorization returned by lookup. */
+export function apiCatalogLabDecision(payload: {
+  authorizationId: string;
+  userCode: string;
+  expectedDecisionVersion: number;
+  decision: 'approve' | 'deny';
+}): Promise<CatalogLabDeviceAuthorization> {
+  return postRequired<CatalogLabDeviceAuthorization>('/api/admin/device-auth/decision', payload);
+}
+
+/** Metadata only: the backend never returns bearer tokens to the TMA. */
+export async function apiCatalogLabTokens(): Promise<CatalogLabGrantView[]> {
+  const response = await getRequired<{ tokens: CatalogLabGrantView[] }>('/api/admin/lab-tokens');
+  return response.tokens;
+}
+
+export function apiRevokeCatalogLabToken(
+  jti: string,
+  expectedRevocationEpoch: number,
+  reason: string,
+): Promise<CatalogLabGrantView> {
+  return postRequired<CatalogLabGrantView>(
+    `/api/admin/lab-tokens/${encodeURIComponent(jti)}/revoke`,
+    { expectedRevocationEpoch, reason },
+  );
+}
+
 /** On-device diagnostics (open with ?diag=1). Surfaces exactly why persistence
  *  might fail: no Telegram, empty initData, auth 401 (BOT_TOKEN mismatch), etc. */
 export async function apiDiagnose(): Promise<Record<string, unknown>> {
