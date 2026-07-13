@@ -141,6 +141,24 @@ export interface SessionResp {
   puzzles?: number;
   is_new: boolean;
   backend_version?: string;
+  builtin_feed_bindings?: BuiltinFeedBindingsV1;
+}
+
+export interface BuiltinFeedBindingV1 {
+  mapping_id: string;
+  playable_id: string;
+  variant_id: string;
+  catalog_mechanic: string;
+  mechanic_family: string;
+  mapping_version: string;
+  mapping_digest: string;
+}
+
+export interface BuiltinFeedBindingsV1 {
+  schema: 'feed.builtin-bindings.v1';
+  available: boolean;
+  unavailable_reason: string | null;
+  by_playable_id: Record<string, BuiltinFeedBindingV1>;
 }
 
 export interface ResultResp {

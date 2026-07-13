@@ -12,13 +12,21 @@ import {
   ApiRequestError,
   type ChallengeComplete,
   type ResultIn,
+  type RunTicketRequest,
 } from './api';
+import {
+  DurableRunTicketStartOutbox,
+  type RunTicketStartFlushResult,
+} from './run-ticket-start-outbox.mjs';
 
 const LEGACY_KEY = 'swipe_pending_results_v1';
 const LEGACY_EVER_KEY = 'swipe_stars_ever_v1';
 const KEY = 'swipe_pending_results_v2';
 const EVER_KEY = 'swipe_stars_ever_v2';
+const RUN_START_KEY = 'swipe_pending_run_ticket_starts_v1';
+const RUN_START_DEAD_KEY = 'swipe_rejected_run_ticket_starts_v1';
 const migratedScopes = new Set<string>();
+const migratedRunStartScopes = new Set<string>();
 
 export interface ConfirmedBalances {
   stars: number;
@@ -57,6 +65,112 @@ function migrateLegacy(keys: { queue: string; ever: string }): void {
     localStorage.removeItem(LEGACY_EVER_KEY);
   } catch { /* storage blocked */ }
   migratedScopes.add(keys.queue);
+}
+
+function runStartStorageKeys(): { queue: string; dead: string; scoped: boolean } {
+  const userId = telegramUserId();
+  const keys = userId
+    ? { queue: `${RUN_START_KEY}:${userId}`, dead: `${RUN_START_DEAD_KEY}:${userId}`, scoped: true }
+    : { queue: RUN_START_KEY, dead: RUN_START_DEAD_KEY, scoped: false };
+  if (keys.scoped) migrateRunStartQueue(keys);
+  return keys;
+}
+
+function migrateRunStartQueue(keys: { queue: string; dead: string }): void {
+  if (migratedRunStartScopes.has(keys.queue)) return;
+  let completed = false;
+  try {
+    const queueMigrated = mergeRunStartStorage(
+      keys.queue,
+      RUN_START_KEY,
+      (item) => String((item as { request?: { ticket_id?: unknown } })?.request?.ticket_id ?? ''),
+    );
+    const deadMigrated = mergeRunStartStorage(
+      keys.dead,
+      RUN_START_DEAD_KEY,
+      (item) => {
+        const value = item as { request?: { ticket_id?: unknown }; reason?: unknown };
+        return `${String(value?.request?.ticket_id ?? '')}:${String(value?.reason ?? '')}`;
+      },
+    );
+    if (queueMigrated) localStorage.removeItem(RUN_START_KEY);
+    if (deadMigrated) localStorage.removeItem(RUN_START_DEAD_KEY);
+    completed = queueMigrated && deadMigrated;
+  } catch { /* storage blocked */ }
+  if (completed) migratedRunStartScopes.add(keys.queue);
+}
+
+function mergeRunStartStorage(
+  targetKey: string,
+  sourceKey: string,
+  identity: (item: unknown) => string,
+): boolean {
+  const sourceRaw = localStorage.getItem(sourceKey);
+  if (!sourceRaw) return true;
+  const targetRaw = localStorage.getItem(targetKey);
+  if (!targetRaw) {
+    localStorage.setItem(targetKey, sourceRaw);
+    return true;
+  }
+  try {
+    const source = JSON.parse(sourceRaw) as unknown;
+    const target = JSON.parse(targetRaw) as unknown;
+    if (!Array.isArray(source) || !Array.isArray(target)) return false;
+    const known = new Set(target.map(identity).filter(Boolean));
+    for (const item of source) {
+      const key = identity(item);
+      if (!key || known.has(key)) continue;
+      target.push(item);
+      known.add(key);
+    }
+    localStorage.setItem(targetKey, JSON.stringify(target));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+let runStartOutbox: DurableRunTicketStartOutbox | null = null;
+let runStartOutboxKey = '';
+
+function currentRunStartOutbox(): DurableRunTicketStartOutbox {
+  const keys = runStartStorageKeys();
+  if (runStartOutbox && runStartOutboxKey === keys.queue) return runStartOutbox;
+  runStartOutboxKey = keys.queue;
+  runStartOutbox = new DurableRunTicketStartOutbox({
+    storage: localStorage,
+    queueKey: keys.queue,
+    deadLetterKey: keys.dead,
+    startRun: (request) => apiStartRunRequired(request as RunTicketRequest),
+  });
+  return runStartOutbox;
+}
+
+/** Persist a run-ticket start intent before the first network attempt. */
+export function queueRunTicketStart(ticket: RunTicketRequest): Promise<RunTicketStartFlushResult> {
+  const outbox = currentRunStartOutbox();
+  try {
+    outbox.enqueue(ticket);
+  } catch (error) {
+    console.error('[run-start] could not durably enqueue ticket', error);
+    return Promise.resolve({
+      status: 'storage_error',
+      confirmed: 0,
+      terminal: 0,
+      pending: outbox.pendingCount(),
+      latest: null,
+    });
+  }
+  return outbox.flush();
+}
+
+/** Recover persisted starts after reload/foreground. */
+export function flushRunTicketStarts(): Promise<RunTicketStartFlushResult> {
+  return currentRunStartOutbox().flush();
+}
+
+export function pendingRunTicketStartCount(): number {
+  return currentRunStartOutbox().pendingCount();
 }
 
 /** Total stars ever enqueued on this device — compare vs server balance to see if
@@ -120,6 +234,10 @@ export function flushResults(): Promise<ConfirmedBalances | null> {
 }
 
 async function flushLoop(): Promise<ConfirmedBalances | null> {
+  // Boot/foreground already calls flushResults, so piggybacking recovery here
+  // guarantees a start-only attempt (lose/abandon, no result row) is retried
+  // after reload too.
+  await flushRunTicketStarts();
   let confirmed: ConfirmedBalances | null = null;
   while (true) {
     const result = load()[0];
@@ -194,4 +312,5 @@ function dropTerminalResult(result: ResultIn, error: unknown, stage: string): bo
 /** Clear the queue (used by the debug reset). */
 export function clearOutbox(): void {
   save([]);
+  try { currentRunStartOutbox().clear(); } catch { /* storage blocked */ }
 }

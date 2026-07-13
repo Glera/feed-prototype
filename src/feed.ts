@@ -32,10 +32,25 @@ import {
 import {
   apiSession, apiMe, variantIdForMechanic,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
-  apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox, apiStartRun,
+  apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
+  type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
+  type SessionResp,
 } from './api';
-import { queueResult, flushResults, pendingPuzzles, type ConfirmedBalances } from './outbox';
+import {
+  queueResult,
+  queueRunTicketStart,
+  flushResults,
+  pendingPuzzles,
+  type ConfirmedBalances,
+} from './outbox';
+import { ActiveDwellAccumulator } from './active-dwell.mjs';
+import {
+  controlPlaneEnabled,
+  flushControlPlane,
+  initControlPlane,
+  queueControlPlaneEvent,
+} from './control-plane';
 import { loadIslandState } from './island-state';
 import { simulateActivity, islandSocialMode, ISLAND_SIM_EVENT, type SimBuildingRef } from './island-sim';
 import { levelStarReward, seriesRewards } from './rewards.mjs';
@@ -184,6 +199,57 @@ const REWARD_PEEL_STAGGER_MS = 78;   // gap between successive peel-offs (halved
 const RING_STEP_MS = 180;       // snappy ring growth per star impact (synced to the bump)
 
 type PlayableOutcome = 'won' | 'lost';
+type ControlPlaneExitState = 'preview' | 'playing' | 'won' | 'lost';
+type ControlPlaneManualAction = {
+  actionSeq: number;
+  actionType: string;
+  accepted: boolean;
+  changedState: boolean;
+};
+type ControlPlaneLevel = {
+  levelImpressionId: string;
+  levelIndex: number;
+  occurredAt: string;
+  emitted: boolean;
+};
+type ControlPlaneExposure = {
+  index: number;
+  feedPosition: number;
+  playableId: string;
+  decisionId: string;
+  impressionId: string;
+  decisionAt: string;
+  revealedAt: string | null;
+  binding: BuiltinFeedBindingV1 | null;
+  decisionEmitted: boolean;
+  impressionEmitted: boolean;
+  closed: boolean;
+  dwell: ActiveDwellAccumulator;
+  levels: Map<number, ControlPlaneLevel>;
+  exit: {
+    reason: 'swipe' | 'background' | 'close';
+    state: ControlPlaneExitState;
+    dwellActiveMs: number;
+    dwellCensored: boolean;
+    occurredAt: string;
+  } | null;
+};
+type ControlPlaneAttempt = {
+  runId: string;
+  exposure: ControlPlaneExposure;
+  levelIndex: number;
+  ticket: RunTicketRequest;
+  startedAt: string;
+  readyAt: string | null;
+  emitted: boolean;
+  actions: Array<ControlPlaneManualAction & { occurredAt: string; emitted: boolean }>;
+  result: {
+    outcome: 'win' | 'lose';
+    timeMs: number;
+    occurredAt: string;
+    emitted: boolean;
+  } | null;
+};
 type SwipeApi = {
   version: number;
   hasAutoPlay: boolean;
@@ -312,6 +378,11 @@ export class Feed {
   private frameUsesStagedReady = new Set<number>();
   private framePrepareRequested = new Set<number>();
   private frameReady = new Set<number>();
+  // Only the exact staged-ready message opens control-plane dwell. Legacy
+  // `ready`/`loaded` and timeout fallbacks may reveal a playable, but they are
+  // not evidence that the mechanic accepted interaction.
+  private frameInteractiveReady = new Set<number>();
+  private frameInteractiveReadyAt = new Map<number, string>();
   private frameRevealed = new Set<number>();
   private framePaused = new Map<number, boolean>();
   private frameFallbackTimers = new Map<number, number>();
@@ -347,6 +418,16 @@ export class Feed {
   private shownIndex = -1;
   private shownAt = 0;
   private firstInputLogged = false;
+  // Shadow control plane. All fields stay dormant unless the build flag is on
+  // and /session supplies a reviewed playable->variant mapping. Unbound early
+  // reveals are retained briefly so a cold /session does not erase the first
+  // unit's honest dwell/exit.
+  private builtinFeedBindings = new Map<string, BuiltinFeedBindingV1>();
+  private cpExposure: ControlPlaneExposure | null = null;
+  private cpPendingExposure: ControlPlaneExposure | null = null;
+  private cpDeferredExposures: ControlPlaneExposure[] = [];
+  private cpAttempts = new Map<string, ControlPlaneAttempt>();
+  private cpFeedPosition = 0;
   private preloaderMountedAt = 0;
   // Preloader waits for BOTH the first mechanic AND the first server seed (capped).
   private mechanicsReady = false;
@@ -354,6 +435,7 @@ export class Feed {
   // Bottom-bar version label: platform (build) + backend (git SHA, after auth).
   private versionEl: HTMLElement | null = null;
   private backendVersion: string | null = null;
+  private sessionSyncPromise: Promise<boolean> | null = null;
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
   private pendingStarRewards = new Set<number>();
@@ -381,6 +463,7 @@ export class Feed {
   private publicIsland: PublicIslandView | null = null;
   private inboxChallenges: ChallengeInboxItem[] = [];   // top-rail: friends' challenges to play
   private challengeCompleted = false;
+  private challengeOverlayOpen = false;
   // Series (W2): taking over a mechanic starts a multi-level run. Most mechanics run
   // 5 levels of the SAME level with varied params; pins runs its 2 real authored
   // levels (level 1 → level 2). Length is per-mechanic (seriesLenFor). Levels are
@@ -469,6 +552,7 @@ export class Feed {
   private prefetchQueued = new Set<number>();
   private prefetching = false;
   private preloaderDone = false;
+  private preloaderFinishing = false;
   private preloaderFillEl: HTMLElement | null = null;
   private preloaderProgressEl: HTMLElement | null = null;
   private preloaderEl: HTMLElement | null = null;
@@ -526,6 +610,8 @@ export class Feed {
     this.publicIsland = publicIsland;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
+    const initialPlayableId = this.playables[this.realIndex()]?.id;
+    if (initialPlayableId) this.beginControlPlaneDecision(this.realIndex(), initialPlayableId);
     this.pickCoverBucket();   // decide tall/compact cover aspect BEFORE any cover loads
     if (this.HOLD_COVER) document.documentElement.classList.add('holdcover');
     this.buildIncoming();
@@ -572,6 +658,8 @@ export class Feed {
     window.addEventListener('pointerdown', this.onPlatformPointerDown, { capture: true, passive: true });
     document.addEventListener('visibilitychange', this.onHostVisibilityChange);
     window.addEventListener('pagehide', this.pauseAllFrames);
+    window.addEventListener('pagehide', this.onControlPlanePageHide);
+    window.addEventListener('pageshow', this.onControlPlanePageShow);
     (window as any).__feedHostGesture = this.onHostGesture;
     window.setInterval(this.pollPlayableAnalytics, ANALYTICS_POLL_MS);
     window.setInterval(this.pollAutoplayUi, 250);
@@ -610,22 +698,450 @@ export class Feed {
     const delays = [0, 2000, 5000, 10000, 15000];
     for (const d of delays) {
       if (d) await new Promise((r) => setTimeout(r, d));
-      const s = await apiSession();
-      if (!s) continue;
-      this.applyServerBalance(s.balance);
-      if (typeof s.puzzles === 'number') this.applyServerPuzzles(s.puzzles);
-      await this.syncDaily(false);
-      if (s.backend_version) { this.backendVersion = s.backend_version; this.renderVersionLabel(); }
-      this.applyConfirmedBalances(await flushResults());
-      await this.syncDaily(false);
-      void this.refreshChallengeRail();
-      return;
+      if (await this.syncSessionBootstrap()) return;
     }
     // Backend never answered in the window — onForeground() will retry.
   }
 
+  private async applySessionBootstrap(session: SessionResp): Promise<void> {
+    // Initialize the authenticated durable queue only after /session has
+    // created/refreshed the user row. This avoids a first-run FK race while
+    // still flushing any events persisted by an earlier app launch.
+    initControlPlane();
+    this.applyBuiltinFeedBindings(session.builtin_feed_bindings);
+    this.applyServerBalance(session.balance);
+    if (typeof session.puzzles === 'number') this.applyServerPuzzles(session.puzzles);
+    await this.syncDaily(false);
+    if (session.backend_version) {
+      this.backendVersion = session.backend_version;
+      this.renderVersionLabel();
+    }
+    this.applyConfirmedBalances(await flushResults());
+    await this.syncDaily(false);
+    void this.refreshChallengeRail();
+  }
+
+  private syncSessionBootstrap(): Promise<boolean> {
+    if (this.sessionSyncPromise) return this.sessionSyncPromise;
+    const current = (async () => {
+      const session = await apiSession();
+      if (!session) return false;
+      await this.applySessionBootstrap(session);
+      return true;
+    })();
+    this.sessionSyncPromise = current;
+    const clear = () => {
+      if (this.sessionSyncPromise === current) this.sessionSyncPromise = null;
+    };
+    void current.then(clear, clear);
+    return current;
+  }
+
+  // ── Durable shadow control plane ─────────────────────────────────────────
+  // The static feed still chooses the playable locally. Identity does not:
+  // /session supplies an immutable reviewed mapping and the wire carries only
+  // its opaque id. Without that mapping this entire path fails closed while the
+  // legacy feed/results path continues unchanged.
+  private applyBuiltinFeedBindings(bindings?: BuiltinFeedBindingsV1): void {
+    if (!controlPlaneEnabled()) return;
+    if (!bindings || bindings.schema !== 'feed.builtin-bindings.v1' || !bindings.available) {
+      // A later fail-closed bootstrap must not leave a previously installed
+      // mapping available for new tickets/decisions in this page.
+      this.builtinFeedBindings.clear();
+      for (const exposure of this.cpDeferredExposures) {
+        if (!exposure.decisionEmitted) exposure.binding = null;
+      }
+      return;
+    }
+
+    const next = new Map<string, BuiltinFeedBindingV1>();
+    for (const [playableId, binding] of Object.entries(bindings.by_playable_id ?? {})) {
+      if (!playableId || binding.playable_id !== playableId) continue;
+      if (!binding.mapping_id || !binding.variant_id || !binding.mapping_digest) continue;
+      next.set(playableId, binding);
+    }
+    this.builtinFeedBindings = next;
+
+    const stillDeferred: ControlPlaneExposure[] = [];
+    for (const exposure of this.cpDeferredExposures) {
+      const binding = next.get(exposure.playableId);
+      if (!binding) {
+        stillDeferred.push(exposure);
+        continue;
+      }
+      // Once the decision is durable its mapping is immutable. A refreshed
+      // session may contain a replacement mapping for future decisions only.
+      if (!exposure.decisionEmitted) exposure.binding = binding;
+      this.emitControlPlaneExposure(exposure);
+      if (this.controlPlaneExposureNeedsRetry(exposure)) stillDeferred.push(exposure);
+    }
+    // A cold backend or temporarily unavailable localStorage can leave early
+    // observations waiting. Keep only snapshots that are not durable yet.
+    this.cpDeferredExposures = stillDeferred.slice(-64);
+    for (const attempt of this.cpAttempts.values()) this.flushControlPlaneAttempt(attempt);
+  }
+
+  private controlPlaneExposureNeedsRetry(exposure: ControlPlaneExposure): boolean {
+    return !exposure.binding
+      || !exposure.decisionEmitted
+      || Boolean(exposure.revealedAt && !exposure.impressionEmitted)
+      || Boolean(exposure.exit);
+  }
+
+  private deferControlPlaneExposure(exposure: ControlPlaneExposure): void {
+    if (!this.controlPlaneExposureNeedsRetry(exposure)) return;
+    if (!this.cpDeferredExposures.includes(exposure)) this.cpDeferredExposures.push(exposure);
+    if (this.cpDeferredExposures.length > 64) this.cpDeferredExposures.shift();
+  }
+
+  private retryDeferredControlPlaneExposures(): void {
+    const pending: ControlPlaneExposure[] = [];
+    for (const exposure of this.cpDeferredExposures) {
+      if (!exposure.binding) exposure.binding = this.builtinFeedBindings.get(exposure.playableId) ?? null;
+      this.emitControlPlaneExposure(exposure);
+      if (this.controlPlaneExposureNeedsRetry(exposure)) pending.push(exposure);
+    }
+    this.cpDeferredExposures = pending.slice(-64);
+  }
+
+  private variantIdForPlayable(playableId: string): string {
+    return this.builtinFeedBindings.get(playableId)?.variant_id ?? variantIdForMechanic(playableId);
+  }
+
+  private beginControlPlaneDecision(i: number, playableId: string): ControlPlaneExposure | null {
+    if (!controlPlaneEnabled()) return null;
+    // A deep-link challenge is a forced social slot, not a choice by the
+    // built-in feed policy. Until that slot has its own server-bound contract,
+    // exclude it rather than falsely attributing its view/attempt to builtin.
+    if (
+      this.activeChallenge
+      && this.activeChallenge.mechanic_id === playableId
+    ) return null;
+    if (
+      this.cpPendingExposure
+      && !this.cpPendingExposure.closed
+      && this.cpPendingExposure.index === i
+      && this.cpPendingExposure.playableId === playableId
+    ) return this.cpPendingExposure;
+    const now = performance.now();
+    const dwell = new ActiveDwellAccumulator(now);
+    const exposure: ControlPlaneExposure = {
+      index: i,
+      feedPosition: this.cpFeedPosition++,
+      playableId,
+      decisionId: ticketUid(),
+      impressionId: ticketUid(),
+      decisionAt: new Date().toISOString(),
+      revealedAt: null,
+      binding: this.builtinFeedBindings.get(playableId) ?? null,
+      decisionEmitted: false,
+      impressionEmitted: false,
+      closed: false,
+      dwell,
+      levels: new Map(),
+      exit: null,
+    };
+    dwell.reset(now);
+    this.cpPendingExposure = exposure;
+    if (exposure.binding) this.emitControlPlaneExposure(exposure);
+    this.deferControlPlaneExposure(exposure);
+    return exposure;
+  }
+
+  private revealControlPlaneExposure(i: number, playableId: string): void {
+    if (!controlPlaneEnabled()) return;
+    const pending = this.cpPendingExposure;
+    const exposure = pending?.index === i && pending.playableId === playableId
+      ? pending
+      : this.beginControlPlaneDecision(i, playableId);
+    if (!exposure) return;
+    if (this.cpPendingExposure === exposure) this.cpPendingExposure = null;
+    exposure.revealedAt ??= new Date().toISOString();
+    this.cpExposure = exposure;
+    exposure.dwell.reset(performance.now(), this.controlPlaneDwellGates(exposure));
+    this.emitControlPlaneExposure(exposure);
+    this.deferControlPlaneExposure(exposure);
+  }
+
+  private emitControlPlaneExposure(exposure: ControlPlaneExposure): void {
+    if (!exposure.binding) return;
+    if (!exposure.decisionEmitted) {
+      const decisionEvent = queueControlPlaneEvent('builtin_feed_decision', {
+        decision_id: exposure.decisionId,
+        mapping_id: exposure.binding.mapping_id,
+        feed_position: exposure.feedPosition,
+      }, exposure.decisionAt);
+      if (!decisionEvent) return;
+      exposure.decisionEmitted = true;
+    }
+    if (exposure.revealedAt && !exposure.impressionEmitted) {
+      const impressionEvent = queueControlPlaneEvent('unit_impression', {
+        decision_id: exposure.decisionId,
+        impression_id: exposure.impressionId,
+        mechanic_id: exposure.playableId,
+        slot_type: 'builtin',
+      }, exposure.revealedAt);
+      if (!impressionEvent) return;
+      exposure.impressionEmitted = true;
+    }
+    if (exposure.impressionEmitted) {
+      if (exposure.exit) this.emitControlPlaneExit(exposure);
+      for (const attempt of this.cpAttempts.values()) {
+        if (attempt.exposure === exposure) this.flushControlPlaneAttempt(attempt);
+      }
+    }
+  }
+
+  private controlPlaneDwellGates(exposure: ControlPlaneExposure): {
+    visible: boolean;
+    foreground: boolean;
+    interactiveReady: boolean;
+  } {
+    const current = exposure.index === this.shownIndex && exposure.index === this.realIndex();
+    return {
+      visible: !document.hidden,
+      foreground: current
+        && this.feedActuallyVisible(exposure.index)
+        && this.framePaused.get(exposure.index) !== true
+        && !this.shouldPauseFrame(exposure.index)
+        && this.collectingRewardIndex === null,
+      interactiveReady: this.frameInteractiveReady.has(exposure.index),
+    };
+  }
+
+  private feedActuallyVisible(i: number): boolean {
+    return i === this.realIndex()
+      && this.frameRevealed.has(i)
+      && this.preloaderDone
+      && !document.hidden
+      && !this.overlayOpen
+      && !this.dailyOpen
+      && !this.challengeOverlayOpen
+      && this.levelUpPageState === 'idle'
+      && !this.heldLevelUpOverlay
+      && this.settlingTargetIndex === null;
+  }
+
+  private markCurrentUnitShownIfVisible(): void {
+    const i = this.realIndex();
+    if (this.feedActuallyVisible(i)) this.markUnitShown(i);
+  }
+
+  private syncControlPlaneDwell(): void {
+    const exposure = this.cpExposure;
+    if (!exposure || exposure.closed) return;
+    exposure.dwell.update(this.controlPlaneDwellGates(exposure), performance.now());
+  }
+
+  private controlPlaneExitState(i: number): ControlPlaneExitState {
+    if (this.earnedThisCycle.has(i)) return 'won';
+    if (this.failedThisCycle.has(i)) return 'lost';
+    if (this.manualRuns.has(i)) return 'playing';
+    return 'preview';
+  }
+
+  private closeControlPlaneExposure(
+    reason: 'swipe' | 'background' | 'close',
+    dwellCensored: boolean,
+  ): void {
+    const exposure = this.cpExposure;
+    if (!exposure || exposure.closed) return;
+    this.syncControlPlaneDwell();
+    const finished = exposure.dwell.finish(performance.now(), dwellCensored);
+    exposure.closed = true;
+    exposure.exit = {
+      reason,
+      state: this.controlPlaneExitState(exposure.index),
+      dwellActiveMs: finished.dwellActiveMs,
+      dwellCensored: finished.dwellCensored,
+      occurredAt: new Date().toISOString(),
+    };
+    this.cpExposure = null;
+    if (exposure.impressionEmitted) this.emitControlPlaneExit(exposure);
+    this.deferControlPlaneExposure(exposure);
+  }
+
+  private emitControlPlaneExit(exposure: ControlPlaneExposure): void {
+    const exit = exposure.exit;
+    if (!exposure.impressionEmitted || !exit) return;
+    const eventId = queueControlPlaneEvent('unit_exit', {
+      impression_id: exposure.impressionId,
+      reason: exit.reason,
+      state: exit.state,
+      dwell_active_ms: exit.dwellActiveMs,
+      dwell_censored: exit.dwellCensored,
+    }, exit.occurredAt);
+    if (!eventId) return;
+    // One exposure has exactly one exit. Clear it after enqueue so a later
+    // binding refresh cannot append a duplicate event with a new event_id.
+    exposure.exit = null;
+  }
+
+  private registerControlPlaneAttempt(
+    i: number,
+    runId: string,
+    ticket: RunTicketRequest,
+  ): ControlPlaneAttempt | null {
+    const existing = this.cpAttempts.get(runId);
+    if (existing) return existing;
+    const exposure = this.cpExposure;
+    if (!controlPlaneEnabled() || !exposure || exposure.closed || exposure.index !== i) return null;
+    const levelIndex = this.series?.index === i ? this.series.done + 1 : 1;
+    const attempt: ControlPlaneAttempt = {
+      runId,
+      exposure,
+      levelIndex,
+      ticket,
+      startedAt: new Date().toISOString(),
+      readyAt: this.frameInteractiveReadyAt.get(i) ?? null,
+      emitted: false,
+      actions: [],
+      result: null,
+    };
+    this.cpAttempts.set(runId, attempt);
+    this.flushControlPlaneAttempt(attempt);
+    return attempt;
+  }
+
+  private flushControlPlaneAttempt(attempt: ControlPlaneAttempt): void {
+    const exposure = attempt.exposure;
+    // A transient persistence failure must not permanently strand the parent
+    // decision/impression while child attempt events keep accumulating.
+    if (!exposure.decisionEmitted || (exposure.revealedAt && !exposure.impressionEmitted)) {
+      this.emitControlPlaneExposure(exposure);
+    }
+    this.deferControlPlaneExposure(exposure);
+    if (!exposure.impressionEmitted || !exposure.binding || !attempt.readyAt) return;
+    // An attempt created before a cold /session answered is a legacy attempt.
+    // Its ticket identity is already frozen and must never be retroactively
+    // relabelled or sent into the bound chain if the reviewed variant differs.
+    if (attempt.ticket.variant_id !== exposure.binding.variant_id) return;
+    let level = exposure.levels.get(attempt.levelIndex);
+    if (!level) {
+      level = {
+        levelImpressionId: ticketUid(),
+        levelIndex: attempt.levelIndex,
+        occurredAt: attempt.readyAt,
+        emitted: false,
+      };
+      exposure.levels.set(attempt.levelIndex, level);
+    }
+    if (!level.emitted) {
+      const eventId = queueControlPlaneEvent('builtin_level_impression', {
+        impression_id: exposure.impressionId,
+        level_impression_id: level.levelImpressionId,
+        level_index: level.levelIndex,
+      }, level.occurredAt);
+      if (!eventId) return;
+      level.emitted = true;
+    }
+    if (!attempt.emitted) {
+      const attemptOccurredAt = attempt.startedAt < attempt.readyAt
+        ? attempt.readyAt
+        : attempt.startedAt;
+      const eventId = queueControlPlaneEvent('attempt_start', {
+        run_id: attempt.runId,
+        ticket_id: attempt.ticket.ticket_id,
+        level_impression_id: level.levelImpressionId,
+        level_index: attempt.levelIndex,
+      }, attemptOccurredAt);
+      if (!eventId) return;
+      attempt.emitted = true;
+    }
+    for (const action of attempt.actions) {
+      if (action.emitted) continue;
+      const eventId = queueControlPlaneEvent('manual_action', {
+        run_id: attempt.runId,
+        level_impression_id: level.levelImpressionId,
+        action_seq: action.actionSeq,
+        action_type: action.actionType,
+        accepted: action.accepted,
+        changed_state: action.changedState,
+      }, action.occurredAt);
+      if (!eventId) return;
+      action.emitted = true;
+    }
+    if (attempt.result && !attempt.result.emitted) {
+      const eventId = queueControlPlaneEvent('attempt_result', {
+        run_id: attempt.runId,
+        outcome: attempt.result.outcome,
+        time_ms: attempt.result.timeMs,
+      }, attempt.result.occurredAt);
+      if (eventId) attempt.result.emitted = true;
+    }
+  }
+
+  private recordControlPlaneManualAction(i: number, action: ControlPlaneManualAction): void {
+    if (i !== this.realIndex() || i !== this.shownIndex || !this.frameInteractiveReady.has(i)) return;
+    const occurredAt = new Date().toISOString();
+    this.enterManualMode(i);
+    const runId = this.frames.get(i)?.dataset.runId;
+    if (!runId) return;
+    const ticket = this.ticketForRun(i, runId);
+    if (!ticket) return;
+    const attempt = this.registerControlPlaneAttempt(i, runId, ticket);
+    if (!attempt) return;
+    attempt.readyAt ??= this.frameInteractiveReadyAt.get(i) ?? occurredAt;
+    attempt.actions.push({ ...action, occurredAt, emitted: false });
+    this.flushControlPlaneAttempt(attempt);
+  }
+
+  private recordControlPlaneAttemptResult(
+    i: number,
+    runId: string,
+    outcome: 'win' | 'lose',
+    timeMs: number,
+  ): void {
+    const ticket = this.ticketForRun(i, runId);
+    if (!ticket) return;
+    const attempt = this.registerControlPlaneAttempt(i, runId, ticket);
+    if (!attempt) return;
+    attempt.result = {
+      outcome,
+      timeMs: Math.max(0, Math.round(timeMs)),
+      occurredAt: new Date().toISOString(),
+      emitted: false,
+    };
+    this.flushControlPlaneAttempt(attempt);
+  }
+
+  private markCurrentControlPlaneAttemptReady(i: number, occurredAt: string): void {
+    const runId = this.frames.get(i)?.dataset.runId;
+    if (!runId) return;
+    const attempt = this.cpAttempts.get(runId);
+    if (!attempt) return;
+    attempt.readyAt ??= occurredAt;
+    this.flushControlPlaneAttempt(attempt);
+  }
+
+  private onControlPlanePageHide = (event: PageTransitionEvent) => {
+    if (event.persisted) {
+      // BFCache is a pause of the same exposure/run, not a terminal unit exit.
+      this.syncControlPlaneDwell();
+      void flushControlPlane({ force: true });
+      return;
+    }
+    this.closeControlPlaneExposure('close', true);
+    void flushControlPlane({ force: true });
+  };
+
+  private onControlPlanePageShow = (event: PageTransitionEvent) => {
+    if (!controlPlaneEnabled()) return;
+    this.retryDeferredControlPlaneExposures();
+    if (event.persisted) this.applyActiveStates();
+    // Never bypass the same occlusion gate used by normal reveal. A BFCache
+    // pageshow can fire while the preloader or a full-screen host view is up.
+    if (!this.cpExposure) this.markCurrentUnitShownIfVisible();
+    this.syncControlPlaneDwell();
+  };
+
   // Foreground: push wins queued while away/offline, then re-read the balance.
   private async onForeground(): Promise<void> {
+    // A cold backend may have exhausted the initial bounded /session retry
+    // window. Foreground is the recovery edge for identity bindings and CP
+    // initialization, not merely a balance refresh.
+    this.retryDeferredControlPlaneExposures();
+    if (await this.syncSessionBootstrap()) return;
     this.applyConfirmedBalances(await flushResults());
     const m = await apiMe();
     if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);
@@ -942,11 +1458,23 @@ export class Feed {
   ): RunTicketRequest | null {
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return null;
+    const challengeVariant = challengeId && this.activeChallenge?.id === challengeId
+      ? this.activeChallenge.variant_id
+      : null;
+    const exposureVariant = !challengeVariant
+      && this.cpExposure
+      && !this.cpExposure.closed
+      && this.cpExposure.index === i
+      && this.cpExposure.playableId === mechanicId
+      ? this.cpExposure.binding?.variant_id ?? null
+      : null;
     return {
       ticket_id: ticketUid(),
       run_id: runId,
       mechanic_id: mechanicId,
-      variant_id: variantIdForMechanic(mechanicId),
+      // A deep-linked challenge is bound to its creator's immutable variant.
+      // A later reviewed built-in mapping must not relabel that challenge run.
+      variant_id: challengeVariant ?? exposureVariant ?? this.variantIdForPlayable(mechanicId),
       kind,
       challenge_id: challengeId,
     };
@@ -954,8 +1482,8 @@ export class Feed {
 
   private warmRunTicket(ticket: RunTicketRequest): void {
     if (!getInitData()) return;
-    void apiStartRun(ticket).then((started) => {
-      if (started) void flushResults();
+    void queueRunTicketStart(ticket).then((started) => {
+      if (started.confirmed > 0) void flushResults();
     });
   }
 
@@ -1000,7 +1528,10 @@ export class Feed {
       : undefined;
     const queued = queueResult({
       mechanic_id: mechanicId,
-      variant_id: variantIdForMechanic(mechanicId),
+      // Ticket identity is frozen at attempt start. A slow /session may install
+      // a reviewed binding while the run is already in flight; never mutate the
+      // result's variant underneath that existing ticket.
+      variant_id: ticket?.variant_id ?? this.variantIdForPlayable(mechanicId),
       run_id: runId,
       metric_key: 'time_ms',
       metric_value: solveMs,
@@ -1067,7 +1598,8 @@ export class Feed {
     await flushResults();
     const res = await apiCreateChallenge({
       mechanic_id: mechanicId,
-      variant_id: variantIdForMechanic(mechanicId),
+      variant_id: this.runTickets.get(runId)?.variant_id
+        ?? (this.series?.lastRunId === runId ? this.series.ticket.variant_id : this.variantIdForPlayable(mechanicId)),
       source_run_id: runId,
     });
     track('share_tap', { mechanic_id: mechanicId, time_ms: solveMs, ok: !!res });
@@ -1185,12 +1717,25 @@ export class Feed {
     actions.className = 'challenge-ov__actions';
     card.append(body, actions);
     scrim.appendChild(card);
+    let shown = false;
+    let closed = false;
+    const finishClose = () => {
+      if (closed) return;
+      closed = true;
+      scrim.remove();
+      if (shown) this.challengeOverlayOpen = false;
+      this.applyActiveStates();
+    };
     const close = () => {
       scrim.classList.remove('challenge-ov--in');
-      scrim.addEventListener('transitionend', () => scrim.remove(), { once: true });
-      window.setTimeout(() => scrim.remove(), 400);
+      scrim.addEventListener('transitionend', finishClose, { once: true });
+      window.setTimeout(finishClose, 400);
     };
     const show = () => {
+      if (shown) return;
+      shown = true;
+      this.challengeOverlayOpen = true;
+      this.syncControlPlaneDwell();
       this.viewport.appendChild(scrim);
       requestAnimationFrame(() => scrim.classList.add('challenge-ov--in'));
     };
@@ -2184,7 +2729,7 @@ export class Feed {
     const mechanicId = this.playables[i]?.id;
     if (series && reward > 0 && mechanicId) {
       void queueResult({
-        mechanic_id: mechanicId, variant_id: variantIdForMechanic(mechanicId),
+        mechanic_id: mechanicId, variant_id: series.ticket.variant_id,
         run_id: series.payoutRunId, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
         expected_puzzles: series.puzzles,
         run_ticket: series.ticket,
@@ -2323,6 +2868,7 @@ export class Feed {
   // unit_shown fires ONLY here (a REVEALED, on-screen unit) — never for a warmed
   // off-screen frame — so it stays an honest denominator (D3).
   private markUnitShown(cur: number): void {
+    if (!this.feedActuallyVisible(cur)) return;
     if (cur === this.shownIndex || cur < 0) return;
     const prev = this.shownIndex;
     if (prev >= 0) {
@@ -2343,9 +2889,10 @@ export class Feed {
     this.shownAt = performance.now();
     this.firstInputLogged = false;
     const id = this.playables[cur]?.id;
+    if (id) this.revealControlPlaneExposure(cur, id);
     track('unit_shown', {
       mechanic_id: id,
-      variant_id: id ? variantIdForMechanic(id) : null,
+      variant_id: id ? this.variantIdForPlayable(id) : null,
       feed_pos: cur,
       mode: this.manualRuns.has(cur) ? 'playing' : 'auto',
     });
@@ -3465,7 +4012,10 @@ export class Feed {
     });
     this.frames.set(i, frame);
     this.rollReward(i, runId);
-    if (this.manualRuns.has(i)) this.ticketForRun(i, runId);
+    if (this.manualRuns.has(i)) {
+      const ticket = this.ticketForRun(i, runId);
+      if (ticket) this.registerControlPlaneAttempt(i, runId, ticket);
+    }
     const seriesParam = this.pendingSeriesParams.get(i);
     this.pendingSeriesParams.delete(i);   // one-shot: consumed by this mount
     // Level for this mount: the pending (series-advance) value, else the mechanic's
@@ -3542,6 +4092,8 @@ export class Feed {
     this.framePrepareRequested.delete(i);
     this.deferredWarmPrepare.delete(i);
     this.frameReady.delete(i);
+    this.frameInteractiveReady.delete(i);
+    this.frameInteractiveReadyAt.delete(i);
     this.frameRevealed.delete(i);
     this.framePaused.delete(i);
     const fallbackTimer = this.frameFallbackTimers.get(i);
@@ -3553,6 +4105,7 @@ export class Feed {
     // Fresh mount → the cover fronts the page again until this run goes live
     // (see the .game--live toggle in pollAutoplayUi).
     this.games[i]?.classList.remove('game--live');
+    this.syncControlPlaneDwell();
   }
 
   private queueFrameReadyFallback(i: number, frame: HTMLIFrameElement) {
@@ -3657,7 +4210,13 @@ export class Feed {
     this.postPlayableCommand(frame, 'prepareInteractive');
   }
 
-  private handlePlayableReady(i: number) {
+  private handlePlayableReady(i: number, interactiveReady = false) {
+    if (interactiveReady && !this.frameInteractiveReady.has(i)) {
+      const occurredAt = new Date().toISOString();
+      this.frameInteractiveReady.add(i);
+      this.frameInteractiveReadyAt.set(i, occurredAt);
+      this.markCurrentControlPlaneAttemptReady(i, occurredAt);
+    }
     this.frameStaticReady.add(i);
     this.frameReady.add(i);
     const fallbackTimer = this.frameFallbackTimers.get(i);
@@ -3670,6 +4229,7 @@ export class Feed {
     this.tryRevealFrame(i);
     this.ensureFrameAutoPlay(i);
     this.applyPendingEditor(i);
+    this.syncControlPlaneDwell();
   }
 
   private tryRevealFrame(i: number) {
@@ -3807,7 +4367,7 @@ export class Feed {
     }
   }
 
-  private enterManualMode(i: number) {
+  private enterManualMode(i: number, deferControlPlaneAttempt = false) {
     if (i < 0 || i >= this.N) return;
     if (!this.manualRuns.has(i)) {
       // First transition autoplay → manual for this unit = a takeover.
@@ -3825,7 +4385,10 @@ export class Feed {
     }
     this.manualRuns.add(i);
     const runId = this.frames.get(i)?.dataset.runId;
-    if (runId) this.ticketForRun(i, runId);
+    if (runId) {
+      const ticket = this.ticketForRun(i, runId);
+      if (ticket && !deferControlPlaneAttempt) this.registerControlPlaneAttempt(i, runId, ticket);
+    }
     if (this.series?.index === i && this.series.playing) this.setSeriesRowManualHidden(true);
     this.stopFrameAutoPlay(i);
     this.setAutoplayUi(i, false);
@@ -3833,12 +4396,13 @@ export class Feed {
 
   private activateManualFromAutoplay(i: number) {
     if (i !== this.realIndex()) return;
-    this.enterManualMode(i);
+    this.enterManualMode(i, true);
     this.revealLabel(i);
     // Restart the round for the manual run. Prefer the in-place swipe.restart
     // (bundle already parsed → no iframe reload, no preloader flash); fall back to
     // a full remount otherwise. `?takeover=continue` keeps the in-progress autoplay
     // state and does neither.
+    let reloaded = false;
     if (this.restartOnTakeover) {
       const swipe = this.playableApi(i)?.swipe;
       if (swipe?.hasRestart) {
@@ -3846,8 +4410,14 @@ export class Feed {
         // the player already watched it during autoplay, so form the field ready.
         try { swipe.restart({ instant: true }); } catch { /* cross-origin */ }
       } else {
+        reloaded = true;
         this.reloadFrame(i);
       }
+    }
+    if (!reloaded) {
+      const runId = this.frames.get(i)?.dataset.runId;
+      const ticket = runId ? this.ticketForRun(i, runId) : null;
+      if (runId && ticket) this.registerControlPlaneAttempt(i, runId, ticket);
     }
     this.applyActiveStates();
   }
@@ -3859,6 +4429,8 @@ export class Feed {
     });
     this.ensureNearCovers();
     this.pollAutoplayUi();
+    this.markCurrentUnitShownIfVisible();
+    this.syncControlPlaneDwell();
   }
 
   /** Pick the cover aspect bucket for THIS device from the real slot box (covers
@@ -4055,6 +4627,7 @@ export class Feed {
     this.clearWarmTimer();
     this.frames.forEach((_frame, i) => this.setFramePaused(i, true));
     this.pauseStoryFrame(true);
+    this.syncControlPlaneDwell();
   };
 
   private onHostVisibilityChange = () => {
@@ -5112,15 +5685,26 @@ export class Feed {
   }
 
   private finishPreloader() {
-    if (this.preloaderDone) return;
-    this.preloaderDone = true;
-    // D3 guard metric: how long the first-load preloader was visible (p95 < 0.5s).
-    track('loader_visible', { ms: Math.round(performance.now() - this.preloaderMountedAt) });
+    if (this.preloaderDone || this.preloaderFinishing) return;
+    this.preloaderFinishing = true;
     const el = this.preloaderEl;
-    if (!el) return;
+    const complete = () => {
+      if (this.preloaderDone) return;
+      this.preloaderDone = true;
+      this.preloaderFinishing = false;
+      // D3 guard metric: full opaque/fading cover lifetime (p95 < 0.5s).
+      track('loader_visible', { ms: Math.round(performance.now() - this.preloaderMountedAt) });
+      el?.remove();
+      this.applyActiveStates();
+      this.maybeShowChallengeIntro();
+    };
+    if (!el) {
+      complete();
+      return;
+    }
     el.classList.add('preloader--hidden');
-    el.addEventListener('transitionend', () => el.remove(), { once: true });
-    this.maybeShowChallengeIntro();
+    el.addEventListener('transitionend', complete, { once: true });
+    window.setTimeout(complete, 450);
   }
 
   // ── Overlay pointer handling ─────────────────────────────────────────────
@@ -5422,8 +6006,13 @@ export class Feed {
       this.handlePlayableStaticReady(i);
       return;
     }
+    const manualAction = this.manualActionFromMessage(e.data);
+    if (manualAction) {
+      this.recordControlPlaneManualAction(i, manualAction);
+      return;
+    }
     if (this.isPlayableReadyMessage(e.data)) {
-      this.handlePlayableReady(i);
+      this.handlePlayableReady(i, this.isPlayableInteractiveReadyMessage(e.data));
       return;
     }
     if (this.isHostGestureMessage(e.data)) {
@@ -5507,6 +6096,27 @@ export class Feed {
     return d.source === 'playable' && (type === 'interactive_ready' || type === 'ready' || type === 'loaded');
   }
 
+  private isPlayableInteractiveReadyMessage(data: unknown): boolean {
+    if (!data || typeof data !== 'object') return false;
+    const d = data as Record<string, unknown>;
+    return d.source === 'playable' && String(d.type ?? '').toLowerCase() === 'interactive_ready';
+  }
+
+  private manualActionFromMessage(data: unknown): ControlPlaneManualAction | null {
+    if (!data || typeof data !== 'object') return null;
+    const d = data as Record<string, unknown>;
+    if (d.source !== 'playable' || d.type !== 'manual_action') return null;
+    if (!Number.isSafeInteger(d.actionSeq) || Number(d.actionSeq) < 0) return null;
+    if (typeof d.actionType !== 'string' || d.actionType.length < 1 || d.actionType.length > 96) return null;
+    if (typeof d.accepted !== 'boolean' || typeof d.changedState !== 'boolean') return null;
+    return {
+      actionSeq: Number(d.actionSeq),
+      actionType: d.actionType,
+      accepted: d.accepted,
+      changedState: d.changedState,
+    };
+  }
+
   private isPlayableStaticReadyMessage(data: unknown): boolean {
     if (!data || typeof data !== 'object') return false;
     const d = data as Record<string, unknown>;
@@ -5572,8 +6182,10 @@ export class Feed {
     if (this.completedRunIds.has(runId)) return;
     this.completedRunIds.add(runId);
     const mechanicId = this.playables[i]?.id;
+    const attemptTimeMs = this.solveMsFor(i);
+    this.recordControlPlaneAttemptResult(i, runId, outcome === 'won' ? 'win' : 'lose', attemptTimeMs);
     if (outcome === 'won') {
-      const solveMs = this.solveMsFor(i);
+      const solveMs = attemptTimeMs;
       track('win', { mechanic_id: mechanicId, mode: 'manual', time_ms: solveMs }, runId);
       // Series owns the win: no per-level reward or challenge pill — it advances the
       // series (and pays out only at the chest).
@@ -6593,6 +7205,12 @@ export class Feed {
     const changed = targetPos !== this.pos;
     const pageChanged = targetIndex !== fromIndex;
     if (changed && pageChanged) {
+      // This is the navigation commit. Close the source now even when the
+      // target stalls before reveal: that target is issued-without-seen, while
+      // the source still has an honest swipe exit instead of a later close.
+      this.closeControlPlaneExposure('swipe', false);
+      const targetPlayableId = this.playables[targetIndex]?.id;
+      if (targetPlayableId) this.beginControlPlaneDecision(targetIndex, targetPlayableId);
       if (!this.series) this.removeSeriesRow(true);
       this.clearWarmTimer();
       this.warmIndex = null;
