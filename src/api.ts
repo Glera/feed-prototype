@@ -500,6 +500,25 @@ export async function apiChallengeInbox(): Promise<ChallengeInboxItem[]> {
 
 export type CatalogLabDeviceState = 'pending' | 'approved' | 'denied' | 'consumed';
 
+export interface CatalogPromotionSummaryLevel {
+  ordinal: number;
+  specHash: string;
+  evaluationId: string;
+  reviewTargetId: string;
+}
+
+export interface CatalogPromotionSummary {
+  schema: 'catalog.promotion-summary.v1';
+  publishId: string;
+  requestHash: string;
+  contentHash: string;
+  mechanic: string;
+  variant: string;
+  runtimeArtifactDigest: string;
+  levels: CatalogPromotionSummaryLevel[];
+  reason: string;
+}
+
 export interface CatalogLabDeviceAuthorization {
   authorizationId: string;
   clientName: string;
@@ -508,6 +527,7 @@ export interface CatalogLabDeviceAuthorization {
   state: CatalogLabDeviceState;
   expiresAt: string;
   decisionVersion: number;
+  promotionSummary?: CatalogPromotionSummary;
 }
 
 export interface CatalogLabGrantView {

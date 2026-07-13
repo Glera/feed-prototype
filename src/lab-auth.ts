@@ -6,6 +6,7 @@ import {
   apiRevokeCatalogLabToken,
   type CatalogLabDeviceAuthorization,
   type CatalogLabGrantView,
+  type CatalogPromotionSummary,
 } from './api';
 import { showConfirm } from './telegram';
 
@@ -62,6 +63,55 @@ function detail(label: string, value: string): HTMLDivElement {
   content.textContent = value;
   row.append(key, content);
   return row;
+}
+
+function promotionSummaryView(summary: CatalogPromotionSummary): HTMLElement {
+  const section = document.createElement('section');
+  section.className = 'lab-auth__promotion';
+  section.dataset.testid = 'catalog-promotion-summary';
+
+  const header = document.createElement('div');
+  header.className = 'lab-auth__promotion-header';
+  const heading = document.createElement('h3');
+  heading.textContent = 'Exact series to publish';
+  const count = document.createElement('span');
+  count.className = 'lab-auth__promotion-count';
+  count.textContent = `${summary.levels.length} ${summary.levels.length === 1 ? 'level' : 'levels'}`;
+  header.append(heading, count);
+
+  const identity = document.createElement('div');
+  identity.className = 'lab-auth__promotion-identity';
+  identity.append(
+    detail('Mechanic', summary.mechanic),
+    detail('Variant', summary.variant),
+    detail('Publish ID', summary.publishId),
+    detail('Request hash', summary.requestHash),
+    detail('Content hash', summary.contentHash),
+    detail('Runtime artifact', summary.runtimeArtifactDigest),
+    detail('Reason', summary.reason),
+  );
+
+  const levels = document.createElement('ol');
+  levels.className = 'lab-auth__promotion-levels';
+  levels.setAttribute('aria-label', 'Ordered series levels');
+  for (const level of summary.levels) {
+    const item = document.createElement('li');
+    item.className = 'lab-auth__promotion-level';
+    const levelHeading = document.createElement('strong');
+    levelHeading.textContent = `Level ${level.ordinal}`;
+    const levelDetails = document.createElement('div');
+    levelDetails.className = 'lab-auth__promotion-level-details';
+    levelDetails.append(
+      detail('Spec hash', level.specHash),
+      detail('Evaluation', level.evaluationId),
+      detail('Review target', level.reviewTargetId),
+    );
+    item.append(levelHeading, levelDetails);
+    levels.appendChild(item);
+  }
+
+  section.append(header, identity, levels);
+  return section;
 }
 
 function isAccountUnavailable(error: unknown): boolean {
@@ -281,6 +331,8 @@ export async function mountCatalogLabAuth(): Promise<void> {
   const resetLookup = (): void => {
     clearSensitiveCode();
     activeAuthorization = null;
+    title.textContent = 'Authorize a Lab computer';
+    copy.textContent = 'Enter the one-time code shown by Mechanic Lab. Review the device and permission before you approve it.';
     requestSection.hidden = true;
     successSection.hidden = true;
     codeSection.hidden = false;
@@ -292,13 +344,26 @@ export async function mountCatalogLabAuth(): Promise<void> {
   };
 
   const renderRequest = (authorization: CatalogLabDeviceAuthorization): void => {
-    requestTitle.textContent = authorization.clientName;
+    const promotion = authorization.promotionSummary;
+    title.textContent = promotion ? 'Approve an exact series' : 'Authorize a Lab computer';
+    copy.textContent = promotion
+      ? 'This is a one-time publication decision, not general access. Compare the immutable series identity below with the reviewed morning candidate.'
+      : 'Review the device and permission before you approve it.';
+    requestEyebrow.textContent = promotion ? 'Exact series publication' : 'Permission request';
+    requestTitle.textContent = promotion
+      ? `${promotion.mechanic} · ${promotion.variant}`
+      : authorization.clientName;
     requestDetails.replaceChildren(
       detail('Computer', authorization.clientName),
       detail('Instance ID', authorization.clientInstanceId),
       detail('Permission', scopeLabel(authorization.scopes)),
       detail('Request expires', formatDate(authorization.expiresAt)),
     );
+    if (promotion) requestDetails.appendChild(promotionSummaryView(promotion));
+    requestWarning.textContent = promotion
+      ? 'Approval authorizes this exact immutable series once. Verify the content identity and every ordered level before approving; no other series can use this authorization.'
+      : 'Approval lets this computer submit validated evaluation results. It does not grant feed, reset, or model API access.';
+    approve.textContent = promotion ? 'Approve exact publication' : 'Approve';
     const pending = authorization.state === 'pending';
     decisionButtons.hidden = !pending;
     if (!pending) {
@@ -422,9 +487,12 @@ export async function mountCatalogLabAuth(): Promise<void> {
   const decide = async (decision: Decision): Promise<void> => {
     if (decisionPending || !activeAuthorization || !activeCode) return;
     const verb = decision === 'approve' ? 'Approve' : 'Deny';
+    const promotion = activeAuthorization.promotionSummary;
     const confirmed = await showConfirm(
       decision === 'approve'
-        ? `${verb} “${activeAuthorization.clientName}” for ${scopeLabel(activeAuthorization.scopes)}?`
+        ? promotion
+          ? `${verb} exact publication ${promotion.publishId} with content hash ${promotion.contentHash}?`
+          : `${verb} “${activeAuthorization.clientName}” for ${scopeLabel(activeAuthorization.scopes)}?`
         : `${verb} the access request from “${activeAuthorization.clientName}”?`,
     );
     if (!confirmed) return;
@@ -443,9 +511,13 @@ export async function mountCatalogLabAuth(): Promise<void> {
       clearSensitiveCode();
       activeAuthorization = null;
       requestSection.hidden = true;
-      successTitle.textContent = decision === 'approve' ? 'Access approved' : 'Request denied';
+      successTitle.textContent = decision === 'approve'
+        ? promotion ? 'Publication approved' : 'Access approved'
+        : 'Request denied';
       successCopy.textContent = decision === 'approve'
-        ? `“${result.clientName}” can now complete the short-lived token exchange. You can revoke it below at any time.`
+        ? promotion
+          ? `“${result.clientName}” can now complete the short-lived exchange for this exact series only.`
+          : `“${result.clientName}” can now complete the short-lived token exchange. You can revoke it below at any time.`
         : `“${result.clientName}” was not granted access.`;
       successSection.hidden = false;
       if (decision === 'approve') void refreshTokenList();

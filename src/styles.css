@@ -243,6 +243,61 @@ body.lab-auth-open #viewport { display: none; }
   color: #dce4f6;
   font: 600 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+.lab-auth__promotion {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  border: 1px solid rgba(119, 232, 186, 0.26);
+  border-radius: 14px;
+  padding: 14px;
+  background: rgba(27, 74, 61, 0.16);
+}
+.lab-auth__promotion-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 13px;
+}
+.lab-auth__promotion-header h3 {
+  margin: 0;
+  color: #e5fff5;
+  font-size: 14px;
+}
+.lab-auth__promotion-count {
+  flex: none;
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: rgba(71, 201, 149, 0.16);
+  color: #8cebc2;
+  font-size: 11px;
+  font-weight: 750;
+}
+.lab-auth__promotion-identity,
+.lab-auth__promotion-level-details {
+  display: grid;
+  gap: 8px;
+}
+.lab-auth__promotion-levels {
+  display: grid;
+  gap: 9px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.lab-auth__promotion-level {
+  border-top: 1px solid rgba(141, 226, 191, 0.13);
+  padding-top: 10px;
+}
+.lab-auth__promotion-level > strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #baf5dc;
+  font-size: 12px;
+}
+.lab-auth__promotion .lab-auth__detail-value {
+  -webkit-user-select: text;
+  user-select: text;
+}
 .lab-auth__notice {
   margin: 14px 0;
   border-left: 2px solid #739dff;
