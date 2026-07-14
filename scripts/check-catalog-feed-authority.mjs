@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 
 import {
   CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS,
+  CATALOG_AUTHORITY_PROJECTION_TIMEOUT_MS,
   CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
   CatalogFeedAuthorityContractError,
   buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
+  catalogSourceDecisionProjectionReady,
   catalogCanaryAuthorityAllowsAllocation,
   catalogCanaryDogfoodEnabled,
   catalogCanaryInvitationMissing,
@@ -95,24 +97,49 @@ equal(catalogAuthorityStartEligible('authority_pending', true, true), false, 're
 equal(catalogAuthorityStartEligible('catalog_ready', true, true), false, 'frame reload reuses delivered authority');
 
 equal(
-  catalogAuthorityFallbackTimerPlan('authority_pending', false, true, null),
+  catalogAuthorityFallbackTimerPlan('authority_pending', false, false, true, null),
   'bootstrap',
   'an initial/navigation claim starts the bounded binding bootstrap',
 );
 equal(
-  catalogAuthorityFallbackTimerPlan('authority_pending', true, true, 'bootstrap'),
-  'delivery',
-  'authority start replaces the bootstrap with a fresh delivery watchdog',
+  catalogAuthorityFallbackTimerPlan('authority_pending', true, false, true, 'bootstrap'),
+  'projection',
+  'authority start replaces bootstrap with the cold CP projection watchdog',
 );
 equal(
-  catalogAuthorityFallbackTimerPlan('authority_pending', true, true, 'delivery'),
+  catalogAuthorityFallbackTimerPlan('authority_pending', true, true, true, 'projection'),
+  'delivery',
+  'durable source ACK starts a fresh catalog delivery watchdog',
+);
+equal(
+  catalogAuthorityFallbackTimerPlan('authority_pending', true, true, true, 'delivery'),
   null,
   'an already armed delivery watchdog is idempotent',
 );
 equal(
-  catalogAuthorityFallbackTimerPlan('catalog_ready', true, true, 'delivery'),
+  catalogAuthorityFallbackTimerPlan('catalog_ready', true, true, true, 'delivery'),
   null,
   'a terminal delivery phase cannot arm another watchdog',
+);
+equal(
+  catalogSourceDecisionProjectionReady(true, 'acknowledged', 'projected'),
+  true,
+  'only a durable normalized source projection may enter catalog delivery',
+);
+equal(
+  catalogSourceDecisionProjectionReady(true, 'acknowledged', 'stored'),
+  false,
+  'a stored durable receipt is not yet a source projection',
+);
+equal(
+  catalogSourceDecisionProjectionReady(true, 'acknowledged', 'pending_dependency'),
+  false,
+  'pending dependency cannot authorize catalog selection',
+);
+equal(
+  catalogSourceDecisionProjectionReady(false, 'acknowledged', 'projected'),
+  false,
+  'a failed flush cannot be hidden by stale page-local receipt state',
 );
 
 // Deterministic clock/epoch regression for the production race. Binding may
@@ -129,26 +156,46 @@ const armTimer = (stage) => {
   const epoch = ++timerEpoch;
   const delay = stage === 'bootstrap'
     ? CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS
-    : CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS;
+    : stage === 'projection'
+      ? CATALOG_AUTHORITY_PROJECTION_TIMEOUT_MS
+      : CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS;
   timerCallbacks.push({ stage, epoch, deadline: timerNow + delay, fire() {
     if (timerEpoch !== epoch || timerStage !== stage) return;
     timerPhase = 'builtin_fallback';
   } });
 };
+const advanceTimer = (nextNow) => {
+  timerNow = nextNow;
+  for (const callback of timerCallbacks) {
+    if (callback.deadline <= timerNow) callback.fire();
+  }
+};
 armTimer('bootstrap');
-timerNow = 4000;
-equal(timerPhase, 'authority_pending', 'a >3.5s delayed binding remains eligible under the 15s bootstrap');
+advanceTimer(20_000);
+equal(timerPhase, 'authority_pending', 'binding delayed beyond 15s remains eligible under the cold-start bootstrap');
 equal(catalogAuthorityStartEligible(timerPhase, false, true), true, 'delayed binding can still start authority');
-armTimer('delivery');
+armTimer('projection');
 const staleBootstrap = timerCallbacks[0];
 staleBootstrap.fire();
 equal(timerPhase, 'authority_pending', 'a stale bootstrap callback is fenced by the replacement epoch');
 equal(
   timerCallbacks[1].deadline,
-  timerNow + CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
-  'authority receives a full delivery budget independent of bootstrap age',
+  timerNow + CATALOG_AUTHORITY_PROJECTION_TIMEOUT_MS,
+  'authority receives a cold-backend projection budget independent of bootstrap age',
 );
-const deliveryCallback = timerCallbacks[1];
+
+advanceTimer(timerNow + 20_000);
+equal(timerPhase, 'authority_pending', 'source ACK delayed beyond 15s cannot trigger catalog fallback');
+armTimer('delivery');
+const staleProjection = timerCallbacks[1];
+staleProjection.fire();
+equal(timerPhase, 'authority_pending', 'a stale projection callback is fenced after durable source ACK');
+equal(
+  timerCallbacks[2].deadline,
+  timerNow + CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
+  'durable source ACK receives a fresh full catalog-delivery window',
+);
+const deliveryCallback = timerCallbacks[2];
 timerPhase = 'catalog_ready';
 timerStage = null;
 timerEpoch += 1;
@@ -158,9 +205,8 @@ equal(timerPhase, 'catalog_ready', 'catalog-ready cancellation fences a queued d
 timerPhase = 'authority_pending';
 timerStage = null;
 armTimer('delivery');
-const unresolvedDelivery = timerCallbacks[2];
-timerNow = unresolvedDelivery.deadline;
-unresolvedDelivery.fire();
+const unresolvedDelivery = timerCallbacks[3];
+advanceTimer(unresolvedDelivery.deadline);
 equal(catalogFeedSurface(timerPhase), 'builtin', 'an unresolved delivery still fails closed to builtin');
 
 timerPhase = 'disposed';

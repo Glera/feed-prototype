@@ -4,7 +4,8 @@ const PLAYABLE_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const CATALOG_MECHANIC_RE = /^[a-z0-9][a-z0-9._-]{0,30}\/[a-z0-9][a-z0-9._-]{0,30}$/;
 const ISO_MILLIS_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
 
-export const CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS = 15000;
+export const CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS = 65000;
+export const CATALOG_AUTHORITY_PROJECTION_TIMEOUT_MS = 65000;
 export const CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS = 15000;
 
 export class CatalogFeedAuthorityContractError extends Error {
@@ -173,19 +174,32 @@ export function catalogAuthorityStartEligible(phase, authorityStarted, decisionE
 /**
  * The claim is created only for the initial slot or a committed navigation,
  * never for ordinary iframe prefetch. It owns a bounded bootstrap wait. Once
- * durable authority actually starts, that bootstrap lifecycle is replaced with
- * a fresh delivery watchdog rather than sharing an already-spent deadline.
+ * authority starts, projection gets a cold-backend budget. Only the durable
+ * source ACK replaces that with the shorter catalog-delivery watchdog.
  */
 export function catalogAuthorityFallbackTimerPlan(
   phase,
   authorityStarted,
+  sourceDecisionAcknowledged,
   claimCommitted,
   currentStage,
 ) {
   if (phase !== 'authority_pending') return null;
-  if (authorityStarted === true) return currentStage === 'delivery' ? null : 'delivery';
+  if (sourceDecisionAcknowledged === true) {
+    return currentStage === 'delivery' ? null : 'delivery';
+  }
+  if (authorityStarted === true) {
+    return currentStage === 'projection' ? null : 'projection';
+  }
   if (claimCommitted === true && currentStage == null) return 'bootstrap';
   return null;
+}
+
+/** Durable receipt alone is insufficient: authority requires the normalized projection. */
+export function catalogSourceDecisionProjectionReady(flushed, eventState, receiptStatus) {
+  return flushed === true
+    && eventState === 'acknowledged'
+    && receiptStatus === 'projected';
 }
 
 export function buildCatalogFeedAuthorityRequest(requestId, sourceDecisionId) {

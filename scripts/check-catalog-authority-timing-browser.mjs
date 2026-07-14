@@ -176,8 +176,9 @@ const waitFor = async (predicate, timeoutMs, message) => {
 
 const browser = await chromium.launch();
 try {
-  const openScenario = async (scenario) => {
+  const openScenario = async (scenario, virtualClock = false) => {
     const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
+    if (virtualClock) await page.clock.install();
     const initData = initDataFor(scenario);
     await page.addInitScript(({ id, data }) => {
       window.Telegram = { WebApp: {
@@ -201,7 +202,7 @@ try {
   );
   assert.ok(scenarios.delayed.authorityRequests[0].atMs >= 3500,
     'fixture must reproduce binding later than the former timeout');
-  assert.ok(scenarios.delayed.authorityRequests[0].atMs < 15_000,
+  assert.ok(scenarios.delayed.authorityRequests[0].atMs < 65_000,
     'delayed binding must still fit inside the new bootstrap budget');
   await delayedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 8000 });
   await waitFor(
@@ -216,13 +217,17 @@ try {
   );
   await delayedPage.close();
 
-  const noBindingPage = await openScenario('no-binding');
-  await new Promise((resolve) => setTimeout(resolve, 4200));
+  const noBindingPage = await openScenario('no-binding', true);
+  await waitFor(
+    () => scenarios['no-binding'].sessionRequests >= 1,
+    2000,
+    'no-binding session bootstrap did not settle',
+  );
+  await noBindingPage.clock.fastForward(20_000);
   assert.equal(await noBindingPage.locator(`iframe[title="${playableId}"]`).count(), 0,
-    'missing binding cannot fall back at the former 3.5s deadline');
-  await noBindingPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 13_000 });
-  const fallbackAt = Date.now() - scenarios['no-binding'].startedAt;
-  assert.ok(fallbackAt >= 14_500, 'missing binding must receive the full claim bootstrap budget');
+    'missing binding cannot fall back after 20s of a cold-start-safe bootstrap');
+  await noBindingPage.clock.fastForward(45_100);
+  await noBindingPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
   assert.equal(scenarios['no-binding'].authorityRequests.length, 0,
     'missing binding cannot call authority without a durable source decision');
   assert.equal(

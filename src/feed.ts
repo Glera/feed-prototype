@@ -63,6 +63,7 @@ import {
 } from './catalog-player-v2.mjs';
 import {
   CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS,
+  CATALOG_AUTHORITY_PROJECTION_TIMEOUT_MS,
   CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
   buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
@@ -73,6 +74,7 @@ import {
   catalogFallbackMatchesBinding,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
+  catalogSourceDecisionProjectionReady,
   catalogDogfoodAccountEligible,
   catalogFeedDogfoodEnabled,
   catalogFeedMustEvictFrame,
@@ -310,10 +312,11 @@ type CatalogFeedSlot = {
   phase: CatalogFeedSlotPhase;
   request: CatalogFeedAuthorityRequestV1;
   authorityStarted: boolean;
+  sourceDecisionAcknowledged: boolean;
   authorityClaimCommitted: boolean;
   authorityTimer: number | null;
   authorityTimerEpoch: number;
-  authorityTimerStage: 'bootstrap' | 'delivery' | null;
+  authorityTimerStage: 'bootstrap' | 'projection' | 'delivery' | null;
   configurationTimer: number | null;
   ticketRequest: CatalogRunTicketRequestV2 | null;
   ticket: CatalogRunTicketViewV2 | null;
@@ -977,6 +980,7 @@ export class Feed {
         phase: 'authority_pending',
         request: buildCatalogFeedAuthorityRequest(ticketUid(), exposure.decisionId),
         authorityStarted: false,
+        sourceDecisionAcknowledged: false,
         authorityClaimCommitted: true,
         authorityTimer: null,
         authorityTimerEpoch: 0,
@@ -1089,6 +1093,7 @@ export class Feed {
     const stage = catalogAuthorityFallbackTimerPlan(
       slot.phase,
       slot.authorityStarted,
+      slot.sourceDecisionAcknowledged,
       slot.authorityClaimCommitted,
       slot.authorityTimerStage,
     );
@@ -1098,10 +1103,12 @@ export class Feed {
     slot.authorityTimerStage = stage;
     const delay = stage === 'bootstrap'
       ? CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS
-      : CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS;
+      : stage === 'projection'
+        ? CATALOG_AUTHORITY_PROJECTION_TIMEOUT_MS
+        : CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS;
     // Bootstrap protects an initial/navigation claim whose session/binding
-    // never arrives. Actual authority replaces it with enough budget for the
-    // sequential CP→canary→allocation→ticket→spec closure on mobile.
+    // never arrives. Projection tolerates a cold durable CP backend. Only its
+    // ACK starts the shorter canary→allocation→ticket→spec delivery budget.
     slot.authorityTimer = window.setTimeout(
       () => {
         if (!this.catalogSlotIsCurrent(slot)
@@ -1119,9 +1126,15 @@ export class Feed {
       // Enqueue success is insufficient: wait for the durable inbox ACK first.
       const flushed = await flushControlPlane({ force: true });
       if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') return;
-      if (!flushed || controlPlaneEventState(slot.exposure.decisionEventId) !== 'acknowledged') {
+      if (!catalogSourceDecisionProjectionReady(
+        Boolean(flushed),
+        controlPlaneEventState(slot.exposure.decisionEventId),
+        controlPlaneEventReceiptStatus(slot.exposure.decisionEventId),
+      )) {
         throw new Error('source decision was not durably projected');
       }
+      slot.sourceDecisionAcknowledged = true;
+      this.armCatalogAuthorityFallback(slot);
 
       type OpaqueAuthority = CatalogCanaryAuthorityResultV1
         | Extract<CatalogFeedAuthorityResultV1, { outcome: 'catalog_authorized' }>;
