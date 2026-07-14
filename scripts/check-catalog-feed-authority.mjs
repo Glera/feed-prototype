@@ -333,6 +333,11 @@ equal(catalogFallbackMatchesBinding(fallback.fallback, {
 const recovery = catalogRecallRecoveryEffect('catalog_ticket_revoked', ids.auth, ids.auth);
 equal(recovery?.claimReward, false, 'hard recall cannot claim a catalog reward');
 equal(recovery?.restore, 'builtin', 'hard recall restores the reviewed builtin');
+const superseded = catalogRecallRecoveryEffect(
+  'catalog_ticket_superseded', ids.auth, ids.auth,
+);
+equal(superseded?.claimReward, false, 'replacement cannot claim a catalog reward');
+equal(superseded?.restore, 'builtin', 'replacement restores the reviewed builtin');
 equal(catalogRecallRecoveryEffect('catalog_ticket_expired', ids.auth, ids.auth), null);
 equal(catalogRecallRecoveryEffect('catalog_ticket_revoked', ids.auth, ids.request), null);
 

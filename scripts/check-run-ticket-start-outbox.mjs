@@ -134,7 +134,10 @@ const v2Outbox = new DurableRunTicketStartOutbox({
         code: 'catalog_ticket_idempotency_conflict',
       });
     }
-    const view = v2View(received, v2Mode === 'revoked' ? 'revoked' : 'active');
+    const view = v2View(
+      received,
+      ['revoked', 'superseded'].includes(v2Mode) ? v2Mode : 'active',
+    );
     if (v2Mode === 'invalid-manifest') view.levels[1].ordinal = 3;
     return view;
   },
@@ -159,6 +162,12 @@ v2Outbox.enqueue({ ...v2Request, ticket_id: '00000000-0000-4000-8000-00000000002
 const revoked = await v2Outbox.flush();
 assert.equal(revoked.terminal, 1);
 assert.equal(v2Outbox.deadLetters().at(-1).reason, 'ticket_revoked');
+
+v2Mode = 'superseded';
+v2Outbox.enqueue({ ...v2Request, ticket_id: '00000000-0000-4000-8000-000000000026', run_id: 'catalog-root-7' });
+const superseded = await v2Outbox.flush();
+assert.equal(superseded.terminal, 1);
+assert.equal(v2Outbox.deadLetters().at(-1).reason, 'ticket_superseded');
 
 v2Mode = 'stable-code';
 v2Outbox.enqueue({ ...v2Request, ticket_id: '00000000-0000-4000-8000-000000000023', run_id: 'catalog-root-4' });

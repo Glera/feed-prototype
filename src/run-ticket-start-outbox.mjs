@@ -1,5 +1,7 @@
 const TERMINAL_HTTP_STATUSES = new Set([400, 404, 409, 410, 422, 428]);
-const ACCEPTED_STATES = new Set(['active', 'consumed', 'expired', 'revoked']);
+const ACCEPTED_STATES = new Set([
+  'active', 'consumed', 'expired', 'revoked', 'superseded',
+]);
 const HASH_RE = /^[0-9a-f]{64}$/;
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -73,8 +75,12 @@ export class DurableRunTicketStartOutbox {
         return { status: 'invalid_response', confirmed, terminal, pending: this.pendingCount(), latest };
       }
       latest = validatedView;
-      if (validatedView.state === 'expired' || validatedView.state === 'revoked') {
-        const reason = validatedView.state === 'expired' ? 'ticket_expired' : 'ticket_revoked';
+      if (['expired', 'revoked', 'superseded'].includes(validatedView.state)) {
+        const reason = validatedView.state === 'expired'
+          ? 'ticket_expired'
+          : validatedView.state === 'superseded'
+            ? 'ticket_superseded'
+            : 'ticket_revoked';
         if (!this._moveToDeadLetter(item, reason, validatedView)) {
           return { status: 'storage_error', confirmed, terminal, pending: this.pendingCount(), latest };
         }

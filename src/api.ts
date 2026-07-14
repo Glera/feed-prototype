@@ -485,7 +485,7 @@ export interface CatalogRunTicketViewV2 {
   completed_levels: number;
   next_result_at: string;
   expires_at: string;
-  state: 'active' | 'consumed' | 'expired' | 'revoked';
+  state: 'active' | 'consumed' | 'expired' | 'revoked' | 'superseded';
 }
 
 export type RunTicketView = LegacyRunTicketView | CatalogRunTicketViewV2;

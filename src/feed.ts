@@ -1303,6 +1303,16 @@ export class Feed {
         && ticket.ticket_id === ticketRequest.ticket_id
         && ticket.run_id === ticketRequest.run_id
         && ticket.decision_id === ticketRequest.decision_id;
+      if (ticket?.state === 'revoked' || ticket?.state === 'superseded') {
+        this.activateCatalogBuiltinFallback(
+          slot,
+          ticket.state === 'superseded'
+            ? 'catalog_ticket_superseded'
+            : 'catalog_ticket_revoked',
+          true,
+        );
+        return;
+      }
       // `replayed:true` recovers only the transport gap before play. An active
       // zero-progress ticket is safe to mount with the same exact identity. A
       // configured/played/terminal ticket is intentionally not resumed yet;
@@ -1319,10 +1329,6 @@ export class Feed {
         || !('schema' in ticket) || ticket.schema !== 'run.ticket.v2'
         || ticket.ticket_id !== ticketRequest.ticket_id
         || ticket.run_id !== ticketRequest.run_id || ticket.state !== 'active') {
-        if (ticket?.state === 'revoked') {
-          this.activateCatalogBuiltinFallback(slot, 'catalog_ticket_revoked', true);
-          return;
-        }
         throw new Error(`catalog ticket start did not confirm (${start.status})`);
       }
 
@@ -1346,15 +1352,20 @@ export class Feed {
     } catch (error) {
       if (!this.catalogSlotIsCurrent(slot)) return;
       const code = error instanceof ApiRequestError ? error.code : null;
-      const revoked = code === 'catalog_ticket_revoked';
+      const terminalTicket = code === 'catalog_ticket_revoked'
+        || code === 'catalog_ticket_superseded';
       const staleInvitation = code === 'feed_authority_candidate_stale';
       const reason = code && [
         'feed_slot_authorization_expired',
         'feed_authority_candidate_stale',
         'feed_slot_authorization_not_found',
-      ].includes(code) ? `catalog_invitation_${code}` : revoked ? 'catalog_ticket_revoked' : 'delivery_failure';
+      ].includes(code)
+        ? `catalog_invitation_${code}`
+        : terminalTicket
+          ? code
+          : 'delivery_failure';
       console.warn('[catalog-player-v2] delivery fell back to reviewed builtin', error);
-      this.activateCatalogBuiltinFallback(slot, reason, revoked || staleInvitation);
+      this.activateCatalogBuiltinFallback(slot, reason, terminalTicket || staleInvitation);
     }
   }
 
@@ -1473,14 +1484,16 @@ export class Feed {
       return ticketId === event.ticketId;
     });
     if (!slot) return;
-    const recalled = Boolean(catalogRecallRecoveryEffect(
+    const terminalTicket = Boolean(catalogRecallRecoveryEffect(
       event.code,
       event.ticketId,
       slot.ticketRequest?.ticket_id ?? '',
     ));
     this.activateCatalogBuiltinFallback(
       slot,
-      recalled ? 'catalog_ticket_revoked' : `catalog_result_rejected_${event.code ?? event.status}`,
+      terminalTicket
+        ? event.code ?? 'catalog_ticket_terminal'
+        : `catalog_result_rejected_${event.code ?? event.status}`,
       true,
     );
   };

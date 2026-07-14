@@ -285,7 +285,8 @@ export function catalogFallbackMatchesBinding(fallback, binding) {
 
 /** Pure terminal edge consumed by the feed before it paints catalog rewards. */
 export function catalogRecallRecoveryEffect(code, ticketId, activeTicketId) {
-  if (code !== 'catalog_ticket_revoked' || typeof ticketId !== 'string'
+  if (!['catalog_ticket_revoked', 'catalog_ticket_superseded'].includes(code)
+    || typeof ticketId !== 'string'
     || ticketId !== activeTicketId) return null;
   return Object.freeze({
     type: 'catalog_recall_recovery',
