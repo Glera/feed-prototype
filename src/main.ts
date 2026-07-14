@@ -4,6 +4,7 @@ import { setMechanicVersions } from './playables';
 import { initTelegram, getStartParam, islandOwnerFromParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
+import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
@@ -44,8 +45,7 @@ async function boot(): Promise<void> {
 }
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
-const labAuthLaunch = startParam === 'lab_auth'
-  || (Boolean((import.meta as any).env?.DEV) && query.get('labAuth') === '1');
+const labAuthLaunch = catalogLabAuthRequested({ search: location.search, startParam });
 
 if (labAuthLaunch) {
   // Focused device approval flow: do not mount or warm the playable feed under

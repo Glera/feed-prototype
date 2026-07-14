@@ -6,8 +6,9 @@
   "description": "Swipe platform (Telegram Mini App): vertical feed of playable mini-games with a social layer (stars, series, challenges) and generative UGC meta experiments. See README.md and ISLAND.md.",
   "scripts": {
     "dev": "vite",
-    "lint": "tsc --noEmit && npm run check:telegram-start-param && npm run check:rewards && npm run check:series && npm run check:dwell && npm run check:cp-outbox && npm run check:run-ticket-outbox && npm run check:result-receipts && npm run check:catalog-player-v2 && npm run check:catalog-feed-authority && npm run check:catalog-feed-dogfood",
+    "lint": "tsc --noEmit && npm run check:telegram-start-param && npm run check:catalog-lab-navigation && npm run check:rewards && npm run check:series && npm run check:dwell && npm run check:cp-outbox && npm run check:run-ticket-outbox && npm run check:result-receipts && npm run check:catalog-player-v2 && npm run check:catalog-feed-authority && npm run check:catalog-feed-dogfood",
     "check:telegram-start-param": "node scripts/check-telegram-start-param.mjs",
+    "check:catalog-lab-navigation": "node scripts/check-catalog-lab-navigation.mjs",
     "check:rewards": "node scripts/check-reward-vectors.mjs",
     "check:series": "node scripts/check-series-policy.mjs",
     "check:dwell": "node scripts/check-active-dwell.mjs",
@@ -17,6 +18,7 @@
     "check:catalog-player-v2": "node scripts/check-catalog-player-v2.mjs",
     "check:catalog-feed-authority": "node scripts/check-catalog-feed-authority.mjs",
     "check:catalog-feed-dogfood": "node scripts/check-catalog-feed-dogfood-harness.mjs",
+    "check:catalog-lab-entry-browser": "node scripts/check-catalog-lab-entry-browser.mjs",
     "serve:catalog-player-v2-browser": "node scripts/serve-catalog-player-v2-browser-harness.mjs",
     "serve:catalog-feed-dogfood": "node scripts/serve-catalog-feed-dogfood-harness.mjs",
     "serve:catalog-feed-real-e2e": "node scripts/serve-catalog-feed-real-e2e.mjs",

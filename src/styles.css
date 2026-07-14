@@ -801,6 +801,27 @@ body {
 }
 .feed-bar__daily-alert[hidden] { display: none; }
 .feed-bar__icon--attention svg * { stroke: #ffd85f; }
+.feed-bar__lab {
+  position: absolute;
+  right: 8px;
+  bottom: calc(var(--safe-bottom) + 8px);
+  z-index: 2;
+  min-width: 40px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid rgba(116, 206, 255, 0.48);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(40, 102, 138, 0.9), rgba(20, 54, 78, 0.94));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 4px 12px rgba(0, 0, 0, 0.34);
+  color: #d9f4ff;
+  font: 900 10px/1 system-ui, sans-serif;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.feed-bar__lab[hidden] { display: none; }
+.feed-bar__lab:active { transform: scale(0.94); }
+.feed-bar__lab:focus-visible { outline: 2px solid #9bdfff; outline-offset: 2px; }
 @keyframes daily-alert-in {
   0% { transform: scale(0); }
   62% { transform: scale(1.28); }

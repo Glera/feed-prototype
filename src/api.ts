@@ -187,6 +187,7 @@ export interface SessionResp {
   puzzles?: number;
   is_new: boolean;
   backend_version?: string;
+  catalog_lab_authorization_available?: boolean;
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
 }
 

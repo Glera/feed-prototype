@@ -9,6 +9,10 @@ import {
   type CatalogPromotionSummary,
 } from './api';
 import { showConfirm } from './telegram';
+import {
+  catalogFeedUrl,
+  catalogLabOpenedFromFeed,
+} from './catalog-lab-navigation.mjs';
 
 const USER_CODE_ALPHABET = new Set('23456789ABCDEFGHJKMNPQRSTUVWXYZ');
 const REVOKE_REASON = 'revoked from Telegram Catalog Lab panel';
@@ -147,6 +151,12 @@ function decisionErrorMessage(error: unknown): string {
 }
 
 function closeMiniApp(): void {
+  // Feed navigation is an in-app round trip. Preserve Telegram's signed launch
+  // fragment and every unrelated feed query while removing only our route.
+  if (catalogLabOpenedFromFeed(location.search)) {
+    location.replace(catalogFeedUrl(location.href));
+    return;
+  }
   const telegram = (window as any).Telegram?.WebApp;
   try {
     if (typeof telegram?.close === 'function') {
@@ -154,9 +164,7 @@ function closeMiniApp(): void {
       return;
     }
   } catch { /* browser fallback below */ }
-  const url = new URL(location.href);
-  url.searchParams.delete('labAuth');
-  location.assign(`${url.pathname}${url.search}${url.hash}`);
+  location.replace(catalogFeedUrl(location.href));
 }
 
 export async function mountCatalogLabAuth(): Promise<void> {

@@ -96,6 +96,10 @@ import { levelStarReward, seriesRewards } from './rewards.mjs';
 import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
 import { getStartParam, shareChallenge, getInitData } from './telegram';
+import {
+  catalogLabAuthorizationAvailable,
+  catalogLabAuthUrl,
+} from './catalog-lab-navigation.mjs';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
@@ -517,6 +521,7 @@ export class Feed {
   private awaitingServerSeed = true;
   // Bottom-bar version label: platform (build) + backend (git SHA, after auth).
   private versionEl: HTMLElement | null = null;
+  private catalogLabNavEl: HTMLButtonElement | null = null;
   private backendVersion: string | null = null;
   private sessionSyncPromise: Promise<boolean> | null = null;
   private earnedThisCycle = new Set<number>();
@@ -795,6 +800,7 @@ export class Feed {
     // still flushing any events persisted by an earlier app launch.
     initControlPlane();
     this.applyBuiltinFeedBindings(session.builtin_feed_bindings);
+    this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
     this.applyServerBalance(session.balance);
     if (typeof session.puzzles === 'number') this.applyServerPuzzles(session.puzzles);
     await this.syncDaily(false);
@@ -1717,6 +1723,11 @@ export class Feed {
     const date = builtAt === 'dev' ? 'dev' : builtAt.slice(5);
     const api = this.backendVersion ? ` · api ${this.backendVersion}` : '';
     this.versionEl.textContent = `${date} · platform ${platformCommit}${api}`;
+  }
+
+  private applyCatalogLabAuthorizationCapability(value: unknown): void {
+    if (!this.catalogLabNavEl) return;
+    this.catalogLabNavEl.hidden = !catalogLabAuthorizationAvailable(value);
   }
 
   // Apply a server balance WITHOUT clobbering optimistic local progress: if the
@@ -4065,6 +4076,23 @@ export class Feed {
       switcher.appendChild(dbg);
     }
     bar.appendChild(switcher);
+
+    // Account-gated operator entry. It starts hidden and is revealed only by
+    // the exact /session capability; direct route access is still protected by
+    // the same server-side dev-user checks as every LAB operation.
+    const catalogLab = document.createElement('button');
+    catalogLab.type = 'button';
+    catalogLab.className = 'feed-bar__lab';
+    catalogLab.hidden = true;
+    catalogLab.textContent = 'LAB';
+    catalogLab.setAttribute('aria-label', 'Catalog Lab access');
+    catalogLab.addEventListener('pointerdown', (event) => event.stopPropagation());
+    catalogLab.addEventListener('click', (event) => {
+      event.stopPropagation();
+      location.assign(catalogLabAuthUrl(location.href));
+    });
+    bar.appendChild(catalogLab);
+    this.catalogLabNavEl = catalogLab;
     // Platform build stamp, bottom-left of the bar — so it's clear which platform
     // build is live (mechanics carry their own badge in their bottom-left corner).
     const ver = document.createElement('div');
