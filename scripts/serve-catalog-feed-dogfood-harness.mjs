@@ -49,6 +49,7 @@ const freshState = (scenario, instanceToken) => ({
   ticketRequests: [],
   specRequests: 0,
   results: [],
+  diagnostics: [],
   authorityPending: false,
   pendingSamples: 0,
   pendingViolation: false,
@@ -191,27 +192,37 @@ const bundle = (ticketId) => ({
   })),
 });
 
-const ticketView = (request) => ({
-  schema: 'run.ticket.v2',
-  ticket_id: request.ticket_id,
-  run_id: request.run_id,
-  kind: 'series',
-  mechanic_id: runtime.playableId,
-  variant_id: runtime.legacyVariantId,
-  decision_id: ids.allocationDecision,
-  catalog_entry_id: ids.entry,
-  series_id: ids.series,
-  runtime_release_id: ids.release,
-  runtime_contract_digest: contractDigest,
-  runtime_artifact_digest: artifactDigest,
-  manifest_content_hash: manifest.contentHash,
-  levels: specHashes.map((specHash, index) => ({ ordinal: index + 1, spec_hash: specHash })),
-  expected_levels: 2,
-  completed_levels: state?.results.filter((item) => item.kind === 'level' && item.outcome === 'confirmed').length ?? 0,
-  next_result_at: new Date(Date.now() - 1000).toISOString(),
-  expires_at: new Date(Date.now() + 60_000).toISOString(),
-  state: 'active',
-});
+const ticketView = (request) => {
+  const common = {
+    ticket_id: request.ticket_id,
+    run_id: request.run_id,
+    kind: request.kind,
+    expected_levels: request.kind === 'series' ? 2 : 1,
+    completed_levels: 0,
+    next_result_at: new Date(Date.now() - 1000).toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    state: 'active',
+  };
+  if (request.schema !== 'run.start.v2') return common;
+  return {
+    schema: 'run.ticket.v2',
+    ...common,
+    kind: 'series',
+    mechanic_id: runtime.playableId,
+    variant_id: runtime.legacyVariantId,
+    decision_id: ids.allocationDecision,
+    catalog_entry_id: ids.entry,
+    series_id: ids.series,
+    runtime_release_id: ids.release,
+    runtime_contract_digest: contractDigest,
+    runtime_artifact_digest: artifactDigest,
+    manifest_content_hash: manifest.contentHash,
+    levels: specHashes.map((specHash, index) => ({ ordinal: index + 1, spec_hash: specHash })),
+    expected_levels: 2,
+    completed_levels: state?.results.filter((item) => item.kind === 'level'
+      && item.outcome === 'confirmed').length ?? 0,
+  };
+};
 
 const uniqueEvents = (name) => {
   const byId = new Map();
@@ -306,6 +317,12 @@ const evaluate = () => {
 const injectedBootstrap = (instanceToken, scenario) => `<script>
 const harnessInstance=${JSON.stringify(instanceToken)};
 const harnessScenario=${JSON.stringify(scenario)};
+const reportHarnessDiagnostic=(kind,args)=>fetch('/__harness/diagnostic?harness_instance='+encodeURIComponent(harnessInstance)+'&scenario='+encodeURIComponent(harnessScenario),{
+  method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({harnessInstance,harnessScenario,kind,args:args.map(value=>value instanceof Error?{name:value.name,message:value.message,stack:value.stack}:String(value))})
+}).catch(()=>{});
+const originalWarn=console.warn.bind(console);
+console.warn=(...args)=>{if(String(args[0]||'').includes('[catalog-player-v2]'))reportHarnessDiagnostic('console.warn',args);originalWarn(...args)};
+addEventListener('unhandledrejection',(event)=>reportHarnessDiagnostic('unhandledrejection',[event.reason]));
 window.Telegram={WebApp:{
   initData:${JSON.stringify(initDataFor(instanceToken, scenario))},
   initDataUnsafe:{user:{id:${userIdFor(instanceToken)}},start_param:null},platform:'web',
@@ -396,7 +413,11 @@ const server = createServer(async (request, response) => {
     if (!activeInstance(instanceToken, scenario)) return ignoreStaleInstance(response);
     const source = readFileSync(path.join(root, 'dist', 'index.html'), 'utf8');
     response.setHeader('content-type', 'text/html; charset=utf-8');
-    response.end(source.replace('<head>', `<head>${injectedBootstrap(instanceToken, scenario)}`));
+    // The external Telegram SDK is a blocking head script and replaces
+    // `window.Telegram` in a plain browser. Install the harness identity after
+    // it, but still before the bundled module, so user-scoped durable queues do
+    // not silently fall back to a shared anonymous localStorage key.
+    response.end(source.replace('</head>', `${injectedBootstrap(instanceToken, scenario)}</head>`));
     return;
   }
   if (request.method === 'GET' && url.pathname === '/__harness/state') {
@@ -486,6 +507,19 @@ const server = createServer(async (request, response) => {
       }
       evaluate();
     }
+    return json(response, { ok: true });
+  }
+  if (request.method === 'POST' && url.pathname === '/__harness/diagnostic') {
+    const diagnostic = await bodyOf(request);
+    const instanceToken = url.searchParams.get('harness_instance');
+    const scenario = url.searchParams.get('scenario');
+    if (!activeInstance(instanceToken, scenario)
+      || diagnostic.harnessInstance !== instanceToken || diagnostic.harnessScenario !== scenario) {
+      return ignoreStaleInstance(response);
+    }
+    const exact = { kind: diagnostic.kind ?? 'unknown', args: diagnostic.args ?? [] };
+    state.diagnostics.push(exact);
+    record('diagnostic', exact);
     return json(response, { ok: true });
   }
   const statefulHarnessApi = (request.method === 'POST' && [
