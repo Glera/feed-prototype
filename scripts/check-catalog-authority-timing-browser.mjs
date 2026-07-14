@@ -10,6 +10,7 @@ import { chromium } from 'playwright';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const userId = 424242;
 const playableId = 'merge-locked-v1-swipe';
+const stagedPlayableId = 'marble-sort-swipe';
 const binding = {
   mapping_id: '10000000-0000-4000-8000-000000000001',
   playable_id: playableId,
@@ -19,9 +20,29 @@ const binding = {
   mapping_version: 'timing-browser.v1',
   mapping_digest: 'a'.repeat(64),
 };
+const stagedBinding = {
+  mapping_id: '10000000-0000-4000-8000-000000000007',
+  playable_id: stagedPlayableId,
+  variant_id: '20000000-0000-4000-8000-000000000008',
+  catalog_mechanic: 'sort/base',
+  mechanic_family: 'sort',
+  mapping_version: 'timing-browser.v1',
+  mapping_digest: 'c'.repeat(64),
+};
 const scenarios = {
   delayed: { startedAt: 0, sessionRequests: 0, authorityRequests: [], cpEvents: [] },
   'no-binding': { startedAt: 0, sessionRequests: 0, authorityRequests: [], cpEvents: [] },
+  staged: {
+    startedAt: 0,
+    sessionRequests: 0,
+    authorityRequests: [],
+    cpEvents: [],
+    sessionPending: false,
+    sessionRelease: null,
+    projectionPending: false,
+    projectionRelease: null,
+    projectionHeld: false,
+  },
 };
 let origin = '';
 
@@ -45,8 +66,8 @@ const scenarioOf = (request) => {
   return Object.hasOwn(scenarios, scenario) ? scenario : null;
 };
 
-const fakePlayable = `<!doctype html><html><body><canvas></canvas><script>
-const id=${JSON.stringify(playableId)};
+const fakePlayable = (requestedPlayableId) => `<!doctype html><html><body><canvas></canvas><script>
+const id=${JSON.stringify(requestedPlayableId)};
 const send=(type)=>parent.postMessage({source:'playable',id,type},'*');
 addEventListener('message',(event)=>{
   const data=event.data||{};
@@ -65,7 +86,16 @@ const server = createServer(async (request, response) => {
     if (scenario === 'delayed' && state.sessionRequests === 1) {
       await new Promise((resolve) => setTimeout(resolve, 4200));
     }
-    const available = scenario === 'delayed';
+    if (scenario === 'staged' && state.sessionRequests === 1) {
+      state.sessionPending = true;
+      await new Promise((resolve) => { state.sessionRelease = resolve; });
+      state.sessionPending = false;
+      state.sessionRelease = null;
+    }
+    const available = scenario === 'delayed' || scenario === 'staged';
+    const bindings = scenario === 'staged'
+      ? { [stagedPlayableId]: stagedBinding }
+      : available ? { [playableId]: binding } : {};
     return json(response, {
       user: { id: userId, ref_code: 'timing-browser' },
       ref_code: 'timing-browser',
@@ -77,14 +107,23 @@ const server = createServer(async (request, response) => {
         schema: 'feed.builtin-bindings.v1',
         available,
         unavailable_reason: available ? null : 'fixture_no_binding',
-        by_playable_id: available ? { [playableId]: binding } : {},
+        by_playable_id: bindings,
       },
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/cp/events') {
     if (!scenario) return json(response, { code: 'fixture_identity_missing' }, 401);
     const body = await bodyOf(request);
-    scenarios[scenario].cpEvents.push(...body.events);
+    const state = scenarios[scenario];
+    state.cpEvents.push(...body.events);
+    if (scenario === 'staged' && !state.projectionHeld
+      && body.events.some((event) => event.event_name === 'builtin_feed_decision')) {
+      state.projectionHeld = true;
+      state.projectionPending = true;
+      await new Promise((resolve) => { state.projectionRelease = resolve; });
+      state.projectionPending = false;
+      state.projectionRelease = null;
+    }
     return json(response, {
       events: body.events.map((event, item_index) => ({
         event_id: event.event_id,
@@ -98,6 +137,7 @@ const server = createServer(async (request, response) => {
     if (!scenario) return json(response, { code: 'fixture_identity_missing' }, 401);
     const body = await bodyOf(request);
     scenarios[scenario].authorityRequests.push({ atMs: Date.now() - scenarios[scenario].startedAt, body });
+    const exactBinding = scenario === 'staged' ? stagedBinding : binding;
     return json(response, {
       schema: 'feed.catalog-authority-result.v1',
       requestId: body.requestId,
@@ -109,10 +149,10 @@ const server = createServer(async (request, response) => {
       authorizationDigest: null,
       expiresAt: null,
       fallback: {
-        mappingId: binding.mapping_id,
-        playableId: binding.playable_id,
-        variantId: binding.variant_id,
-        catalogMechanic: binding.catalog_mechanic,
+        mappingId: exactBinding.mapping_id,
+        playableId: exactBinding.playable_id,
+        variantId: exactBinding.variant_id,
+        catalogMechanic: exactBinding.catalog_mechanic,
       },
     });
   }
@@ -126,7 +166,7 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname.endsWith('.html')) {
     response.setHeader('content-type', 'text/html; charset=utf-8');
-    return response.end(fakePlayable);
+    return response.end(fakePlayable(path.basename(url.pathname, '.html')));
   }
   if (url.pathname.startsWith('/api/')) return json(response, { code: 'fixture_not_configured' }, 404);
   response.statusCode = 404;
@@ -217,17 +257,68 @@ try {
   );
   await delayedPage.close();
 
-  const noBindingPage = await openScenario('no-binding', true);
+  // Exercise the real Feed lifecycle beyond both former 15s stage boundaries.
+  // The browser clock advances while the fixture holds each network response,
+  // so this remains fast without replacing the production timers or helpers.
+  const stagedPage = await openScenario('staged', true);
   await waitFor(
-    () => scenarios['no-binding'].sessionRequests >= 1,
+    () => scenarios.staged.sessionPending,
     2000,
-    'no-binding session bootstrap did not settle',
+    'staged session request did not reach the held fixture response',
   );
-  await noBindingPage.clock.fastForward(20_000);
-  assert.equal(await noBindingPage.locator(`iframe[title="${playableId}"]`).count(), 0,
-    'missing binding cannot fall back after 20s of a cold-start-safe bootstrap');
-  await noBindingPage.clock.fastForward(45_100);
+  await stagedPage.clock.fastForward(20_000);
+  assert.equal(scenarios.staged.authorityRequests.length, 0,
+    'authority cannot start before the >15s delayed session binding arrives');
+  assert.equal(await stagedPage.locator(`iframe[title="${playableId}"]`).count(), 0,
+    'bootstrap remains poster-only while the delayed session binding is unresolved');
+  scenarios.staged.sessionRelease();
+  await stagedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  assert.equal(scenarios.staged.authorityRequests.length, 0,
+    'authoritatively unbound initial Merge falls back without calling authority');
+  await stagedPage.clock.fastForward(500);
+  await stagedPage.evaluate((id) => window.__feedHostGesture(id), playableId);
+  await stagedPage.locator('.game--show-close .game__close').click();
+  await waitFor(
+    () => scenarios.staged.projectionPending,
+    3000,
+    'mapped Sort navigation did not reach the held control-plane projection',
+  );
+  const stagedDecision = scenarios.staged.cpEvents.find(
+    (event) => event.event_name === 'builtin_feed_decision',
+  );
+  assert.equal(stagedDecision?.payload?.mapping_id, stagedBinding.mapping_id,
+    'only the mapped Sort opportunity enters the staged authority path');
+  await stagedPage.clock.fastForward(20_000);
+  assert.equal(scenarios.staged.authorityRequests.length, 0,
+    'authority cannot start before the >15s delayed source projection is acknowledged');
+  assert.equal(await stagedPage.locator(`iframe[title="${stagedPlayableId}"]`).count(), 0,
+    'projection wait remains poster-only without leaking the reviewed builtin frame');
+  scenarios.staged.projectionRelease();
+  await waitFor(
+    () => scenarios.staged.authorityRequests.length === 1,
+    3000,
+    'authority did not start after the delayed source decision projected',
+  );
+  await stagedPage.waitForSelector(`iframe[title="${stagedPlayableId}"]`, { timeout: 3000 });
+  await stagedPage.clock.fastForward(500);
+  await waitFor(
+    () => scenarios.staged.cpEvents.some((event) => event.event_name === 'unit_impression'),
+    3000,
+    'delayed staged authority fallback did not produce its exact built-in impression',
+  );
+  assert.equal(scenarios.staged.authorityRequests.length, 1,
+    'late binding and projection still invoke exact authority once');
+  assert.equal(
+    scenarios.staged.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
+    1,
+    'late binding and projection still emit one honest built-in impression',
+  );
+  await stagedPage.close();
+
+  const noBindingPage = await openScenario('no-binding');
   await noBindingPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  assert.ok(Date.now() - scenarios['no-binding'].startedAt < 3000,
+    'an authoritative unavailable binding document must restore builtin immediately');
   assert.equal(scenarios['no-binding'].authorityRequests.length, 0,
     'missing binding cannot call authority without a durable source decision');
   assert.equal(
@@ -237,7 +328,7 @@ try {
   );
   await noBindingPage.close();
 
-  console.log('catalog authority timing browser: delayed binding and no-binding fallback passed');
+  console.log('catalog authority timing browser: staged late binding/projection and known-unbound fallback passed');
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
