@@ -6,7 +6,7 @@
   "description": "Swipe platform (Telegram Mini App): vertical feed of playable mini-games with a social layer (stars, series, challenges) and generative UGC meta experiments. See README.md and ISLAND.md.",
   "scripts": {
     "dev": "vite",
-    "lint": "tsc --noEmit && npm run check:rewards && npm run check:series && npm run check:dwell && npm run check:cp-outbox && npm run check:run-ticket-outbox && npm run check:result-receipts && npm run check:catalog-player-v2 && npm run check:catalog-feed-authority",
+    "lint": "tsc --noEmit && npm run check:rewards && npm run check:series && npm run check:dwell && npm run check:cp-outbox && npm run check:run-ticket-outbox && npm run check:result-receipts && npm run check:catalog-player-v2 && npm run check:catalog-feed-authority && npm run check:catalog-feed-dogfood",
     "check:rewards": "node scripts/check-reward-vectors.mjs",
     "check:series": "node scripts/check-series-policy.mjs",
     "check:dwell": "node scripts/check-active-dwell.mjs",
@@ -15,6 +15,7 @@
     "check:result-receipts": "node scripts/check-result-receipts.mjs",
     "check:catalog-player-v2": "node scripts/check-catalog-player-v2.mjs",
     "check:catalog-feed-authority": "node scripts/check-catalog-feed-authority.mjs",
+    "check:catalog-feed-dogfood": "node scripts/check-catalog-feed-dogfood-harness.mjs",
     "serve:catalog-player-v2-browser": "node scripts/serve-catalog-player-v2-browser-harness.mjs",
     "serve:catalog-feed-dogfood": "node scripts/serve-catalog-feed-dogfood-harness.mjs",
     "check:cp-browser": "node scripts/check-control-plane-feed-browser.mjs",

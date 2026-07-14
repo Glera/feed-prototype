@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -20,13 +21,24 @@ const ids = {
   release: '10000000-0000-4000-8000-000000000008',
   runtimeVariant: '10000000-0000-4000-8000-000000000009',
 };
-const initData = `query_id=dogfood&user=${encodeURIComponent(JSON.stringify({ id: 42 }))}&hash=dogfood`;
-
 let origin = '';
 let state = null;
 
-const freshState = (scenario) => ({
-  scenario: scenario === 'recall' ? 'recall' : 'success',
+const normalizedScenario = (scenario) => (scenario === 'recall' ? 'recall' : 'success');
+const userIdFor = (instanceToken) => Number.parseInt(instanceToken.replaceAll('-', '').slice(0, 12), 16) + 1;
+
+const initDataFor = (instanceToken, scenario) => new URLSearchParams({
+  query_id: 'dogfood',
+  harness_instance: instanceToken,
+  harness_scenario: normalizedScenario(scenario),
+  user: JSON.stringify({ id: userIdFor(instanceToken) }),
+  hash: 'dogfood',
+}).toString();
+
+const freshState = (scenario, instanceToken) => ({
+  instanceToken,
+  userId: userIdFor(instanceToken),
+  scenario: normalizedScenario(scenario),
   startedAt: Date.now(),
   status: 'running',
   message: 'waiting for real Feed',
@@ -80,6 +92,31 @@ const bodyOf = async (request) => {
   for await (const chunk of request) chunks.push(chunk);
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
 };
+
+const activeInstance = (instanceToken, scenario) => Boolean(state
+  && typeof instanceToken === 'string'
+  && instanceToken === state.instanceToken
+  && scenario === state.scenario);
+
+const authorizationIdentity = (request) => {
+  const authorization = request.headers.authorization;
+  if (typeof authorization !== 'string' || !authorization.startsWith('tma ')) return null;
+  const params = new URLSearchParams(authorization.slice(4));
+  return {
+    instanceToken: params.get('harness_instance'),
+    scenario: params.get('harness_scenario'),
+  };
+};
+
+const authorizedForActiveInstance = (request) => {
+  const identity = authorizationIdentity(request);
+  return identity !== null && activeInstance(identity.instanceToken, identity.scenario);
+};
+
+const ignoreStaleInstance = (response) => json(response, {
+  ok: true,
+  ignored: 'stale_harness_instance',
+}, 202);
 
 const spec = (specHash, seed) => ({
   schema: 'sort.level-spec.v1',
@@ -266,10 +303,12 @@ const evaluate = () => {
   }
 };
 
-const injectedBootstrap = () => `<script>
+const injectedBootstrap = (instanceToken, scenario) => `<script>
+const harnessInstance=${JSON.stringify(instanceToken)};
+const harnessScenario=${JSON.stringify(scenario)};
 window.Telegram={WebApp:{
-  initData:${JSON.stringify(initData)},
-  initDataUnsafe:{user:{id:42},start_param:null},platform:'web',
+  initData:${JSON.stringify(initDataFor(instanceToken, scenario))},
+  initDataUnsafe:{user:{id:${userIdFor(instanceToken)}},start_param:null},platform:'web',
   ready(){},expand(){},disableVerticalSwipes(){},setHeaderColor(){},
   setBackgroundColor(){},lockOrientation(){},onEvent(){}
 }};
@@ -292,8 +331,8 @@ addEventListener('DOMContentLoaded',()=>{
       chest.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:7}));
       setTimeout(()=>chest.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7})),650);
     }
-    fetch('/__harness/client',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      currentFrame,currentIframeCount,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,
+    fetch('/__harness/client?harness_instance='+encodeURIComponent(harnessInstance)+'&scenario='+encodeURIComponent(harnessScenario),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
+      harnessInstance,harnessScenario,currentFrame,currentIframeCount,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,
       preloaderVisible:Boolean(document.querySelector('.preloader:not(.preloader--hidden)'))
     })}).catch(()=>{});
   };
@@ -301,7 +340,7 @@ addEventListener('DOMContentLoaded',()=>{
 });
 </script>`;
 
-const controllerHtml = (scenario) => `<!doctype html>
+const controllerHtml = (scenario, instanceToken) => `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Real Feed catalog dogfood · ${scenario}</title>
 <style>
@@ -311,12 +350,12 @@ iframe{position:fixed;inset:0;width:100%;height:100%;border:0}
 output{display:block;padding:6px;border-radius:6px;background:#26313f;font-weight:700}output[data-state=pass]{background:#0b5c35}output[data-state=fail]{background:#7a2020}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0 0}a{color:#8ecbff}
 </style></head><body>
-<iframe data-testid="feed" src="/feed?scenario=${scenario}&initData=${encodeURIComponent(initData)}"></iframe>
+<iframe data-testid="feed" data-harness-instance="${instanceToken}" src="/feed?scenario=${scenario}&harness_instance=${encodeURIComponent(instanceToken)}&initData=${encodeURIComponent(initDataFor(instanceToken, scenario))}"></iframe>
 <aside class="panel"><div><a href="/harness.html?scenario=success">success</a> · <a href="/harness.html?scenario=recall">hard recall</a></div>
 <output data-testid="status" data-state="running">RUNNING</output><pre data-testid="trace">[]</pre></aside>
 <script>
 const status=document.querySelector('[data-testid=status]');const trace=document.querySelector('[data-testid=trace]');
-const poll=async()=>{try{const s=await fetch('/__harness/state',{cache:'no-store'}).then(r=>r.json());status.dataset.state=s.status;status.textContent=s.status.toUpperCase()+': '+s.message;trace.textContent=JSON.stringify(s,null,2);window.__catalogFeedDogfoodHarness=s;}catch(e){status.dataset.state='fail';status.textContent='FAIL: '+e}};
+const poll=async()=>{try{const s=await fetch('/__harness/state?harness_instance=${encodeURIComponent(instanceToken)}&scenario=${scenario}',{cache:'no-store'}).then(r=>r.json());status.dataset.state=s.status;status.textContent=s.status.toUpperCase()+': '+s.message;trace.textContent=JSON.stringify(s,null,2);window.__catalogFeedDogfoodHarness=s;}catch(e){status.dataset.state='fail';status.textContent='FAIL: '+e}};
 setInterval(poll,120);poll();
 </script></body></html>`;
 
@@ -343,25 +382,41 @@ addEventListener('load',()=>send('static_ready'));
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/harness.html')) {
-    const scenario = url.searchParams.get('scenario') === 'recall' ? 'recall' : 'success';
-    state = freshState(scenario);
-    record('harness_started', { scenario });
+    const scenario = normalizedScenario(url.searchParams.get('scenario'));
+    const instanceToken = randomUUID();
+    state = freshState(scenario, instanceToken);
+    record('harness_started', { scenario, instanceToken });
     response.setHeader('content-type', 'text/html; charset=utf-8');
-    response.end(controllerHtml(scenario));
+    response.end(controllerHtml(scenario, instanceToken));
     return;
   }
   if (request.method === 'GET' && url.pathname === '/feed') {
+    const instanceToken = url.searchParams.get('harness_instance');
+    const scenario = url.searchParams.get('scenario');
+    if (!activeInstance(instanceToken, scenario)) return ignoreStaleInstance(response);
     const source = readFileSync(path.join(root, 'dist', 'index.html'), 'utf8');
     response.setHeader('content-type', 'text/html; charset=utf-8');
-    response.end(source.replace('<head>', `<head>${injectedBootstrap()}`));
+    response.end(source.replace('<head>', `<head>${injectedBootstrap(instanceToken, scenario)}`));
     return;
   }
   if (request.method === 'GET' && url.pathname === '/__harness/state') {
+    const requestedInstance = url.searchParams.get('harness_instance');
+    const requestedScenario = url.searchParams.get('scenario');
+    if (requestedInstance && !activeInstance(requestedInstance, requestedScenario)) {
+      return json(response, { status: 'stale', message: 'harness instance is no longer active' }, 409);
+    }
     evaluate();
     return json(response, state ?? { status: 'fail', message: 'open /harness.html first' });
   }
   if (request.method === 'POST' && url.pathname === '/__harness/client') {
-    const snapshot = await bodyOf(request);
+    const report = await bodyOf(request);
+    const instanceToken = url.searchParams.get('harness_instance');
+    const scenario = url.searchParams.get('scenario');
+    if (!activeInstance(instanceToken, scenario)
+      || report.harnessInstance !== instanceToken || report.harnessScenario !== scenario) {
+      return ignoreStaleInstance(response);
+    }
+    const { harnessInstance: _instance, harnessScenario: _scenario, ...snapshot } = report;
     if (state) {
       if (state.authorityPending) {
         state.pendingSamples += 1;
@@ -433,10 +488,22 @@ const server = createServer(async (request, response) => {
     }
     return json(response, { ok: true });
   }
+  const statefulHarnessApi = (request.method === 'POST' && [
+    '/api/session',
+    '/api/cp/events',
+    '/api/feed/catalog-authority',
+    '/api/catalog/allocate-authorized',
+    '/api/runs/start',
+    '/api/results',
+  ].includes(url.pathname)) || (request.method === 'GET'
+    && /^\/api\/catalog\/tickets\/[^/]+\/specs$/.test(url.pathname));
+  if (statefulHarnessApi && !authorizedForActiveInstance(request)) {
+    return ignoreStaleInstance(response);
+  }
   if (request.method === 'POST' && url.pathname === '/api/session') {
     record('session');
     return json(response, {
-      user: { id: 42, ref_code: 'dogfood' }, ref_code: 'dogfood',
+      user: { id: state.userId, ref_code: 'dogfood' }, ref_code: 'dogfood',
       balance: 0, puzzles: 0, is_new: false, backend_version: 'dogfood-harness',
       builtin_feed_bindings: {
         schema: 'feed.builtin-bindings.v1', available: true, unavailable_reason: null,
