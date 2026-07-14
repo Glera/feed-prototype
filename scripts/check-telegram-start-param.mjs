@@ -8,17 +8,18 @@ assert.equal(
   'the URL launch parameter must route before initDataUnsafe is hydrated',
 );
 assert.equal(
-  resolveTelegramStartParam({ hash: '#tgWebAppStartParam=lab_auth&tgWebAppVersion=9.1' }),
+  resolveTelegramStartParam({ hash: '#/launch?tgWebAppStartParam=lab_auth&tgWebAppVersion=9.1' }),
   'lab_auth',
-  'Telegram launch service parameters in the URL fragment must be supported',
+  'Telegram launch service parameters after a fragment path must be supported',
 );
 assert.equal(
   resolveTelegramStartParam({
-    webViewStartParam: 'lab_auth',
+    search: '?tgWebAppStartParam=lab_auth',
+    webViewStartParam: 'stale_previous_launch',
     unsafeStartParam: 'stale_previous_launch',
   }),
   'lab_auth',
-  'the SDK parsed WebView launch parameter must win over stale initDataUnsafe',
+  'the current URL must win over SDK state restored from an older WebView',
 );
 assert.equal(
   resolveTelegramStartParam({
@@ -40,6 +41,14 @@ assert.equal(
 );
 assert.equal(
   resolveTelegramStartParam({
+    initData: 'auth_date=1&start_param=diag&hash=x',
+    webViewStartParam: 'stale_previous_launch',
+  }),
+  'diag',
+  'current raw initData must win over restored WebView state',
+);
+assert.equal(
+  resolveTelegramStartParam({
     search: '?tgWebAppStartParam=',
     unsafeStartParam: 'fallback',
   }),
@@ -48,4 +57,4 @@ assert.equal(
 );
 assert.equal(resolveTelegramStartParam(), null);
 
-console.log('telegram start param: 8 assertions passed');
+console.log('telegram start param: 9 assertions passed');

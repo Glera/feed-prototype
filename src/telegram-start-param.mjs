@@ -14,15 +14,15 @@ export function resolveTelegramStartParam({
   unsafeStartParam = null,
   initData = '',
 } = {}) {
-  if (typeof webViewStartParam === 'string' && webViewStartParam.length > 0) {
-    return webViewStartParam;
-  }
-
   const fromQuery = new URLSearchParams(String(search || '')).get('tgWebAppStartParam');
   if (typeof fromQuery === 'string' && fromQuery.length > 0) return fromQuery;
 
   const fragment = String(hash || '').replace(/^#/, '');
-  const fromHash = new URLSearchParams(fragment).get('tgWebAppStartParam');
+  const fragmentQueryAt = fragment.indexOf('?');
+  const fragmentParams = fragmentQueryAt >= 0
+    ? fragment.slice(fragmentQueryAt + 1)
+    : fragment;
+  const fromHash = new URLSearchParams(fragmentParams).get('tgWebAppStartParam');
   if (typeof fromHash === 'string' && fromHash.length > 0) return fromHash;
 
   if (typeof unsafeStartParam === 'string' && unsafeStartParam.length > 0) {
@@ -30,7 +30,11 @@ export function resolveTelegramStartParam({
   }
 
   const fromInitData = new URLSearchParams(String(initData || '')).get('start_param');
-  return typeof fromInitData === 'string' && fromInitData.length > 0
-    ? fromInitData
+  if (typeof fromInitData === 'string' && fromInitData.length > 0) return fromInitData;
+
+  // telegram-web-app.js may restore WebView.initParams from sessionStorage, so
+  // this is deliberately the last fallback after all current-launch sources.
+  return typeof webViewStartParam === 'string' && webViewStartParam.length > 0
+    ? webViewStartParam
     : null;
 }
