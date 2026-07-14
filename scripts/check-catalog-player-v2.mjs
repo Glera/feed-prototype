@@ -234,6 +234,7 @@ const readyData = {
   runtimeContractDigest: contractDigest,
   runtimeArtifactDigest: artifactDigest,
 };
+const skinReadyData = { ...readyData, skinContractDigest };
 equal(session.handleMessage({ source: {}, origin: 'https://feed.example.test', data: readyData }, 9).reason, 'source');
 equal(session.handleMessage({ source: frameSource, origin: 'https://evil.example', data: readyData }, 9).reason, 'origin');
 equal(session.handleMessage({ source: frameSource, origin: 'https://feed.example.test', data: readyData }, 8).reason, 'stale_epoch');
@@ -313,7 +314,7 @@ const wrongSkinApplied = new CatalogPlayerV2Session({
   baseUrl: 'https://feed.example.test',
 });
 wrongSkinApplied.handleMessage({
-  source: wrongSkinFrame, origin: 'https://feed.example.test', data: readyData,
+  source: wrongSkinFrame, origin: 'https://feed.example.test', data: skinReadyData,
 }, 23);
 const wrongSkinResult = wrongSkinApplied.handleMessage({
   source: wrongSkinFrame,
@@ -329,6 +330,15 @@ equal(wrongSkinResult.effects[0].type, 'catalog_configuration_failure');
 equal(wrongSkinApplied.setVisible(true, 23).effects.length, 0,
   'a skin digest failure cannot create an impression or attempt trigger');
 
+const missingSkinReadyFrame = {};
+const missingSkinReady = new CatalogPlayerV2Session({
+  bundle: skinBundle(), ordinal: 1, frameEpoch: 25, frameSource: missingSkinReadyFrame,
+  baseUrl: 'https://feed.example.test',
+});
+equal(missingSkinReady.handleMessage({
+  source: missingSkinReadyFrame, origin: 'https://feed.example.test', data: readyData,
+}, 25).reason, 'contract', 'skin-capable runtime must declare its exact skin contract before configure');
+
 const exactSkinFrame = {};
 const exactSkinSession = new CatalogPlayerV2Session({
   bundle: skinBundle(), ordinal: 1, frameEpoch: 24, frameSource: exactSkinFrame,
@@ -336,7 +346,7 @@ const exactSkinSession = new CatalogPlayerV2Session({
 });
 exactSkinSession.setVisible(true, 24);
 equal(exactSkinSession.handleMessage({
-  source: exactSkinFrame, origin: 'https://feed.example.test', data: readyData,
+  source: exactSkinFrame, origin: 'https://feed.example.test', data: skinReadyData,
 }, 24).effects[0].message.skin.skinHash, skinHash, 'configure message carries exact SkinSpec');
 const exactSkinConfigured = exactSkinSession.handleMessage({
   source: exactSkinFrame,

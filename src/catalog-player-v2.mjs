@@ -416,12 +416,17 @@ export class CatalogPlayerV2Session {
     }
 
     if (type === 'configure_ready') {
-      if (!exactKeys(event.data, ['type', 'nonce', 'runtimeContractDigest', 'runtimeArtifactDigest'])
+      const readyKeys = this.binding.skinHash
+        ? ['type', 'nonce', 'runtimeContractDigest', 'runtimeArtifactDigest', 'skinContractDigest']
+        : ['type', 'nonce', 'runtimeContractDigest', 'runtimeArtifactDigest'];
+      if (!exactKeys(event.data, readyKeys)
         || typeof event.data.nonce !== 'string' || !NONCE_RE.test(event.data.nonce)) {
         return this._fail('contract');
       }
       if (event.data.runtimeContractDigest !== this.binding.runtimeContractDigest) return this._fail('contract');
       if (event.data.runtimeArtifactDigest !== this.binding.runtimeArtifactDigest) return this._fail('runtime');
+      if (this.binding.skinContractDigest
+        && event.data.skinContractDigest !== this.binding.skinContractDigest) return this._fail('contract');
       if (this._phase !== 'awaiting_ready') return ignored(this._phase, 'duplicate_ready');
       this._nonce = event.data.nonce;
       this._phase = 'awaiting_configured';
