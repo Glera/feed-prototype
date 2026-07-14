@@ -16,6 +16,7 @@
     "check:catalog-player-v2": "node scripts/check-catalog-player-v2.mjs",
     "check:catalog-feed-authority": "node scripts/check-catalog-feed-authority.mjs",
     "serve:catalog-player-v2-browser": "node scripts/serve-catalog-player-v2-browser-harness.mjs",
+    "serve:catalog-feed-dogfood": "node scripts/serve-catalog-feed-dogfood-harness.mjs",
     "check:cp-browser": "node scripts/check-control-plane-feed-browser.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",

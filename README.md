@@ -91,6 +91,18 @@ npm run dev     # vite; в dev сам сервит механики из ../play
 npm run build   # tsc + vite build → dist/index.html (single file)
 ```
 
+Effectful catalog path можно прогнать без живого backend/runtime:
+
+```bash
+npm run serve:catalog-feed-dogfood
+```
+
+Команда собирает ленту с тремя явными dogfood-флагами и печатает два URL:
+успешная двухуровневая серия и hard-recall. На странице поверх реального `Feed`
+есть воспроизводимый trace и итоговый `PASS/FAIL`; проверяются poster-only до
+authority, exact ticket/spec/impression/result/chest и восстановление встроенной
+механики без награды при recall. Все продуктовые флаги по умолчанию выключены.
+
 Деплой — из `playables/`: `bash scripts/deploy-swipe.sh [<id>…|--all]` —
 пересобирает ленту со свежим стампом (виден в левом нижнем углу бара),
 экспортирует механики и пушит `swipe-platform` (Render автодеплой).
