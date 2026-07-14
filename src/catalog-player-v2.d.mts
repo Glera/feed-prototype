@@ -122,7 +122,11 @@ export class CatalogPlayerV2ContractError extends Error {
   readonly code: string;
 }
 
-export function catalogPlayerV2Enabled(env: Record<string, unknown> | undefined, controlPlaneEnabled: boolean): boolean;
+export function catalogPlayerV2Enabled(
+  env: Record<string, unknown> | undefined,
+  controlPlaneEnabled: boolean,
+  accountEligible: boolean,
+): boolean;
 export function validateCatalogTicketLevelSpecBundle(value: unknown): CatalogTicketLevelSpecBundleV1;
 export function buildCatalogPlayerLevelBinding(bundle: CatalogTicketLevelSpecBundleV1, ordinal: number, frameEpoch: number): CatalogPlayerLevelBinding;
 export function buildCatalogFrameNavigation(binding: CatalogPlayerLevelBinding, baseUrl: string): CatalogFrameNavigation;

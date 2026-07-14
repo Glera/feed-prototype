@@ -45,9 +45,15 @@ export class CatalogFeedAuthorityContractError extends Error {
   readonly code: string;
 }
 
+export function catalogDogfoodAccountEligible(
+  env: Record<string, unknown> | undefined,
+  initData: string | null,
+): boolean;
+
 export function catalogFeedDogfoodEnabled(
   env: Record<string, unknown> | undefined,
   controlPlaneEnabled: boolean,
+  accountEligible: boolean,
 ): boolean;
 export function catalogFeedSurface(
   phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'

@@ -13,8 +13,9 @@ export const CATALOG_FRAME_REFERRER_POLICY = 'origin';
  * cannot enable catalog delivery on its own; feed integration remains a
  * separate, explicitly gated slice.
  */
-export function catalogPlayerV2Enabled(env, controlPlaneEnabled) {
+export function catalogPlayerV2Enabled(env, controlPlaneEnabled, accountEligible) {
   return controlPlaneEnabled === true
+    && accountEligible === true
     && String(env?.VITE_CATALOG_PLAYER_V2_ENABLED ?? '').toLowerCase() === 'true';
 }
 

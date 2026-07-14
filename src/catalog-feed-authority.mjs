@@ -56,9 +56,30 @@ function cloneAndFreeze(value) {
   return freeze(cloned);
 }
 
-/** Three independent build/runtime gates; there is no query-string escape. */
-export function catalogFeedDogfoodEnabled(env, controlPlaneEnabled) {
+/**
+ * One exact Telegram account owns the effectful dogfood surface. The raw
+ * initData is still authenticated by the backend; this client check only keeps
+ * every other account on the reviewed built-in path before any catalog request.
+ */
+export function catalogDogfoodAccountEligible(env, initData) {
+  const configured = env?.VITE_CATALOG_DOGFOOD_USER_ID;
+  if (typeof configured !== 'string' || !/^[1-9][0-9]{0,15}$/.test(configured)) return false;
+  if (typeof initData !== 'string' || initData.length === 0) return false;
+  try {
+    const rawUser = new URLSearchParams(initData).get('user');
+    if (!rawUser) return false;
+    const user = JSON.parse(rawUser);
+    return Boolean(user && typeof user === 'object' && !Array.isArray(user)
+      && Number.isSafeInteger(user.id) && user.id > 0 && String(user.id) === configured);
+  } catch {
+    return false;
+  }
+}
+
+/** Three independent build/runtime gates plus an exact account; no query escape. */
+export function catalogFeedDogfoodEnabled(env, controlPlaneEnabled, accountEligible) {
   return controlPlaneEnabled === true
+    && accountEligible === true
     && String(env?.VITE_CATALOG_PLAYER_V2_ENABLED ?? '').toLowerCase() === 'true'
     && String(env?.VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED ?? '').toLowerCase() === 'true';
 }

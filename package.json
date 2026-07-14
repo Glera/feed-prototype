@@ -18,6 +18,7 @@
     "check:catalog-feed-dogfood": "node scripts/check-catalog-feed-dogfood-harness.mjs",
     "serve:catalog-player-v2-browser": "node scripts/serve-catalog-player-v2-browser-harness.mjs",
     "serve:catalog-feed-dogfood": "node scripts/serve-catalog-feed-dogfood-harness.mjs",
+    "serve:catalog-feed-real-e2e": "node scripts/serve-catalog-feed-real-e2e.mjs",
     "check:cp-browser": "node scripts/check-control-plane-feed-browser.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",

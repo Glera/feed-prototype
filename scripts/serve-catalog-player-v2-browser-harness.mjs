@@ -169,6 +169,7 @@ try {
   const enabled = catalogPlayerV2Enabled(
     { VITE_CATALOG_PLAYER_V2_ENABLED: scenario === 'disabled' ? 'false' : 'true' },
     true,
+    true,
   );
   if (!enabled) {
     invariant(frames.querySelectorAll('iframe').length === 0, 'disabled path mounted an iframe');

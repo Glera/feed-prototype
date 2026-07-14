@@ -103,6 +103,35 @@ npm run serve:catalog-feed-dogfood
 authority, exact ticket/spec/impression/result/chest и восстановление встроенной
 механики без награды при recall. Все продуктовые флаги по умолчанию выключены.
 
+Effectful-путь в production требует не только три флага, но и ровно один аккаунт:
+
+```bash
+VITE_CONTROL_PLANE_ENABLED=true
+VITE_CATALOG_PLAYER_V2_ENABLED=true
+VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED=true
+VITE_CATALOG_DOGFOOD_USER_ID=<telegram-user-id>
+```
+
+Отсутствующий, неканонический или несовпадающий `VITE_CATALOG_DOGFOOD_USER_ID`
+fail-closed оставляет пользователя на проверенной встроенной механике. Generic
+control-plane shadow при этом остаётся независимым и может собираться шире.
+
+Smoke с настоящими backend и content-addressed runtime запускается отдельно:
+
+```bash
+VITE_API_BASE=https://backend.example \
+VITE_CATALOG_DOGFOOD_USER_ID=<telegram-user-id> \
+CATALOG_REAL_E2E_INIT_DATA='<signed Telegram initData>' \
+npm run serve:catalog-feed-real-e2e
+```
+
+InitData читается только процессом локального E2E-сервера и инжектируется в
+отдаваемую браузеру страницу — в bundle, URL и stdout секрет не записывается.
+Harness не подменяет и не проксирует API/runtime: он требует от backend абсолютный
+HTTPS locator вида `runtime-releases/<playable>/<artifact-digest>/…`, наблюдает
+реальные ответы и ставит `PASS` только после specialized impression от
+сконфигурированного runtime.
+
 Деплой — из `playables/`: `bash scripts/deploy-swipe.sh [<id>…|--all]` —
 пересобирает ленту со свежим стампом (виден в левом нижнем углу бара),
 экспортирует механики и пушит `swipe-platform` (Render автодеплой).

@@ -85,9 +85,12 @@ function bundle() {
   };
 }
 
-equal(catalogPlayerV2Enabled({}, true), false, 'catalog is off by default');
-equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, false), false, 'CP is a second gate');
-equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'TRUE' }, true), true, 'both explicit gates enable the adapter');
+equal(catalogPlayerV2Enabled({}, true, true), false, 'catalog is off by default');
+equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, false, true), false, 'CP is a second gate');
+equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, true, false), false,
+  'account scope is a third gate');
+equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'TRUE' }, true, true), true,
+  'all explicit gates enable the adapter');
 
 const frozenBundle = validateCatalogTicketLevelSpecBundle(bundle());
 equal(Object.isFrozen(frozenBundle), true);

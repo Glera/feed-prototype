@@ -47,12 +47,11 @@ const controllerInstance = async (url) => {
   return { instanceToken: match[1], feedUrl: new URL(feedMatch[1], url).href };
 };
 
-const userIdFor = (instanceToken) => Number.parseInt(instanceToken.replaceAll('-', '').slice(0, 12), 16) + 1;
 const initDataFor = (instanceToken, scenario) => new URLSearchParams({
   query_id: 'dogfood',
   harness_instance: instanceToken,
   harness_scenario: scenario,
-  user: JSON.stringify({ id: userIdFor(instanceToken) }),
+  user: JSON.stringify({ id: 424242 }),
   hash: 'dogfood',
 }).toString();
 

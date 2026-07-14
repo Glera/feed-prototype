@@ -25,19 +25,19 @@ let origin = '';
 let state = null;
 
 const normalizedScenario = (scenario) => (scenario === 'recall' ? 'recall' : 'success');
-const userIdFor = (instanceToken) => Number.parseInt(instanceToken.replaceAll('-', '').slice(0, 12), 16) + 1;
+const dogfoodUserId = 424242;
 
 const initDataFor = (instanceToken, scenario) => new URLSearchParams({
   query_id: 'dogfood',
   harness_instance: instanceToken,
   harness_scenario: normalizedScenario(scenario),
-  user: JSON.stringify({ id: userIdFor(instanceToken) }),
+  user: JSON.stringify({ id: dogfoodUserId }),
   hash: 'dogfood',
 }).toString();
 
 const freshState = (scenario, instanceToken) => ({
   instanceToken,
-  userId: userIdFor(instanceToken),
+  userId: dogfoodUserId,
   scenario: normalizedScenario(scenario),
   startedAt: Date.now(),
   status: 'running',
@@ -325,7 +325,7 @@ console.warn=(...args)=>{if(String(args[0]||'').includes('[catalog-player-v2]'))
 addEventListener('unhandledrejection',(event)=>reportHarnessDiagnostic('unhandledrejection',[event.reason]));
 window.Telegram={WebApp:{
   initData:${JSON.stringify(initDataFor(instanceToken, scenario))},
-  initDataUnsafe:{user:{id:${userIdFor(instanceToken)}},start_param:null},platform:'web',
+  initDataUnsafe:{user:{id:${dogfoodUserId}},start_param:null},platform:'web',
   ready(){},expand(){},disableVerticalSwipes(){},setHeaderColor(){},
   setBackgroundColor(){},lockOrientation(){},onEvent(){}
 }};
@@ -709,6 +709,7 @@ const build = spawnSync('npm', ['run', 'build'], {
     VITE_CONTROL_PLANE_ENABLED: 'true',
     VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
     VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
+    VITE_CATALOG_DOGFOOD_USER_ID: String(dogfoodUserId),
   },
 });
 if (build.status !== 0) {

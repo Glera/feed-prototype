@@ -5,6 +5,7 @@ import {
   buildCatalogFeedAuthorityRequest,
   catalogAuthorityStartEligible,
   catalogFallbackMatchesBinding,
+  catalogDogfoodAccountEligible,
   catalogFeedDogfoodEnabled,
   catalogFeedMustEvictFrame,
   catalogFeedSurface,
@@ -32,16 +33,32 @@ const ids = {
   variant: '10000000-0000-4000-8000-000000000006',
 };
 const request = buildCatalogFeedAuthorityRequest(ids.request, ids.source);
+const dogfoodEnv = {
+  VITE_CATALOG_DOGFOOD_USER_ID: '424242',
+  VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
+  VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
+};
+const dogfoodInitData = new URLSearchParams({ user: JSON.stringify({ id: 424242 }) }).toString();
 
-equal(catalogFeedDogfoodEnabled({}, true), false, 'dogfood is off by default');
+equal(catalogDogfoodAccountEligible({}, dogfoodInitData), false, 'missing account config fails closed');
+equal(catalogDogfoodAccountEligible({ VITE_CATALOG_DOGFOOD_USER_ID: '424242,7' }, dogfoodInitData), false,
+  'an allowlist cannot replace the one-account gate');
+equal(catalogDogfoodAccountEligible({ VITE_CATALOG_DOGFOOD_USER_ID: '0424242' }, dogfoodInitData), false,
+  'configured user id must be canonical');
+equal(catalogDogfoodAccountEligible({ VITE_CATALOG_DOGFOOD_USER_ID: '424242' }, null), false,
+  'missing Telegram identity fails closed');
+equal(catalogDogfoodAccountEligible({ VITE_CATALOG_DOGFOOD_USER_ID: '424242' },
+  new URLSearchParams({ user: JSON.stringify({ id: 7 }) }).toString()), false,
+  'a different authenticated account is excluded');
+equal(catalogDogfoodAccountEligible({ VITE_CATALOG_DOGFOOD_USER_ID: '424242' }, dogfoodInitData), true,
+  'the one exact configured Telegram account is eligible');
+equal(catalogFeedDogfoodEnabled({}, true, true), false, 'dogfood is off by default');
 equal(catalogFeedDogfoodEnabled({
   VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
   VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
-}, false), false, 'control-plane is an independent gate');
-equal(catalogFeedDogfoodEnabled({
-  VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
-  VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
-}, true), true, 'all three gates enable the bridge');
+}, false, true), false, 'control-plane is an independent gate');
+equal(catalogFeedDogfoodEnabled(dogfoodEnv, true, false), false, 'account scope is an independent gate');
+equal(catalogFeedDogfoodEnabled(dogfoodEnv, true, true), true, 'all gates plus exact account enable the bridge');
 equal(catalogFeedSurface('authority_pending'), 'poster_only', 'authority cannot reveal the warm builtin');
 equal(catalogFeedSurface('delivery_pending'), 'poster_only', 'delivery cannot reveal the warm builtin');
 equal(catalogFeedSurface('catalog_ready'), 'catalog', 'only exact catalog delivery mounts catalog');

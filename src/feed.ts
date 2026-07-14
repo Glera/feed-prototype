@@ -64,6 +64,7 @@ import {
   buildCatalogFeedAuthorityRequest,
   catalogFallbackMatchesBinding,
   catalogAuthorityStartEligible,
+  catalogDogfoodAccountEligible,
   catalogFeedDogfoodEnabled,
   catalogFeedMustEvictFrame,
   catalogFeedSurface,
@@ -487,6 +488,7 @@ export class Feed {
   private readonly catalogDogfoodEnabled = catalogFeedDogfoodEnabled(
     (import.meta as any).env,
     controlPlaneEnabled(),
+    catalogDogfoodAccountEligible((import.meta as any).env, getInitData()),
   );
   private catalogSlots = new Map<number, CatalogFeedSlot>();
   private catalogFrameEpoch = 0;
