@@ -6,7 +6,8 @@
   "description": "Swipe platform (Telegram Mini App): vertical feed of playable mini-games with a social layer (stars, series, challenges) and generative UGC meta experiments. See README.md and ISLAND.md.",
   "scripts": {
     "dev": "vite",
-    "lint": "tsc --noEmit && npm run check:rewards && npm run check:series && npm run check:dwell && npm run check:cp-outbox && npm run check:run-ticket-outbox && npm run check:result-receipts && npm run check:catalog-player-v2 && npm run check:catalog-feed-authority && npm run check:catalog-feed-dogfood",
+    "lint": "tsc --noEmit && npm run check:telegram-start-param && npm run check:rewards && npm run check:series && npm run check:dwell && npm run check:cp-outbox && npm run check:run-ticket-outbox && npm run check:result-receipts && npm run check:catalog-player-v2 && npm run check:catalog-feed-authority && npm run check:catalog-feed-dogfood",
+    "check:telegram-start-param": "node scripts/check-telegram-start-param.mjs",
     "check:rewards": "node scripts/check-reward-vectors.mjs",
     "check:series": "node scripts/check-series-policy.mjs",
     "check:dwell": "node scripts/check-active-dwell.mjs",

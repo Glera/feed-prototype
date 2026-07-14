@@ -16,6 +16,8 @@
  *       (`contentSafeAreaInset`); we sum them so feed chrome clears both.
  */
 
+import { resolveTelegramStartParam } from './telegram-start-param.mjs';
+
 type AnyTG = any;
 
 /** Raw Telegram initData for the `Authorization: tma <initData>` header. Null
@@ -33,12 +35,23 @@ export function getInitData(): string | null {
   }
 }
 
-/** Telegram launch start_param (deep-link payload), e.g. a challenge id. Null
- *  outside Telegram. Tags session entry source (direct|challenge|referral). */
+/** Telegram launch start_param (deep-link payload), e.g. a challenge id.
+ *
+ * Main Mini App deep links carry the same value in `initDataUnsafe`, raw
+ * `initData`, and the launch URL's `tgWebAppStartParam`.  Reading all three is
+ * intentional: Telegram clients do not hydrate them at exactly the same time.
+ * The backend still validates signed initData before any privileged action.
+ */
 export function getStartParam(): string | null {
   try {
-    const p = (window as any).Telegram?.WebApp?.initDataUnsafe?.start_param;
-    return typeof p === 'string' && p.length > 0 ? p : null;
+    const tg = (window as any).Telegram?.WebApp;
+    return resolveTelegramStartParam({
+      search: location.search,
+      hash: location.hash,
+      webViewStartParam: (window as any).Telegram?.WebView?.initParams?.tgWebAppStartParam,
+      unsafeStartParam: tg?.initDataUnsafe?.start_param,
+      initData: tg?.initData,
+    });
   } catch {
     return null;
   }
