@@ -213,6 +213,12 @@ export function catalogPendingSlotShouldFallbackForBinding(
     && hasBinding !== true;
 }
 
+/** Future unbound opportunities stay builtin once session bindings are authoritative. */
+export function catalogFeedShouldClaimSlot(dogfoodEnabled, bindingsResolved, hasBinding) {
+  return dogfoodEnabled === true
+    && (bindingsResolved !== true || hasBinding === true);
+}
+
 export function buildCatalogFeedAuthorityRequest(requestId, sourceDecisionId) {
   return Object.freeze({
     schema: 'feed.catalog-authority-request.v1',

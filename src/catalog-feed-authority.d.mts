@@ -124,6 +124,11 @@ export function catalogPendingSlotShouldFallbackForBinding(
   bindingsResolved: boolean,
   hasBinding: boolean,
 ): boolean;
+export function catalogFeedShouldClaimSlot(
+  dogfoodEnabled: boolean,
+  bindingsResolved: boolean,
+  hasBinding: boolean,
+): boolean;
 export function buildCatalogFeedAuthorityRequest(
   requestId: string,
   sourceDecisionId: string,

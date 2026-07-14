@@ -9,6 +9,7 @@ import {
   buildCatalogFeedAuthorityRequest,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
+  catalogFeedShouldClaimSlot,
   catalogPendingSlotShouldFallbackForBinding,
   catalogSourceDecisionProjectionReady,
   catalogCanaryAuthorityAllowsAllocation,
@@ -161,6 +162,26 @@ equal(
   catalogPendingSlotShouldFallbackForBinding('delivery_pending', true, false),
   false,
   'binding refresh cannot retrofit an in-flight delivery or shown surface',
+);
+equal(
+  catalogFeedShouldClaimSlot(true, false, false),
+  true,
+  'a pre-session opportunity retains a cold-start catalog claim',
+);
+equal(
+  catalogFeedShouldClaimSlot(true, true, false),
+  false,
+  'a future authoritatively unbound opportunity stays plain builtin',
+);
+equal(
+  catalogFeedShouldClaimSlot(true, true, true),
+  true,
+  'a future mapped opportunity still receives a catalog claim',
+);
+equal(
+  catalogFeedShouldClaimSlot(false, false, true),
+  false,
+  'resolved state cannot bypass the dogfood gate',
 );
 
 // Deterministic clock/epoch regression for the production race. Binding may

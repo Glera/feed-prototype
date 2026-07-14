@@ -74,6 +74,7 @@ import {
   catalogFallbackMatchesBinding,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
+  catalogFeedShouldClaimSlot,
   catalogPendingSlotShouldFallbackForBinding,
   catalogSourceDecisionProjectionReady,
   catalogDogfoodAccountEligible,
@@ -502,6 +503,7 @@ export class Feed {
   // reveals are retained briefly so a cold /session does not erase the first
   // unit's honest dwell/exit.
   private builtinFeedBindings = new Map<string, BuiltinFeedBindingV1>();
+  private builtinFeedBindingsResolved = false;
   private cpExposure: ControlPlaneExposure | null = null;
   private cpPendingExposure: ControlPlaneExposure | null = null;
   private cpDeferredExposures: ControlPlaneExposure[] = [];
@@ -846,6 +848,7 @@ export class Feed {
   // legacy feed/results path continues unchanged.
   private applyBuiltinFeedBindings(bindings?: BuiltinFeedBindingsV1): void {
     if (!controlPlaneEnabled()) return;
+    this.builtinFeedBindingsResolved = true;
     if (!bindings || bindings.schema !== 'feed.builtin-bindings.v1' || !bindings.available) {
       // A later fail-closed bootstrap must not leave a previously installed
       // mapping available for new tickets/decisions in this page.
@@ -980,7 +983,11 @@ export class Feed {
       exit: null,
     };
     dwell.reset(now);
-    if (this.catalogDogfoodEnabled) {
+    if (catalogFeedShouldClaimSlot(
+      this.catalogDogfoodEnabled,
+      this.builtinFeedBindingsResolved,
+      exposure.binding !== null,
+    )) {
       this.disposeCatalogSlot(i);
       const existingFrame = this.frames.get(i);
       if (existingFrame && catalogFeedMustEvictFrame('authority_pending', true)) {
