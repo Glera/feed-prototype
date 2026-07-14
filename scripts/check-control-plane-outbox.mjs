@@ -67,13 +67,16 @@ assert.deepEqual(
 assert.equal(reloaded.deadLetterCount(), 1);
 assert.equal(reloaded.eventState(event0.event_id), 'acknowledged');
 assert.equal(reloaded.eventState(event1.event_id), 'rejected');
+assert.equal(reloaded.eventReceiptStatus(event0.event_id), 'projected');
+assert.equal(reloaded.eventReceiptStatus(event1.event_id), 'rejected');
 assert.equal(reloaded.deadLetters()[0].rejectReason, 'invalid_payload');
 assert.equal(requests[0][0].payload.mutated_after_enqueue, undefined);
 
 responseMode = 'pending';
-reloaded.enqueue('attempt_start', { run_id: 'r1' });
+const pendingDependency = reloaded.enqueue('attempt_start', { run_id: 'r1' });
 assert.equal((await reloaded.flush()).acknowledged, 1);
 assert.equal(reloaded.pendingCount(), 0, 'pending_dependency is durable on the server');
+assert.equal(reloaded.eventReceiptStatus(pendingDependency.event_id), 'pending_dependency');
 
 // A transport failure persists the item and enforces exponential retry time.
 responseMode = 'throw';

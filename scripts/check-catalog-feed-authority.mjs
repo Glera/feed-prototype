@@ -2,8 +2,13 @@ import assert from 'node:assert/strict';
 
 import {
   CatalogFeedAuthorityContractError,
+  buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
   catalogAuthorityStartEligible,
+  catalogCanaryAuthorityAllowsAllocation,
+  catalogCanaryDogfoodEnabled,
+  catalogCanaryInvitationMissing,
+  catalogCanaryTicketStartIsSafe,
   catalogFallbackMatchesBinding,
   catalogDogfoodAccountEligible,
   catalogFeedDogfoodEnabled,
@@ -11,6 +16,7 @@ import {
   catalogFeedSurface,
   catalogFeedUsesBuiltinImpression,
   catalogRecallRecoveryEffect,
+  validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
 } from '../src/catalog-feed-authority.mjs';
 
@@ -59,6 +65,17 @@ equal(catalogFeedDogfoodEnabled({
 }, false, true), false, 'control-plane is an independent gate');
 equal(catalogFeedDogfoodEnabled(dogfoodEnv, true, false), false, 'account scope is an independent gate');
 equal(catalogFeedDogfoodEnabled(dogfoodEnv, true, true), true, 'all gates plus exact account enable the bridge');
+equal(catalogCanaryDogfoodEnabled({}, true), false, 'canary invitation lookup is independently off by default');
+equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'true' }, false), false,
+  'the canary flag cannot widen the existing effectful bridge');
+equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'TRUE' }, true), true,
+  'the explicit canary flag adds invitation precedence to an eligible bridge');
+equal(catalogCanaryInvitationMissing(404, 'catalog_canary_invitation_not_found'), true,
+  'only the exact no-invitation code falls through to normal effectful policy');
+equal(catalogCanaryInvitationMissing(404, 'catalog_canary_not_available'), false,
+  'wrong-account backend evidence is terminal, not a policy fallthrough');
+equal(catalogCanaryInvitationMissing(409, 'catalog_canary_invitation_not_found'), false,
+  'the no-invitation code cannot bypass its exact HTTP status');
 equal(catalogFeedSurface('authority_pending'), 'poster_only', 'authority cannot reveal the warm builtin');
 equal(catalogFeedSurface('delivery_pending'), 'poster_only', 'delivery cannot reveal the warm builtin');
 equal(catalogFeedSurface('catalog_ready'), 'catalog', 'only exact catalog delivery mounts catalog');
@@ -75,6 +92,33 @@ equal(catalogAuthorityStartEligible('authority_pending', true, true), false, 're
 equal(catalogAuthorityStartEligible('catalog_ready', true, true), false, 'frame reload reuses delivered authority');
 equal(Object.keys(request).join(','), 'schema,requestId,sourceDecisionId');
 equal(Object.isFrozen(request), true);
+
+const canary = validateCatalogCanaryAuthorityResult({
+  schema: 'catalog.canary-authority-result.v1',
+  authorizationId: ids.auth,
+  authorizationDigest: 'd'.repeat(64),
+  expiresAt: '2026-07-14T12:00:00.123456+00:00',
+  replayed: false,
+});
+equal(canary.authorizationId, ids.auth);
+equal(Object.keys(canary).join(','), 'schema,authorizationId,authorizationDigest,expiresAt,replayed');
+equal(Object.isFrozen(canary), true);
+equal(catalogCanaryAuthorityAllowsAllocation(canary, Date.parse('2026-07-14T11:59:59Z')), true,
+  'a fresh invitation may allocate before expiry');
+equal(catalogCanaryAuthorityAllowsAllocation(canary, Date.parse('2026-07-14T12:00:01Z')), false,
+  'an uncommitted invitation cannot allocate after expiry');
+equal(catalogCanaryAuthorityAllowsAllocation({ ...canary, replayed: true }, Date.parse('2030-01-01T00:00:00Z')), true,
+  'a committed invitation remains usable only through exact allocation replay');
+const canaryRun = buildCatalogCanaryRunIdentity(ids.auth);
+equal(canaryRun.ticketId, ids.auth, 'canary reload repeats the opaque authorization as ticket identity');
+equal(canaryRun.runId, `catalog-canary:${ids.auth}`, 'canary reload repeats one bounded run identity');
+equal(Object.isFrozen(canaryRun), true);
+equal(catalogCanaryTicketStartIsSafe({ state: 'active', completed_levels: 0 }), true,
+  'only an active zero-progress canary ticket is safe to recover');
+equal(catalogCanaryTicketStartIsSafe({ state: 'active', completed_levels: 1 }), false,
+  'configured or played canary tickets do not mid-series resume');
+equal(catalogCanaryTicketStartIsSafe({ state: 'consumed', completed_levels: 2 }), false,
+  'terminal canary tickets cannot duplicate a chest or reward');
 
 const catalog = validateCatalogFeedAuthorityResult({
   schema: 'feed.catalog-authority-result.v1',
@@ -145,6 +189,26 @@ throws(
 throws(
   () => buildCatalogFeedAuthorityRequest('not-a-uuid', ids.source),
   /canonical UUID/,
+);
+throws(
+  () => validateCatalogCanaryAuthorityResult({ ...canary, entryId: ids.plan }),
+  /unsupported shape/,
+  'the invitation can never leak or accept a catalog content identity',
+);
+throws(
+  () => validateCatalogCanaryAuthorityResult({ ...canary, expiresAt: '2026-07-14T12:00:00+03:00' }),
+  /timezone-aware UTC/,
+  'a non-UTC expiry fails closed',
+);
+throws(
+  () => validateCatalogCanaryAuthorityResult({ ...canary, replayed: 1 }),
+  /must be boolean/,
+  'replay evidence cannot be truthy coercion',
+);
+throws(
+  () => buildCatalogCanaryRunIdentity('not-a-uuid'),
+  /canonical UUID/,
+  'a malformed invitation cannot create a persisted recovery identity',
 );
 
 console.log(`catalog feed authority: ${assertions} assertions passed`);

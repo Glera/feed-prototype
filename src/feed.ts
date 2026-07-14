@@ -31,7 +31,8 @@ import {
 } from './collections';
 import {
   apiSession, apiMe, variantIdForMechanic,
-  apiAllocateAuthorizedCatalogRequired, apiGetCatalogFeedAuthorityRequired,
+  apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
+  apiGetCatalogFeedAuthorityRequired,
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
@@ -61,7 +62,12 @@ import {
   type CatalogTicketLevelSpecBundleV1,
 } from './catalog-player-v2.mjs';
 import {
+  buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
+  catalogCanaryAuthorityAllowsAllocation,
+  catalogCanaryDogfoodEnabled,
+  catalogCanaryInvitationMissing,
+  catalogCanaryTicketStartIsSafe,
   catalogFallbackMatchesBinding,
   catalogAuthorityStartEligible,
   catalogDogfoodAccountEligible,
@@ -70,10 +76,14 @@ import {
   catalogFeedSurface,
   catalogFeedUsesBuiltinImpression,
   catalogRecallRecoveryEffect,
+  validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
+  type CatalogCanaryAuthorityResultV1,
   type CatalogFeedAuthorityRequestV1,
+  type CatalogFeedAuthorityResultV1,
 } from './catalog-feed-authority.mjs';
 import {
+  controlPlaneEventReceiptStatus,
   controlPlaneEventState,
   controlPlaneEnabled,
   flushControlPlane,
@@ -303,6 +313,7 @@ type CatalogFeedSlot = {
   session: CatalogPlayerV2Session | null;
   ordinal: number;
   failureEmitted: boolean;
+  canaryProjectionRequired: boolean;
 };
 type SwipeApi = {
   version: number;
@@ -490,6 +501,14 @@ export class Feed {
     controlPlaneEnabled(),
     catalogDogfoodAccountEligible((import.meta as any).env, getInitData()),
   );
+  private readonly catalogCanaryDogfoodEnabled = catalogCanaryDogfoodEnabled(
+    (import.meta as any).env,
+    this.catalogDogfoodEnabled,
+  );
+  // One invitation can be offered to many nearby feed opportunities while
+  // warm-up decisions overlap. The first eligible source owns it for this page
+  // lifetime; every other slot continues through ordinary effectful policy.
+  private catalogCanaryClaimed = false;
   private catalogSlots = new Map<number, CatalogFeedSlot>();
   private catalogFrameEpoch = 0;
   private preloaderMountedAt = 0;
@@ -956,6 +975,7 @@ export class Feed {
         session: null,
         ordinal: 1,
         failureEmitted: false,
+        canaryProjectionRequired: false,
       };
       // A cold/disabled authority must never turn the real feed into a blank
       // page. This timer preserves the exact reviewed built-in opportunity.
@@ -1063,48 +1083,111 @@ export class Feed {
         throw new Error('source decision was not durably projected');
       }
 
-      let authority = null;
+      type OpaqueAuthority = CatalogCanaryAuthorityResultV1
+        | Extract<CatalogFeedAuthorityResultV1, { outcome: 'catalog_authorized' }>;
+      let authority: OpaqueAuthority | null = null;
       const retryDelays = [0, 120, 360];
-      for (const delay of retryDelays) {
-        if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
-        if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') return;
+
+      // A canary invitation is account-bound and intentionally contains no
+      // entry/spec/runtime identity. Only its opaque authorization enters the
+      // existing Player-v2 delivery closure. A precise no-invitation 404 is the
+      // sole edge that falls through to ordinary effectful feed policy.
+      if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed) {
+        this.catalogCanaryClaimed = true;
         try {
-          const raw = await apiGetCatalogFeedAuthorityRequired(slot.request);
-          authority = validateCatalogFeedAuthorityResult(raw, slot.request);
-          break;
+          for (const [attempt, delay] of retryDelays.entries()) {
+            if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+            if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') {
+              this.catalogCanaryClaimed = false;
+              return;
+            }
+            try {
+              const raw = await apiGetCatalogCanaryAuthorityRequired();
+              authority = validateCatalogCanaryAuthorityResult(raw);
+              break;
+            } catch (error) {
+              if (error instanceof ApiRequestError
+                && catalogCanaryInvitationMissing(error.status, error.code)) break;
+              const retryable = error instanceof ApiRequestError
+                && [0, 429, 502, 503, 504].includes(error.status);
+              if (!retryable || attempt === retryDelays.length - 1) throw error;
+            }
+          }
         } catch (error) {
-          const retryable = error instanceof ApiRequestError && (
-            error.status === 0
-            || (error.status === 404 && error.code === 'feed_authority_source_not_found')
-            || (error.status === 503 && ['feed_authority_not_ready', 'feed_authority_integrity_failure'].includes(error.code ?? ''))
-          );
-          if (!retryable || delay === retryDelays[retryDelays.length - 1]) throw error;
+          // A terminal/invalid invitation is fail-closed once for this page;
+          // nearby warm slots must not hammer the same broken authority. A
+          // navigation that vanished before claiming is released above.
+          throw error;
+        }
+        if (!authority) this.catalogCanaryClaimed = false;
+        if (authority && !catalogCanaryAuthorityAllowsAllocation(authority)) {
+          throw new Error('fresh catalog canary authority expired before allocation');
         }
       }
-      if (!authority) throw new Error('catalog authority returned no result');
-      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') return;
-      if (authority.outcome === 'builtin_fallback') {
-        if (!catalogFallbackMatchesBinding(authority.fallback, slot.exposure.binding)) {
-          throw new Error('server fallback differs from the projected built-in opportunity');
+
+      if (!authority) {
+        let normalAuthority: CatalogFeedAuthorityResultV1 | null = null;
+        for (const [attempt, delay] of retryDelays.entries()) {
+          if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+          if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') return;
+          try {
+            const raw = await apiGetCatalogFeedAuthorityRequired(slot.request);
+            normalAuthority = validateCatalogFeedAuthorityResult(raw, slot.request);
+            break;
+          } catch (error) {
+            const retryable = error instanceof ApiRequestError && (
+              error.status === 0
+              || (error.status === 404 && error.code === 'feed_authority_source_not_found')
+              || (error.status === 503 && ['feed_authority_not_ready', 'feed_authority_integrity_failure'].includes(error.code ?? ''))
+            );
+            if (!retryable || attempt === retryDelays.length - 1) throw error;
+          }
         }
-        this.activateCatalogBuiltinFallback(slot, 'server_policy_fallback');
+        if (!normalAuthority) throw new Error('catalog authority returned no result');
+        if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') return;
+        if (normalAuthority.outcome === 'builtin_fallback') {
+          if (!catalogFallbackMatchesBinding(normalAuthority.fallback, slot.exposure.binding)) {
+            throw new Error('server fallback differs from the projected built-in opportunity');
+          }
+          this.activateCatalogBuiltinFallback(slot, 'server_policy_fallback');
+          return;
+        }
+        if (Date.parse(normalAuthority.expiresAt) <= Date.now()) {
+          throw new Error('catalog authority expired before allocation');
+        }
+        authority = normalAuthority;
+      }
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') {
+        if ('replayed' in authority) this.catalogCanaryClaimed = false;
         return;
       }
-      if (Date.parse(authority.expiresAt) <= Date.now()) {
-        throw new Error('catalog authority expired before allocation');
-      }
+      const canaryAuthority = 'replayed' in authority;
+      const canaryReplay = 'replayed' in authority ? authority.replayed : false;
+      // GET can race across tabs: both pages may observe replayed=false while
+      // only one commits allocation first. Gate every canary (not just an
+      // explicit GET replay) on its exact projected configured impression.
+      slot.canaryProjectionRequired = canaryAuthority;
 
       slot.phase = 'delivery_pending';
       const authorized = await apiAllocateAuthorizedCatalogRequired({
         schema: 'catalog.allocate-authorized.v2',
         authorizationId: authority.authorizationId,
       });
-      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') return;
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') {
+        if (canaryAuthority) this.catalogCanaryClaimed = false;
+        return;
+      }
       if (authorized.schema !== 'catalog.allocate-authorized-result.v2'
         || authorized.authorizationId !== authority.authorizationId
         || authorized.authorizationDigest !== authority.authorizationDigest
         || authorized.allocation.allocationId !== authority.authorizationId) {
         throw new Error('authorized allocation differs from its effectful authority');
+      }
+      if (canaryAuthority && (authorized.allocation.outcome !== 'allocated'
+        || authorized.allocation.catalog.entryState !== 'canary'
+        || authorized.allocation.slotType !== 'canary-dogfood'
+        || authorized.allocation.policyVersion !== 'catalog-canary-dogfood.v1')) {
+        throw new Error('canary authorization did not resolve to its exact canary allocation');
       }
       if (authorized.allocation.outcome !== 'allocated') {
         this.activateCatalogBuiltinFallback(slot, 'catalog_runway_empty');
@@ -1115,10 +1198,13 @@ export class Feed {
         throw new Error('selected runtime does not require the catalog handshake');
       }
 
+      const canaryRunIdentity = canaryAuthority
+        ? buildCatalogCanaryRunIdentity(authority.authorizationId)
+        : null;
       const ticketRequest: CatalogRunTicketRequestV2 = {
         schema: 'run.start.v2',
-        ticket_id: ticketUid(),
-        run_id: `series-${runUid()}`,
+        ticket_id: canaryRunIdentity?.ticketId ?? ticketUid(),
+        run_id: canaryRunIdentity?.runId ?? `series-${runUid()}`,
         mechanic_id: allocation.runtime.playableId,
         variant_id: allocation.runtime.legacyVariantId,
         kind: 'series',
@@ -1127,8 +1213,28 @@ export class Feed {
       slot.ticketRequest = ticketRequest;
       slot.allocation = allocation;
       const start = await queueRunTicketStart(ticketRequest);
-      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') return;
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') {
+        if (canaryAuthority) this.catalogCanaryClaimed = false;
+        return;
+      }
       const ticket = start.latest;
+      const exactCanaryTicket = canaryAuthority && ticket
+        && 'schema' in ticket && ticket.schema === 'run.ticket.v2'
+        && ticket.ticket_id === ticketRequest.ticket_id
+        && ticket.run_id === ticketRequest.run_id
+        && ticket.decision_id === ticketRequest.decision_id;
+      // `replayed:true` recovers only the transport gap before play. An active
+      // zero-progress ticket is safe to mount with the same exact identity. A
+      // configured/played/terminal ticket is intentionally not resumed yet;
+      // reviewed content cannot duplicate its chest or reward.
+      if (canaryAuthority && exactCanaryTicket && !catalogCanaryTicketStartIsSafe(ticket)) {
+        this.activateCatalogBuiltinFallback(
+          slot,
+          canaryReplay ? 'catalog_canary_resume_unsupported' : 'catalog_canary_ticket_not_fresh',
+          true,
+        );
+        return;
+      }
       if (start.status !== 'ok' || start.pending !== 0 || !ticket
         || !('schema' in ticket) || ticket.schema !== 'run.ticket.v2'
         || ticket.ticket_id !== ticketRequest.ticket_id
@@ -1143,7 +1249,10 @@ export class Feed {
       const catalogTicket = ticket as CatalogRunTicketViewV2;
 
       const rawBundle = await apiGetCatalogTicketSpecsRequired(catalogTicket.ticket_id);
-      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') return;
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') {
+        if (canaryAuthority) this.catalogCanaryClaimed = false;
+        return;
+      }
       const bundle = validateCatalogTicketLevelSpecBundle(rawBundle);
       this.assertCatalogDeliveryClosure(allocation, catalogTicket, bundle);
       slot.ticket = catalogTicket;
@@ -1154,9 +1263,16 @@ export class Feed {
       if (this.liveSet().has(slot.index)) this.mount(slot.index);
     } catch (error) {
       if (!this.catalogSlotIsCurrent(slot)) return;
-      const revoked = error instanceof ApiRequestError && error.code === 'catalog_ticket_revoked';
+      const code = error instanceof ApiRequestError ? error.code : null;
+      const revoked = code === 'catalog_ticket_revoked';
+      const staleInvitation = code === 'feed_authority_candidate_stale';
+      const reason = code && [
+        'feed_slot_authorization_expired',
+        'feed_authority_candidate_stale',
+        'feed_slot_authorization_not_found',
+      ].includes(code) ? `catalog_invitation_${code}` : revoked ? 'catalog_ticket_revoked' : 'delivery_failure';
       console.warn('[catalog-player-v2] delivery fell back to reviewed builtin', error);
-      this.activateCatalogBuiltinFallback(slot, revoked ? 'catalog_ticket_revoked' : 'delivery_failure', revoked);
+      this.activateCatalogBuiltinFallback(slot, reason, revoked || staleInvitation);
     }
   }
 
@@ -1199,6 +1315,7 @@ export class Feed {
     if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
     slot.authorityTimer = null;
     slot.configurationTimer = null;
+    slot.canaryProjectionRequired = false;
     slot.session?.dispose(slot.frameEpoch);
     slot.session = null;
 
@@ -1211,8 +1328,12 @@ export class Feed {
 
     const visibleRecovery = slot.index === this.realIndex()
       && (this.cpExposure === slot.exposure || this.shownIndex === slot.index);
-    if (slot.exposure.impressionEmitted && visibleRecovery) {
-      this.closeControlPlaneExposure('close', true);
+    if (visibleRecovery) {
+      // A projected catalog impression needs an exit; a rejected/unconfirmed
+      // one does not exist server-side. Both cases still need a fresh builtin
+      // impression identity and truthful later reveal timestamp. Otherwise the
+      // old shownIndex suppresses markUnitShown on the replacement frame.
+      if (slot.exposure.impressionEmitted) this.closeControlPlaneExposure('close', true);
       const now = performance.now();
       const dwell = new ActiveDwellAccumulator(now);
       dwell.reset(now);
@@ -1283,6 +1404,7 @@ export class Feed {
   private disposeCatalogSlot(i: number): void {
     const slot = this.catalogSlots.get(i);
     if (!slot) return;
+    if (slot.canaryProjectionRequired) this.catalogCanaryClaimed = false;
     if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
     if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
     slot.session?.dispose(slot.frameEpoch);
@@ -1468,6 +1590,7 @@ export class Feed {
       }, attemptOccurredAt);
       if (!eventId) return;
       attempt.emitted = true;
+      if (catalogAttempt && catalogSlot) this.watchCatalogControlPlaneConflict(catalogSlot, eventId);
     }
     for (const action of attempt.actions) {
       if (action.emitted) continue;
@@ -1481,6 +1604,7 @@ export class Feed {
       }, action.occurredAt);
       if (!eventId) return;
       action.emitted = true;
+      if (catalogAttempt && catalogSlot) this.watchCatalogControlPlaneConflict(catalogSlot, eventId);
     }
     if (attempt.result && !attempt.result.emitted) {
       const eventId = queueControlPlaneEvent('attempt_result', {
@@ -1488,7 +1612,10 @@ export class Feed {
         outcome: attempt.result.outcome,
         time_ms: attempt.result.timeMs,
       }, attempt.result.occurredAt);
-      if (eventId) attempt.result.emitted = true;
+      if (eventId) {
+        attempt.result.emitted = true;
+        if (catalogAttempt && catalogSlot) this.watchCatalogControlPlaneConflict(catalogSlot, eventId);
+      }
     }
   }
 
@@ -5162,6 +5289,7 @@ export class Feed {
     if (this.overlayOpen) return true;   // a story / editor is up — freeze the whole feed
     if (this.dailyOpen) return true;     // daily central view is up — freeze + mute like any other non-feed tab
     if (this.collectingRewardIndex !== null) return true;   // star credit in flight — freeze EVERY frame behind the cover so nothing competes for the main thread
+    if (this.catalogSlotForIndex(i)?.canaryProjectionRequired) return true;
     if (this.frameUsesStagedReady.has(i) && !this.frameReady.has(i)) return true;
     if (this.settlingTargetIndex === i) return true;
     return i !== this.realIndex() || (this.earnedThisCycle.has(i) && !this.manualRuns.has(i)) || this.failedThisCycle.has(i);
@@ -6722,6 +6850,7 @@ export class Feed {
       if (session.snapshot().phase === 'configured') this.markCatalogConfigured(slot);
       return true;
     }
+    if (slot.canaryProjectionRequired) return true;
     // No gameplay/readiness signal is accepted before the exact configured ACK.
     return session.snapshot().phase !== 'configured';
   }
@@ -6755,12 +6884,16 @@ export class Feed {
   private markCatalogConfigured(slot: CatalogFeedSlot): void {
     const i = slot.index;
     if (!this.catalogSlotIsCurrent(slot) || this.frameReady.has(i)) return;
+    // Another tab may already have committed this canary closure even when our
+    // GET originally said replayed=false. Exact configured pixels may reveal
+    // (making the upcoming impression truthful), but the runtime stays paused
+    // and non-interactive until the specialized impression is projected.
     if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
     slot.configurationTimer = null;
     this.frameStaticReady.add(i);
     this.frameReady.add(i);
-    this.frameInteractiveReady.add(i);
-    if (this.manualRuns.has(i)) {
+    if (!slot.canaryProjectionRequired) this.frameInteractiveReady.add(i);
+    if (!slot.canaryProjectionRequired && this.manualRuns.has(i)) {
       const runId = this.frames.get(i)?.dataset.runId;
       const ticket = runId ? this.ticketForRun(i, runId) : null;
       if (runId && ticket) this.registerControlPlaneAttempt(i, runId, ticket);
@@ -6806,12 +6939,71 @@ export class Feed {
     );
     if (!eventId) return;
     level.emitted = true;
+    if (slot.canaryProjectionRequired) {
+      if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
+      slot.configurationTimer = window.setTimeout(() => {
+        this.activateCatalogBuiltinFallback(slot, 'catalog_control_plane_unconfirmed', true);
+      }, 2500);
+      void this.confirmCanaryCatalogProjection(slot, eventId, level);
+      return;
+    }
+    this.commitCatalogLevelImpression(slot, level);
+    this.watchCatalogControlPlaneConflict(slot, eventId);
+  }
+
+  private commitCatalogLevelImpression(slot: CatalogFeedSlot, level: ControlPlaneLevel): void {
+    const exposure = slot.exposure;
+    if (!this.catalogSlotIsCurrent(slot) || level.levelIndex !== slot.ordinal) return;
     exposure.revealedAt ??= level.occurredAt;
     exposure.impressionEmitted = true;
     this.frameInteractiveReadyAt.set(slot.index, level.occurredAt);
     for (const attempt of this.cpAttempts.values()) {
       if (attempt.exposure === exposure) this.flushControlPlaneAttempt(attempt);
     }
+  }
+
+  private async confirmCanaryCatalogProjection(
+    slot: CatalogFeedSlot,
+    eventId: string,
+    level: ControlPlaneLevel,
+  ): Promise<void> {
+    for (const delay of [0, 120, 360, 900]) {
+      if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+      if (!this.catalogSlotIsCurrent(slot) || !slot.canaryProjectionRequired) return;
+      await flushControlPlane({ force: true });
+      if (!this.catalogSlotIsCurrent(slot) || !slot.canaryProjectionRequired) return;
+      const receipt = controlPlaneEventReceiptStatus(eventId);
+      if (receipt === 'projected') {
+        slot.canaryProjectionRequired = false;
+        if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
+        slot.configurationTimer = null;
+        this.commitCatalogLevelImpression(slot, level);
+        this.frameInteractiveReady.add(slot.index);
+        this.applyActiveStates();
+        this.ensureFrameAutoPlay(slot.index);
+        this.applyPendingEditor(slot.index);
+        return;
+      }
+      if (['stored', 'pending_dependency', 'rejected'].includes(receipt)) {
+        this.activateCatalogBuiltinFallback(
+          slot,
+          receipt === 'rejected'
+            ? 'catalog_control_plane_conflict'
+            : `catalog_control_plane_${receipt}`,
+          true,
+        );
+        return;
+      }
+    }
+    this.activateCatalogBuiltinFallback(slot, 'catalog_control_plane_unconfirmed', true);
+  }
+
+  private watchCatalogControlPlaneConflict(slot: CatalogFeedSlot, eventId: string): void {
+    void flushControlPlane({ force: true }).then(() => {
+      if (controlPlaneEventState(eventId) === 'rejected') {
+        this.activateCatalogBuiltinFallback(slot, 'catalog_control_plane_conflict', true);
+      }
+    });
   }
 
   private onHostGesture = (playableId?: string) => {

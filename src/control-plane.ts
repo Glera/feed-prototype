@@ -184,6 +184,13 @@ export function controlPlaneEventState(
   return outbox.eventState(eventId);
 }
 
+export function controlPlaneEventReceiptStatus(
+  eventId: string | null,
+): 'pending' | 'stored' | 'projected' | 'pending_dependency' | 'rejected' | 'unavailable' {
+  if (!outbox || !eventId) return 'unavailable';
+  return outbox.eventReceiptStatus(eventId);
+}
+
 function onVisibilityChange(): void {
   const nextForeground = !document.hidden;
   if (nextForeground === foreground) return;

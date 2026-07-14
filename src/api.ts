@@ -11,6 +11,7 @@ import type {
   CatalogTicketLevelSpecBundleV1,
 } from './catalog-player-v2.mjs';
 import type {
+  CatalogCanaryAuthorityResultV1,
   CatalogFeedAuthorityRequestV1,
   CatalogFeedAuthorityResultV1,
 } from './catalog-feed-authority.mjs';
@@ -211,6 +212,11 @@ export function apiGetCatalogFeedAuthorityRequired(
   payload: CatalogFeedAuthorityRequestV1,
 ): Promise<CatalogFeedAuthorityResultV1> {
   return postRequired<CatalogFeedAuthorityResultV1>('/api/feed/catalog-authority', payload);
+}
+
+/** Read one account-bound invitation; the response contains no content identity. */
+export function apiGetCatalogCanaryAuthorityRequired(): Promise<CatalogCanaryAuthorityResultV1> {
+  return getRequired<CatalogCanaryAuthorityResultV1>('/api/catalog/canary-authority');
 }
 
 export interface CatalogAllocateAuthorizedRequestV2 {

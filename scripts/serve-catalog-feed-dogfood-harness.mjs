@@ -23,33 +23,43 @@ const ids = {
 };
 let origin = '';
 let state = null;
+let canaryBuildHtml = '';
+let canaryDisabledBuildHtml = '';
 
-const normalizedScenario = (scenario) => (scenario === 'recall' ? 'recall' : 'success');
+const scenarios = new Set([
+  'success', 'recall', 'replay-conflict', 'no-invite', 'wrong-account', 'disabled',
+]);
+const normalizedScenario = (scenario) => scenarios.has(scenario) ? scenario : 'success';
 const dogfoodUserId = 424242;
+const userIdForScenario = (scenario) => scenario === 'wrong-account' ? 7 : dogfoodUserId;
 
 const initDataFor = (instanceToken, scenario) => new URLSearchParams({
   query_id: 'dogfood',
   harness_instance: instanceToken,
   harness_scenario: normalizedScenario(scenario),
-  user: JSON.stringify({ id: dogfoodUserId }),
+  user: JSON.stringify({ id: userIdForScenario(normalizedScenario(scenario)) }),
   hash: 'dogfood',
 }).toString();
 
 const freshState = (scenario, instanceToken) => ({
   instanceToken,
-  userId: dogfoodUserId,
+  userId: userIdForScenario(normalizedScenario(scenario)),
   scenario: normalizedScenario(scenario),
   startedAt: Date.now(),
   status: 'running',
   message: 'waiting for real Feed',
   trace: [],
   cpEvents: [],
+  canaryRequests: [],
   authorityRequests: [],
   allocationRequests: [],
+  allocationResponses: [],
   ticketRequests: [],
   specRequests: 0,
   results: [],
   diagnostics: [],
+  runtimeEvents: [],
+  replayConflictTransportAttempts: 0,
   authorityPending: false,
   pendingSamples: 0,
   pendingViolation: false,
@@ -61,6 +71,7 @@ const freshState = (scenario, instanceToken) => ({
     rewardAfterChestReceipt: null,
     recallResult: null,
     recallRecovery: null,
+    replayConflict: null,
   },
   client: {
     currentFrame: 'none',
@@ -176,6 +187,19 @@ const allocation = {
   manifest,
 };
 
+const allocationForScenario = (scenario) => {
+  const canary = ['success', 'recall', 'replay-conflict'].includes(scenario);
+  return {
+    ...allocation,
+    slotType: canary ? 'canary-dogfood' : allocation.slotType,
+    policyVersion: canary ? 'catalog-canary-dogfood.v1' : allocation.policyVersion,
+    catalog: {
+      ...allocation.catalog,
+      entryState: canary ? 'canary' : allocation.catalog.entryState,
+    },
+  };
+};
+
 const bundle = (ticketId) => ({
   schema: 'catalog.ticket-level-spec-bundle.v1',
   ticketId,
@@ -246,28 +270,55 @@ const evaluate = () => {
     state.message = 'authority_pending exposed an iframe instead of poster-only (expected iframe count=0)';
     return;
   }
-  if (state.scenario === 'recall' && (state.client.chestSeen || state.client.rewardSeen || chestResults.length > 0)) {
+  if (['recall', 'replay-conflict', 'no-invite', 'wrong-account'].includes(state.scenario)
+    && (state.client.chestSeen || state.client.rewardSeen || chestResults.length > 0)) {
     state.status = 'fail';
-    state.message = 'hard recall leaked a chest or reward';
+    state.message = `${state.scenario} leaked a chest or reward`;
     return;
   }
 
+  const exactCanaryGet = state.canaryRequests.every((item) => item.method === 'GET'
+    && item.path === '/api/catalog/canary-authority'
+    && item.query === '' && item.contentLength === null);
+  const canaryPath = exactCanaryGet
+    && state.canaryRequests.length === 1
+    && state.authorityRequests.length === 0;
+  const normalPath = state.canaryRequests.length === 0
+    && state.authorityRequests.length === 1
+    && state.authorityRequests[0]?.sourceDecisionId === source[0]?.payload.decision_id;
+  const catalogAuthorityPath = ['success', 'recall', 'replay-conflict'].includes(state.scenario)
+    ? canaryPath
+    : state.scenario === 'disabled' && normalPath;
+  const allocationResponse = state.allocationResponses[0];
+  const exactAllocationClass = ['success', 'recall', 'replay-conflict'].includes(state.scenario)
+    ? allocationResponse?.catalog?.entryState === 'canary'
+      && allocationResponse?.slotType === 'canary-dogfood'
+      && allocationResponse?.policyVersion === 'catalog-canary-dogfood.v1'
+    : state.scenario === 'disabled'
+      && allocationResponse?.catalog?.entryState === 'published'
+      && allocationResponse?.slotType === 'anchor'
+      && allocationResponse?.policyVersion === 'dogfood.fixture.v1';
   const exactTransport = source.length === 1
-    && state.authorityRequests[0]?.sourceDecisionId === source[0].payload.decision_id
+    && catalogAuthorityPath
+    && exactAllocationClass
     && state.allocationRequests[0]?.authorizationId === ids.authorization
     && v2Ticket?.decision_id === ids.allocationDecision
     && catalogImpressions.every((event) => event.payload.ticket_id === v2Ticket?.ticket_id
       && event.payload.decision_id === ids.allocationDecision
       && event.payload.series_id === ids.series);
+  const exactCanaryTicketIdentity = !['success', 'recall', 'replay-conflict'].includes(state.scenario)
+    || (v2Ticket?.ticket_id === ids.authorization
+      && v2Ticket?.run_id === `catalog-canary:${ids.authorization}`);
   const common = exactTransport
-    && state.authorityRequests.length === 1
+    && exactCanaryTicketIdentity
     && state.allocationRequests.length === 1
+    && state.allocationResponses.length === 1
     && Boolean(v2Ticket)
     && state.specRequests >= 1
     && state.pendingSamples > 0
     && state.checkpoints.pendingSurface?.pass === true
     && state.client.catalogSeen;
-  if (state.scenario === 'success') {
+  if (['success', 'disabled'].includes(state.scenario)) {
     const impressionIdentity = catalogImpressions.length === 2
       && new Set(catalogImpressions.map((event) => event.payload.impression_id)).size === 1
       && new Set(catalogImpressions.map((event) => event.payload.level_impression_id)).size === 2
@@ -289,11 +340,13 @@ const evaluate = () => {
       && state.checkpoints.rewardAfterChestReceipt?.pass === true
       && builtinImpressions.length === 0 && state.client.chestSeen && state.client.rewardSeen) {
       state.status = 'pass';
-      state.message = 'real Feed completed exact two-level catalog series and confirmed chest';
+      state.message = state.scenario === 'success'
+        ? 'canary invitation completed the exact two-level catalog series and confirmed chest'
+        : 'disabled canary left the normal effectful catalog path unchanged';
       record('assertions_passed', { scenario: state.scenario });
       return;
     }
-  } else {
+  } else if (state.scenario === 'recall') {
     const revoked = levelResults.length === 1 && levelResults[0].outcome === 'revoked';
     if (common && catalogImpressions.length === 1 && revoked
       && state.checkpoints.configuredImpressions.length === 1
@@ -304,6 +357,53 @@ const evaluate = () => {
       && state.client.currentFrame === 'builtin' && chestResults.length === 0) {
       state.status = 'pass';
       state.message = 'hard recall restored reviewed builtin without chest or reward';
+      record('assertions_passed', { scenario: state.scenario });
+      return;
+    }
+  } else if (state.scenario === 'replay-conflict') {
+    const deterministicTicket = v2Ticket?.ticket_id === ids.authorization
+      && v2Ticket?.run_id === `catalog-canary:${ids.authorization}`;
+    const conflict = state.checkpoints.replayConflict?.pass === true;
+    const gatedGameplayEvents = ['attempt_start', 'manual_action', 'attempt_result']
+      .flatMap((name) => uniqueEvents(name));
+    const inertUntilReject = state.replayConflictTransportAttempts === 3
+      && state.client.catalogSeen && gatedGameplayEvents.length === 0
+      && state.results.length === 0 && !state.client.chestSeen && !state.client.rewardSeen;
+    if (common && deterministicTicket && conflict && inertUntilReject
+      && catalogImpressions.length === 1 && levelResults.length === 0
+      && chestResults.length === 0 && builtinImpressions.length >= 1
+      && state.client.recoverySeen && state.client.currentFrame === 'builtin') {
+      state.status = 'pass';
+      state.message = 'fresh-looking allocation race stayed inert through delayed conflict and restored reviewed builtin';
+      record('assertions_passed', { scenario: state.scenario });
+      return;
+    }
+  } else if (state.scenario === 'no-invite') {
+    const exactFallback = exactCanaryGet
+      && state.canaryRequests.length === 1
+      && state.authorityRequests.length === 1
+      && state.authorityRequests[0]?.sourceDecisionId === source[0]?.payload.decision_id
+      && state.allocationRequests.length === 0 && state.ticketRequests.length === 0
+      && state.specRequests === 0 && catalogImpressions.length === 0
+      && builtinImpressions.length >= 1 && state.pendingSamples > 0
+      && state.checkpoints.pendingSurface?.pass === true
+      && state.client.currentFrame === 'builtin' && state.client.builtinSeen;
+    if (source.length === 1 && exactFallback) {
+      state.status = 'pass';
+      state.message = 'no invitation fell through to the exact normal reviewed-builtin fallback';
+      record('assertions_passed', { scenario: state.scenario });
+      return;
+    }
+  } else if (state.scenario === 'wrong-account') {
+    const isolated = source.length === 1
+      && state.canaryRequests.length === 0 && state.authorityRequests.length === 0
+      && state.allocationRequests.length === 0 && state.ticketRequests.length === 0
+      && state.specRequests === 0 && catalogImpressions.length === 0
+      && builtinImpressions.length >= 1
+      && state.client.currentFrame === 'builtin' && state.client.builtinSeen;
+    if (isolated) {
+      state.status = 'pass';
+      state.message = 'wrong account stayed on the reviewed builtin without any catalog request';
       record('assertions_passed', { scenario: state.scenario });
       return;
     }
@@ -325,7 +425,7 @@ console.warn=(...args)=>{if(String(args[0]||'').includes('[catalog-player-v2]'))
 addEventListener('unhandledrejection',(event)=>reportHarnessDiagnostic('unhandledrejection',[event.reason]));
 window.Telegram={WebApp:{
   initData:${JSON.stringify(initDataFor(instanceToken, scenario))},
-  initDataUnsafe:{user:{id:${dogfoodUserId}},start_param:null},platform:'web',
+  initDataUnsafe:{user:{id:${userIdForScenario(scenario)}},start_param:null},platform:'web',
   ready(){},expand(){},disableVerticalSwipes(){},setHeaderColor(){},
   setBackgroundColor(){},lockOrientation(){},onEvent(){}
 }};
@@ -337,6 +437,9 @@ addEventListener('DOMContentLoaded',()=>{
     const frame=current?.querySelector('iframe')||null;
     const currentIframeCount=current?.querySelectorAll('iframe').length||0;
     const currentFrame=!frame?'none':frame.dataset.catalogPlayerV2==='1'?'catalog':'builtin';
+    const currentGameClasses=current?.className||'';
+    const frameNavigated=frame?.dataset.catalogNavigated||null;
+    let frameVisibility=null;try{frameVisibility=frame?.contentDocument?.visibilityState||null}catch{}
     catalogSeen ||= currentFrame==='catalog';
     builtinSeen ||= currentFrame==='builtin';
     const chest=document.querySelector('.chest-ov__chest');
@@ -349,7 +452,7 @@ addEventListener('DOMContentLoaded',()=>{
       setTimeout(()=>chest.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7})),650);
     }
     fetch('/__harness/client?harness_instance='+encodeURIComponent(harnessInstance)+'&scenario='+encodeURIComponent(harnessScenario),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      harnessInstance,harnessScenario,currentFrame,currentIframeCount,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,
+      harnessInstance,harnessScenario,currentFrame,currentIframeCount,currentGameClasses,frameNavigated,frameVisibility,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,
       preloaderVisible:Boolean(document.querySelector('.preloader:not(.preloader--hidden)'))
     })}).catch(()=>{});
   };
@@ -367,27 +470,47 @@ iframe{position:fixed;inset:0;width:100%;height:100%;border:0}
 output{display:block;padding:6px;border-radius:6px;background:#26313f;font-weight:700}output[data-state=pass]{background:#0b5c35}output[data-state=fail]{background:#7a2020}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0 0}a{color:#8ecbff}
 </style></head><body>
-<iframe data-testid="feed" data-harness-instance="${instanceToken}" src="/feed?scenario=${scenario}&harness_instance=${encodeURIComponent(instanceToken)}&initData=${encodeURIComponent(initDataFor(instanceToken, scenario))}"></iframe>
-<aside class="panel"><div><a href="/harness.html?scenario=success">success</a> · <a href="/harness.html?scenario=recall">hard recall</a></div>
+<div data-testid="feed-root" data-harness-instance="${instanceToken}"></div>
+<aside class="panel"><div><a href="/harness.html?scenario=success">canary success</a> · <a href="/harness.html?scenario=recall">hard recall</a> · <a href="/harness.html?scenario=replay-conflict">replay conflict</a> · <a href="/harness.html?scenario=no-invite">no invite</a> · <a href="/harness.html?scenario=wrong-account">wrong account</a> · <a href="/harness.html?scenario=disabled">canary disabled</a></div>
 <output data-testid="status" data-state="running">RUNNING</output><pre data-testid="trace">[]</pre></aside>
 <script>
 const status=document.querySelector('[data-testid=status]');const trace=document.querySelector('[data-testid=trace]');
+const feedSrc=${JSON.stringify(`/feed?scenario=${scenario}&harness_instance=${encodeURIComponent(instanceToken)}&initData=${encodeURIComponent(initDataFor(instanceToken, scenario))}`)};
 const poll=async()=>{try{const s=await fetch('/__harness/state?harness_instance=${encodeURIComponent(instanceToken)}&scenario=${scenario}',{cache:'no-store'}).then(r=>r.json());status.dataset.state=s.status;status.textContent=s.status.toUpperCase()+': '+s.message;trace.textContent=JSON.stringify(s,null,2);window.__catalogFeedDogfoodHarness=s;}catch(e){status.dataset.state='fail';status.textContent='FAIL: '+e}};
 setInterval(poll,120);poll();
+const clearOriginState=async()=>{
+  localStorage.clear();sessionStorage.clear();
+  if('caches'in window){for(const key of await caches.keys())await caches.delete(key)}
+  if(navigator.serviceWorker){for(const registration of await navigator.serviceWorker.getRegistrations())await registration.unregister()}
+  if(indexedDB.databases){
+    const databases=await indexedDB.databases();
+    await Promise.all(databases.filter(item=>item.name).map(item=>new Promise((resolve,reject)=>{
+      const request=indexedDB.deleteDatabase(item.name);request.onsuccess=()=>resolve();request.onerror=()=>reject(request.error);request.onblocked=()=>reject(new Error('indexedDB delete blocked'));
+    })));
+  }
+};
+clearOriginState().then(()=>{
+  const frame=document.createElement('iframe');frame.dataset.testid='feed';frame.dataset.harnessInstance=${JSON.stringify(instanceToken)};frame.src=feedSrc;
+  document.querySelector('[data-testid=feed-root]').appendChild(frame);
+}).catch(error=>{status.dataset.state='fail';status.textContent='FAIL: origin reset: '+error});
 </script></body></html>`;
 
-const catalogRuntimeHtml = () => `<!doctype html><html><body><p>Catalog Sort fixture</p><script>
+const catalogRuntimeHtml = (instanceToken, scenario) => `<!doctype html><html><body><p>Catalog Sort fixture</p><script>
 const send=(value)=>parent.postMessage(value,location.origin);
+const report=(stage,detail={})=>fetch('/__harness/runtime',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({harnessInstance:${JSON.stringify(instanceToken)},harnessScenario:${JSON.stringify(scenario)},stage,detail})}).catch(()=>{});
+report('script_evaluated',{visibility:document.visibilityState});
 addEventListener('message',(event)=>{
   if(event.origin!==location.origin||event.source!==parent)return;
   const data=event.data||{};
   if(data.type!=='configure_level')return;
+  report('configure_level_received',{visibility:document.visibilityState,specHash:data.spec?.specHash||null});
   send({type:'configured',appliedSpecHash:data.spec.specHash,runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}});
-  setTimeout(()=>send({source:'playable',type:'host_gesture'}),900);
-  setTimeout(()=>send({source:'playable',type:'manual_action',actionType:'fixture.sort',actionSeq:1,accepted:true,changedState:true}),1050);
-  setTimeout(()=>send({source:'playable',type:'completed',outcome:'won'}),1350);
+  report('configured_sent',{visibility:document.visibilityState});
+  setTimeout(()=>{report('host_gesture_sent',{visibility:document.visibilityState});send({source:'playable',type:'host_gesture'})},900);
+  setTimeout(()=>{report('manual_action_sent',{visibility:document.visibilityState});send({source:'playable',type:'manual_action',actionType:'fixture.sort',actionSeq:1,accepted:true,changedState:true})},1050);
+  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState});send({source:'playable',type:'completed',outcome:'won'})},1350);
 });
-addEventListener('load',()=>send({type:'configure_ready',nonce:'a'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}}));
+addEventListener('load',()=>{report('load',{visibility:document.visibilityState});send({type:'configure_ready',nonce:'a'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}})});
 </script></body></html>`;
 
 const builtinRuntimeHtml = (playableId) => `<!doctype html><html><body><p>Reviewed builtin ${playableId}</p><script>
@@ -411,7 +534,8 @@ const server = createServer(async (request, response) => {
     const instanceToken = url.searchParams.get('harness_instance');
     const scenario = url.searchParams.get('scenario');
     if (!activeInstance(instanceToken, scenario)) return ignoreStaleInstance(response);
-    const source = readFileSync(path.join(root, 'dist', 'index.html'), 'utf8');
+    const source = scenario === 'disabled' ? canaryDisabledBuildHtml : canaryBuildHtml;
+    if (!source) return json(response, { code: 'harness_build_unavailable' }, 503);
     response.setHeader('content-type', 'text/html; charset=utf-8');
     // The external Telegram SDK is a blocking head script and replaces
     // `window.Telegram` in a plain browser. Install the harness identity after
@@ -522,6 +646,16 @@ const server = createServer(async (request, response) => {
     record('diagnostic', exact);
     return json(response, { ok: true });
   }
+  if (request.method === 'POST' && url.pathname === '/__harness/runtime') {
+    const runtimeEvent = await bodyOf(request);
+    if (!activeInstance(runtimeEvent.harnessInstance, runtimeEvent.harnessScenario)) {
+      return ignoreStaleInstance(response);
+    }
+    const exact = { stage: runtimeEvent.stage ?? 'unknown', detail: runtimeEvent.detail ?? {} };
+    state.runtimeEvents.push(exact);
+    record('runtime', exact);
+    return json(response, { ok: true });
+  }
   const statefulHarnessApi = (request.method === 'POST' && [
     '/api/session',
     '/api/cp/events',
@@ -530,7 +664,8 @@ const server = createServer(async (request, response) => {
     '/api/runs/start',
     '/api/results',
   ].includes(url.pathname)) || (request.method === 'GET'
-    && /^\/api\/catalog\/tickets\/[^/]+\/specs$/.test(url.pathname));
+    && (url.pathname === '/api/catalog/canary-authority'
+      || /^\/api\/catalog\/tickets\/[^/]+\/specs$/.test(url.pathname)));
   if (statefulHarnessApi && !authorizedForActiveInstance(request)) {
     return ignoreStaleInstance(response);
   }
@@ -557,6 +692,21 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === 'POST' && url.pathname === '/api/cp/events') {
     const body = await bodyOf(request);
+    const replayConflictBatch = state?.scenario === 'replay-conflict'
+      && body.events.some((event) => event.event_name === 'catalog_level_impression');
+    if (replayConflictBatch && state.replayConflictTransportAttempts < 2) {
+      state.replayConflictTransportAttempts += 1;
+      record('replay_conflict_cp_transport_failure', {
+        attempt: state.replayConflictTransportAttempts,
+      });
+      return json(response, { code: 'fixture_transient_cp_failure' }, 503);
+    }
+    if (replayConflictBatch && state) {
+      state.replayConflictTransportAttempts += 1;
+      // Keep the canary inert beyond every fixture gameplay timer
+      // (900/1050/1350ms), then reject before the 2500ms safety deadline.
+      await new Promise((resolve) => setTimeout(resolve, 1450));
+    }
     const previousIds = new Set(state?.cpEvents.map((event) => event.event_id) ?? []);
     state?.cpEvents.push(...body.events);
     for (const event of body.events) {
@@ -581,9 +731,59 @@ const server = createServer(async (request, response) => {
         }
       }
     }
-    return json(response, { events: body.events.map((event, item_index) => ({
-      event_id: event.event_id, item_index, status: 'projected', reject_reason: null,
-    })) });
+    return json(response, { events: body.events.map((event, item_index) => {
+      const replayConflict = state?.scenario === 'replay-conflict'
+        && event.event_name === 'catalog_level_impression';
+      if (replayConflict && state) {
+        state.checkpoints.replayConflict = {
+          eventId: event.event_id,
+          ticketId: event.payload?.ticket_id ?? null,
+          ordinal: event.payload?.ordinal ?? null,
+          pass: event.payload?.ticket_id === ids.authorization && event.payload?.ordinal === 1,
+        };
+        record('checkpoint_allocation_race_configured_impression_conflict', state.checkpoints.replayConflict);
+      }
+      return {
+        event_id: event.event_id,
+        item_index,
+        status: replayConflict ? 'rejected' : 'projected',
+        reject_reason: replayConflict ? 'catalog_level_impression_conflict' : null,
+      };
+    }) });
+  }
+  if (request.method === 'GET' && url.pathname === '/api/catalog/canary-authority') {
+    const requestEvidence = {
+      method: request.method,
+      path: url.pathname,
+      query: url.search,
+      contentLength: request.headers['content-length'] ?? null,
+    };
+    state?.canaryRequests.push(requestEvidence);
+    if (state) state.authorityPending = true;
+    record('canary_authority_pending', requestEvidence);
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    if (state) state.authorityPending = false;
+    if (state?.scenario === 'no-invite') {
+      record('canary_authority_missing');
+      return json(response, { code: 'catalog_canary_invitation_not_found' }, 404);
+    }
+    if (!['success', 'recall', 'replay-conflict'].includes(state?.scenario ?? '')) {
+      if (state) {
+        state.status = 'fail';
+        state.message = `canary endpoint was called in ${state.scenario}`;
+      }
+      return json(response, { code: 'catalog_canary_not_available' }, 404);
+    }
+    record('canary_authority', { authorizationId: ids.authorization });
+    return json(response, {
+      schema: 'catalog.canary-authority-result.v1',
+      authorizationId: ids.authorization,
+      authorizationDigest: '8'.repeat(64),
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+      // replay-conflict models two tabs which both observed fresh authority;
+      // only the allocation/closure reveals that one tab committed first.
+      replayed: false,
+    });
   }
   if (request.method === 'POST' && url.pathname === '/api/feed/catalog-authority') {
     const body = await bodyOf(request);
@@ -592,6 +792,28 @@ const server = createServer(async (request, response) => {
     record('authority_pending', { sourceDecisionId: body.sourceDecisionId });
     await new Promise((resolve) => setTimeout(resolve, 650));
     if (state) state.authorityPending = false;
+    if (state?.scenario === 'no-invite') {
+      record('authority_builtin_fallback');
+      return json(response, {
+        schema: 'feed.catalog-authority-result.v1', requestId: body.requestId,
+        sourceDecisionId: body.sourceDecisionId, planId: ids.plan,
+        planDigest: '9'.repeat(64), outcome: 'builtin_fallback',
+        authorizationId: null, authorizationDigest: null, expiresAt: null,
+        fallback: {
+          mappingId: ids.mapping,
+          playableId: 'merge-locked-v1-swipe',
+          variantId: ids.builtinVariant,
+          catalogMechanic: 'merge/locked',
+        },
+      });
+    }
+    if (state?.scenario !== 'disabled') {
+      if (state) {
+        state.status = 'fail';
+        state.message = `normal authority was called after a canary invitation in ${state.scenario}`;
+      }
+      return json(response, { code: 'unexpected_normal_authority' }, 500);
+    }
     record('authority_catalog');
     return json(response, {
       schema: 'feed.catalog-authority-result.v1', requestId: body.requestId,
@@ -605,9 +827,11 @@ const server = createServer(async (request, response) => {
     const body = await bodyOf(request);
     state?.allocationRequests.push(body);
     record('allocated', { authorizationId: body.authorizationId });
+    const exactAllocation = allocationForScenario(state?.scenario ?? 'disabled');
+    state?.allocationResponses.push(exactAllocation);
     return json(response, {
       schema: 'catalog.allocate-authorized-result.v2',
-      authorizationId: ids.authorization, authorizationDigest: '8'.repeat(64), allocation,
+      authorizationId: ids.authorization, authorizationDigest: '8'.repeat(64), allocation: exactAllocation,
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/runs/start') {
@@ -679,7 +903,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/versions.json') return json(response, {});
   if (url.pathname === `/runtime-releases/marble-sort-swipe/${artifactHex}/index.html`) {
     response.setHeader('content-type', 'text/html; charset=utf-8');
-    response.end(catalogRuntimeHtml());
+    response.end(catalogRuntimeHtml(state?.instanceToken ?? '', state?.scenario ?? ''));
     return;
   }
   if (url.pathname.endsWith('.html')) {
@@ -699,28 +923,52 @@ await new Promise((resolve, reject) => {
 });
 origin = `http://127.0.0.1:${server.address().port}`;
 
-const build = spawnSync('npm', ['run', 'build'], {
-  cwd: root,
-  encoding: 'utf8',
-  timeout: 120_000,
-  env: {
-    ...process.env,
-    VITE_API_BASE: origin,
-    VITE_CONTROL_PLANE_ENABLED: 'true',
-    VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
-    VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
-    VITE_CATALOG_DOGFOOD_USER_ID: String(dogfoodUserId),
-  },
-});
-if (build.status !== 0) {
-  process.stderr.write(`${build.stdout}\n${build.stderr}\n`);
+const buildFeed = (canaryEnabled) => {
+  const build = spawnSync('npm', ['run', 'build'], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: {
+      ...process.env,
+      VITE_API_BASE: origin,
+      VITE_CONTROL_PLANE_ENABLED: 'true',
+      VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
+      VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
+      VITE_CATALOG_CANARY_DOGFOOD_ENABLED: canaryEnabled ? 'true' : 'false',
+      VITE_CATALOG_DOGFOOD_USER_ID: String(dogfoodUserId),
+    },
+  });
+  if (build.status !== 0) {
+    process.stderr.write(`${build.stdout}\n${build.stderr}\n`);
+    return { ok: false, html: '', status: build.status ?? 1 };
+  }
+  return {
+    ok: true,
+    html: readFileSync(path.join(root, 'dist', 'index.html'), 'utf8'),
+    status: 0,
+  };
+};
+
+const enabledBuild = buildFeed(true);
+if (!enabledBuild.ok) {
   await new Promise((resolve) => server.close(resolve));
-  process.exit(build.status ?? 1);
+  process.exit(enabledBuild.status);
 }
+canaryBuildHtml = enabledBuild.html;
+const disabledBuild = buildFeed(false);
+if (!disabledBuild.ok) {
+  await new Promise((resolve) => server.close(resolve));
+  process.exit(disabledBuild.status);
+}
+canaryDisabledBuildHtml = disabledBuild.html;
 
 console.log(JSON.stringify({
   successUrl: `${origin}/harness.html?scenario=success`,
   recallUrl: `${origin}/harness.html?scenario=recall`,
+  replayConflictUrl: `${origin}/harness.html?scenario=replay-conflict`,
+  noInviteUrl: `${origin}/harness.html?scenario=no-invite`,
+  wrongAccountUrl: `${origin}/harness.html?scenario=wrong-account`,
+  disabledUrl: `${origin}/harness.html?scenario=disabled`,
   stateUrl: `${origin}/__harness/state`,
 }));
 

@@ -34,6 +34,14 @@ export type CatalogFeedAuthorityResultV1 = {
   }
 );
 
+export interface CatalogCanaryAuthorityResultV1 {
+  schema: 'catalog.canary-authority-result.v1';
+  authorizationId: string;
+  authorizationDigest: string;
+  expiresAt: string;
+  replayed: boolean;
+}
+
 export interface BuiltinBindingLike {
   mapping_id: string;
   playable_id: string;
@@ -55,6 +63,26 @@ export function catalogFeedDogfoodEnabled(
   controlPlaneEnabled: boolean,
   accountEligible: boolean,
 ): boolean;
+export function catalogCanaryDogfoodEnabled(
+  env: Record<string, unknown> | undefined,
+  feedDogfoodEnabled: boolean,
+): boolean;
+export function catalogCanaryInvitationMissing(status: number, code: string | null): boolean;
+export function validateCatalogCanaryAuthorityResult(
+  value: unknown,
+): Readonly<CatalogCanaryAuthorityResultV1>;
+export function catalogCanaryAuthorityAllowsAllocation(
+  authority: CatalogCanaryAuthorityResultV1,
+  nowMs?: number,
+): boolean;
+export function buildCatalogCanaryRunIdentity(authorizationId: string): Readonly<{
+  ticketId: string;
+  runId: string;
+}>;
+export function catalogCanaryTicketStartIsSafe(ticket: {
+  state: string;
+  completed_levels: number;
+} | null | undefined): boolean;
 export function catalogFeedSurface(
   phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'
     | 'builtin_fallback' | 'disposed' | null,

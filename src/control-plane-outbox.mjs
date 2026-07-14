@@ -1,6 +1,7 @@
 const STATE_SCHEMA = 'control-plane-outbox.v2';
 const MAX_BATCH = 100;
 const MAX_DEAD_LETTERS = 200;
+const MAX_RECEIPTS = 256;
 const BASE_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
 
@@ -23,6 +24,10 @@ export class DurableControlPlaneOutbox {
     this._now = options.now ?? (() => Date.now());
     this._uuid = options.uuid ?? controlPlaneUuid;
     this._state = loadState(this._storage, this._storageKey, this._uuid);
+    // Exact per-item statuses are intentionally page-local. Durable envelopes
+    // remain the source of retry truth; this bounded map lets a safety gate
+    // distinguish `projected` from merely stored/pending_dependency.
+    this._receipts = new Map();
     this._flushPromise = null;
     this._flushRequested = false;
     this._forceRequested = false;
@@ -149,6 +154,7 @@ export class DurableControlPlaneOutbox {
           continue;
         }
         terminalIds.add(event.event_id);
+        this._recordReceipt(event.event_id, ack.status);
         if (ack.status === 'rejected') {
           rejected += 1;
           this._state.deadLetters.push({
@@ -209,6 +215,19 @@ export class DurableControlPlaneOutbox {
     return 'acknowledged';
   }
 
+  eventReceiptStatus(eventId) {
+    if (this._state.pending.some((event) => event.event_id === eventId)) return 'pending';
+    if (this._state.deadLetters.some((entry) => entry.event.event_id === eventId)) return 'rejected';
+    return this._receipts.get(eventId) ?? 'unavailable';
+  }
+
+  _recordReceipt(eventId, status) {
+    this._receipts.set(eventId, status);
+    while (this._receipts.size > MAX_RECEIPTS) {
+      this._receipts.delete(this._receipts.keys().next().value);
+    }
+  }
+
   nextRetryAt() {
     return this._state.nextRetryAt;
   }
@@ -218,6 +237,7 @@ export class DurableControlPlaneOutbox {
     this._state.deadLetters = [];
     this._state.retryAttempt = 0;
     this._state.nextRetryAt = 0;
+    this._receipts.clear();
     this._persist();
   }
 

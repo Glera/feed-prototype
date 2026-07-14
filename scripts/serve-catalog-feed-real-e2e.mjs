@@ -52,6 +52,7 @@ const build = spawnSync('npm', ['run', 'build'], {
     VITE_CONTROL_PLANE_ENABLED: 'true',
     VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
     VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
+    VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'true',
     VITE_CATALOG_DOGFOOD_USER_ID: dogfoodUserId,
   },
 });
@@ -71,9 +72,10 @@ window.Telegram={WebApp:{
   const apiOrigin=${scriptJson(apiUrl.origin)};
   const timeoutMs=${timeoutMs};
   const state={
-    schema:'catalog.real-e2e-state.v1',status:'running',message:'waiting for real backend authority',
+    schema:'catalog.real-e2e-state.v1',status:'running',message:'waiting for fresh canary invitation',
     startedAt:Date.now(),apiOrigin,requests:[],eventNames:[],closure:{
-      session:false,authority:null,allocation:null,ticketV2:false,specBundle:false,
+      session:false,canaryFresh:false,canaryAuthorizationId:null,canaryAuthorizationDigest:null,
+      normalAuthorityRequests:0,allocation:null,allocationCanary:false,ticketV2:false,specBundle:false,
       runtimeLocator:null,runtimeArtifactDigest:null,specHash:null,runtimeAbsolute:false,
       catalogFrame:false,frameExact:false,catalogImpression:false
     },currentFrame:'none'
@@ -89,30 +91,56 @@ window.Telegram={WebApp:{
   const requestJson=(init)=>{try{return typeof init?.body==='string'?JSON.parse(init.body):null}catch{return null}};
   const responseJson=async(response)=>{try{return await response.clone().json()}catch{return null}};
   const tracked=(url)=>url?.origin===apiOrigin&&(
-    ['/api/session','/api/cp/events','/api/feed/catalog-authority','/api/catalog/allocate-authorized','/api/runs/start'].includes(url.pathname)
+    ['/api/session','/api/cp/events','/api/catalog/canary-authority','/api/feed/catalog-authority','/api/catalog/allocate-authorized','/api/runs/start'].includes(url.pathname)
     || /^\\/api\\/catalog\\/tickets\\/[^/]+\\/specs$/.test(url.pathname)
   );
   const inspect=(url,response,data,body)=>{
     const route=url.pathname;
     const detail={};
     if(route==='/api/cp/events'){
-      const names=Array.isArray(body?.events)?body.events.map(event=>event?.event_name).filter(Boolean):[];
+      const events=Array.isArray(body?.events)?body.events:[];
+      const names=events.map(event=>event?.event_name).filter(Boolean);
       detail.events=names;
       for(const name of names)if(!state.eventNames.includes(name))state.eventNames.push(name);
       if(names.includes('unit_impression'))stop('effectful slot emitted a generic builtin impression');
       if(names.includes('catalog_configuration_failure'))stop('real runtime failed the catalog handshake');
-      if(names.includes('catalog_level_impression'))state.closure.catalogImpression=true;
+      for(const event of events.filter(item=>item?.event_name==='catalog_level_impression')){
+        const ack=Array.isArray(data?.events)?data.events.find(item=>item?.event_id===event.event_id):null;
+        if(ack?.status==='projected')state.closure.catalogImpression=true;
+        else stop('specialized impression did not receive its exact projected ACK');
+      }
     }else if(route==='/api/session'){
       state.closure.session=Boolean(data?.builtin_feed_bindings?.available);
       if(!state.closure.session)stop('real session has no available reviewed builtin bindings');
+    }else if(route==='/api/catalog/canary-authority'){
+      const keys=data&&typeof data==='object'?Object.keys(data).sort().join(','):'';
+      const exactKeys='authorizationDigest,authorizationId,expiresAt,replayed,schema';
+      state.closure.canaryFresh=response.ok&&keys===exactKeys
+        &&data?.schema==='catalog.canary-authority-result.v1'&&data?.replayed===false;
+      state.closure.canaryAuthorizationId=data?.authorizationId??null;
+      state.closure.canaryAuthorizationDigest=data?.authorizationDigest??null;
+      if(!state.closure.canaryFresh)stop('real backend did not return one fresh opaque canary invitation');
     }else if(route==='/api/feed/catalog-authority'){
-      state.closure.authority=data?.outcome??null;
-      if(data?.outcome!=='catalog_authorized')stop('real backend did not authorize catalog content');
+      state.closure.normalAuthorityRequests+=1;
+      stop('normal effectful authority ran despite a fresh canary invitation');
     }else if(route==='/api/catalog/allocate-authorized'){
       state.closure.allocation=data?.allocation?.outcome??null;
-      if(data?.allocation?.outcome!=='allocated')stop('real catalog runway did not allocate a published series');
+      const allocation=data?.allocation;
+      state.closure.allocationCanary=allocation?.outcome==='allocated'
+        &&allocation?.catalog?.entryState==='canary'
+        &&allocation?.slotType==='canary-dogfood'
+        &&allocation?.policyVersion==='catalog-canary-dogfood.v1'
+        &&allocation?.allocationId===state.closure.canaryAuthorizationId
+        &&data?.authorizationId===state.closure.canaryAuthorizationId
+        &&data?.authorizationDigest===state.closure.canaryAuthorizationDigest
+        &&body?.authorizationId===state.closure.canaryAuthorizationId;
+      if(!state.closure.allocationCanary)stop('real canary authority did not resolve to its exact canary allocation');
     }else if(route==='/api/runs/start'&&body?.schema==='run.start.v2'){
-      state.closure.ticketV2=data?.schema==='run.ticket.v2'&&data?.state==='active';
+      const expectedId=state.closure.canaryAuthorizationId;
+      state.closure.ticketV2=data?.schema==='run.ticket.v2'&&data?.state==='active'
+        &&data?.completed_levels===0&&body?.ticket_id===expectedId
+        &&body?.run_id==='catalog-canary:'+expectedId&&data?.ticket_id===body?.ticket_id
+        &&data?.run_id===body?.run_id;
       if(!state.closure.ticketV2)stop('real backend did not confirm the manifest-bound v2 ticket');
     }else if(/^\\/api\\/catalog\\/tickets\\/[^/]+\\/specs$/.test(route)){
       const runtime=data?.runtime;
@@ -159,9 +187,10 @@ window.Telegram={WebApp:{
       }catch{state.closure.frameExact=false}
     }
     const c=state.closure;
-    if(c.session&&c.authority==='catalog_authorized'&&c.allocation==='allocated'&&c.ticketV2
+    if(c.session&&c.canaryFresh&&c.normalAuthorityRequests===0&&c.allocation==='allocated'
+      &&c.allocationCanary&&c.ticketV2
       &&c.specBundle&&c.runtimeAbsolute&&c.catalogFrame&&c.frameExact&&c.catalogImpression){
-      state.status='pass';state.message='real backend + absolute content-addressed runtime configured and revealed';
+      state.status='pass';state.message='fresh canary invitation configured the exact real content-addressed runtime';
     }else if(Date.now()-state.startedAt>timeoutMs){
       stop('timeout before the real catalog runtime produced its specialized impression');
     }

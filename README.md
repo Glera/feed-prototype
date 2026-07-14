@@ -97,24 +97,45 @@ Effectful catalog path можно прогнать без живого backend/r
 npm run serve:catalog-feed-dogfood
 ```
 
-Команда собирает ленту с тремя явными dogfood-флагами и печатает два URL:
-успешная двухуровневая серия и hard-recall. На странице поверх реального `Feed`
-есть воспроизводимый trace и итоговый `PASS/FAIL`; проверяются poster-only до
-authority, exact ticket/spec/impression/result/chest и восстановление встроенной
-механики без награды при recall. Все продуктовые флаги по умолчанию выключены.
+Команда делает две production-сборки (canary включён/выключен) и печатает URL
+шести сценариев: fresh invitation, hard recall, двухвкладочная allocation-гонка с конфликтом уже принятого
+impression, точный no-invitation fallback, другой аккаунт и выключенный canary.
+На странице поверх реального `Feed` есть воспроизводимый trace и итоговый
+`PASS/FAIL`; проверяются poster-only без iframe до authority, opaque allocation,
+exact ticket/spec/impression/result/chest и возврат к проверенной встроенной
+механике без награды при terminal conflict/recall. Продуктовые флаги по умолчанию
+выключены; `npm run lint` автоматически проверяет wire/изоляцию всех URL.
 
-Effectful-путь в production требует не только три флага, но и ровно один аккаунт:
+Canary-путь в production требует ровно четыре additive frontend-флага и один
+точный аккаунт (canary-флаг никогда не расширяет базовый effectful scope):
 
 ```bash
 VITE_CONTROL_PLANE_ENABLED=true
 VITE_CATALOG_PLAYER_V2_ENABLED=true
 VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED=true
+VITE_CATALOG_CANARY_DOGFOOD_ENABLED=true
 VITE_CATALOG_DOGFOOD_USER_ID=<telegram-user-id>
 ```
 
 Отсутствующий, неканонический или несовпадающий `VITE_CATALOG_DOGFOOD_USER_ID`
 fail-closed оставляет пользователя на проверенной встроенной механике. Generic
 control-plane shadow при этом остаётся независимым и может собираться шире.
+`GET /api/catalog/canary-authority` выполняется до normal effectful authority;
+только точный `404 catalog_canary_invitation_not_found` продолжает обычную
+политику. При invitation клиент передаёт дальше только opaque
+`authorizationId`, а pending-слот остаётся poster-only.
+
+Reload закрыт пока только для потерянного transport response: canary повторяет
+`ticket_id = authorizationId` и `run_id = catalog-canary:<authorizationId>`, а
+mount разрешён лишь для active ticket с `completed_levels=0`. Это не
+mid-series resume: частично сыгранный/terminal ticket и любой поздний
+configured-impression CP conflict или terminal result conflict немедленно
+возвращает reviewed builtin без chest/reward.
+Новая попытка требует новой операторской invitation; доставленная запись не
+блокирует её создание.
+Каждый canary (включая fresh GET) до exact `projected` ACK специализированного
+impression остаётся paused/non-interactive: это закрывает гонку двух вкладок,
+которые обе могли увидеть `replayed=false` до первого allocation commit.
 
 Smoke с настоящими backend и content-addressed runtime запускается отдельно:
 
@@ -128,9 +149,10 @@ npm run serve:catalog-feed-real-e2e
 InitData читается только процессом локального E2E-сервера и инжектируется в
 отдаваемую браузеру страницу — в bundle, URL и stdout секрет не записывается.
 Harness не подменяет и не проксирует API/runtime: он требует от backend абсолютный
-HTTPS locator вида `runtime-releases/<playable>/<artifact-digest>/…`, наблюдает
-реальные ответы и ставит `PASS` только после specialized impression от
-сконфигурированного runtime.
+HTTPS locator вида `runtime-releases/<playable>/<artifact-digest>/…`, требует
+fresh opaque canary invitation (normal authority в этом гейте запрещён),
+проверяет canary allocation и deterministic zero-progress ticket и ставит
+`PASS` только после specialized impression от сконфигурированного runtime.
 
 Деплой — из `playables/`: `bash scripts/deploy-swipe.sh [<id>…|--all]` —
 пересобирает ленту со свежим стампом (виден в левом нижнем углу бара),

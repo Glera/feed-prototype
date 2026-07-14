@@ -84,6 +84,65 @@ export function catalogFeedDogfoodEnabled(env, controlPlaneEnabled, accountEligi
     && String(env?.VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED ?? '').toLowerCase() === 'true';
 }
 
+/** Additive invitation probe; it can never widen the existing effectful surface. */
+export function catalogCanaryDogfoodEnabled(env, feedDogfoodEnabled) {
+  return feedDogfoodEnabled === true
+    && String(env?.VITE_CATALOG_CANARY_DOGFOOD_ENABLED ?? '').toLowerCase() === 'true';
+}
+
+/** The only 404 which means "continue through the ordinary effectful policy". */
+export function catalogCanaryInvitationMissing(status, code) {
+  return status === 404 && code === 'catalog_canary_invitation_not_found';
+}
+
+/** Validate the opaque invitation without accepting any content identity. */
+export function validateCatalogCanaryAuthorityResult(value) {
+  if (!exactKeys(value, [
+    'schema', 'authorizationId', 'authorizationDigest', 'expiresAt', 'replayed',
+  ])) fail('invalid_canary_authority', 'catalog canary authority has an unsupported shape');
+  if (value.schema !== 'catalog.canary-authority-result.v1') {
+    fail('invalid_canary_authority', 'catalog canary authority schema is unsupported');
+  }
+  canonicalUuid(value.authorizationId, 'canary.authorizationId');
+  hash(value.authorizationDigest, 'canary.authorizationDigest');
+  if (typeof value.expiresAt !== 'string'
+    || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)$/.test(value.expiresAt)
+    || !Number.isFinite(Date.parse(value.expiresAt))) {
+    fail('invalid_canary_authority', 'catalog canary authority expiry must be a timezone-aware UTC instant');
+  }
+  if (typeof value.replayed !== 'boolean') {
+    fail('invalid_canary_authority', 'catalog canary authority replayed must be boolean');
+  }
+  return cloneAndFreeze(value);
+}
+
+/** Fresh invitations expire normally; committed allocations remain exact-replayable. */
+export function catalogCanaryAuthorityAllowsAllocation(authority, nowMs = Date.now()) {
+  if (!authority || !Number.isFinite(nowMs)) return false;
+  const expiresAt = Date.parse(authority.expiresAt);
+  return authority.replayed === true || (Number.isFinite(expiresAt) && expiresAt > nowMs);
+}
+
+/**
+ * A delivered canary invitation is also the bounded reload-recovery identity.
+ * Repeating the same exact start request after a lost response replays the
+ * manifest-bound ticket instead of colliding on decision uniqueness. This is
+ * not mid-series resume: callers may mount only a zero-progress active ticket.
+ */
+export function buildCatalogCanaryRunIdentity(authorizationId) {
+  const exact = canonicalUuid(authorizationId, 'canary.authorizationId');
+  return Object.freeze({
+    ticketId: exact,
+    runId: `catalog-canary:${exact}`,
+  });
+}
+
+export function catalogCanaryTicketStartIsSafe(ticket) {
+  return Boolean(ticket
+    && ticket.state === 'active'
+    && ticket.completed_levels === 0);
+}
+
 export function catalogFeedSurface(phase) {
   if (phase == null || phase === 'builtin_fallback') return 'builtin';
   if (phase === 'catalog_ready' || phase === 'catalog_mounted') return 'catalog';
