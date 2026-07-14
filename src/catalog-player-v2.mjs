@@ -232,18 +232,25 @@ export function buildCatalogPlayerLevelBinding(bundleInput, ordinal, frameEpoch)
  * pre-existing query/fragment data are rejected.
  */
 export function buildCatalogFrameNavigation(binding, baseUrl) {
-  const expectedRelative = `runtime-releases/${binding.playableId}/${binding.runtimeArtifactDigest.slice(7)}/index.html`;
+  const expectedRoot = `runtime-releases/${binding.playableId}/${binding.runtimeArtifactDigest.slice(7)}/`;
   const locator = binding.indexLocator;
+  const validContentAddressedPath = (value) => {
+    if (!value.startsWith(expectedRoot) || value.length <= expectedRoot.length
+      || !/^[A-Za-z0-9._/-]+$/.test(value) || value.includes('//')) return false;
+    const suffix = value.slice(expectedRoot.length);
+    return !suffix.split('/').some((segment) => segment === '.' || segment === '..' || segment.length === 0);
+  };
   let target;
-  if (locator === expectedRelative) {
+  if (validContentAddressedPath(locator)) {
     let base;
     try { base = new URL(baseUrl); } catch { fail('invalid_locator', 'baseUrl is invalid'); }
-    target = new URL(`/${expectedRelative}`, base.origin);
+    target = new URL(`/${locator}`, base.origin);
   } else {
     let absolute;
     try { absolute = new URL(locator); } catch { absolute = null; }
     if (!absolute || absolute.protocol !== 'https:' || absolute.username || absolute.password
-      || absolute.pathname !== `/${expectedRelative}` || absolute.search || absolute.hash) {
+      || !validContentAddressedPath(absolute.pathname.slice(1))
+      || absolute.search || absolute.hash) {
       fail('invalid_locator', 'indexLocator is not the exact content-addressed runtime path');
     }
     target = absolute;

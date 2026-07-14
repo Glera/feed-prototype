@@ -125,6 +125,16 @@ const absoluteBundle = bundle();
 absoluteBundle.runtime.indexLocator = `https://runtime.example.test/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/index.html`;
 const absoluteBinding = buildCatalogPlayerLevelBinding(absoluteBundle, 1, 1);
 equal(buildCatalogFrameNavigation(absoluteBinding, 'https://feed.example.test').expectedOrigin, 'https://runtime.example.test');
+const nestedIndexBundle = bundle();
+nestedIndexBundle.runtime.indexLocator = `runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/game/player.html`;
+equal(
+  buildCatalogFrameNavigation(
+    buildCatalogPlayerLevelBinding(nestedIndexBundle, 1, 1),
+    'https://feed.example.test',
+  ).src,
+  `https://feed.example.test/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/game/player.html?level_config=catalog_required&expected_spec_hash=${specHash1}`,
+  'the server-owned descriptor may use any safe file below the exact digest root',
+);
 const mutableBundle = bundle();
 mutableBundle.runtime.indexLocator = 'runtime-releases/marble-sort-swipe/latest/index.html';
 throws(() => buildCatalogFrameNavigation(buildCatalogPlayerLevelBinding(mutableBundle, 1, 1), 'https://feed.example.test'), /content-addressed/);
