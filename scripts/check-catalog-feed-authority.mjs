@@ -9,6 +9,7 @@ import {
   buildCatalogFeedAuthorityRequest,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
+  catalogPendingSlotShouldFallbackForBinding,
   catalogSourceDecisionProjectionReady,
   catalogCanaryAuthorityAllowsAllocation,
   catalogCanaryDogfoodEnabled,
@@ -140,6 +141,26 @@ equal(
   catalogSourceDecisionProjectionReady(false, 'acknowledged', 'projected'),
   false,
   'a failed flush cannot be hidden by stale page-local receipt state',
+);
+equal(
+  catalogPendingSlotShouldFallbackForBinding('authority_pending', true, false),
+  true,
+  'an authoritative document immediately releases an unmapped pending claim',
+);
+equal(
+  catalogPendingSlotShouldFallbackForBinding('authority_pending', true, true),
+  false,
+  'a mapped pending claim remains eligible for catalog authority',
+);
+equal(
+  catalogPendingSlotShouldFallbackForBinding('authority_pending', false, false),
+  false,
+  'an unresolved session retains the cold-start bootstrap window',
+);
+equal(
+  catalogPendingSlotShouldFallbackForBinding('delivery_pending', true, false),
+  false,
+  'binding refresh cannot retrofit an in-flight delivery or shown surface',
 );
 
 // Deterministic clock/epoch regression for the production race. Binding may

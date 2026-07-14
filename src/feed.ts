@@ -74,6 +74,7 @@ import {
   catalogFallbackMatchesBinding,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
+  catalogPendingSlotShouldFallbackForBinding,
   catalogSourceDecisionProjectionReady,
   catalogDogfoodAccountEligible,
   catalogFeedDogfoodEnabled,
@@ -852,6 +853,7 @@ export class Feed {
       for (const exposure of this.cpDeferredExposures) {
         if (!exposure.decisionEmitted) exposure.binding = null;
       }
+      this.failCatalogClaimsWithoutBinding(null);
       return;
     }
 
@@ -879,7 +881,25 @@ export class Feed {
     // A cold backend or temporarily unavailable localStorage can leave early
     // observations waiting. Keep only snapshots that are not durable yet.
     this.cpDeferredExposures = stillDeferred.slice(-64);
+    this.failCatalogClaimsWithoutBinding(next);
     for (const attempt of this.cpAttempts.values()) this.flushControlPlaneAttempt(attempt);
+  }
+
+  private failCatalogClaimsWithoutBinding(
+    bindings: ReadonlyMap<string, BuiltinFeedBindingV1> | null,
+  ): void {
+    for (const slot of [...this.catalogSlots.values()]) {
+      if (!catalogPendingSlotShouldFallbackForBinding(
+        slot.phase,
+        true,
+        bindings?.has(slot.exposure.playableId) === true,
+      )) continue;
+      // The 65s bootstrap exists only while /session is unresolved. Once the
+      // authoritative document says this playable is absent (or bindings are
+      // unavailable), keeping the poster would add latency without any chance
+      // of catalog authority becoming valid.
+      this.activateCatalogBuiltinFallback(slot, 'catalog_binding_unavailable');
+    }
   }
 
   private controlPlaneExposureNeedsRetry(exposure: ControlPlaneExposure): boolean {

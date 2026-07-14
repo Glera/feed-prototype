@@ -118,6 +118,12 @@ export function catalogSourceDecisionProjectionReady(
   eventState: 'pending' | 'rejected' | 'acknowledged' | 'unavailable',
   receiptStatus: 'pending' | 'stored' | 'projected' | 'pending_dependency' | 'rejected' | 'unavailable',
 ): boolean;
+export function catalogPendingSlotShouldFallbackForBinding(
+  phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'
+    | 'builtin_fallback' | 'disposed',
+  bindingsResolved: boolean,
+  hasBinding: boolean,
+): boolean;
 export function buildCatalogFeedAuthorityRequest(
   requestId: string,
   sourceDecisionId: string,

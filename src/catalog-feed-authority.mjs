@@ -202,6 +202,17 @@ export function catalogSourceDecisionProjectionReady(flushed, eventState, receip
     && receiptStatus === 'projected';
 }
 
+/** Resolved session bindings can fail only still-pending catalog claims immediately. */
+export function catalogPendingSlotShouldFallbackForBinding(
+  phase,
+  bindingsResolved,
+  hasBinding,
+) {
+  return phase === 'authority_pending'
+    && bindingsResolved === true
+    && hasBinding !== true;
+}
+
 export function buildCatalogFeedAuthorityRequest(requestId, sourceDecisionId) {
   return Object.freeze({
     schema: 'feed.catalog-authority-request.v1',
