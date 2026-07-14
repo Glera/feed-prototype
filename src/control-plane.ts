@@ -97,9 +97,18 @@ export interface ControlPlanePayloadMap {
   unit_impression: UnitImpressionPayload;
   level_impression: LevelImpressionPayload;
   catalog_level_impression: CatalogLevelImpressionPayload;
+  catalog_level_impression_v2: CatalogLevelImpressionPayload & {
+    skin_hash: string;
+    applied_skin_hash: string;
+    skin_contract_digest: string;
+  };
   builtin_level_impression: BuiltinLevelImpressionPayload;
   configuration_failure: ConfigurationFailurePayload;
   catalog_configuration_failure: CatalogConfigurationFailurePayload;
+  catalog_configuration_failure_v2: CatalogConfigurationFailurePayload & {
+    expected_skin_hash: string;
+    skin_contract_digest: string;
+  };
   unit_exit: UnitExitPayload;
   attempt_start: AttemptStartPayload;
   attempt_result: AttemptResultPayload;

@@ -8,7 +8,9 @@
 import { getInitData } from './telegram';
 import type {
   CatalogRuntimeIdentityV1,
+  CatalogTicketLevelSpecBundle,
   CatalogTicketLevelSpecBundleV1,
+  CatalogTicketLevelSpecBundleV2,
 } from './catalog-player-v2.mjs';
 import type {
   CatalogCanaryAuthorityResultV1,
@@ -286,6 +288,14 @@ export interface CatalogAllocationManifestV1 {
   levels: Array<{ ordinal: number; specHash: string }>;
 }
 
+export interface CatalogAllocationManifestV2 extends Omit<CatalogAllocationManifestV1, 'schema'> {
+  schema: 'series.manifest.v2';
+  skinHash: string;
+  skinContractDigest: string;
+  gameplayFingerprint: string;
+  presentationFingerprint: string;
+}
+
 interface CatalogAllocationDecisionResultBaseV1 {
   schema: 'catalog.allocate-decision-result.v1';
   decisionId: string;
@@ -313,11 +323,27 @@ export type CatalogAllocationDecisionResultV1 = CatalogAllocationDecisionResultB
   }
 );
 
+interface CatalogAllocationDecisionResultBaseV2 extends Omit<CatalogAllocationDecisionResultBaseV1, 'schema'> {
+  schema: 'catalog.allocate-decision-result.v2';
+}
+
+export type CatalogAllocationDecisionResultV2 = CatalogAllocationDecisionResultBaseV2 & {
+  outcome: 'allocated';
+  holdExpiresAt: string;
+  catalog: CatalogAllocationIdentityV1;
+  runtime: CatalogRuntimeIdentityV1;
+  manifest: CatalogAllocationManifestV2;
+};
+
+export type CatalogAllocationDecisionResult =
+  | CatalogAllocationDecisionResultV1
+  | CatalogAllocationDecisionResultV2;
+
 export interface CatalogAllocateAuthorizedResultV2 {
   schema: 'catalog.allocate-authorized-result.v2';
   authorizationId: string;
   authorizationDigest: string;
-  allocation: CatalogAllocationDecisionResultV1;
+  allocation: CatalogAllocationDecisionResult;
 }
 
 /** Additive player-v2 transport; the only real-feed caller is triple-gated. */
@@ -330,13 +356,17 @@ export function apiAllocateAuthorizedCatalogRequired(
 /** Fetch specs through an active server-owned ticket, never by client hashes. */
 export function apiGetCatalogTicketSpecsRequired(
   ticketId: string,
-): Promise<CatalogTicketLevelSpecBundleV1> {
-  return getRequired<CatalogTicketLevelSpecBundleV1>(
+): Promise<CatalogTicketLevelSpecBundle> {
+  return getRequired<CatalogTicketLevelSpecBundle>(
     `/api/catalog/tickets/${encodeURIComponent(ticketId)}/specs`,
   );
 }
 
-export type { CatalogTicketLevelSpecBundleV1 };
+export type {
+  CatalogTicketLevelSpecBundle,
+  CatalogTicketLevelSpecBundleV1,
+  CatalogTicketLevelSpecBundleV2,
+};
 
 export interface ResultResp {
   is_best: boolean;
@@ -351,6 +381,7 @@ export function apiSession(): Promise<SessionResp | null> {
 }
 
 export interface ResultIn {
+  schema?: 'catalog.result.v2';
   mechanic_id: string;
   variant_id: string;
   run_id: string;
@@ -364,6 +395,7 @@ export interface ResultIn {
   series_id?: string;
   ordinal?: number;
   applied_spec_hash?: string;
+  applied_skin_hash?: string;
   complete_challenge_id?: string; // durable post-result action; never sent to /results
   server_confirmed?: boolean; // local outbox state; never sent
   tz_offset_minutes?: number;
@@ -421,6 +453,16 @@ export interface CatalogChestResultV2 extends CatalogResultBaseV2 {
   series_level?: never;
   ordinal?: never;
   applied_spec_hash?: never;
+}
+
+export interface CatalogSkinLevelResultV2 extends CatalogLevelResultV2 {
+  schema: 'catalog.result.v2';
+  applied_skin_hash: string;
+}
+
+export interface CatalogSkinChestResultV2 extends CatalogChestResultV2 {
+  schema: 'catalog.result.v2';
+  applied_skin_hash?: never;
 }
 
 export function apiPostCatalogLevelResultRequired(payload: CatalogLevelResultV2): Promise<ResultResp> {
@@ -488,12 +530,18 @@ export interface CatalogRunTicketViewV2 {
   state: 'active' | 'consumed' | 'expired' | 'revoked' | 'superseded';
 }
 
-export type RunTicketView = LegacyRunTicketView | CatalogRunTicketViewV2;
+export interface CatalogRunTicketViewV3 extends Omit<CatalogRunTicketViewV2, 'schema'> {
+  schema: 'run.ticket.v3';
+  skin_hash: string;
+  skin_contract_digest: string;
+}
+
+export type RunTicketView = LegacyRunTicketView | CatalogRunTicketViewV2 | CatalogRunTicketViewV3;
 
 export function apiStartCatalogRunRequired(
   payload: CatalogRunTicketRequestV2,
-): Promise<CatalogRunTicketViewV2> {
-  return postRequired<CatalogRunTicketViewV2>(
+): Promise<CatalogRunTicketViewV2 | CatalogRunTicketViewV3> {
+  return postRequired<CatalogRunTicketViewV2 | CatalogRunTicketViewV3>(
     '/api/runs/start',
     payload,
     OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,

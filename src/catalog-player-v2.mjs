@@ -142,6 +142,30 @@ function validateSortLevelSpec(value) {
   return value;
 }
 
+function validateSortSkinSpec(value) {
+  if (!exactKeys(value, ['schema', 'skinHash', 'skinContractDigest', 'params'])
+    || value.schema !== 'sort.skin-spec.v1') {
+    fail('invalid_skin', 'SkinSpec envelope must exactly match sort.skin-spec.v1');
+  }
+  hash(value.skinHash, 'SkinSpec.skinHash');
+  hash(value.skinContractDigest, 'SkinSpec.skinContractDigest');
+  const params = value.params;
+  if (!exactKeys(params, [
+    'marbleStyle', 'markerStyle', 'targetShape', 'sourceShape',
+    'backgroundPattern', 'sceneColors', 'roleDisplayColors',
+  ]) || !exactKeys(params.sceneColors, [
+    'ground', 'edge', 'sceneBg', 'boardBg', 'belt', 'outline',
+  ])) {
+    fail('invalid_skin', 'SkinSpec.params has an unsupported shape');
+  }
+  const colors = [...Object.values(params.sceneColors), ...(params.roleDisplayColors || [])];
+  if (!denseArray(params.roleDisplayColors) || params.roleDisplayColors.length !== 6
+    || !colors.every((color) => typeof color === 'string' && /^#[0-9A-F]{6}$/.test(color))) {
+    fail('invalid_skin', 'SkinSpec colors are invalid');
+  }
+  return value;
+}
+
 function validateRuntime(value) {
   if (!exactKeys(value, [
     'releaseId', 'playableId', 'legacyVariantId', 'runtimeContractDigest',
@@ -171,14 +195,18 @@ function validateRuntime(value) {
 
 /** Strictly validate and freeze the server-owned ticket delivery bundle. */
 export function validateCatalogTicketLevelSpecBundle(value) {
-  if (!exactKeys(value, [
+  const skinBearing = value?.schema === 'catalog.ticket-level-spec-bundle.v2';
+  const keys = [
     'schema', 'ticketId', 'ticketState', 'decisionId', 'catalogEntryId',
     'seriesId', 'manifestContentHash', 'runtime', 'levels',
-  ])) {
+    ...(skinBearing ? ['skinHash', 'skinContractDigest', 'skin'] : []),
+  ];
+  if (!exactKeys(value, keys)) {
     fail('invalid_bundle', 'ticket LevelSpec bundle has an unsupported shape');
   }
-  if (value.schema !== 'catalog.ticket-level-spec-bundle.v1' || value.ticketState !== 'active') {
-    fail('invalid_bundle', 'ticket LevelSpec bundle is not active v1');
+  if (!['catalog.ticket-level-spec-bundle.v1', 'catalog.ticket-level-spec-bundle.v2'].includes(value.schema)
+    || value.ticketState !== 'active') {
+    fail('invalid_bundle', 'ticket LevelSpec bundle is not active and versioned');
   }
   uuid(value.ticketId, 'bundle.ticketId');
   uuid(value.decisionId, 'bundle.decisionId');
@@ -186,6 +214,16 @@ export function validateCatalogTicketLevelSpecBundle(value) {
   uuid(value.seriesId, 'bundle.seriesId');
   hash(value.manifestContentHash, 'bundle.manifestContentHash');
   validateRuntime(value.runtime);
+  if (skinBearing) {
+    hash(value.skinHash, 'bundle.skinHash');
+    hash(value.skinContractDigest, 'bundle.skinContractDigest');
+    validateSortSkinSpec(value.skin);
+    if (value.skinHash !== value.skin.skinHash
+      || value.skinContractDigest !== value.skin.skinContractDigest
+      || value.runtime.capabilities.sortSkinSpecV1 !== true) {
+      fail('invalid_bundle', 'bundle SkinSpec differs from its runtime-bound identity');
+    }
+  }
   if (!denseArray(value.levels) || value.levels.length < 1 || value.levels.length > MAX_LEVELS) {
     fail('invalid_bundle', 'bundle.levels must contain 1..6 levels');
   }
@@ -224,6 +262,10 @@ export function buildCatalogPlayerLevelBinding(bundleInput, ordinal, frameEpoch)
     indexLocator: bundle.runtime.indexLocator,
     specHash: level.specHash,
     spec: level.spec,
+    skinHash: bundle.schema === 'catalog.ticket-level-spec-bundle.v2' ? bundle.skinHash : null,
+    skinContractDigest: bundle.schema === 'catalog.ticket-level-spec-bundle.v2'
+      ? bundle.skinContractDigest : null,
+    skin: bundle.schema === 'catalog.ticket-level-spec-bundle.v2' ? bundle.skin : null,
   });
 }
 
@@ -262,6 +304,7 @@ export function buildCatalogFrameNavigation(binding, baseUrl) {
   }
   target.searchParams.set('level_config', 'catalog_required');
   target.searchParams.set('expected_spec_hash', binding.specHash);
+  if (binding.skinHash) target.searchParams.set('expected_skin_hash', binding.skinHash);
   return deepFreeze({
     src: target.href,
     expectedOrigin: target.origin,
@@ -272,7 +315,7 @@ export function buildCatalogFrameNavigation(binding, baseUrl) {
 
 export function buildCatalogConfigurationFailure(binding, reason) {
   if (!FAILURE_REASONS.has(reason)) fail('invalid_failure', 'configuration failure reason is unsupported');
-  return deepFreeze({
+  const result = {
     decision_id: binding.decisionId,
     ticket_id: binding.ticketId,
     series_id: binding.seriesId,
@@ -280,11 +323,16 @@ export function buildCatalogConfigurationFailure(binding, reason) {
     expected_spec_hash: binding.specHash,
     runtime_release_id: binding.runtimeReleaseId,
     reason,
-  });
+  };
+  if (binding.skinHash) {
+    result.expected_skin_hash = binding.skinHash;
+    result.skin_contract_digest = binding.skinContractDigest;
+  }
+  return deepFreeze(result);
 }
 
 export function buildCatalogLevelImpression(binding, impressionId, levelImpressionId) {
-  return deepFreeze({
+  const result = {
     decision_id: binding.decisionId,
     impression_id: uuid(impressionId, 'impression_id'),
     level_impression_id: uuid(levelImpressionId, 'level_impression_id'),
@@ -297,7 +345,13 @@ export function buildCatalogLevelImpression(binding, impressionId, levelImpressi
     runtime_release_id: binding.runtimeReleaseId,
     runtime_contract_digest: binding.runtimeContractDigest,
     runtime_artifact_digest: binding.runtimeArtifactDigest,
-  });
+  };
+  if (binding.skinHash) {
+    result.skin_hash = binding.skinHash;
+    result.applied_skin_hash = binding.skinHash;
+    result.skin_contract_digest = binding.skinContractDigest;
+  }
+  return deepFreeze(result);
 }
 
 function ignored(phase, reason) {
@@ -338,6 +392,7 @@ export class CatalogPlayerV2Session {
       failureReason: this._failureReason,
       ordinal: this.binding.ordinal,
       expectedSpecHash: this.binding.specHash,
+      expectedSkinHash: this.binding.skinHash,
     });
   }
 
@@ -378,15 +433,26 @@ export class CatalogPlayerV2Session {
           type: 'post_configure_level',
           frameEpoch: this.binding.frameEpoch,
           targetOrigin: this.navigation.expectedOrigin,
-          message: deepFreeze({ type: 'configure_level', nonce: this._nonce, spec: this.binding.spec }),
+          message: deepFreeze({
+            type: 'configure_level',
+            nonce: this._nonce,
+            spec: this.binding.spec,
+            ...(this.binding.skin ? { skin: this.binding.skin } : {}),
+          }),
         }],
       });
     }
 
-    if (!exactKeys(event.data, ['type', 'appliedSpecHash', 'runtimeContractDigest', 'runtimeArtifactDigest'])) {
+    const configuredKeys = this.binding.skinHash
+      ? ['type', 'appliedSpecHash', 'appliedSkinHash', 'runtimeContractDigest', 'skinContractDigest', 'runtimeArtifactDigest']
+      : ['type', 'appliedSpecHash', 'runtimeContractDigest', 'runtimeArtifactDigest'];
+    if (!exactKeys(event.data, configuredKeys)) {
       return this._fail('contract');
     }
     if (event.data.appliedSpecHash !== this.binding.specHash) return this._fail('digest');
+    if (this.binding.skinHash && event.data.appliedSkinHash !== this.binding.skinHash) return this._fail('digest');
+    if (this.binding.skinContractDigest
+      && event.data.skinContractDigest !== this.binding.skinContractDigest) return this._fail('contract');
     if (event.data.runtimeContractDigest !== this.binding.runtimeContractDigest) return this._fail('contract');
     if (event.data.runtimeArtifactDigest !== this.binding.runtimeArtifactDigest) return this._fail('runtime');
     if (this._phase === 'configured') return ignored(this._phase, 'duplicate_configured');
@@ -428,6 +494,7 @@ export class CatalogPlayerV2Session {
         frameEpoch: this.binding.frameEpoch,
         ordinal: this.binding.ordinal,
         appliedSpecHash: this.binding.specHash,
+        appliedSkinHash: this.binding.skinHash,
       }));
     }
     return deepFreeze({ status: 'accepted', phase: this._phase, reason: null, effects });

@@ -40,6 +40,22 @@ export interface CatalogTicketLevelSpecBundleV1 {
   levels: Array<{ ordinal: number; specHash: string; spec: SortLevelSpecV1 }>;
 }
 
+export interface SortSkinSpecV1 {
+  schema: 'sort.skin-spec.v1';
+  skinHash: string;
+  skinContractDigest: string;
+  params: Record<string, unknown>;
+}
+
+export interface CatalogTicketLevelSpecBundleV2 extends Omit<CatalogTicketLevelSpecBundleV1, 'schema'> {
+  schema: 'catalog.ticket-level-spec-bundle.v2';
+  skinHash: string;
+  skinContractDigest: string;
+  skin: SortSkinSpecV1;
+}
+
+export type CatalogTicketLevelSpecBundle = CatalogTicketLevelSpecBundleV1 | CatalogTicketLevelSpecBundleV2;
+
 export interface CatalogPlayerLevelBinding {
   frameEpoch: number;
   decisionId: string;
@@ -55,6 +71,9 @@ export interface CatalogPlayerLevelBinding {
   indexLocator: string;
   specHash: string;
   spec: SortLevelSpecV1;
+  skinHash: string | null;
+  skinContractDigest: string | null;
+  skin: SortSkinSpecV1 | null;
 }
 
 export interface CatalogFrameNavigation {
@@ -71,6 +90,8 @@ export interface CatalogConfigurationFailurePayload {
   ordinal: number;
   expected_spec_hash: string;
   runtime_release_id: string;
+  expected_skin_hash?: string;
+  skin_contract_digest?: string;
   reason: CatalogFailureReason;
 }
 
@@ -87,6 +108,9 @@ export interface CatalogLevelImpressionPayload {
   runtime_release_id: string;
   runtime_contract_digest: string;
   runtime_artifact_digest: string;
+  skin_hash?: string;
+  applied_skin_hash?: string;
+  skin_contract_digest?: string;
 }
 
 export interface CatalogMessageEvent {
@@ -96,8 +120,8 @@ export interface CatalogMessageEvent {
 }
 
 export type CatalogPlayerEffect =
-  | { type: 'post_configure_level'; frameEpoch: number; targetOrigin: string; message: { type: 'configure_level'; nonce: string; spec: SortLevelSpecV1 } }
-  | { type: 'catalog_reveal_ready'; frameEpoch: number; ordinal: number; appliedSpecHash: string }
+  | { type: 'post_configure_level'; frameEpoch: number; targetOrigin: string; message: { type: 'configure_level'; nonce: string; spec: SortLevelSpecV1; skin?: SortSkinSpecV1 } }
+  | { type: 'catalog_reveal_ready'; frameEpoch: number; ordinal: number; appliedSpecHash: string; appliedSkinHash: string | null }
   | { type: 'catalog_configuration_failure'; frameEpoch: number; payload: CatalogConfigurationFailurePayload };
 
 export interface CatalogPlayerTransition {
@@ -108,7 +132,7 @@ export interface CatalogPlayerTransition {
 }
 
 export interface CatalogPlayerSessionOptions {
-  bundle: CatalogTicketLevelSpecBundleV1;
+  bundle: CatalogTicketLevelSpecBundle;
   ordinal: number;
   frameEpoch: number;
   frameSource: object;
@@ -127,8 +151,8 @@ export function catalogPlayerV2Enabled(
   controlPlaneEnabled: boolean,
   accountEligible: boolean,
 ): boolean;
-export function validateCatalogTicketLevelSpecBundle(value: unknown): CatalogTicketLevelSpecBundleV1;
-export function buildCatalogPlayerLevelBinding(bundle: CatalogTicketLevelSpecBundleV1, ordinal: number, frameEpoch: number): CatalogPlayerLevelBinding;
+export function validateCatalogTicketLevelSpecBundle(value: unknown): CatalogTicketLevelSpecBundle;
+export function buildCatalogPlayerLevelBinding(bundle: CatalogTicketLevelSpecBundle, ordinal: number, frameEpoch: number): CatalogPlayerLevelBinding;
 export function buildCatalogFrameNavigation(binding: CatalogPlayerLevelBinding, baseUrl: string): CatalogFrameNavigation;
 export function buildCatalogConfigurationFailure(binding: CatalogPlayerLevelBinding, reason: CatalogFailureReason): CatalogConfigurationFailurePayload;
 export function buildCatalogLevelImpression(binding: CatalogPlayerLevelBinding, impressionId: string, levelImpressionId: string): CatalogLevelImpressionPayload;
@@ -145,6 +169,7 @@ export class CatalogPlayerV2Session {
     failureReason: CatalogFailureReason | null;
     ordinal: number;
     expectedSpecHash: string;
+    expectedSkinHash: string | null;
   };
   handleMessage(event: CatalogMessageEvent, frameEpoch: number): CatalogPlayerTransition;
   setVisible(visible: boolean, frameEpoch: number): CatalogPlayerTransition;

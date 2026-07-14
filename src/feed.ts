@@ -37,8 +37,8 @@ import {
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
-  type CatalogAllocationDecisionResultV1, type CatalogRunTicketRequestV2,
-  type CatalogRunTicketViewV2,
+  type CatalogAllocationDecisionResult, type CatalogRunTicketRequestV2,
+  type CatalogRunTicketViewV2, type CatalogRunTicketViewV3,
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
   type SessionResp,
 } from './api';
@@ -59,7 +59,7 @@ import {
   validateCatalogTicketLevelSpecBundle,
   type CatalogFailureReason,
   type CatalogPlayerEffect,
-  type CatalogTicketLevelSpecBundleV1,
+  type CatalogTicketLevelSpecBundle,
 } from './catalog-player-v2.mjs';
 import {
   CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS,
@@ -321,9 +321,9 @@ type CatalogFeedSlot = {
   authorityTimerStage: 'bootstrap' | 'projection' | 'delivery' | null;
   configurationTimer: number | null;
   ticketRequest: CatalogRunTicketRequestV2 | null;
-  ticket: CatalogRunTicketViewV2 | null;
-  allocation: Extract<CatalogAllocationDecisionResultV1, { outcome: 'allocated' }> | null;
-  bundle: CatalogTicketLevelSpecBundleV1 | null;
+  ticket: CatalogRunTicketViewV2 | CatalogRunTicketViewV3 | null;
+  allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }> | null;
+  bundle: CatalogTicketLevelSpecBundle | null;
   frameEpoch: number;
   session: CatalogPlayerV2Session | null;
   ordinal: number;
@@ -1299,7 +1299,7 @@ export class Feed {
       }
       const ticket = start.latest;
       const exactCanaryTicket = canaryAuthority && ticket
-        && 'schema' in ticket && ticket.schema === 'run.ticket.v2'
+        && 'schema' in ticket && ['run.ticket.v2', 'run.ticket.v3'].includes(ticket.schema)
         && ticket.ticket_id === ticketRequest.ticket_id
         && ticket.run_id === ticketRequest.run_id
         && ticket.decision_id === ticketRequest.decision_id;
@@ -1326,13 +1326,13 @@ export class Feed {
         return;
       }
       if (start.status !== 'ok' || start.pending !== 0 || !ticket
-        || !('schema' in ticket) || ticket.schema !== 'run.ticket.v2'
+        || !('schema' in ticket) || !['run.ticket.v2', 'run.ticket.v3'].includes(ticket.schema)
         || ticket.ticket_id !== ticketRequest.ticket_id
         || ticket.run_id !== ticketRequest.run_id || ticket.state !== 'active') {
         throw new Error(`catalog ticket start did not confirm (${start.status})`);
       }
 
-      const catalogTicket = ticket as CatalogRunTicketViewV2;
+      const catalogTicket = ticket as CatalogRunTicketViewV2 | CatalogRunTicketViewV3;
 
       const rawBundle = await apiGetCatalogTicketSpecsRequired(catalogTicket.ticket_id);
       if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') {
@@ -1370,9 +1370,9 @@ export class Feed {
   }
 
   private assertCatalogDeliveryClosure(
-    allocation: Extract<CatalogAllocationDecisionResultV1, { outcome: 'allocated' }>,
-    ticket: CatalogRunTicketViewV2,
-    bundle: CatalogTicketLevelSpecBundleV1,
+    allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }>,
+    ticket: CatalogRunTicketViewV2 | CatalogRunTicketViewV3,
+    bundle: CatalogTicketLevelSpecBundle,
   ): void {
     const manifestLevels = allocation.manifest.levels;
     const exact = bundle.ticketId === ticket.ticket_id
@@ -1394,7 +1394,16 @@ export class Feed {
       && bundle.levels.length === manifestLevels.length
       && bundle.levels.every((level, index) => level.ordinal === index + 1
         && level.specHash === ticket.levels[index]?.spec_hash
-        && level.specHash === manifestLevels[index]?.specHash);
+        && level.specHash === manifestLevels[index]?.specHash)
+      && (allocation.schema === 'catalog.allocate-decision-result.v2'
+        ? ticket.schema === 'run.ticket.v3'
+          && bundle.schema === 'catalog.ticket-level-spec-bundle.v2'
+          && allocation.manifest.skinHash === ticket.skin_hash
+          && allocation.manifest.skinHash === bundle.skinHash
+          && allocation.manifest.skinContractDigest === ticket.skin_contract_digest
+          && allocation.manifest.skinContractDigest === bundle.skinContractDigest
+        : ticket.schema === 'run.ticket.v2'
+          && bundle.schema === 'catalog.ticket-level-spec-bundle.v1');
     if (!exact) throw new Error('ticket/spec bundle differs from the authorized allocation closure');
   }
 
@@ -2227,6 +2236,12 @@ export class Feed {
       series_id: catalog.bundle.seriesId,
       ordinal: level.ordinal,
       applied_spec_hash: level.specHash,
+      ...(catalog.bundle.schema === 'catalog.ticket-level-spec-bundle.v2'
+        ? {
+          schema: 'catalog.result.v2' as const,
+          applied_skin_hash: catalog.bundle.skinHash,
+        }
+        : {}),
       tz_offset_minutes: currentTzOffsetMinutes(),
     }).then((receipt) => {
       if (receipt.status === 'confirmed' && catalogResultAllowsProgress(receipt, runId)) {
@@ -3529,6 +3544,9 @@ export class Feed {
       expected_puzzles: series.puzzles,
       run_ticket: catalog.ticketRequest,
       series_id: catalog.bundle.seriesId,
+      ...(catalog.bundle.schema === 'catalog.ticket-level-spec-bundle.v2'
+        ? { schema: 'catalog.result.v2' as const }
+        : {}),
       tz_offset_minutes: currentTzOffsetMinutes(),
     }).then((receipt) => {
       if (receipt.status === 'confirmed'
@@ -6990,7 +7008,9 @@ export class Feed {
       } else if (effect.type === 'catalog_configuration_failure') {
         if (!slot.failureEmitted) {
           const eventId = queueControlPlaneEvent(
-            'catalog_configuration_failure',
+            slot.session?.binding.skinHash
+              ? 'catalog_configuration_failure_v2'
+              : 'catalog_configuration_failure',
             effect.payload,
             new Date().toISOString(),
           );
@@ -7055,7 +7075,9 @@ export class Feed {
     }
     if (level.emitted) return;
     const eventId = queueControlPlaneEvent(
-      'catalog_level_impression',
+      session.binding.skinHash
+        ? 'catalog_level_impression_v2'
+        : 'catalog_level_impression',
       buildCatalogLevelImpression(session.binding, exposure.impressionId, level.levelImpressionId),
       level.occurredAt,
     );

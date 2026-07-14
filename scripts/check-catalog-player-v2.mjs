@@ -39,6 +39,8 @@ const contractDigest = 'c'.repeat(64);
 const artifactDigest = `sha256:${'d'.repeat(64)}`;
 const specHash1 = '1'.repeat(64);
 const specHash2 = '2'.repeat(64);
+const skinHash = '5'.repeat(64);
+const skinContractDigest = '6'.repeat(64);
 
 function spec(specHash, seed) {
   return {
@@ -85,6 +87,38 @@ function bundle() {
   };
 }
 
+function skinBundle() {
+  const value = bundle();
+  value.schema = 'catalog.ticket-level-spec-bundle.v2';
+  value.runtime.capabilities.sortSkinSpecV1 = true;
+  value.skinHash = skinHash;
+  value.skinContractDigest = skinContractDigest;
+  value.skin = {
+    schema: 'sort.skin-spec.v1',
+    skinHash,
+    skinContractDigest,
+    params: {
+      marbleStyle: 'glass',
+      markerStyle: 'ring',
+      targetShape: 'rounded',
+      sourceShape: 'rounded',
+      backgroundPattern: 'grid',
+      sceneColors: {
+        ground: '#14213D',
+        edge: '#FCA311',
+        sceneBg: '#000000',
+        boardBg: '#1F2937',
+        belt: '#374151',
+        outline: '#E5E7EB',
+      },
+      // Deliberately not the canonical gameplay palette: this also keeps the
+      // first generated probe exercising the actual distance validator.
+      roleDisplayColors: ['#0B6E4F', '#FFB000', '#648FFF', '#DC267F', '#785EF0', '#FE6100'],
+    },
+  };
+  return value;
+}
+
 equal(catalogPlayerV2Enabled({}, true, true), false, 'catalog is off by default');
 equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, false, true), false, 'CP is a second gate');
 equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, true, false), false,
@@ -112,6 +146,16 @@ throws(() => validateCatalogTicketLevelSpecBundle(wrongEmbeddedHash), /differs f
 const wrongContract = bundle();
 wrongContract.levels[0].spec.runtimeContractDigest = '4'.repeat(64);
 throws(() => validateCatalogTicketLevelSpecBundle(wrongContract), /runtime contract differs/);
+
+const frozenSkinBundle = validateCatalogTicketLevelSpecBundle(skinBundle());
+equal(frozenSkinBundle.skinHash, skinHash, 'skin-bearing bundle preserves exact skin identity');
+equal(Object.isFrozen(frozenSkinBundle.skin.params), true, 'skin params are frozen with the delivery closure');
+const missingSkinCapability = skinBundle();
+delete missingSkinCapability.runtime.capabilities.sortSkinSpecV1;
+throws(() => validateCatalogTicketLevelSpecBundle(missingSkinCapability), /runtime-bound identity/);
+const wrongEmbeddedSkinHash = skinBundle();
+wrongEmbeddedSkinHash.skin.skinHash = '7'.repeat(64);
+throws(() => validateCatalogTicketLevelSpecBundle(wrongEmbeddedSkinHash), /runtime-bound identity/);
 
 const binding = buildCatalogPlayerLevelBinding(bundle(), 1, 7);
 equal(binding.ordinal, 1);
@@ -141,6 +185,24 @@ equal(
 const mutableBundle = bundle();
 mutableBundle.runtime.indexLocator = 'runtime-releases/marble-sort-swipe/latest/index.html';
 throws(() => buildCatalogFrameNavigation(buildCatalogPlayerLevelBinding(mutableBundle, 1, 1), 'https://feed.example.test'), /content-addressed/);
+
+const skinBinding = buildCatalogPlayerLevelBinding(skinBundle(), 1, 22);
+equal(skinBinding.skinHash, skinHash);
+equal(
+  buildCatalogFrameNavigation(skinBinding, 'https://feed.example.test').src,
+  `https://feed.example.test/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/index.html?level_config=catalog_required&expected_spec_hash=${specHash1}&expected_skin_hash=${skinHash}`,
+  'skin identity is committed before iframe navigation',
+);
+deepEqual(Object.keys(buildCatalogConfigurationFailure(skinBinding, 'digest')).sort(), [
+  'decision_id', 'expected_skin_hash', 'expected_spec_hash', 'ordinal', 'reason',
+  'runtime_release_id', 'series_id', 'skin_contract_digest', 'ticket_id',
+]);
+deepEqual(Object.keys(buildCatalogLevelImpression(skinBinding, ids.impression, ids.levelImpression)).sort(), [
+  'applied_skin_hash', 'applied_spec_hash', 'catalog_entry_id', 'decision_id', 'impression_id',
+  'level_impression_id', 'level_spec_hash', 'ordinal', 'runtime_artifact_digest',
+  'runtime_contract_digest', 'runtime_release_id', 'series_id', 'skin_contract_digest',
+  'skin_hash', 'ticket_id',
+]);
 
 const failure = buildCatalogConfigurationFailure(binding, 'mount');
 deepEqual(Object.keys(failure).sort(), [
@@ -244,6 +306,50 @@ equal(wrongApplied.handleMessage({
   origin: 'https://feed.example.test',
   data: { ...configuredData, appliedSpecHash: specHash2 },
 }, 21).reason, 'digest', 'applied hash must equal the current manifest ordinal');
+
+const wrongSkinFrame = {};
+const wrongSkinApplied = new CatalogPlayerV2Session({
+  bundle: skinBundle(), ordinal: 1, frameEpoch: 23, frameSource: wrongSkinFrame,
+  baseUrl: 'https://feed.example.test',
+});
+wrongSkinApplied.handleMessage({
+  source: wrongSkinFrame, origin: 'https://feed.example.test', data: readyData,
+}, 23);
+const wrongSkinResult = wrongSkinApplied.handleMessage({
+  source: wrongSkinFrame,
+  origin: 'https://feed.example.test',
+  data: {
+    ...configuredData,
+    appliedSkinHash: '8'.repeat(64),
+    skinContractDigest,
+  },
+}, 23);
+equal(wrongSkinResult.reason, 'digest', 'a different applied skin fails closed');
+equal(wrongSkinResult.effects[0].type, 'catalog_configuration_failure');
+equal(wrongSkinApplied.setVisible(true, 23).effects.length, 0,
+  'a skin digest failure cannot create an impression or attempt trigger');
+
+const exactSkinFrame = {};
+const exactSkinSession = new CatalogPlayerV2Session({
+  bundle: skinBundle(), ordinal: 1, frameEpoch: 24, frameSource: exactSkinFrame,
+  baseUrl: 'https://feed.example.test',
+});
+exactSkinSession.setVisible(true, 24);
+equal(exactSkinSession.handleMessage({
+  source: exactSkinFrame, origin: 'https://feed.example.test', data: readyData,
+}, 24).effects[0].message.skin.skinHash, skinHash, 'configure message carries exact SkinSpec');
+const exactSkinConfigured = exactSkinSession.handleMessage({
+  source: exactSkinFrame,
+  origin: 'https://feed.example.test',
+  data: {
+    ...configuredData,
+    appliedSkinHash: skinHash,
+    skinContractDigest,
+  },
+}, 24);
+equal(exactSkinConfigured.status, 'accepted');
+equal(exactSkinConfigured.effects[0].appliedSkinHash, skinHash,
+  'reveal is released only after the double ACK');
 
 const premature = new CatalogPlayerV2Session({
   bundle: bundle(), ordinal: 1, frameEpoch: 11, frameSource, baseUrl: 'https://feed.example.test',

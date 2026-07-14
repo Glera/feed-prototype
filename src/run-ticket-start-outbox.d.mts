@@ -55,7 +55,13 @@ export interface DurableCatalogRunTicketViewV2 {
   state: 'active' | 'consumed' | 'expired' | 'revoked' | 'superseded';
 }
 
-export type DurableRunTicketView = DurableLegacyRunTicketView | DurableCatalogRunTicketViewV2;
+export interface DurableCatalogRunTicketViewV3 extends Omit<DurableCatalogRunTicketViewV2, 'schema'> {
+  schema: 'run.ticket.v3';
+  skin_hash: string;
+  skin_contract_digest: string;
+}
+
+export type DurableRunTicketView = DurableLegacyRunTicketView | DurableCatalogRunTicketViewV2 | DurableCatalogRunTicketViewV3;
 
 export interface RunTicketStartFlushResult {
   status: 'ok' | 'retry' | 'invalid_response' | 'storage_error';

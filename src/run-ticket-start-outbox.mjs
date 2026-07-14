@@ -222,8 +222,9 @@ function validateResponse(value, request) {
     'decision_id', 'catalog_entry_id', 'series_id', 'runtime_release_id',
     'runtime_contract_digest', 'runtime_artifact_digest', 'manifest_content_hash',
     'levels', 'expected_levels', 'completed_levels', 'next_result_at', 'expires_at', 'state',
+    ...(value.schema === 'run.ticket.v3' ? ['skin_hash', 'skin_contract_digest'] : []),
   ];
-  if (!hasExactKeys(value, keys) || value.schema !== 'run.ticket.v2'
+  if (!hasExactKeys(value, keys) || !['run.ticket.v2', 'run.ticket.v3'].includes(value.schema)
     || value.kind !== 'series' || value.mechanic_id !== request.mechanic_id
     || value.variant_id !== request.variant_id || value.decision_id !== request.decision_id) return null;
   for (const key of [
@@ -236,6 +237,9 @@ function validateResponse(value, request) {
     || typeof value.runtime_artifact_digest !== 'string' || !DIGEST_RE.test(value.runtime_artifact_digest)
     || typeof value.next_result_at !== 'string' || value.next_result_at.length === 0
     || typeof value.expires_at !== 'string' || value.expires_at.length === 0) return null;
+  if (value.schema === 'run.ticket.v3'
+    && (!HASH_RE.test(String(value.skin_hash || ''))
+      || !HASH_RE.test(String(value.skin_contract_digest || '')))) return null;
   if (!Array.isArray(value.levels) || value.levels.length < 1 || value.levels.length > 6
     || value.levels.some((level, index) => !hasExactKeys(level, ['ordinal', 'spec_hash'])
       || level.ordinal !== index + 1 || typeof level.spec_hash !== 'string' || !HASH_RE.test(level.spec_hash))) {

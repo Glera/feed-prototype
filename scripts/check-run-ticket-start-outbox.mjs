@@ -121,6 +121,15 @@ function v2View(received, state = 'active') {
   };
 }
 
+function v3View(received, state = 'active') {
+  return {
+    ...v2View(received, state),
+    schema: 'run.ticket.v3',
+    skin_hash: '5'.repeat(64),
+    skin_contract_digest: '6'.repeat(64),
+  };
+}
+
 const v2Storage = new MemoryStorage();
 let v2Mode = 'active';
 const v2Outbox = new DurableRunTicketStartOutbox({
@@ -148,6 +157,36 @@ assert.equal(v2Confirmed.status, 'ok');
 assert.equal(v2Confirmed.confirmed, 1);
 assert.equal(v2Confirmed.latest.schema, 'run.ticket.v2');
 assert.equal(v2Confirmed.latest.levels[1].ordinal, 2);
+
+const v3Storage = new MemoryStorage();
+let v3Invalid = false;
+const v3Outbox = new DurableRunTicketStartOutbox({
+  storage: v3Storage,
+  queueKey: 'v3-queue',
+  deadLetterKey: 'v3-dead',
+  startRun: async (received) => {
+    const view = v3View(received);
+    if (v3Invalid) delete view.skin_hash;
+    return view;
+  },
+});
+assert.equal(v3Outbox.enqueue({
+  ...v2Request,
+  ticket_id: '00000000-0000-4000-8000-000000000031',
+  run_id: 'catalog-skin-root-1',
+}), true);
+const v3Confirmed = await v3Outbox.flush();
+assert.equal(v3Confirmed.status, 'ok');
+assert.equal(v3Confirmed.latest.schema, 'run.ticket.v3');
+assert.equal(v3Confirmed.latest.skin_hash, '5'.repeat(64));
+v3Invalid = true;
+v3Outbox.enqueue({
+  ...v2Request,
+  ticket_id: '00000000-0000-4000-8000-000000000032',
+  run_id: 'catalog-skin-root-2',
+});
+assert.equal((await v3Outbox.flush()).status, 'invalid_response',
+  'skin ticket without the all-or-none skin identity remains durable');
 
 v2Mode = 'invalid-manifest';
 v2Outbox.enqueue({ ...v2Request, ticket_id: '00000000-0000-4000-8000-000000000021', run_id: 'catalog-root-2' });
@@ -192,4 +231,4 @@ assert.throws(
   /decision_id must be a canonical UUID/,
 );
 
-console.log('run-ticket start outbox: legacy + strict catalog-v2 checks passed');
+console.log('run-ticket start outbox: legacy + strict catalog-v2/v3 checks passed');
