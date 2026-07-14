@@ -18,6 +18,7 @@ import {
   DurableRunTicketStartOutbox,
   type RunTicketStartFlushResult,
 } from './run-ticket-start-outbox.mjs';
+import { ResultReceiptWaiters } from './result-receipts.mjs';
 
 const LEGACY_KEY = 'swipe_pending_results_v1';
 const LEGACY_EVER_KEY = 'swipe_stars_ever_v1';
@@ -32,6 +33,31 @@ export interface ConfirmedBalances {
   stars: number;
   puzzles: number | null;
   challenge?: ChallengeComplete;
+}
+
+export interface ResultTerminalEvent {
+  runId: string;
+  ticketId: string | null;
+  stage: string;
+  status: number;
+  code: string | null;
+}
+
+export type ResultReceipt =
+  | { runId: string; status: 'confirmed'; balances: ConfirmedBalances }
+  | { runId: string; status: 'rejected'; code: string | null; httpStatus: number }
+  | { runId: string; status: 'storage_error'; code: 'result_not_persisted' };
+
+const resultTerminalListeners = new Set<(event: ResultTerminalEvent) => void>();
+const resultReceiptWaiters = new ResultReceiptWaiters<ResultReceipt>();
+
+export function onResultTerminal(listener: (event: ResultTerminalEvent) => void): () => void {
+  resultTerminalListeners.add(listener);
+  return () => resultTerminalListeners.delete(listener);
+}
+
+function settleResultReceipt(receipt: ResultReceipt): void {
+  resultReceiptWaiters.settle(receipt);
 }
 
 function telegramUserId(): string | null {
@@ -210,6 +236,27 @@ export function pendingCount(): number {
 
 /** Enqueue a win and try to flush immediately. */
 export function queueResult(r: ResultIn): Promise<ConfirmedBalances | null> {
+  persistResult(r);
+  return flushResults();
+}
+
+/**
+ * Persist a result and wait for that exact run's server receipt. Unlike
+ * `queueResult`, this never treats another item from the shared flush as this
+ * run's confirmation. Used by catalog chest presentation, where a false
+ * positive would paint a reward after recall.
+ */
+export function queueResultWithReceipt(r: ResultIn): Promise<ResultReceipt> {
+  const receipt = resultReceiptWaiters.wait(r.run_id);
+  if (!persistResult(r)) {
+    settleResultReceipt({ runId: r.run_id, status: 'storage_error', code: 'result_not_persisted' });
+    return receipt;
+  }
+  void flushResults();
+  return receipt;
+}
+
+function persistResult(r: ResultIn): boolean {
   const q = load();
   if (!q.some((x) => x.run_id === r.run_id)) {
     q.push(r);
@@ -219,7 +266,7 @@ export function queueResult(r: ResultIn): Promise<ConfirmedBalances | null> {
       localStorage.setItem(keys.ever, String(starsEverQueued() + (r.stars ?? 1)));
     } catch { /* noop */ }
   }
-  return flushResults();
+  return load().some((item) => item.run_id === r.run_id);
 }
 
 let flushPromise: Promise<ConfirmedBalances | null> | null = null;
@@ -252,7 +299,7 @@ async function flushLoop(): Promise<ConfirmedBalances | null> {
       }
       if (ticket.state === 'expired') {
         console.warn(`[results] dropping expired run ticket ${ticket.ticket_id}`);
-        dropResult(result.run_id);
+        notifyTerminalResult(result, 'ticket start', 410, 'catalog_ticket_expired');
         continue;
       }
       const waitMs = Date.parse(ticket.next_result_at) - Date.now();
@@ -289,6 +336,7 @@ async function flushLoop(): Promise<ConfirmedBalances | null> {
         challenge,
       };
     }
+    settleResultReceipt({ runId: result.run_id, status: 'confirmed', balances: confirmed });
     save(load().filter((candidate) => candidate.run_id !== result.run_id));
   }
   return confirmed;
@@ -304,9 +352,37 @@ function dropTerminalResult(result: ResultIn, error: unknown, stage: string): bo
   // how the backend retires ticketless entries left by an old client build.
   // Network/auth/rate-limit/too-early failures remain durable in the queue.
   if (![400, 404, 409, 410, 422, 428].includes(error.status)) return false;
-  console.warn(`[results] dropping rejected outbox item ${result.run_id} at ${stage}: ${error.message}`);
-  dropResult(result.run_id);
+  notifyTerminalResult(result, stage, error.status, error.code);
   return true;
+}
+
+function notifyTerminalResult(
+  result: ResultIn,
+  stage: string,
+  status: number,
+  code: string | null,
+): void {
+  console.warn(
+    `[results] dropping rejected outbox item ${result.run_id} at ${stage}`
+      + ` (HTTP ${status}${code ? `, ${code}` : ''})`,
+  );
+  const terminal: ResultTerminalEvent = {
+    runId: result.run_id,
+    ticketId: result.run_ticket?.ticket_id ?? null,
+    stage,
+    status,
+    code,
+  };
+  dropResult(result.run_id);
+  settleResultReceipt({
+    runId: result.run_id,
+    status: 'rejected',
+    code,
+    httpStatus: status,
+  });
+  for (const listener of resultTerminalListeners) {
+    try { listener(terminal); } catch { /* diagnostics must not block queue progress */ }
+  }
 }
 
 /** Clear the queue (used by the debug reset). */

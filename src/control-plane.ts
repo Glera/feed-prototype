@@ -177,6 +177,13 @@ export function controlPlaneQueueState(): { pending: number; deadLetters: number
   };
 }
 
+export function controlPlaneEventState(
+  eventId: string | null,
+): 'pending' | 'rejected' | 'acknowledged' | 'unavailable' {
+  if (!outbox || !eventId) return 'unavailable';
+  return outbox.eventState(eventId);
+}
+
 function onVisibilityChange(): void {
   const nextForeground = !document.hidden;
   if (nextForeground === foreground) return;

@@ -46,6 +46,7 @@ export class DurableControlPlaneOutbox {
   pendingCount(): number;
   deadLetterCount(): number;
   deadLetters(): ControlPlaneDeadLetter[];
+  eventState(eventId: string): 'pending' | 'rejected' | 'acknowledged';
   nextRetryAt(): number;
   clear(): void;
 }

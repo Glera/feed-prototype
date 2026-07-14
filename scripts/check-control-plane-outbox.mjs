@@ -54,6 +54,7 @@ assert.equal(event0.seq, 0);
 assert.equal(event1.seq, 1);
 assert.equal(event0.client_instance_id, event1.client_instance_id);
 event0.payload.mutated_after_enqueue = true;
+assert.equal(first.eventState(event0.event_id), 'pending');
 
 // Reload sees the same durable queue and client sequence.
 const reloaded = new DurableControlPlaneOutbox(options);
@@ -64,6 +65,8 @@ assert.deepEqual(
   { status: 'ok', acknowledged: 1, rejected: 1, pending: 0 },
 );
 assert.equal(reloaded.deadLetterCount(), 1);
+assert.equal(reloaded.eventState(event0.event_id), 'acknowledged');
+assert.equal(reloaded.eventState(event1.event_id), 'rejected');
 assert.equal(reloaded.deadLetters()[0].rejectReason, 'invalid_payload');
 assert.equal(requests[0][0].payload.mutated_after_enqueue, undefined);
 
@@ -121,4 +124,4 @@ await joined;
 assert.equal(coalesced.pendingCount(), 0);
 assert.equal(requests.at(-1)[0].event_id, coalescedEvent.event_id);
 
-console.log('control-plane outbox: 28 assertions passed');
+console.log('control-plane outbox: 31 assertions passed');

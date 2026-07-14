@@ -1,0 +1,93 @@
+export interface CatalogFeedAuthorityRequestV1 {
+  schema: 'feed.catalog-authority-request.v1';
+  requestId: string;
+  sourceDecisionId: string;
+}
+
+export interface CatalogBuiltinFallbackV1 {
+  mappingId: string;
+  playableId: string;
+  variantId: string;
+  catalogMechanic: string;
+}
+
+export type CatalogFeedAuthorityResultV1 = {
+  schema: 'feed.catalog-authority-result.v1';
+  requestId: string;
+  sourceDecisionId: string;
+  planId: string;
+  planDigest: string;
+} & (
+  | {
+    outcome: 'catalog_authorized';
+    authorizationId: string;
+    authorizationDigest: string;
+    expiresAt: string;
+    fallback: null;
+  }
+  | {
+    outcome: 'builtin_fallback';
+    authorizationId: null;
+    authorizationDigest: null;
+    expiresAt: null;
+    fallback: CatalogBuiltinFallbackV1;
+  }
+);
+
+export interface BuiltinBindingLike {
+  mapping_id: string;
+  playable_id: string;
+  variant_id: string;
+  catalog_mechanic: string;
+}
+
+export class CatalogFeedAuthorityContractError extends Error {
+  readonly code: string;
+}
+
+export function catalogFeedDogfoodEnabled(
+  env: Record<string, unknown> | undefined,
+  controlPlaneEnabled: boolean,
+): boolean;
+export function catalogFeedSurface(
+  phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'
+    | 'builtin_fallback' | 'disposed' | null,
+): 'poster_only' | 'catalog' | 'builtin';
+export function catalogFeedUsesBuiltinImpression(
+  phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'
+    | 'builtin_fallback' | 'disposed' | null,
+): boolean;
+export function catalogFeedMustEvictFrame(
+  phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'
+    | 'builtin_fallback' | 'disposed' | null,
+  hasFrame: boolean,
+): boolean;
+export function catalogAuthorityStartEligible(
+  phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'
+    | 'builtin_fallback' | 'disposed',
+  authorityStarted: boolean,
+  decisionEmitted: boolean,
+): boolean;
+export function buildCatalogFeedAuthorityRequest(
+  requestId: string,
+  sourceDecisionId: string,
+): CatalogFeedAuthorityRequestV1;
+export function validateCatalogFeedAuthorityResult(
+  value: unknown,
+  request: CatalogFeedAuthorityRequestV1,
+): CatalogFeedAuthorityResultV1;
+export function catalogFallbackMatchesBinding(
+  fallback: CatalogBuiltinFallbackV1 | null,
+  binding: BuiltinBindingLike | null,
+): boolean;
+export function catalogRecallRecoveryEffect(
+  code: string | null,
+  ticketId: string | null,
+  activeTicketId: string,
+): Readonly<{
+  type: 'catalog_recall_recovery';
+  closeControlPlane: true;
+  claimReward: false;
+  restore: 'builtin';
+  message: 'Серия обновилась';
+}> | null;

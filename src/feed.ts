@@ -31,21 +31,49 @@ import {
 } from './collections';
 import {
   apiSession, apiMe, variantIdForMechanic,
+  apiAllocateAuthorizedCatalogRequired, apiGetCatalogFeedAuthorityRequired,
+  apiGetCatalogTicketSpecsRequired, ApiRequestError,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
+  type CatalogAllocationDecisionResultV1, type CatalogRunTicketRequestV2,
+  type CatalogRunTicketViewV2,
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
   type SessionResp,
 } from './api';
 import {
   queueResult,
+  queueResultWithReceipt,
   queueRunTicketStart,
   flushResults,
+  onResultTerminal,
   pendingPuzzles,
   type ConfirmedBalances,
 } from './outbox';
 import { ActiveDwellAccumulator } from './active-dwell.mjs';
+import { catalogResultAllowsProgress } from './result-receipts.mjs';
 import {
+  CatalogPlayerV2Session,
+  buildCatalogLevelImpression,
+  validateCatalogTicketLevelSpecBundle,
+  type CatalogFailureReason,
+  type CatalogPlayerEffect,
+  type CatalogTicketLevelSpecBundleV1,
+} from './catalog-player-v2.mjs';
+import {
+  buildCatalogFeedAuthorityRequest,
+  catalogFallbackMatchesBinding,
+  catalogAuthorityStartEligible,
+  catalogFeedDogfoodEnabled,
+  catalogFeedMustEvictFrame,
+  catalogFeedSurface,
+  catalogFeedUsesBuiltinImpression,
+  catalogRecallRecoveryEffect,
+  validateCatalogFeedAuthorityResult,
+  type CatalogFeedAuthorityRequestV1,
+} from './catalog-feed-authority.mjs';
+import {
+  controlPlaneEventState,
   controlPlaneEnabled,
   flushControlPlane,
   initControlPlane,
@@ -222,6 +250,7 @@ type ControlPlaneExposure = {
   revealedAt: string | null;
   binding: BuiltinFeedBindingV1 | null;
   decisionEmitted: boolean;
+  decisionEventId: string | null;
   impressionEmitted: boolean;
   closed: boolean;
   dwell: ActiveDwellAccumulator;
@@ -249,6 +278,30 @@ type ControlPlaneAttempt = {
     occurredAt: string;
     emitted: boolean;
   } | null;
+};
+type CatalogFeedSlotPhase =
+  | 'authority_pending'
+  | 'delivery_pending'
+  | 'catalog_ready'
+  | 'catalog_mounted'
+  | 'builtin_fallback'
+  | 'disposed';
+type CatalogFeedSlot = {
+  index: number;
+  exposure: ControlPlaneExposure;
+  phase: CatalogFeedSlotPhase;
+  request: CatalogFeedAuthorityRequestV1;
+  authorityStarted: boolean;
+  authorityTimer: number | null;
+  configurationTimer: number | null;
+  ticketRequest: CatalogRunTicketRequestV2 | null;
+  ticket: CatalogRunTicketViewV2 | null;
+  allocation: Extract<CatalogAllocationDecisionResultV1, { outcome: 'allocated' }> | null;
+  bundle: CatalogTicketLevelSpecBundleV1 | null;
+  frameEpoch: number;
+  session: CatalogPlayerV2Session | null;
+  ordinal: number;
+  failureEmitted: boolean;
 };
 type SwipeApi = {
   version: number;
@@ -428,6 +481,15 @@ export class Feed {
   private cpDeferredExposures: ControlPlaneExposure[] = [];
   private cpAttempts = new Map<string, ControlPlaneAttempt>();
   private cpFeedPosition = 0;
+  // Default-off dogfood bridge. It never derives a catalog candidate locally:
+  // every slot starts from a projected built-in opportunity and accepts only
+  // the server's opaque authority → allocation → ticket → exact spec bundle.
+  private readonly catalogDogfoodEnabled = catalogFeedDogfoodEnabled(
+    (import.meta as any).env,
+    controlPlaneEnabled(),
+  );
+  private catalogSlots = new Map<number, CatalogFeedSlot>();
+  private catalogFrameEpoch = 0;
   private preloaderMountedAt = 0;
   // Preloader waits for BOTH the first mechanic AND the first server seed (capped).
   private mechanicsReady = false;
@@ -479,6 +541,8 @@ export class Feed {
     ticket: RunTicketRequest;
     lastRunId: string | null;
     playing: boolean;
+    catalog: CatalogFeedSlot | null;
+    catalogChestQueued: boolean;
   } | null = null;
   private seriesRowEl: HTMLElement | null = null;
   private chestEl: HTMLElement | null = null;
@@ -663,6 +727,7 @@ export class Feed {
     (window as any).__feedHostGesture = this.onHostGesture;
     window.setInterval(this.pollPlayableAnalytics, ANALYTICS_POLL_MS);
     window.setInterval(this.pollAutoplayUi, 250);
+    onResultTerminal(this.onCatalogResultTerminal);
     this.initPerfTelemetry();
     // Debug hook: window.__feedWarm() → live snapshot of the next-mechanic warm
     // state (is it pre-warmed? if not, why — blocked, or calm window starved?).
@@ -808,6 +873,22 @@ export class Feed {
     return this.builtinFeedBindings.get(playableId)?.variant_id ?? variantIdForMechanic(playableId);
   }
 
+  private effectivePlayableId(i: number): string | undefined {
+    const slot = this.catalogSlotForIndex(i);
+    return slot && slot.phase !== 'builtin_fallback' && slot.bundle
+      ? slot.bundle.runtime.playableId
+      : this.playables[i]?.id;
+  }
+
+  private effectiveVariantId(i: number): string | null {
+    const slot = this.catalogSlotForIndex(i);
+    if (slot && slot.phase !== 'builtin_fallback' && slot.bundle) {
+      return slot.bundle.runtime.legacyVariantId;
+    }
+    const playableId = this.playables[i]?.id;
+    return playableId ? this.variantIdForPlayable(playableId) : null;
+  }
+
   private beginControlPlaneDecision(i: number, playableId: string): ControlPlaneExposure | null {
     if (!controlPlaneEnabled()) return null;
     // A deep-link challenge is a forced social slot, not a choice by the
@@ -835,6 +916,7 @@ export class Feed {
       revealedAt: null,
       binding: this.builtinFeedBindings.get(playableId) ?? null,
       decisionEmitted: false,
+      decisionEventId: null,
       impressionEmitted: false,
       closed: false,
       dwell,
@@ -842,6 +924,45 @@ export class Feed {
       exit: null,
     };
     dwell.reset(now);
+    if (this.catalogDogfoodEnabled) {
+      this.disposeCatalogSlot(i);
+      const existingFrame = this.frames.get(i);
+      if (existingFrame && catalogFeedMustEvictFrame('authority_pending', true)) {
+        // A target can already hold a warm legacy iframe before goTo commits its
+        // server-owned opportunity. Poster-only starts by physically removing it;
+        // otherwise mount() would return at frames.has(i) and leak false seen.
+        this.clearAutoplayLoopTimer(i);
+        this.disposeFrame(i, existingFrame);
+        this.frames.delete(i);
+        this.resetFrameReadiness(i);
+        this.games[i]?.classList.add('game--loading');
+        this.games[i]?.classList.remove('game--ready');
+      }
+      const slot: CatalogFeedSlot = {
+        index: i,
+        exposure,
+        phase: 'authority_pending',
+        request: buildCatalogFeedAuthorityRequest(ticketUid(), exposure.decisionId),
+        authorityStarted: false,
+        authorityTimer: null,
+        configurationTimer: null,
+        ticketRequest: null,
+        ticket: null,
+        allocation: null,
+        bundle: null,
+        frameEpoch: 0,
+        session: null,
+        ordinal: 1,
+        failureEmitted: false,
+      };
+      // A cold/disabled authority must never turn the real feed into a blank
+      // page. This timer preserves the exact reviewed built-in opportunity.
+      slot.authorityTimer = window.setTimeout(
+        () => this.activateCatalogBuiltinFallback(slot, 'authority_timeout'),
+        3500,
+      );
+      this.catalogSlots.set(i, slot);
+    }
     this.cpPendingExposure = exposure;
     if (exposure.binding) this.emitControlPlaneExposure(exposure);
     this.deferControlPlaneExposure(exposure);
@@ -873,6 +994,20 @@ export class Feed {
       }, exposure.decisionAt);
       if (!decisionEvent) return;
       exposure.decisionEmitted = true;
+      exposure.decisionEventId = decisionEvent;
+      const slot = this.catalogSlotForExposure(exposure);
+      if (slot) this.beginCatalogAuthority(slot);
+    }
+    const catalogSlot = this.catalogSlotForExposure(exposure);
+    if (catalogSlot && !catalogFeedUsesBuiltinImpression(catalogSlot.phase)) {
+      if (exposure.revealedAt) this.revealCatalogLevel(catalogSlot);
+      if (exposure.impressionEmitted) {
+        if (exposure.exit) this.emitControlPlaneExit(exposure);
+        for (const attempt of this.cpAttempts.values()) {
+          if (attempt.exposure === exposure) this.flushControlPlaneAttempt(attempt);
+        }
+      }
+      return;
     }
     if (exposure.revealedAt && !exposure.impressionEmitted) {
       const impressionEvent = queueControlPlaneEvent('unit_impression', {
@@ -890,6 +1025,273 @@ export class Feed {
         if (attempt.exposure === exposure) this.flushControlPlaneAttempt(attempt);
       }
     }
+  }
+
+  private catalogSlotForExposure(exposure: ControlPlaneExposure): CatalogFeedSlot | null {
+    const slot = this.catalogSlots.get(exposure.index);
+    return slot?.exposure === exposure && slot.phase !== 'disposed' ? slot : null;
+  }
+
+  private catalogSlotForIndex(i: number): CatalogFeedSlot | null {
+    const slot = this.catalogSlots.get(i);
+    return slot && slot.phase !== 'disposed' ? slot : null;
+  }
+
+  private catalogSlotIsCurrent(slot: CatalogFeedSlot): boolean {
+    return this.catalogSlots.get(slot.index) === slot && slot.phase !== 'disposed';
+  }
+
+  private beginCatalogAuthority(slot: CatalogFeedSlot): void {
+    if (!this.catalogSlotIsCurrent(slot) || !catalogAuthorityStartEligible(
+      slot.phase,
+      slot.authorityStarted,
+      slot.exposure.decisionEmitted,
+    )) return;
+    slot.authorityStarted = true;
+    void this.resolveCatalogAuthority(slot);
+  }
+
+  private async resolveCatalogAuthority(slot: CatalogFeedSlot): Promise<void> {
+    try {
+      // The effectful endpoint accepts only an already projected opportunity.
+      // Enqueue success is insufficient: wait for the durable inbox ACK first.
+      const flushed = await flushControlPlane({ force: true });
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') return;
+      if (!flushed || controlPlaneEventState(slot.exposure.decisionEventId) !== 'acknowledged') {
+        throw new Error('source decision was not durably projected');
+      }
+
+      let authority = null;
+      const retryDelays = [0, 120, 360];
+      for (const delay of retryDelays) {
+        if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+        if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') return;
+        try {
+          const raw = await apiGetCatalogFeedAuthorityRequired(slot.request);
+          authority = validateCatalogFeedAuthorityResult(raw, slot.request);
+          break;
+        } catch (error) {
+          const retryable = error instanceof ApiRequestError && (
+            error.status === 0
+            || (error.status === 404 && error.code === 'feed_authority_source_not_found')
+            || (error.status === 503 && ['feed_authority_not_ready', 'feed_authority_integrity_failure'].includes(error.code ?? ''))
+          );
+          if (!retryable || delay === retryDelays[retryDelays.length - 1]) throw error;
+        }
+      }
+      if (!authority) throw new Error('catalog authority returned no result');
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'authority_pending') return;
+      if (authority.outcome === 'builtin_fallback') {
+        if (!catalogFallbackMatchesBinding(authority.fallback, slot.exposure.binding)) {
+          throw new Error('server fallback differs from the projected built-in opportunity');
+        }
+        this.activateCatalogBuiltinFallback(slot, 'server_policy_fallback');
+        return;
+      }
+      if (Date.parse(authority.expiresAt) <= Date.now()) {
+        throw new Error('catalog authority expired before allocation');
+      }
+
+      slot.phase = 'delivery_pending';
+      const authorized = await apiAllocateAuthorizedCatalogRequired({
+        schema: 'catalog.allocate-authorized.v2',
+        authorizationId: authority.authorizationId,
+      });
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') return;
+      if (authorized.schema !== 'catalog.allocate-authorized-result.v2'
+        || authorized.authorizationId !== authority.authorizationId
+        || authorized.authorizationDigest !== authority.authorizationDigest
+        || authorized.allocation.allocationId !== authority.authorizationId) {
+        throw new Error('authorized allocation differs from its effectful authority');
+      }
+      if (authorized.allocation.outcome !== 'allocated') {
+        this.activateCatalogBuiltinFallback(slot, 'catalog_runway_empty');
+        return;
+      }
+      const allocation = authorized.allocation;
+      if (allocation.runtime.capabilities.catalogRequiredHandshake !== true) {
+        throw new Error('selected runtime does not require the catalog handshake');
+      }
+
+      const ticketRequest: CatalogRunTicketRequestV2 = {
+        schema: 'run.start.v2',
+        ticket_id: ticketUid(),
+        run_id: `series-${runUid()}`,
+        mechanic_id: allocation.runtime.playableId,
+        variant_id: allocation.runtime.legacyVariantId,
+        kind: 'series',
+        decision_id: allocation.decisionId,
+      };
+      slot.ticketRequest = ticketRequest;
+      slot.allocation = allocation;
+      const start = await queueRunTicketStart(ticketRequest);
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') return;
+      const ticket = start.latest;
+      if (start.status !== 'ok' || start.pending !== 0 || !ticket
+        || !('schema' in ticket) || ticket.schema !== 'run.ticket.v2'
+        || ticket.ticket_id !== ticketRequest.ticket_id
+        || ticket.run_id !== ticketRequest.run_id || ticket.state !== 'active') {
+        if (ticket?.state === 'revoked') {
+          this.activateCatalogBuiltinFallback(slot, 'catalog_ticket_revoked', true);
+          return;
+        }
+        throw new Error(`catalog ticket start did not confirm (${start.status})`);
+      }
+
+      const catalogTicket = ticket as CatalogRunTicketViewV2;
+
+      const rawBundle = await apiGetCatalogTicketSpecsRequired(catalogTicket.ticket_id);
+      if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') return;
+      const bundle = validateCatalogTicketLevelSpecBundle(rawBundle);
+      this.assertCatalogDeliveryClosure(allocation, catalogTicket, bundle);
+      slot.ticket = catalogTicket;
+      slot.bundle = bundle;
+      slot.phase = 'catalog_ready';
+      if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
+      slot.authorityTimer = null;
+      if (this.liveSet().has(slot.index)) this.mount(slot.index);
+    } catch (error) {
+      if (!this.catalogSlotIsCurrent(slot)) return;
+      const revoked = error instanceof ApiRequestError && error.code === 'catalog_ticket_revoked';
+      console.warn('[catalog-player-v2] delivery fell back to reviewed builtin', error);
+      this.activateCatalogBuiltinFallback(slot, revoked ? 'catalog_ticket_revoked' : 'delivery_failure', revoked);
+    }
+  }
+
+  private assertCatalogDeliveryClosure(
+    allocation: Extract<CatalogAllocationDecisionResultV1, { outcome: 'allocated' }>,
+    ticket: CatalogRunTicketViewV2,
+    bundle: CatalogTicketLevelSpecBundleV1,
+  ): void {
+    const manifestLevels = allocation.manifest.levels;
+    const exact = bundle.ticketId === ticket.ticket_id
+      && bundle.decisionId === allocation.decisionId
+      && bundle.decisionId === ticket.decision_id
+      && bundle.catalogEntryId === allocation.catalog.entryId
+      && bundle.catalogEntryId === ticket.catalog_entry_id
+      && bundle.seriesId === allocation.catalog.seriesId
+      && bundle.seriesId === ticket.series_id
+      && bundle.manifestContentHash === allocation.manifest.contentHash
+      && bundle.manifestContentHash === ticket.manifest_content_hash
+      && bundle.runtime.releaseId === allocation.runtime.releaseId
+      && bundle.runtime.releaseId === ticket.runtime_release_id
+      && bundle.runtime.playableId === ticket.mechanic_id
+      && bundle.runtime.legacyVariantId === ticket.variant_id
+      && bundle.runtime.runtimeContractDigest === ticket.runtime_contract_digest
+      && bundle.runtime.runtimeArtifactDigest === ticket.runtime_artifact_digest
+      && bundle.levels.length === ticket.levels.length
+      && bundle.levels.length === manifestLevels.length
+      && bundle.levels.every((level, index) => level.ordinal === index + 1
+        && level.specHash === ticket.levels[index]?.spec_hash
+        && level.specHash === manifestLevels[index]?.specHash);
+    if (!exact) throw new Error('ticket/spec bundle differs from the authorized allocation closure');
+  }
+
+  private activateCatalogBuiltinFallback(
+    slot: CatalogFeedSlot,
+    reason: string,
+    showRecovery = false,
+  ): void {
+    if (!this.catalogSlotIsCurrent(slot) || slot.phase === 'builtin_fallback') return;
+    if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
+    if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
+    slot.authorityTimer = null;
+    slot.configurationTimer = null;
+    slot.session?.dispose(slot.frameEpoch);
+    slot.session = null;
+
+    const frame = this.frames.get(slot.index);
+    if (frame) {
+      this.disposeFrame(slot.index, frame);
+      this.frames.delete(slot.index);
+      this.resetFrameReadiness(slot.index);
+    }
+
+    const visibleRecovery = slot.index === this.realIndex()
+      && (this.cpExposure === slot.exposure || this.shownIndex === slot.index);
+    if (slot.exposure.impressionEmitted && visibleRecovery) {
+      this.closeControlPlaneExposure('close', true);
+      const now = performance.now();
+      const dwell = new ActiveDwellAccumulator(now);
+      dwell.reset(now);
+      const recovery: ControlPlaneExposure = {
+        ...slot.exposure,
+        impressionId: ticketUid(),
+        revealedAt: null,
+        impressionEmitted: false,
+        closed: false,
+        dwell,
+        levels: new Map(),
+        exit: null,
+      };
+      slot.exposure = recovery;
+      this.cpPendingExposure = recovery;
+      this.cpExposure = null;
+      if (this.shownIndex === slot.index) this.shownIndex = -1;
+    }
+
+    slot.phase = 'builtin_fallback';
+    if (this.series?.catalog === slot) {
+      this.clearSeriesUi();
+      this.series = null;
+    }
+    track('catalog_fallback', { mechanic_id: slot.exposure.playableId, reason });
+    if (showRecovery && visibleRecovery) this.showCatalogRecoveryNotice();
+    if (this.liveSet().has(slot.index)
+      && (!slot.exposure.impressionEmitted || visibleRecovery)) this.mount(slot.index);
+  }
+
+  private showCatalogRecoveryNotice(): void {
+    if (!this.seriesTransitionEl) {
+      const el = document.createElement('div');
+      el.className = 'series-transition';
+      this.viewport.appendChild(el);
+      this.seriesTransitionEl = el;
+    }
+    this.seriesTransitionEl.innerHTML =
+      '<div class="series-transition__praise">Серия обновилась</div>'
+      + '<div class="series-transition__sub">Продолжаем с проверенной версией</div>';
+    requestAnimationFrame(() => this.seriesTransitionEl?.classList.add('series-transition--in'));
+    window.setTimeout(() => this.hideSeriesTransition(), 1200);
+  }
+
+  private onCatalogResultTerminal = (event: {
+    ticketId: string | null;
+    code: string | null;
+    status: number;
+  }): void => {
+    if (!event.ticketId) return;
+    const slot = [...this.catalogSlots.values()].find((candidate) => {
+      const ticketId = candidate.ticketRequest?.ticket_id;
+      return ticketId === event.ticketId;
+    });
+    if (!slot) return;
+    const recalled = Boolean(catalogRecallRecoveryEffect(
+      event.code,
+      event.ticketId,
+      slot.ticketRequest?.ticket_id ?? '',
+    ));
+    this.activateCatalogBuiltinFallback(
+      slot,
+      recalled ? 'catalog_ticket_revoked' : `catalog_result_rejected_${event.code ?? event.status}`,
+      true,
+    );
+  };
+
+  private disposeCatalogSlot(i: number): void {
+    const slot = this.catalogSlots.get(i);
+    if (!slot) return;
+    if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
+    if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
+    slot.session?.dispose(slot.frameEpoch);
+    const frame = this.frames.get(i);
+    if (frame?.dataset.catalogPlayerV2 === '1') {
+      this.disposeFrame(i, frame);
+      this.frames.delete(i);
+      this.resetFrameReadiness(i);
+    }
+    slot.phase = 'disposed';
+    this.catalogSlots.delete(i);
   }
 
   private controlPlaneDwellGates(exposure: ControlPlaneExposure): {
@@ -924,7 +1326,11 @@ export class Feed {
 
   private markCurrentUnitShownIfVisible(): void {
     const i = this.realIndex();
-    if (this.feedActuallyVisible(i)) this.markUnitShown(i);
+    if (this.feedActuallyVisible(i)) {
+      this.markUnitShown(i);
+      const slot = this.catalogSlotForIndex(i);
+      if (slot) this.revealCatalogLevel(slot);
+    }
   }
 
   private syncControlPlaneDwell(): void {
@@ -1011,30 +1417,43 @@ export class Feed {
       this.emitControlPlaneExposure(exposure);
     }
     this.deferControlPlaneExposure(exposure);
-    if (!exposure.impressionEmitted || !exposure.binding || !attempt.readyAt) return;
-    // An attempt created before a cold /session answered is a legacy attempt.
-    // Its ticket identity is already frozen and must never be retroactively
-    // relabelled or sent into the bound chain if the reviewed variant differs.
-    if (attempt.ticket.variant_id !== exposure.binding.variant_id) return;
+    if (!exposure.impressionEmitted || !exposure.binding) return;
+    const catalogSlot = this.catalogSlotForExposure(exposure);
+    const catalogAttempt = Boolean(catalogSlot
+      && catalogSlot.phase !== 'builtin_fallback'
+      && attempt.ticket.schema === 'run.start.v2');
     let level = exposure.levels.get(attempt.levelIndex);
-    if (!level) {
-      level = {
-        levelImpressionId: ticketUid(),
-        levelIndex: attempt.levelIndex,
-        occurredAt: attempt.readyAt,
-        emitted: false,
-      };
-      exposure.levels.set(attempt.levelIndex, level);
+    if (catalogAttempt) {
+      if (!catalogSlot?.ticketRequest || attempt.ticket.ticket_id !== catalogSlot.ticketRequest.ticket_id
+        || attempt.ticket.decision_id !== catalogSlot.ticketRequest.decision_id
+        || !level?.emitted) return;
+      attempt.readyAt ??= level.occurredAt;
+    } else {
+      if (!attempt.readyAt) return;
+      // An attempt created before a cold /session answered is a legacy attempt.
+      // Its ticket identity is already frozen and must never be retroactively
+      // relabelled or sent into the bound chain if the reviewed variant differs.
+      if (attempt.ticket.variant_id !== exposure.binding.variant_id) return;
+      if (!level) {
+        level = {
+          levelImpressionId: ticketUid(),
+          levelIndex: attempt.levelIndex,
+          occurredAt: attempt.readyAt,
+          emitted: false,
+        };
+        exposure.levels.set(attempt.levelIndex, level);
+      }
+      if (!level.emitted) {
+        const eventId = queueControlPlaneEvent('builtin_level_impression', {
+          impression_id: exposure.impressionId,
+          level_impression_id: level.levelImpressionId,
+          level_index: level.levelIndex,
+        }, level.occurredAt);
+        if (!eventId) return;
+        level.emitted = true;
+      }
     }
-    if (!level.emitted) {
-      const eventId = queueControlPlaneEvent('builtin_level_impression', {
-        impression_id: exposure.impressionId,
-        level_impression_id: level.levelImpressionId,
-        level_index: level.levelIndex,
-      }, level.occurredAt);
-      if (!eventId) return;
-      level.emitted = true;
-    }
+    if (!level || !attempt.readyAt) return;
     if (!attempt.emitted) {
       const attemptOccurredAt = attempt.startedAt < attempt.readyAt
         ? attempt.readyAt
@@ -1546,6 +1965,57 @@ export class Feed {
     return queued;
   }
 
+  private reportCatalogLevelResult(
+    i: number,
+    runId: string,
+    solveMs: number,
+    catalog: CatalogFeedSlot,
+    completedLevel: number,
+  ): Promise<boolean> {
+    const level = catalog.bundle?.levels[completedLevel - 1];
+    const ticket = catalog.ticketRequest;
+    if (!level || !catalog.bundle || !ticket
+      || this.series?.index !== i || this.series.catalog !== catalog) {
+      if (this.catalogSlotIsCurrent(catalog)) {
+        this.activateCatalogBuiltinFallback(catalog, 'catalog_level_binding_missing', true);
+      }
+      return Promise.resolve(false);
+    }
+    return queueResultWithReceipt({
+      mechanic_id: catalog.bundle.runtime.playableId,
+      variant_id: ticket.variant_id,
+      run_id: runId,
+      metric_key: 'time_ms',
+      metric_value: solveMs,
+      stars: 0,
+      run_ticket: ticket,
+      series_level: completedLevel,
+      series_id: catalog.bundle.seriesId,
+      ordinal: level.ordinal,
+      applied_spec_hash: level.specHash,
+      tz_offset_minutes: currentTzOffsetMinutes(),
+    }).then((receipt) => {
+      if (receipt.status === 'confirmed' && catalogResultAllowsProgress(receipt, runId)) {
+        this.bumpDailyProgress('levels_10', 1);
+        return true;
+      }
+      // A terminal server rejection reaches the shared listener first. A local
+      // persistence failure has no such edge and must fail closed here.
+      if (this.catalogSlotIsCurrent(catalog)) {
+        this.activateCatalogBuiltinFallback(
+          catalog,
+          receipt.status === 'storage_error'
+            ? 'catalog_level_storage_error'
+            : receipt.status === 'rejected'
+              ? `catalog_level_rejected_${receipt.code ?? receipt.httpStatus}`
+              : 'catalog_level_receipt_mismatch',
+          true,
+        );
+      }
+      return false;
+    });
+  }
+
   // Solve time for this unit's current manual run (takeover → now), ms. Falls back
   // to time-since-shown if we somehow missed the takeover mark.
   private solveMsFor(i: number): number {
@@ -1800,7 +2270,39 @@ export class Feed {
 
   // Length of the CURRENT series (based on the mechanic being played).
   private seriesLen(): number {
+    if (this.series?.catalog?.bundle) return this.series.catalog.bundle.levels.length;
     return this.seriesLenFor(this.playables[this.series?.index ?? -1]?.id ?? '');
+  }
+
+  private ensureCatalogSeries(i: number): boolean {
+    const slot = this.catalogSlotForIndex(i);
+    if (!slot || !slot.bundle || !slot.ticketRequest || !slot.ticket
+      || !['catalog_ready', 'catalog_mounted'].includes(slot.phase)) return false;
+    if (this.series?.catalog === slot) {
+      this.series.playing = true;
+      return true;
+    }
+    if (this.series) return false;
+    const payout = seriesRewards(slot.ticketRequest.run_id);
+    this.series = {
+      index: i,
+      done: 0,
+      reward: payout.stars,
+      puzzles: payout.puzzles,
+      payoutRunId: slot.ticketRequest.run_id,
+      ticket: slot.ticketRequest,
+      lastRunId: null,
+      playing: true,
+      catalog: slot,
+      catalogChestQueued: false,
+    };
+    track('series_start', {
+      mechanic_id: slot.bundle.runtime.playableId,
+      source: 'catalog_player_v2',
+      series_id: slot.bundle.seriesId,
+    });
+    this.renderSeriesRow({ forceVisible: true });
+    return true;
   }
 
   // Which built-in game LEVEL to load for a given 1-based series level. pins maps
@@ -1830,6 +2332,8 @@ export class Feed {
       ticket,
       lastRunId: null,
       playing: true,
+      catalog: null,
+      catalogChestQueued: false,
     };
     this.warmRunTicket(ticket);
     track('series_start', { mechanic_id: this.playables[i]?.id });
@@ -1843,8 +2347,25 @@ export class Feed {
     this.lastSolveMs = solveMs;   // shown on the series win screen + used for the challenge
     // Persist the run for time/telemetry but grant NO stars per level (series pays
     // out only at the chest).
+    const catalog = this.series.catalog;
+    const completedLevel = this.series.done;
+    if (catalog) {
+      // Progress is released by this exact run's durable server receipt, never
+      // by the shared flush or by confirmation of another queued run.
+      void this.reportCatalogLevelResult(i, runId, solveMs, catalog, completedLevel).then((confirmed) => {
+        if (!confirmed || this.series?.catalog !== catalog || this.series.done !== completedLevel
+          || catalog.phase === 'builtin_fallback') return;
+        this.finishSeriesLevelWin(i, completedLevel);
+      });
+      return;
+    }
     void this.reportResult(i, runId, solveMs, 0);
-    track('series_level_win', { mechanic_id: this.playables[i]?.id, level: this.series.done });
+    this.finishSeriesLevelWin(i, completedLevel);
+  }
+
+  private finishSeriesLevelWin(i: number, completedLevel: number): void {
+    if (!this.series || this.series.index !== i || this.series.done !== completedLevel) return;
+    track('series_level_win', { mechanic_id: this.effectivePlayableId(i), level: this.series.done });
     const filledSlot = this.series.done - 1;
     // Hold the just-cleared slot as PENDING (not yet green) so the panel arrives
     // without it, and pulseSeriesSlot then plays the green-in as a fresh appearance.
@@ -1854,12 +2375,25 @@ export class Feed {
     // Keep `playing` true through the chest so a stray swipe can't page away
     // mid-ceremony; it's cleared when the end-panel appears.
     if (this.series.done >= this.seriesLen()) {
-      // Final level: fill the LAST slot FIRST, then launch the chest — sequential,
-      // not simultaneous (the slot stamp reads before the gift lifts off the panel).
-      this.afterSeriesRowEntrance(() => {
-        this.pulseSeriesSlot(filledSlot);
-        window.setTimeout(() => this.beginChest(i), 780);
-      });
+      const launchChest = () => {
+        if (!this.series || this.series.index !== i || this.series.done !== completedLevel) return;
+        // Final level: fill the LAST slot FIRST, then launch the chest — sequential,
+        // not simultaneous (the slot stamp reads before the gift lifts off the panel).
+        this.afterSeriesRowEntrance(() => {
+          this.pulseSeriesSlot(filledSlot);
+          window.setTimeout(() => this.beginChest(i), 780);
+        });
+      };
+      const catalog = this.series.catalog;
+      if (catalog) {
+        // Confirm (or durably queue) the exact manifest-bound chest before any
+        // reward animation. A hard recall therefore recovers neutrally instead
+        // of showing a reward the server refused.
+        void this.queueCatalogChestResult(i).then((confirmed) => {
+          if (!confirmed || this.series?.catalog !== catalog || catalog.phase === 'builtin_fallback') return;
+          launchChest();
+        });
+      } else launchChest();
       return;
     }
     // Smooth transition: cover the reboot (which would otherwise flash the mechanic's
@@ -1940,12 +2474,13 @@ export class Feed {
     // vary return null → no query → identical replay.
     const nextSeriesLevel = (this.series?.done ?? 0) + 1;
     const mechId = this.playables[i]?.id ?? '';
-    const params = this.seriesParamsFor(mechId, nextSeriesLevel);
+    const catalogSeries = this.series?.catalog ?? null;
+    const params = catalogSeries ? null : this.seriesParamsFor(mechId, nextSeriesLevel);
     if (params) this.pendingSeriesParams.set(i, encodeURIComponent(JSON.stringify(params)));
     else this.pendingSeriesParams.delete(i);
     // pins (and future level-based mechanics) load the REAL next level via ?level=;
     // param-varied mechanics return null and just replay the same level.
-    const gameLevel = this.seriesGameLevel(mechId, nextSeriesLevel);
+    const gameLevel = catalogSeries ? null : this.seriesGameLevel(mechId, nextSeriesLevel);
     if (gameLevel != null) this.pendingLevels.set(i, gameLevel);
     else this.pendingLevels.delete(i);
     // Suppress the in-slot arrival poster for this reload: it holds the unit's
@@ -1991,7 +2526,8 @@ export class Feed {
       && !this.manualRuns.has(idx) && this.collectingRewardIndex === null && !this.seriesWinShown.has(idx);
     if (!active && !showPreview) { this.removeSeriesRow(true); return; }
     const done = active ? active.done : 0;
-    const len = active ? this.seriesLen() : this.seriesLenFor(id);
+    const catalogPreviewLength = this.catalogSlotForIndex(idx)?.bundle?.levels.length;
+    const len = active ? this.seriesLen() : catalogPreviewLength ?? this.seriesLenFor(id);
     const rowKey = `${active ? 'active' : 'preview'}:${idx}:${len}`;
     if (this.seriesRowEl?.dataset.seriesRowKey && this.seriesRowEl.dataset.seriesRowKey !== rowKey) {
       this.removeSeriesRow(true);
@@ -2137,7 +2673,7 @@ export class Feed {
       const m = Math.floor(Math.random() * (n + 1));
       [queue[n], queue[m]] = [queue[m], queue[n]];
     }
-    track('series_complete', { mechanic_id: this.playables[i]?.id, reward: this.series.reward });
+    track('series_complete', { mechanic_id: this.effectivePlayableId(i), reward: this.series.reward });
     // Does the chest payout cross a level threshold? Capture it now (before the
     // stars fly and nudge totalStars) so the level-up ceremony can ride in when
     // the player swipes off the series win screen (see onDown/onUp reward path).
@@ -2728,15 +3264,56 @@ export class Feed {
     const reward = series?.reward ?? 0;
     const mechanicId = this.playables[i]?.id;
     if (series && reward > 0 && mechanicId) {
+      const catalog = series.catalog;
+      if (catalog && series.catalogChestQueued) return;
       void queueResult({
-        mechanic_id: mechanicId, variant_id: series.ticket.variant_id,
+        mechanic_id: catalog?.bundle?.runtime.playableId ?? mechanicId,
+        variant_id: series.ticket.variant_id,
         run_id: series.payoutRunId, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
         expected_puzzles: series.puzzles,
         run_ticket: series.ticket,
+        series_id: catalog?.bundle?.seriesId,
         tz_offset_minutes: currentTzOffsetMinutes(),
       });
       this.bumpDailyProgress('stars_50', reward);
     }
+  }
+
+  private queueCatalogChestResult(i: number): Promise<boolean> {
+    const series = this.series;
+    const catalog = series?.index === i ? series.catalog : null;
+    if (!series || !catalog?.bundle || !catalog.ticketRequest) return Promise.resolve(false);
+    if (series.catalogChestQueued) return Promise.resolve(false);
+    series.catalogChestQueued = true;
+    return queueResultWithReceipt({
+      mechanic_id: catalog.bundle.runtime.playableId,
+      variant_id: catalog.ticketRequest.variant_id,
+      run_id: series.payoutRunId,
+      metric_key: 'series',
+      metric_value: this.seriesLen(),
+      stars: series.reward,
+      expected_puzzles: series.puzzles,
+      run_ticket: catalog.ticketRequest,
+      series_id: catalog.bundle.seriesId,
+      tz_offset_minutes: currentTzOffsetMinutes(),
+    }).then((receipt) => {
+      if (receipt.status === 'confirmed'
+        && catalogResultAllowsProgress(receipt, series.payoutRunId)) return true;
+      // Terminal rejection is normally handled synchronously by the shared
+      // listener. Storage failure has no server edge, so close it here too.
+      if (this.catalogSlotIsCurrent(catalog)) {
+        this.activateCatalogBuiltinFallback(
+          catalog,
+          receipt.status === 'storage_error'
+            ? 'catalog_chest_storage_error'
+            : receipt.status === 'rejected'
+              ? `catalog_chest_rejected_${receipt.code ?? receipt.httpStatus}`
+              : 'catalog_chest_receipt_mismatch',
+          true,
+        );
+      }
+      return false;
+    });
   }
 
   // After the chest empties: show the REAL win screen — the same reward overlay a
@@ -2800,7 +3377,9 @@ export class Feed {
     // distinct call-to-action. Persistent while the win screen is up; cleared
     // when the player leaves the unit (markUnitShown → dismissChallengePill).
     const lastRunId = this.series?.lastRunId;
-    if (lastRunId) this.showChallengePill(mechanicId, this.lastSolveMs || 5000, lastRunId, true);
+    if (lastRunId && !this.series?.catalog) {
+      this.showChallengePill(mechanicId, this.lastSolveMs || 5000, lastRunId, true);
+    }
   }
 
   // × (or any exit) mid-series: break it, no reward.
@@ -2876,7 +3455,7 @@ export class Feed {
         : this.failedThisCycle.has(prev) ? 'lost'
         : this.manualRuns.has(prev) ? 'playing' : 'autoplay';
       track('swipe_away', {
-        mechanic_id: this.playables[prev]?.id,
+        mechanic_id: this.effectivePlayableId(prev),
         played: this.manualRuns.has(prev),
         state,
         ms_since_shown: Math.round(performance.now() - this.shownAt),
@@ -2891,8 +3470,8 @@ export class Feed {
     const id = this.playables[cur]?.id;
     if (id) this.revealControlPlaneExposure(cur, id);
     track('unit_shown', {
-      mechanic_id: id,
-      variant_id: id ? this.variantIdForPlayable(id) : null,
+      mechanic_id: this.effectivePlayableId(cur),
+      variant_id: this.effectiveVariantId(cur),
       feed_pos: cur,
       mode: this.manualRuns.has(cur) ? 'playing' : 'auto',
     });
@@ -3987,6 +4566,17 @@ export class Feed {
 
   private mount(i: number) {
     if (this.frames.has(i)) return;
+    const catalogSlot = this.catalogSlotForIndex(i);
+    const catalogSurface = catalogFeedSurface(catalogSlot?.phase ?? null);
+    if (catalogSurface !== 'builtin') {
+      // Authority/delivery pending deliberately means no iframe at all: the
+      // opaque poster remains the only painted surface, so a warm built-in can
+      // never be visible while its impression is suppressed.
+      if (catalogSurface === 'catalog' && catalogSlot) {
+        this.mountCatalogFrame(i, catalogSlot);
+      }
+      return;
+    }
     this.resetFrameReadiness(i);
     this.games[i].classList.add('game--loading');
     this.games[i].classList.remove('game--ready');
@@ -4034,6 +4624,80 @@ export class Feed {
     this.slots[i].appendChild(frame);
   }
 
+  private mountCatalogFrame(i: number, slot: CatalogFeedSlot): void {
+    if (this.frames.has(i) || !slot.bundle || !slot.ticketRequest || !slot.ticket) return;
+    const ordinal = this.series?.catalog === slot ? this.series.done + 1 : 1;
+    if (!slot.bundle.levels[ordinal - 1]) {
+      this.activateCatalogBuiltinFallback(slot, 'manifest_ordinal_missing');
+      return;
+    }
+    this.resetFrameReadiness(i);
+    this.games[i].classList.add('game--loading');
+    this.games[i].classList.remove('game--ready');
+    const frame = document.createElement('iframe');
+    frame.className = 'game__frame';
+    const runId = runUid();
+    frame.dataset.runId = runId;
+    frame.dataset.catalogPlayerV2 = '1';
+    frame.setAttribute('scrolling', 'no');
+    frame.setAttribute('title', slot.bundle.runtime.playableId);
+    frame.setAttribute('allow', 'autoplay');
+    frame.referrerPolicy = 'origin';
+    frame.addEventListener('load', () => {
+      if (frame.dataset.catalogNavigated !== '1' || this.frames.get(i) !== frame) return;
+      this.markWarmTimeline(i, 'loadAt');
+      this.disableFrameDoubleTapZoom(frame);
+      this.attachPointerActivityProbe(i, frame);
+      this.frameLoaded.add(i);
+      this.setFramePaused(i, this.shouldPauseFrame(i));
+      if (this.platformAudioPrimed) window.setTimeout(() => this.callPlayableHostGesture(i), 0);
+      // The configured ACK can legitimately arrive before iframe `load` (the
+      // runtime ACKs after mount, while subresources may still be settling).
+      // Re-check reveal from both sides of that race.
+      this.tryRevealFrame(i);
+      this.ensureFrameAutoPlay(i);
+      this.applyPendingEditor(i);
+    });
+    frame.addEventListener('error', () => {
+      if (this.frames.get(i) === frame) this.failCatalogConfiguration(slot, 'mount');
+    });
+    this.frames.set(i, frame);
+    this.rollReward(i, runId);
+    this.slots[i].appendChild(frame);
+    const frameSource = frame.contentWindow;
+    if (!frameSource) {
+      this.activateCatalogBuiltinFallback(slot, 'frame_source_missing');
+      return;
+    }
+    slot.frameEpoch = ++this.catalogFrameEpoch;
+    slot.ordinal = ordinal;
+    slot.failureEmitted = false;
+    try {
+      slot.session = new CatalogPlayerV2Session({
+        bundle: slot.bundle,
+        ordinal,
+        frameEpoch: slot.frameEpoch,
+        frameSource,
+        baseUrl: location.href,
+      });
+    } catch (error) {
+      console.warn('[catalog-player-v2] invalid ticket delivery bundle', error);
+      this.activateCatalogBuiltinFallback(slot, 'contract_setup_failure');
+      return;
+    }
+    slot.phase = 'catalog_mounted';
+    frame.referrerPolicy = slot.session.navigation.referrerPolicy;
+    frame.dataset.catalogNavigated = '1';
+    frame.src = slot.session.navigation.src;
+    if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
+    slot.configurationTimer = window.setTimeout(
+      () => this.failCatalogConfiguration(slot, 'timeout'),
+      10_000,
+    );
+    this.warmTimeline.delete(slot.bundle.runtime.playableId);
+    this.markWarmTimeline(i, 'appendAt');
+  }
+
   private unmount(i: number) {
     const frame = this.frames.get(i);
     if (!frame) return;
@@ -4049,6 +4713,14 @@ export class Feed {
   }
 
   private disposeFrame(i: number, frame: HTMLIFrameElement) {
+    const catalogSlot = this.catalogSlotForIndex(i);
+    if (frame.dataset.catalogPlayerV2 === '1' && catalogSlot) {
+      catalogSlot.session?.dispose(catalogSlot.frameEpoch);
+      catalogSlot.session = null;
+      if (catalogSlot.configurationTimer !== null) window.clearTimeout(catalogSlot.configurationTimer);
+      catalogSlot.configurationTimer = null;
+      if (catalogSlot.phase === 'catalog_mounted') catalogSlot.phase = 'catalog_ready';
+    }
     try { this.setFramePaused(i, true); } catch { /* noop */ }
     try { this.stopFrameAutoPlay(i); } catch { /* noop */ }
     try { frame.src = 'about:blank'; } catch { /* noop */ }
@@ -4252,6 +4924,8 @@ export class Feed {
       if (i === this.realIndex()) {
         this.scheduleWarmNext();
         this.markUnitShown(i);   // revealed while current (first load / cold arrival)
+        const slot = this.catalogSlotForIndex(i);
+        if (slot) this.revealCatalogLevel(slot);
       }
     }, FRAME_REVEAL_DELAY_MS);
     this.frameRevealTimers.set(i, timer);
@@ -4372,7 +5046,7 @@ export class Feed {
     if (!this.manualRuns.has(i)) {
       // First transition autoplay → manual for this unit = a takeover.
       track('takeover', {
-        mechanic_id: this.playables[i]?.id,
+        mechanic_id: this.effectivePlayableId(i),
         ms_since_shown: Math.round(performance.now() - this.shownAt),
         ab_arm: null,   // W3: auto vs tap-to-start arm
       });
@@ -4381,6 +5055,7 @@ export class Feed {
       this.manualStartMs.set(i, performance.now());
       // Taking over a mechanic begins its configured series (unless this is a
       // one-shot challenge play).
+      this.ensureCatalogSeries(i);
       this.maybeStartSeries(i);
     }
     this.manualRuns.add(i);
@@ -5997,6 +6672,7 @@ export class Feed {
   private onWindowMessage = (e: MessageEvent) => {
     const i = this.frameIndexForSource(e.source);
     if (i < 0) return;
+    if (this.handleCatalogPlayerMessage(i, e)) return;
     const d = e.data as Record<string, unknown> | null;
     if (d && typeof d === 'object' && d.source === 'playable' && d.type === 'boot_timings') {
       this.handleBootTimings(i, d);
@@ -6028,8 +6704,119 @@ export class Feed {
     this.handlePlayableCompleted(i, outcome);
   };
 
+  private handleCatalogPlayerMessage(i: number, event: MessageEvent): boolean {
+    const slot = this.catalogSlotForIndex(i);
+    const session = slot?.session;
+    if (!slot || !session || this.frames.get(i)?.dataset.catalogPlayerV2 !== '1') return false;
+    const data = event.data as Record<string, unknown> | null;
+    const type = data && typeof data === 'object' ? String(data.type ?? '') : '';
+    if (['configure_ready', 'configured', 'configure_failed'].includes(type)) {
+      const transition = session.handleMessage({
+        source: event.source,
+        origin: event.origin,
+        data: event.data,
+      }, slot.frameEpoch);
+      this.applyCatalogPlayerEffects(slot, transition.effects);
+      if (session.snapshot().phase === 'configured') this.markCatalogConfigured(slot);
+      return true;
+    }
+    // No gameplay/readiness signal is accepted before the exact configured ACK.
+    return session.snapshot().phase !== 'configured';
+  }
+
+  private applyCatalogPlayerEffects(slot: CatalogFeedSlot, effects: readonly CatalogPlayerEffect[]): void {
+    if (!this.catalogSlotIsCurrent(slot)) return;
+    for (const effect of effects) {
+      if (effect.frameEpoch !== slot.frameEpoch) continue;
+      if (effect.type === 'post_configure_level') {
+        try {
+          this.frames.get(slot.index)?.contentWindow?.postMessage(effect.message, effect.targetOrigin);
+        } catch {
+          this.failCatalogConfiguration(slot, 'contract');
+        }
+      } else if (effect.type === 'catalog_configuration_failure') {
+        if (!slot.failureEmitted) {
+          const eventId = queueControlPlaneEvent(
+            'catalog_configuration_failure',
+            effect.payload,
+            new Date().toISOString(),
+          );
+          if (eventId) slot.failureEmitted = true;
+        }
+        this.activateCatalogBuiltinFallback(slot, `configuration_${effect.payload.reason}`);
+      } else if (effect.type === 'catalog_reveal_ready') {
+        this.emitCatalogLevelImpression(slot);
+      }
+    }
+  }
+
+  private markCatalogConfigured(slot: CatalogFeedSlot): void {
+    const i = slot.index;
+    if (!this.catalogSlotIsCurrent(slot) || this.frameReady.has(i)) return;
+    if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
+    slot.configurationTimer = null;
+    this.frameStaticReady.add(i);
+    this.frameReady.add(i);
+    this.frameInteractiveReady.add(i);
+    if (this.manualRuns.has(i)) {
+      const runId = this.frames.get(i)?.dataset.runId;
+      const ticket = runId ? this.ticketForRun(i, runId) : null;
+      if (runId && ticket) this.registerControlPlaneAttempt(i, runId, ticket);
+    }
+    this.applyActiveStates();
+    this.tryRevealFrame(i);
+    this.ensureFrameAutoPlay(i);
+    this.applyPendingEditor(i);
+  }
+
+  private failCatalogConfiguration(slot: CatalogFeedSlot, reason: CatalogFailureReason): void {
+    if (!this.catalogSlotIsCurrent(slot) || !slot.session) return;
+    const transition = slot.session.fail(reason, slot.frameEpoch);
+    this.applyCatalogPlayerEffects(slot, transition.effects);
+  }
+
+  private revealCatalogLevel(slot: CatalogFeedSlot): void {
+    if (!this.catalogSlotIsCurrent(slot) || !slot.session
+      || slot.phase !== 'catalog_mounted' || !this.feedActuallyVisible(slot.index)) return;
+    const transition = slot.session.setVisible(true, slot.frameEpoch);
+    this.applyCatalogPlayerEffects(slot, transition.effects);
+  }
+
+  private emitCatalogLevelImpression(slot: CatalogFeedSlot): void {
+    const exposure = slot.exposure;
+    const session = slot.session;
+    if (!session || !this.catalogSlotIsCurrent(slot) || !this.feedActuallyVisible(slot.index)) return;
+    let level = exposure.levels.get(slot.ordinal);
+    if (!level) {
+      level = {
+        levelImpressionId: ticketUid(),
+        levelIndex: slot.ordinal,
+        occurredAt: new Date().toISOString(),
+        emitted: false,
+      };
+      exposure.levels.set(slot.ordinal, level);
+    }
+    if (level.emitted) return;
+    const eventId = queueControlPlaneEvent(
+      'catalog_level_impression',
+      buildCatalogLevelImpression(session.binding, exposure.impressionId, level.levelImpressionId),
+      level.occurredAt,
+    );
+    if (!eventId) return;
+    level.emitted = true;
+    exposure.revealedAt ??= level.occurredAt;
+    exposure.impressionEmitted = true;
+    this.frameInteractiveReadyAt.set(slot.index, level.occurredAt);
+    for (const attempt of this.cpAttempts.values()) {
+      if (attempt.exposure === exposure) this.flushControlPlaneAttempt(attempt);
+    }
+  }
+
   private onHostGesture = (playableId?: string) => {
-    const i = playableId ? this.playables.findIndex((p) => p.id === playableId) : this.realIndex();
+    const current = this.realIndex();
+    const i = playableId && this.effectivePlayableId(current) !== playableId
+      ? this.playables.findIndex((p) => p.id === playableId)
+      : current;
     const idx = i >= 0 ? i : this.realIndex();
     // First in-iframe user input on the current unit (fires before takeover below).
     if (idx === this.shownIndex && !this.firstInputLogged) {
@@ -6181,7 +6968,7 @@ export class Feed {
 
     if (this.completedRunIds.has(runId)) return;
     this.completedRunIds.add(runId);
-    const mechanicId = this.playables[i]?.id;
+    const mechanicId = this.effectivePlayableId(i);
     const attemptTimeMs = this.solveMsFor(i);
     this.recordControlPlaneAttemptResult(i, runId, outcome === 'won' ? 'win' : 'lose', attemptTimeMs);
     if (outcome === 'won') {
@@ -6209,7 +6996,7 @@ export class Feed {
   // "so close" congratulation so the reboot doesn't flash the mechanic's intro.
   private handleSeriesFail(i: number): void {
     if (!this.series || this.series.index !== i) { this.handleLoss(i); return; }
-    track('series_fail', { mechanic_id: this.playables[i]?.id, level: this.series.done + 1 });
+    track('series_fail', { mechanic_id: this.effectivePlayableId(i), level: this.series.done + 1 });
     // Retry the CURRENT level, not the whole series — `done` (levels already
     // cleared) is preserved, so advanceSeriesInPlace relaunches level `done + 1`.
     this.series.playing = true;
@@ -6445,8 +7232,29 @@ export class Feed {
     actions.className = 'reward__actions';
     reward.appendChild(actions);
 
-    const replay = this.rewardButton('↻', 'Replay', 'reward__action--replay');
-    replay.addEventListener('click', () => this.replayManual(i));
+    // A catalog authorization is a finite, server-owned series. Once its chest has
+    // been earned the ticket cannot be replayed or extended locally, so the primary
+    // action must leave the unit instead of manufacturing an extra ordinal.
+    const completedCatalogSeries = Boolean(
+      this.series?.index === i
+      && this.series.catalog
+      && this.series.done >= this.seriesLen(),
+    );
+    const replay = this.rewardButton(
+      completedCatalogSeries ? '↑' : '↻',
+      completedCatalogSeries ? 'Next mechanic' : 'Replay',
+      'reward__action--replay',
+    );
+    replay.addEventListener('click', () => {
+      if (!completedCatalogSeries) {
+        this.replayManual(i);
+        return;
+      }
+      this.seriesWinShown.delete(i);
+      this.clearSeriesUi();
+      this.series = null;
+      this.advanceToNext();
+    });
     actions.appendChild(replay);
 
     const swipe = this.playableApi(i)?.swipe;

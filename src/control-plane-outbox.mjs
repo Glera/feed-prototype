@@ -199,6 +199,16 @@ export class DurableControlPlaneOutbox {
     return jsonClone(this._state.deadLetters);
   }
 
+  /** Exact receipt state for a previously enqueued event identity. */
+  eventState(eventId) {
+    if (this._state.pending.some((event) => event.event_id === eventId)) return 'pending';
+    if (this._state.deadLetters.some((entry) => entry.event.event_id === eventId)) return 'rejected';
+    // The outbox removes an envelope only after a per-item ACK. Callers retain
+    // the event id returned by enqueue, so absence from both durable sets is an
+    // exact acknowledgement rather than a global queue heuristic.
+    return 'acknowledged';
+  }
+
   nextRetryAt() {
     return this._state.nextRetryAt;
   }

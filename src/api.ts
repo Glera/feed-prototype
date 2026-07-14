@@ -10,6 +10,10 @@ import type {
   CatalogRuntimeIdentityV1,
   CatalogTicketLevelSpecBundleV1,
 } from './catalog-player-v2.mjs';
+import type {
+  CatalogFeedAuthorityRequestV1,
+  CatalogFeedAuthorityResultV1,
+} from './catalog-feed-authority.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -202,6 +206,13 @@ export interface BuiltinFeedBindingsV1 {
   by_playable_id: Record<string, BuiltinFeedBindingV1>;
 }
 
+/** Ask the server policy to plan one already-projected built-in opportunity. */
+export function apiGetCatalogFeedAuthorityRequired(
+  payload: CatalogFeedAuthorityRequestV1,
+): Promise<CatalogFeedAuthorityResultV1> {
+  return postRequired<CatalogFeedAuthorityResultV1>('/api/feed/catalog-authority', payload);
+}
+
 export interface CatalogAllocateAuthorizedRequestV2 {
   schema: 'catalog.allocate-authorized.v2';
   authorizationId: string;
@@ -258,7 +269,7 @@ export interface CatalogAllocateAuthorizedResultV2 {
   allocation: CatalogAllocationDecisionResultV1;
 }
 
-/** Additive player-v2 transport. No feed caller is wired to it yet. */
+/** Additive player-v2 transport; the only real-feed caller is triple-gated. */
 export function apiAllocateAuthorizedCatalogRequired(
   payload: CatalogAllocateAuthorizedRequestV2,
 ): Promise<CatalogAllocateAuthorizedResultV2> {
