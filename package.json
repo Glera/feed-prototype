@@ -13,6 +13,7 @@
     "check:cp-outbox": "node scripts/check-control-plane-outbox.mjs",
     "check:run-ticket-outbox": "node scripts/check-run-ticket-start-outbox.mjs",
     "check:catalog-player-v2": "node scripts/check-catalog-player-v2.mjs",
+    "serve:catalog-player-v2-browser": "node scripts/serve-catalog-player-v2-browser-harness.mjs",
     "check:cp-browser": "node scripts/check-control-plane-feed-browser.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
