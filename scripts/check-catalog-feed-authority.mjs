@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 
 import {
+  CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS,
+  CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
   CatalogFeedAuthorityContractError,
   buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
+  catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
   catalogCanaryAuthorityAllowsAllocation,
   catalogCanaryDogfoodEnabled,
@@ -90,6 +93,81 @@ equal(catalogFeedMustEvictFrame('builtin_fallback', true), false, 'fallback may 
 equal(catalogAuthorityStartEligible('authority_pending', false, true), true, 'the first source ACK starts authority');
 equal(catalogAuthorityStartEligible('authority_pending', true, true), false, 'retry/reload cannot start authority twice');
 equal(catalogAuthorityStartEligible('catalog_ready', true, true), false, 'frame reload reuses delivered authority');
+
+equal(
+  catalogAuthorityFallbackTimerPlan('authority_pending', false, true, null),
+  'bootstrap',
+  'an initial/navigation claim starts the bounded binding bootstrap',
+);
+equal(
+  catalogAuthorityFallbackTimerPlan('authority_pending', true, true, 'bootstrap'),
+  'delivery',
+  'authority start replaces the bootstrap with a fresh delivery watchdog',
+);
+equal(
+  catalogAuthorityFallbackTimerPlan('authority_pending', true, true, 'delivery'),
+  null,
+  'an already armed delivery watchdog is idempotent',
+);
+equal(
+  catalogAuthorityFallbackTimerPlan('catalog_ready', true, true, 'delivery'),
+  null,
+  'a terminal delivery phase cannot arm another watchdog',
+);
+
+// Deterministic clock/epoch regression for the production race. Binding may
+// arrive after the former 3.5s deadline, and authority then owns a full fresh
+// delivery budget. Deliberately execute the stale bootstrap callback as if a
+// browser queued it before clearTimeout; its epoch must fence it out.
+let timerNow = 0;
+let timerEpoch = 0;
+let timerStage = null;
+let timerPhase = 'authority_pending';
+const timerCallbacks = [];
+const armTimer = (stage) => {
+  timerStage = stage;
+  const epoch = ++timerEpoch;
+  const delay = stage === 'bootstrap'
+    ? CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS
+    : CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS;
+  timerCallbacks.push({ stage, epoch, deadline: timerNow + delay, fire() {
+    if (timerEpoch !== epoch || timerStage !== stage) return;
+    timerPhase = 'builtin_fallback';
+  } });
+};
+armTimer('bootstrap');
+timerNow = 4000;
+equal(timerPhase, 'authority_pending', 'a >3.5s delayed binding remains eligible under the 15s bootstrap');
+equal(catalogAuthorityStartEligible(timerPhase, false, true), true, 'delayed binding can still start authority');
+armTimer('delivery');
+const staleBootstrap = timerCallbacks[0];
+staleBootstrap.fire();
+equal(timerPhase, 'authority_pending', 'a stale bootstrap callback is fenced by the replacement epoch');
+equal(
+  timerCallbacks[1].deadline,
+  timerNow + CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
+  'authority receives a full delivery budget independent of bootstrap age',
+);
+const deliveryCallback = timerCallbacks[1];
+timerPhase = 'catalog_ready';
+timerStage = null;
+timerEpoch += 1;
+deliveryCallback.fire();
+equal(timerPhase, 'catalog_ready', 'catalog-ready cancellation fences a queued delivery callback');
+
+timerPhase = 'authority_pending';
+timerStage = null;
+armTimer('delivery');
+const unresolvedDelivery = timerCallbacks[2];
+timerNow = unresolvedDelivery.deadline;
+unresolvedDelivery.fire();
+equal(catalogFeedSurface(timerPhase), 'builtin', 'an unresolved delivery still fails closed to builtin');
+
+timerPhase = 'disposed';
+timerStage = null;
+timerEpoch += 1;
+unresolvedDelivery.fire();
+equal(timerPhase, 'disposed', 'dispose keeps stale watchdog callbacks fenced');
 equal(Object.keys(request).join(','), 'schema,requestId,sourceDecisionId');
 equal(Object.isFrozen(request), true);
 

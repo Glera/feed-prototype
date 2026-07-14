@@ -102,6 +102,15 @@ export function catalogAuthorityStartEligible(
   authorityStarted: boolean,
   decisionEmitted: boolean,
 ): boolean;
+export const CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS: 15000;
+export const CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS: 15000;
+export function catalogAuthorityFallbackTimerPlan(
+  phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'
+    | 'builtin_fallback' | 'disposed',
+  authorityStarted: boolean,
+  claimCommitted: boolean,
+  currentStage: 'bootstrap' | 'delivery' | null,
+): 'bootstrap' | 'delivery' | null;
 export function buildCatalogFeedAuthorityRequest(
   requestId: string,
   sourceDecisionId: string,

@@ -62,6 +62,8 @@ import {
   type CatalogTicketLevelSpecBundleV1,
 } from './catalog-player-v2.mjs';
 import {
+  CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS,
+  CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
   buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
   catalogCanaryAuthorityAllowsAllocation,
@@ -69,6 +71,7 @@ import {
   catalogCanaryInvitationMissing,
   catalogCanaryTicketStartIsSafe,
   catalogFallbackMatchesBinding,
+  catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
   catalogDogfoodAccountEligible,
   catalogFeedDogfoodEnabled,
@@ -307,7 +310,10 @@ type CatalogFeedSlot = {
   phase: CatalogFeedSlotPhase;
   request: CatalogFeedAuthorityRequestV1;
   authorityStarted: boolean;
+  authorityClaimCommitted: boolean;
   authorityTimer: number | null;
+  authorityTimerEpoch: number;
+  authorityTimerStage: 'bootstrap' | 'delivery' | null;
   configurationTimer: number | null;
   ticketRequest: CatalogRunTicketRequestV2 | null;
   ticket: CatalogRunTicketViewV2 | null;
@@ -971,7 +977,10 @@ export class Feed {
         phase: 'authority_pending',
         request: buildCatalogFeedAuthorityRequest(ticketUid(), exposure.decisionId),
         authorityStarted: false,
+        authorityClaimCommitted: true,
         authorityTimer: null,
+        authorityTimerEpoch: 0,
+        authorityTimerStage: null,
         configurationTimer: null,
         ticketRequest: null,
         ticket: null,
@@ -983,13 +992,8 @@ export class Feed {
         failureEmitted: false,
         canaryProjectionRequired: false,
       };
-      // A cold/disabled authority must never turn the real feed into a blank
-      // page. This timer preserves the exact reviewed built-in opportunity.
-      slot.authorityTimer = window.setTimeout(
-        () => this.activateCatalogBuiltinFallback(slot, 'authority_timeout'),
-        3500,
-      );
       this.catalogSlots.set(i, slot);
+      this.armCatalogAuthorityFallback(slot);
     }
     this.cpPendingExposure = exposure;
     if (exposure.binding) this.emitControlPlaneExposure(exposure);
@@ -1076,7 +1080,37 @@ export class Feed {
       slot.exposure.decisionEmitted,
     )) return;
     slot.authorityStarted = true;
+    this.armCatalogAuthorityFallback(slot);
     void this.resolveCatalogAuthority(slot);
+  }
+
+  private armCatalogAuthorityFallback(slot: CatalogFeedSlot): void {
+    if (!this.catalogSlotIsCurrent(slot)) return;
+    const stage = catalogAuthorityFallbackTimerPlan(
+      slot.phase,
+      slot.authorityStarted,
+      slot.authorityClaimCommitted,
+      slot.authorityTimerStage,
+    );
+    if (!stage) return;
+    if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
+    const epoch = ++slot.authorityTimerEpoch;
+    slot.authorityTimerStage = stage;
+    const delay = stage === 'bootstrap'
+      ? CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS
+      : CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS;
+    // Bootstrap protects an initial/navigation claim whose session/binding
+    // never arrives. Actual authority replaces it with enough budget for the
+    // sequential CP→canary→allocation→ticket→spec closure on mobile.
+    slot.authorityTimer = window.setTimeout(
+      () => {
+        if (!this.catalogSlotIsCurrent(slot)
+          || slot.authorityTimerEpoch !== epoch
+          || slot.authorityTimerStage !== stage) return;
+        this.activateCatalogBuiltinFallback(slot, `${stage}_timeout`);
+      },
+      delay,
+    );
   }
 
   private async resolveCatalogAuthority(slot: CatalogFeedSlot): Promise<void> {
@@ -1266,6 +1300,8 @@ export class Feed {
       slot.phase = 'catalog_ready';
       if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
       slot.authorityTimer = null;
+      slot.authorityTimerStage = null;
+      slot.authorityTimerEpoch += 1;
       if (this.liveSet().has(slot.index)) this.mount(slot.index);
     } catch (error) {
       if (!this.catalogSlotIsCurrent(slot)) return;
@@ -1320,6 +1356,8 @@ export class Feed {
     if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
     if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
     slot.authorityTimer = null;
+    slot.authorityTimerStage = null;
+    slot.authorityTimerEpoch += 1;
     slot.configurationTimer = null;
     slot.canaryProjectionRequired = false;
     slot.session?.dispose(slot.frameEpoch);
@@ -1414,6 +1452,9 @@ export class Feed {
     if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
     if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
     slot.session?.dispose(slot.frameEpoch);
+    slot.authorityTimer = null;
+    slot.authorityTimerStage = null;
+    slot.authorityTimerEpoch += 1;
     const frame = this.frames.get(i);
     if (frame?.dataset.catalogPlayerV2 === '1') {
       this.disposeFrame(i, frame);
