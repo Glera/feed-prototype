@@ -19,6 +19,7 @@ import {
   type RunTicketStartFlushResult,
 } from './run-ticket-start-outbox.mjs';
 import { ResultReceiptWaiters } from './result-receipts.mjs';
+import { getInitData } from './telegram';
 
 const LEGACY_KEY = 'swipe_pending_results_v1';
 const LEGACY_EVER_KEY = 'swipe_stars_ever_v1';
@@ -26,6 +27,8 @@ const KEY = 'swipe_pending_results_v2';
 const EVER_KEY = 'swipe_stars_ever_v2';
 const RUN_START_KEY = 'swipe_pending_run_ticket_starts_v1';
 const RUN_START_DEAD_KEY = 'swipe_rejected_run_ticket_starts_v1';
+const RESULT_RETRY_BASE_MS = 1_000;
+const RESULT_RETRY_MAX_MS = 30_000;
 const migratedScopes = new Set<string>();
 const migratedRunStartScopes = new Set<string>();
 
@@ -270,13 +273,54 @@ function persistResult(r: ResultIn): boolean {
 }
 
 let flushPromise: Promise<ConfirmedBalances | null> | null = null;
+let resultRetryTimer: number | null = null;
+let resultRetryAttempt = 0;
+
+function cancelScheduledResultRetry(): void {
+  if (resultRetryTimer == null) return;
+  window.clearTimeout(resultRetryTimer);
+  resultRetryTimer = null;
+}
+
+function resetResultRetryBackoff(): void {
+  resultRetryAttempt = 0;
+  cancelScheduledResultRetry();
+}
+
+function scheduleResultRetry(): void {
+  // Plain web previews have no authenticated backend identity. Keep their
+  // durable queue for a later Telegram boot, but never poll a guaranteed 401.
+  if (resultRetryTimer != null || pendingCount() === 0 || !getInitData()) return;
+  const baseDelay = RESULT_RETRY_BASE_MS * (2 ** Math.min(resultRetryAttempt, 10));
+  // Spread recovery after a shared backend outage instead of waking every
+  // client on the same 1/2/4/8s boundary.
+  const delay = Math.min(
+    RESULT_RETRY_MAX_MS,
+    Math.round(baseDelay * (0.8 + Math.random() * 0.4)),
+  );
+  resultRetryAttempt += 1;
+  resultRetryTimer = window.setTimeout(() => {
+    resultRetryTimer = null;
+    void flushResults();
+  }, delay);
+}
 
 /** Retry pending results in order; drop each once the server confirms. Stops at
  *  the first failure (offline / cold backend) to retry later. Returns the latest
  *  server balance seen, or null if nothing was confirmed. */
 export function flushResults(): Promise<ConfirmedBalances | null> {
   if (flushPromise) return flushPromise;
-  flushPromise = flushLoop().finally(() => { flushPromise = null; });
+  // A foreground/manual flush supersedes a sleeping backoff. Do not reset the
+  // attempt counter: repeated foreground events must not create a hot loop.
+  cancelScheduledResultRetry();
+  flushPromise = flushLoop().finally(() => {
+    flushPromise = null;
+    // Cover both transient failures and the enqueue-vs-finally race: an exact
+    // receipt may enqueue the catalog chest while the preceding level drain is
+    // still settling. Anything durable that remains always gets another turn.
+    if (pendingCount() > 0) scheduleResultRetry();
+    else resetResultRetryBackoff();
+  });
   return flushPromise;
 }
 
@@ -295,6 +339,7 @@ async function flushLoop(): Promise<ConfirmedBalances | null> {
         ticket = await apiStartRunRequired(result.run_ticket);
       } catch (error) {
         if (dropTerminalResult(result, error, 'ticket start')) continue;
+        logRetryableResult(result, error, 'ticket start');
         break;
       }
       if (ticket.state === 'expired') {
@@ -310,6 +355,7 @@ async function flushLoop(): Promise<ConfirmedBalances | null> {
       response = await apiPostResultRequired(result);
     } catch (error) {
       if (dropTerminalResult(result, error, 'result submit')) continue;
+      logRetryableResult(result, error, 'result submit');
       break;
     }
     const afterResult = load();
@@ -338,8 +384,18 @@ async function flushLoop(): Promise<ConfirmedBalances | null> {
     }
     settleResultReceipt({ runId: result.run_id, status: 'confirmed', balances: confirmed });
     save(load().filter((candidate) => candidate.run_id !== result.run_id));
+    resetResultRetryBackoff();
   }
   return confirmed;
+}
+
+function logRetryableResult(result: ResultIn, error: unknown, stage: string): void {
+  const status = error instanceof ApiRequestError ? error.status : 0;
+  const code = error instanceof ApiRequestError ? error.code : null;
+  console.warn(
+    `[results] retaining outbox item ${result.run_id}; ${stage} will retry`
+      + ` (HTTP ${status}${code ? `, ${code}` : ''})`,
+  );
 }
 
 function dropResult(runId: string): void {
@@ -374,6 +430,7 @@ function notifyTerminalResult(
     code,
   };
   dropResult(result.run_id);
+  resetResultRetryBackoff();
   settleResultReceipt({
     runId: result.run_id,
     status: 'rejected',
@@ -387,6 +444,7 @@ function notifyTerminalResult(
 
 /** Clear the queue (used by the debug reset). */
 export function clearOutbox(): void {
+  resetResultRetryBackoff();
   save([]);
   try { currentRunStartOutbox().clear(); } catch { /* storage blocked */ }
 }

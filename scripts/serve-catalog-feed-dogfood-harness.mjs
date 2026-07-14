@@ -9,7 +9,18 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const contractDigest = 'c'.repeat(64);
 const artifactHex = 'd'.repeat(64);
 const artifactDigest = `sha256:${artifactHex}`;
-const specHashes = ['1'.repeat(64), '2'.repeat(64)];
+const configuredLevelCount = Number(process.env.CATALOG_DOGFOOD_LEVEL_COUNT ?? '2');
+if (!Number.isInteger(configuredLevelCount) || configuredLevelCount < 1 || configuredLevelCount > 6) {
+  throw new Error('CATALOG_DOGFOOD_LEVEL_COUNT must be an integer from 1 to 6');
+}
+const specHashes = Array.from(
+  { length: configuredLevelCount },
+  (_, index) => String(index + 1).repeat(64),
+);
+const harnessTimeoutMs = Number(process.env.CATALOG_DOGFOOD_TIMEOUT_MS ?? '45000');
+if (!Number.isInteger(harnessTimeoutMs) || harnessTimeoutMs < 5_000 || harnessTimeoutMs > 60_000) {
+  throw new Error('CATALOG_DOGFOOD_TIMEOUT_MS must be an integer from 5000 to 60000');
+}
 const ids = {
   mapping: '10000000-0000-4000-8000-000000000001',
   builtinVariant: '10000000-0000-4000-8000-000000000002',
@@ -27,7 +38,14 @@ let canaryBuildHtml = '';
 let canaryDisabledBuildHtml = '';
 
 const scenarios = new Set([
-  'success', 'recall', 'replay-conflict', 'no-invite', 'wrong-account', 'disabled',
+  'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
+  'no-invite', 'wrong-account', 'disabled',
+]);
+const canaryScenarios = new Set([
+  'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
+]);
+const successfulCatalogScenarios = new Set([
+  'success', 'result-transient', 'result-timeout', 'disabled',
 ]);
 const normalizedScenario = (scenario) => scenarios.has(scenario) ? scenario : 'success';
 const dogfoodUserId = 424242;
@@ -57,6 +75,9 @@ const freshState = (scenario, instanceToken) => ({
   ticketRequests: [],
   specRequests: 0,
   results: [],
+  resultAttempts: [],
+  resultTransientInjected: false,
+  resultTimeoutInjected: false,
   diagnostics: [],
   runtimeEvents: [],
   replayConflictTransportAttempts: 0,
@@ -188,7 +209,7 @@ const allocation = {
 };
 
 const allocationForScenario = (scenario) => {
-  const canary = ['success', 'recall', 'replay-conflict'].includes(scenario);
+  const canary = canaryScenarios.has(scenario);
   return {
     ...allocation,
     slotType: canary ? 'canary-dogfood' : allocation.slotType,
@@ -221,7 +242,7 @@ const ticketView = (request) => {
     ticket_id: request.ticket_id,
     run_id: request.run_id,
     kind: request.kind,
-    expected_levels: request.kind === 'series' ? 2 : 1,
+    expected_levels: request.kind === 'series' ? specHashes.length : 1,
     completed_levels: 0,
     next_result_at: new Date(Date.now() - 1000).toISOString(),
     expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -242,7 +263,7 @@ const ticketView = (request) => {
     runtime_artifact_digest: artifactDigest,
     manifest_content_hash: manifest.contentHash,
     levels: specHashes.map((specHash, index) => ({ ordinal: index + 1, spec_hash: specHash })),
-    expected_levels: 2,
+    expected_levels: specHashes.length,
     completed_levels: state?.results.filter((item) => item.kind === 'level'
       && item.outcome === 'confirmed').length ?? 0,
   };
@@ -286,11 +307,11 @@ const evaluate = () => {
   const normalPath = state.canaryRequests.length === 0
     && state.authorityRequests.length === 1
     && state.authorityRequests[0]?.sourceDecisionId === source[0]?.payload.decision_id;
-  const catalogAuthorityPath = ['success', 'recall', 'replay-conflict'].includes(state.scenario)
+  const catalogAuthorityPath = canaryScenarios.has(state.scenario)
     ? canaryPath
     : state.scenario === 'disabled' && normalPath;
   const allocationResponse = state.allocationResponses[0];
-  const exactAllocationClass = ['success', 'recall', 'replay-conflict'].includes(state.scenario)
+  const exactAllocationClass = canaryScenarios.has(state.scenario)
     ? allocationResponse?.catalog?.entryState === 'canary'
       && allocationResponse?.slotType === 'canary-dogfood'
       && allocationResponse?.policyVersion === 'catalog-canary-dogfood.v1'
@@ -306,7 +327,7 @@ const evaluate = () => {
     && catalogImpressions.every((event) => event.payload.ticket_id === v2Ticket?.ticket_id
       && event.payload.decision_id === ids.allocationDecision
       && event.payload.series_id === ids.series);
-  const exactCanaryTicketIdentity = !['success', 'recall', 'replay-conflict'].includes(state.scenario)
+  const exactCanaryTicketIdentity = !canaryScenarios.has(state.scenario)
     || (v2Ticket?.ticket_id === ids.authorization
       && v2Ticket?.run_id === `catalog-canary:${ids.authorization}`);
   const common = exactTransport
@@ -318,12 +339,12 @@ const evaluate = () => {
     && state.pendingSamples > 0
     && state.checkpoints.pendingSurface?.pass === true
     && state.client.catalogSeen;
-  if (['success', 'disabled'].includes(state.scenario)) {
-    const impressionIdentity = catalogImpressions.length === 2
+  if (successfulCatalogScenarios.has(state.scenario)) {
+    const impressionIdentity = catalogImpressions.length === specHashes.length
       && new Set(catalogImpressions.map((event) => event.payload.impression_id)).size === 1
-      && new Set(catalogImpressions.map((event) => event.payload.level_impression_id)).size === 2
+      && new Set(catalogImpressions.map((event) => event.payload.level_impression_id)).size === specHashes.length
       && catalogImpressions.every((event, index) => event.payload.ordinal === index + 1);
-    const exactLevels = levelResults.length === 2
+    const exactLevels = levelResults.length === specHashes.length
       && levelResults.every((item, index) => item.outcome === 'confirmed'
         && item.body.ordinal === index + 1
         && item.body.applied_spec_hash === specHashes[index]
@@ -332,17 +353,17 @@ const evaluate = () => {
       && chestResults[0].outcome === 'confirmed'
       && chestResults[0].body.series_id === ids.series;
     if (common && impressionIdentity && exactLevels && exactChest
-      && state.checkpoints.configuredImpressions.length === 2
+      && state.checkpoints.configuredImpressions.length === specHashes.length
       && state.checkpoints.configuredImpressions.every((checkpoint) => checkpoint.pass)
-      && state.checkpoints.levelReceipts.length === 2
+      && state.checkpoints.levelReceipts.length === specHashes.length
       && state.checkpoints.levelReceipts.every((checkpoint) => checkpoint.pass)
       && state.checkpoints.chestAfterExactReceipts?.pass === true
       && state.checkpoints.rewardAfterChestReceipt?.pass === true
       && builtinImpressions.length === 0 && state.client.chestSeen && state.client.rewardSeen) {
       state.status = 'pass';
-      state.message = state.scenario === 'success'
-        ? 'canary invitation completed the exact two-level catalog series and confirmed chest'
-        : 'disabled canary left the normal effectful catalog path unchanged';
+      state.message = state.scenario === 'disabled'
+        ? 'disabled canary left the normal effectful catalog path unchanged'
+        : `canary invitation completed the exact ${specHashes.length}-level catalog series and confirmed chest`;
       record('assertions_passed', { scenario: state.scenario });
       return;
     }
@@ -408,7 +429,7 @@ const evaluate = () => {
       return;
     }
   }
-  if (Date.now() - state.startedAt > 45_000) {
+  if (Date.now() - state.startedAt > harnessTimeoutMs) {
     state.status = 'fail';
     state.message = `timeout: source=${source.length}, catalogImpressions=${catalogImpressions.length}, levels=${levelResults.length}, chest=${chestResults.length}`;
   }
@@ -471,7 +492,7 @@ output{display:block;padding:6px;border-radius:6px;background:#26313f;font-weigh
 pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0 0}a{color:#8ecbff}
 </style></head><body>
 <div data-testid="feed-root" data-harness-instance="${instanceToken}"></div>
-<aside class="panel"><div><a href="/harness.html?scenario=success">canary success</a> · <a href="/harness.html?scenario=recall">hard recall</a> · <a href="/harness.html?scenario=replay-conflict">replay conflict</a> · <a href="/harness.html?scenario=no-invite">no invite</a> · <a href="/harness.html?scenario=wrong-account">wrong account</a> · <a href="/harness.html?scenario=disabled">canary disabled</a></div>
+<aside class="panel"><div><a href="/harness.html?scenario=success">canary success</a> · <a href="/harness.html?scenario=result-transient">transient result recovery</a> · <a href="/harness.html?scenario=result-timeout">hung result recovery</a> · <a href="/harness.html?scenario=recall">hard recall</a> · <a href="/harness.html?scenario=replay-conflict">replay conflict</a> · <a href="/harness.html?scenario=no-invite">no invite</a> · <a href="/harness.html?scenario=wrong-account">wrong account</a> · <a href="/harness.html?scenario=disabled">canary disabled</a></div>
 <output data-testid="status" data-state="running">RUNNING</output><pre data-testid="trace">[]</pre></aside>
 <script>
 const status=document.querySelector('[data-testid=status]');const trace=document.querySelector('[data-testid=trace]');
@@ -767,7 +788,7 @@ const server = createServer(async (request, response) => {
       record('canary_authority_missing');
       return json(response, { code: 'catalog_canary_invitation_not_found' }, 404);
     }
-    if (!['success', 'recall', 'replay-conflict'].includes(state?.scenario ?? '')) {
+    if (!canaryScenarios.has(state?.scenario ?? '')) {
       if (state) {
         state.status = 'fail';
         state.message = `canary endpoint was called in ${state.scenario}`;
@@ -849,6 +870,21 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/api/results') {
     const body = await bodyOf(request);
     const kind = body.metric_key === 'series' ? 'chest' : 'level';
+    if (state?.scenario === 'result-transient' && kind === 'level' && !state.resultTransientInjected) {
+      state.resultTransientInjected = true;
+      state.resultAttempts.push({ kind, outcome: 'transient', status: 503, body });
+      record('result_transient_failure', { kind, runId: body.run_id });
+      return json(response, { code: 'fixture_transient_result' }, 503);
+    }
+    if (state?.scenario === 'result-timeout' && kind === 'level' && !state.resultTimeoutInjected) {
+      state.resultTimeoutInjected = true;
+      state.resultAttempts.push({ kind, outcome: 'hung', status: 0, body });
+      record('result_hung_until_client_abort', { kind, runId: body.run_id });
+      // Deliberately leave the HTTP response open. The production timeout must
+      // abort this socket, release the global drain promise, and retry the exact
+      // durable body without a visibility or foreground event.
+      return;
+    }
     if (state?.scenario === 'recall' && kind === 'level') {
       state.results.push({ kind, outcome: 'revoked', body });
       state.checkpoints.recallResult = {
@@ -862,6 +898,7 @@ const server = createServer(async (request, response) => {
       record('checkpoint_recall_result_code', state.checkpoints.recallResult);
       return json(response, { code: 'catalog_ticket_revoked' }, 410);
     }
+    state?.resultAttempts.push({ kind, outcome: 'confirmed', status: 200, body });
     state?.results.push({ kind, outcome: 'confirmed', body });
     if (state && kind === 'level') {
       const expectedHash = specHashes[Number(body.ordinal) - 1];
@@ -964,6 +1001,8 @@ canaryDisabledBuildHtml = disabledBuild.html;
 
 console.log(JSON.stringify({
   successUrl: `${origin}/harness.html?scenario=success`,
+  transientResultUrl: `${origin}/harness.html?scenario=result-transient`,
+  timeoutResultUrl: `${origin}/harness.html?scenario=result-timeout`,
   recallUrl: `${origin}/harness.html?scenario=recall`,
   replayConflictUrl: `${origin}/harness.html?scenario=replay-conflict`,
   noInviteUrl: `${origin}/harness.html?scenario=no-invite`,

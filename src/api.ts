@@ -51,6 +51,45 @@ export class ApiRequestError extends Error {
   }
 }
 
+const configuredOutboxRequestTimeoutMs = Number(
+  (import.meta as any).env?.VITE_OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+);
+const OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS = Number.isFinite(configuredOutboxRequestTimeoutMs)
+  && configuredOutboxRequestTimeoutMs >= 100
+  && configuredOutboxRequestTimeoutMs <= 60_000
+  ? Math.round(configuredOutboxRequestTimeoutMs)
+  : 12_000;
+
+async function withRequestTimeout<T>(
+  operation: (signal: AbortSignal | undefined) => Promise<T>,
+  timeoutMs?: number,
+): Promise<T> {
+  if (!timeoutMs || timeoutMs <= 0) return operation(undefined);
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new ApiRequestError(
+        0,
+        `Request timed out after ${timeoutMs}ms`,
+        'request_timeout',
+      ));
+    }, timeoutMs);
+  });
+  try {
+    // The explicit race also makes the deadline effective in test doubles which
+    // do not implement AbortSignal. Native fetch still receives the signal so a
+    // real hung socket is released rather than merely ignored.
+    return await Promise.race([
+      operation(controller.signal),
+      timeout,
+    ]);
+  } finally {
+    if (timer != null) clearTimeout(timer);
+  }
+}
+
 function backendErrorCode(data: unknown): string | null {
   if (!data || typeof data !== 'object') return null;
   const body = data as {
@@ -72,18 +111,23 @@ function backendErrorCode(data: unknown): string | null {
   return typeof code === 'string' ? code : null;
 }
 
-async function postRequired<T>(path: string, body?: unknown): Promise<T> {
+async function postRequired<T>(path: string, body?: unknown, timeoutMs?: number): Promise<T> {
   let r: Response;
+  let text: string;
   try {
-    r = await fetch(`${API_BASE}${path}`, {
-      method: 'POST',
-      headers: headers(),
-      body: body != null ? JSON.stringify(body) : undefined,
-    });
+    ({ response: r, text } = await withRequestTimeout(async (signal) => {
+      const response = await fetch(`${API_BASE}${path}`, {
+        method: 'POST',
+        headers: headers(),
+        body: body != null ? JSON.stringify(body) : undefined,
+        signal,
+      });
+      return { response, text: await response.text() };
+    }, timeoutMs));
   } catch (e) {
+    if (e instanceof ApiRequestError) throw e;
     throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
   }
-  const text = await r.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
   if (!r.ok) {
@@ -347,7 +391,11 @@ export function apiPostResult(payload: ResultIn): Promise<ResultResp | null> {
 }
 
 export function apiPostResultRequired(payload: ResultIn): Promise<ResultResp> {
-  return postRequired<ResultResp>('/api/results', resultPayload(payload));
+  return postRequired<ResultResp>(
+    '/api/results',
+    resultPayload(payload),
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
 }
 
 interface CatalogResultBaseV2 {
@@ -376,11 +424,11 @@ export interface CatalogChestResultV2 extends CatalogResultBaseV2 {
 }
 
 export function apiPostCatalogLevelResultRequired(payload: CatalogLevelResultV2): Promise<ResultResp> {
-  return postRequired<ResultResp>('/api/results', payload);
+  return postRequired<ResultResp>('/api/results', payload, OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS);
 }
 
 export function apiPostCatalogChestResultRequired(payload: CatalogChestResultV2): Promise<ResultResp> {
-  return postRequired<ResultResp>('/api/results', payload);
+  return postRequired<ResultResp>('/api/results', payload, OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS);
 }
 
 export interface LegacyRunTicketRequest {
@@ -445,7 +493,11 @@ export type RunTicketView = LegacyRunTicketView | CatalogRunTicketViewV2;
 export function apiStartCatalogRunRequired(
   payload: CatalogRunTicketRequestV2,
 ): Promise<CatalogRunTicketViewV2> {
-  return postRequired<CatalogRunTicketViewV2>('/api/runs/start', payload);
+  return postRequired<CatalogRunTicketViewV2>(
+    '/api/runs/start',
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
 }
 
 export function apiStartRun(payload: RunTicketRequest): Promise<RunTicketView | null> {
@@ -453,7 +505,11 @@ export function apiStartRun(payload: RunTicketRequest): Promise<RunTicketView | 
 }
 
 export function apiStartRunRequired(payload: RunTicketRequest): Promise<RunTicketView> {
-  return postRequired<RunTicketView>('/api/runs/start', payload);
+  return postRequired<RunTicketView>(
+    '/api/runs/start',
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
 }
 
 export interface DailyQuestView {
