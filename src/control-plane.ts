@@ -6,6 +6,10 @@ import {
 } from './control-plane-outbox.mjs';
 import { getInitData } from './telegram';
 import { sessionIdOf } from './telemetry';
+import type {
+  CatalogConfigurationFailurePayload,
+  CatalogLevelImpressionPayload,
+} from './catalog-player-v2.mjs';
 
 type Uuid = string;
 
@@ -92,8 +96,10 @@ export interface ControlPlanePayloadMap {
   builtin_feed_decision: BuiltinFeedDecisionPayload;
   unit_impression: UnitImpressionPayload;
   level_impression: LevelImpressionPayload;
+  catalog_level_impression: CatalogLevelImpressionPayload;
   builtin_level_impression: BuiltinLevelImpressionPayload;
   configuration_failure: ConfigurationFailurePayload;
+  catalog_configuration_failure: CatalogConfigurationFailurePayload;
   unit_exit: UnitExitPayload;
   attempt_start: AttemptStartPayload;
   attempt_result: AttemptResultPayload;

@@ -3,20 +3,59 @@ export interface StorageLike {
   setItem(key: string, value: string): void;
 }
 
-export interface DurableRunTicketRequest {
+export interface DurableLegacyRunTicketRequest {
   ticket_id: string;
   run_id: string;
   mechanic_id: string;
   variant_id: string;
   kind: 'single' | 'series';
   challenge_id?: string;
+  schema?: never;
+  decision_id?: never;
 }
 
-export interface DurableRunTicketView {
+export interface DurableCatalogRunTicketRequestV2 {
+  schema: 'run.start.v2';
+  ticket_id: string;
+  run_id: string;
+  mechanic_id: string;
+  variant_id: string;
+  kind: 'series';
+  decision_id: string;
+  challenge_id?: null;
+}
+
+export type DurableRunTicketRequest = DurableLegacyRunTicketRequest | DurableCatalogRunTicketRequestV2;
+
+export interface DurableLegacyRunTicketView {
   ticket_id: string;
   run_id: string;
   state: 'active' | 'consumed' | 'expired';
 }
+
+export interface DurableCatalogRunTicketViewV2 {
+  schema: 'run.ticket.v2';
+  ticket_id: string;
+  run_id: string;
+  kind: 'series';
+  mechanic_id: string;
+  variant_id: string;
+  decision_id: string;
+  catalog_entry_id: string;
+  series_id: string;
+  runtime_release_id: string;
+  runtime_contract_digest: string;
+  runtime_artifact_digest: string;
+  manifest_content_hash: string;
+  levels: Array<{ ordinal: number; spec_hash: string }>;
+  expected_levels: number;
+  completed_levels: number;
+  next_result_at: string;
+  expires_at: string;
+  state: 'active' | 'consumed' | 'expired' | 'revoked';
+}
+
+export type DurableRunTicketView = DurableLegacyRunTicketView | DurableCatalogRunTicketViewV2;
 
 export interface RunTicketStartFlushResult {
   status: 'ok' | 'retry' | 'invalid_response' | 'storage_error';

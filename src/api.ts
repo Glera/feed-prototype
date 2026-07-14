@@ -6,6 +6,10 @@
  * the feed works unchanged in a plain browser / AppLovin.
  */
 import { getInitData } from './telegram';
+import type {
+  CatalogRuntimeIdentityV1,
+  CatalogTicketLevelSpecBundleV1,
+} from './catalog-player-v2.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -32,10 +36,35 @@ async function post<T>(path: string, body?: unknown): Promise<T | null> {
 }
 
 export class ApiRequestError extends Error {
-  constructor(public readonly status: number, message: string) {
+  constructor(
+    public readonly status: number,
+    message: string,
+    public readonly code: string | null = null,
+  ) {
     super(message);
     this.name = 'ApiRequestError';
   }
+}
+
+function backendErrorCode(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null;
+  const body = data as {
+    code?: unknown;
+    detail?: unknown;
+    error?: unknown;
+  };
+  const candidates = [
+    body.code,
+    typeof body.detail === 'object' && body.detail !== null
+      ? (body.detail as { code?: unknown }).code
+      : null,
+    typeof body.error === 'object' && body.error !== null
+      ? (body.error as { code?: unknown }).code
+      : null,
+  ];
+  const code = candidates.find((candidate) =>
+    typeof candidate === 'string' && /^[a-z][a-z0-9_]{1,95}$/.test(candidate));
+  return typeof code === 'string' ? code : null;
 }
 
 async function postRequired<T>(path: string, body?: unknown): Promise<T> {
@@ -54,7 +83,11 @@ async function postRequired<T>(path: string, body?: unknown): Promise<T> {
   try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
   if (!r.ok) {
     const detail = data?.detail ?? data?.error ?? text ?? r.statusText;
-    throw new ApiRequestError(r.status, `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+    throw new ApiRequestError(
+      r.status,
+      `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+      backendErrorCode(data),
+    );
   }
   if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
   return data as T;
@@ -79,7 +112,11 @@ async function putRequired<T>(path: string, body: unknown): Promise<T> {
   try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
   if (!r.ok) {
     const detail = data?.detail ?? data?.error ?? text ?? r.statusText;
-    throw new ApiRequestError(r.status, `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+    throw new ApiRequestError(
+      r.status,
+      `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+      backendErrorCode(data),
+    );
   }
   if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
   return data as T;
@@ -97,7 +134,11 @@ async function getRequired<T>(path: string): Promise<T> {
   try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
   if (!r.ok) {
     const detail = data?.detail ?? data?.error ?? text ?? r.statusText;
-    throw new ApiRequestError(r.status, `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+    throw new ApiRequestError(
+      r.status,
+      `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+      backendErrorCode(data),
+    );
   }
   if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
   return data as T;
@@ -161,6 +202,80 @@ export interface BuiltinFeedBindingsV1 {
   by_playable_id: Record<string, BuiltinFeedBindingV1>;
 }
 
+export interface CatalogAllocateAuthorizedRequestV2 {
+  schema: 'catalog.allocate-authorized.v2';
+  authorizationId: string;
+}
+
+export interface CatalogAllocationIdentityV1 {
+  entryId: string;
+  entryState: 'canary' | 'published';
+  entryStateVersion: number;
+  mechanic: string;
+  variant: string;
+  seriesId: string;
+}
+
+export interface CatalogAllocationManifestV1 {
+  schema: 'series.manifest.v1';
+  contentHash: string;
+  seriesFingerprint: string;
+  fingerprintVersion: string;
+  levels: Array<{ ordinal: number; specHash: string }>;
+}
+
+interface CatalogAllocationDecisionResultBaseV1 {
+  schema: 'catalog.allocate-decision-result.v1';
+  decisionId: string;
+  allocationId: string;
+  requestHash: string;
+  requestedCatalogMechanic: string;
+  slotType: string;
+  policyVersion: string;
+}
+
+export type CatalogAllocationDecisionResultV1 = CatalogAllocationDecisionResultBaseV1 & (
+  | {
+    outcome: 'allocated';
+    holdExpiresAt: string;
+    catalog: CatalogAllocationIdentityV1;
+    runtime: CatalogRuntimeIdentityV1;
+    manifest: CatalogAllocationManifestV1;
+  }
+  | {
+    outcome: 'policy_runway_empty';
+    holdExpiresAt: null;
+    catalog: null;
+    runtime: null;
+    manifest: null;
+  }
+);
+
+export interface CatalogAllocateAuthorizedResultV2 {
+  schema: 'catalog.allocate-authorized-result.v2';
+  authorizationId: string;
+  authorizationDigest: string;
+  allocation: CatalogAllocationDecisionResultV1;
+}
+
+/** Additive player-v2 transport. No feed caller is wired to it yet. */
+export function apiAllocateAuthorizedCatalogRequired(
+  payload: CatalogAllocateAuthorizedRequestV2,
+): Promise<CatalogAllocateAuthorizedResultV2> {
+  return postRequired<CatalogAllocateAuthorizedResultV2>('/api/catalog/allocate-authorized', payload);
+}
+
+/** Fetch specs through an active server-owned ticket, never by client hashes. */
+export function apiGetCatalogTicketSpecsRequired(
+  ticketId: string,
+): Promise<CatalogTicketLevelSpecBundleV1> {
+  return getRequired<CatalogTicketLevelSpecBundleV1>(
+    `/api/catalog/tickets/${encodeURIComponent(ticketId)}/specs`,
+  );
+}
+
+export type { CatalogTicketLevelSpecBundleV1 };
+
 export interface ResultResp {
   is_best: boolean;
   stars_awarded: number;
@@ -183,6 +298,10 @@ export interface ResultIn {
   expected_puzzles?: number; // local outbox reconciliation only; never sent
   run_ticket?: RunTicketRequest; // durable local start intent; API receives ticket_id only
   series_level?: number;
+  // Catalog-v2 level binding is all-or-none; chest rows carry only series_id.
+  series_id?: string;
+  ordinal?: number;
+  applied_spec_hash?: string;
   complete_challenge_id?: string; // durable post-result action; never sent to /results
   server_confirmed?: boolean; // local outbox state; never sent
   tz_offset_minutes?: number;
@@ -213,16 +332,64 @@ export function apiPostResultRequired(payload: ResultIn): Promise<ResultResp> {
   return postRequired<ResultResp>('/api/results', resultPayload(payload));
 }
 
-export interface RunTicketRequest {
+interface CatalogResultBaseV2 {
+  mechanic_id: string;
+  variant_id: string;
+  run_id: string;
+  ticket_id: string;
+  metric_value: number;
+  series_id: string;
+  stars?: number;
+  tz_offset_minutes?: number;
+}
+
+export interface CatalogLevelResultV2 extends CatalogResultBaseV2 {
+  metric_key: 'time_ms';
+  series_level: number;
+  ordinal: number;
+  applied_spec_hash: string;
+}
+
+export interface CatalogChestResultV2 extends CatalogResultBaseV2 {
+  metric_key: 'series';
+  series_level?: never;
+  ordinal?: never;
+  applied_spec_hash?: never;
+}
+
+export function apiPostCatalogLevelResultRequired(payload: CatalogLevelResultV2): Promise<ResultResp> {
+  return postRequired<ResultResp>('/api/results', payload);
+}
+
+export function apiPostCatalogChestResultRequired(payload: CatalogChestResultV2): Promise<ResultResp> {
+  return postRequired<ResultResp>('/api/results', payload);
+}
+
+export interface LegacyRunTicketRequest {
   ticket_id: string;
   run_id: string;
   mechanic_id: string;
   variant_id: string;
   kind: 'single' | 'series';
   challenge_id?: string;
+  schema?: never;
+  decision_id?: never;
 }
 
-export interface RunTicketView {
+export interface CatalogRunTicketRequestV2 {
+  schema: 'run.start.v2';
+  ticket_id: string;
+  run_id: string;
+  mechanic_id: string;
+  variant_id: string;
+  kind: 'series';
+  decision_id: string;
+  challenge_id?: null;
+}
+
+export type RunTicketRequest = LegacyRunTicketRequest | CatalogRunTicketRequestV2;
+
+export interface LegacyRunTicketView {
   ticket_id: string;
   run_id: string;
   kind: 'single' | 'series';
@@ -231,6 +398,36 @@ export interface RunTicketView {
   next_result_at: string;
   expires_at: string;
   state: 'active' | 'consumed' | 'expired';
+}
+
+export interface CatalogRunTicketViewV2 {
+  schema: 'run.ticket.v2';
+  ticket_id: string;
+  run_id: string;
+  kind: 'series';
+  mechanic_id: string;
+  variant_id: string;
+  decision_id: string;
+  catalog_entry_id: string;
+  series_id: string;
+  runtime_release_id: string;
+  runtime_contract_digest: string;
+  runtime_artifact_digest: string;
+  manifest_content_hash: string;
+  levels: Array<{ ordinal: number; spec_hash: string }>;
+  expected_levels: number;
+  completed_levels: number;
+  next_result_at: string;
+  expires_at: string;
+  state: 'active' | 'consumed' | 'expired' | 'revoked';
+}
+
+export type RunTicketView = LegacyRunTicketView | CatalogRunTicketViewV2;
+
+export function apiStartCatalogRunRequired(
+  payload: CatalogRunTicketRequestV2,
+): Promise<CatalogRunTicketViewV2> {
+  return postRequired<CatalogRunTicketViewV2>('/api/runs/start', payload);
 }
 
 export function apiStartRun(payload: RunTicketRequest): Promise<RunTicketView | null> {

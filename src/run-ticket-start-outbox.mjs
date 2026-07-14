@@ -1,5 +1,8 @@
 const TERMINAL_HTTP_STATUSES = new Set([400, 404, 409, 410, 422, 428]);
-const TERMINAL_STATES = new Set(['active', 'consumed', 'expired']);
+const ACCEPTED_STATES = new Set(['active', 'consumed', 'expired', 'revoked']);
+const HASH_RE = /^[0-9a-f]{64}$/;
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_DEAD_LETTERS = 100;
 
 /**
@@ -55,7 +58,7 @@ export class DurableRunTicketStartOutbox {
         // Clone again so a transport adapter cannot mutate the persisted copy.
         view = await this._startRun(jsonClone(item.request));
       } catch (error) {
-        const reason = terminalErrorReason(error);
+        const reason = terminalErrorReason(error, item.request);
         if (!reason) {
           return { status: 'retry', confirmed, terminal, pending: this.pendingCount(), latest };
         }
@@ -65,13 +68,14 @@ export class DurableRunTicketStartOutbox {
         terminal += 1;
         continue;
       }
-      if (!view || !TERMINAL_STATES.has(view.state)
-        || view.ticket_id !== item.request.ticket_id || view.run_id !== item.request.run_id) {
+      const validatedView = validateResponse(view, item.request);
+      if (!validatedView) {
         return { status: 'invalid_response', confirmed, terminal, pending: this.pendingCount(), latest };
       }
-      latest = jsonClone(view);
-      if (view.state === 'expired') {
-        if (!this._moveToDeadLetter(item, 'ticket_expired', view)) {
+      latest = validatedView;
+      if (validatedView.state === 'expired' || validatedView.state === 'revoked') {
+        const reason = validatedView.state === 'expired' ? 'ticket_expired' : 'ticket_revoked';
+        if (!this._moveToDeadLetter(item, reason, validatedView)) {
           return { status: 'storage_error', confirmed, terminal, pending: this.pendingCount(), latest };
         }
         terminal += 1;
@@ -177,15 +181,73 @@ function validateRequest(value) {
   if (value.kind !== 'single' && value.kind !== 'series') {
     throw new TypeError('run-ticket request kind must be single or series');
   }
-  if (value.challenge_id !== undefined && typeof value.challenge_id !== 'string') {
+  const v2 = value.schema !== undefined || value.decision_id !== undefined;
+  if (v2) {
+    const exactWithoutChallenge = hasExactKeys(value, [
+      'schema', 'ticket_id', 'run_id', 'mechanic_id', 'variant_id', 'kind', 'decision_id',
+    ]);
+    const exactNullChallenge = hasExactKeys(value, [
+      'schema', 'ticket_id', 'run_id', 'mechanic_id', 'variant_id', 'kind', 'decision_id', 'challenge_id',
+    ]) && value.challenge_id === null;
+    if (!exactWithoutChallenge && !exactNullChallenge) {
+      throw new TypeError('run.start.v2 request must use the exact catalog wire');
+    }
+    if (value.schema !== 'run.start.v2' || value.kind !== 'series') {
+      throw new TypeError('run.start.v2 request must be an unchallenged series');
+    }
+    for (const key of ['ticket_id', 'variant_id', 'decision_id']) {
+      if (!UUID_RE.test(value[key])) throw new TypeError(`run.start.v2 ${key} must be a canonical UUID`);
+    }
+  } else if (value.challenge_id !== undefined && typeof value.challenge_id !== 'string') {
     throw new TypeError('run-ticket request challenge_id must be a string');
   }
   return jsonClone(value);
 }
 
-function terminalErrorReason(error) {
+function validateResponse(value, request) {
+  if (!value || typeof value !== 'object' || !ACCEPTED_STATES.has(value.state)
+    || value.ticket_id !== request.ticket_id || value.run_id !== request.run_id) return null;
+  if (request.schema !== 'run.start.v2') {
+    if (value.schema !== undefined || !['active', 'consumed', 'expired'].includes(value.state)) return null;
+    return jsonClone(value);
+  }
+  const keys = [
+    'schema', 'ticket_id', 'run_id', 'kind', 'mechanic_id', 'variant_id',
+    'decision_id', 'catalog_entry_id', 'series_id', 'runtime_release_id',
+    'runtime_contract_digest', 'runtime_artifact_digest', 'manifest_content_hash',
+    'levels', 'expected_levels', 'completed_levels', 'next_result_at', 'expires_at', 'state',
+  ];
+  if (!hasExactKeys(value, keys) || value.schema !== 'run.ticket.v2'
+    || value.kind !== 'series' || value.mechanic_id !== request.mechanic_id
+    || value.variant_id !== request.variant_id || value.decision_id !== request.decision_id) return null;
+  for (const key of [
+    'ticket_id', 'variant_id', 'decision_id', 'catalog_entry_id', 'series_id', 'runtime_release_id',
+  ]) {
+    if (typeof value[key] !== 'string' || !UUID_RE.test(value[key])) return null;
+  }
+  if (typeof value.runtime_contract_digest !== 'string' || !HASH_RE.test(value.runtime_contract_digest)
+    || typeof value.manifest_content_hash !== 'string' || !HASH_RE.test(value.manifest_content_hash)
+    || typeof value.runtime_artifact_digest !== 'string' || !DIGEST_RE.test(value.runtime_artifact_digest)
+    || typeof value.next_result_at !== 'string' || value.next_result_at.length === 0
+    || typeof value.expires_at !== 'string' || value.expires_at.length === 0) return null;
+  if (!Array.isArray(value.levels) || value.levels.length < 1 || value.levels.length > 6
+    || value.levels.some((level, index) => !hasExactKeys(level, ['ordinal', 'spec_hash'])
+      || level.ordinal !== index + 1 || typeof level.spec_hash !== 'string' || !HASH_RE.test(level.spec_hash))) {
+    return null;
+  }
+  if (!Number.isInteger(value.expected_levels) || value.expected_levels !== value.levels.length
+    || !Number.isInteger(value.completed_levels) || value.completed_levels < 0
+    || value.completed_levels > value.expected_levels) return null;
+  return jsonClone(value);
+}
+
+function terminalErrorReason(error, request) {
   const status = Number(error?.status);
-  return TERMINAL_HTTP_STATUSES.has(status) ? `http_${status}` : null;
+  if (!TERMINAL_HTTP_STATUSES.has(status)) return null;
+  if (request.schema === 'run.start.v2'
+    && typeof error?.code === 'string'
+    && /^[a-z][a-z0-9_]{1,95}$/.test(error.code)) return error.code;
+  return `http_${status}`;
 }
 
 function validQueueItem(value) {
@@ -209,6 +271,14 @@ function stableJson(value) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+function hasExactKeys(value, expected) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length
+    && actual.every((key, index) => key === wanted[index]);
 }
 
 function jsonClone(value) {
