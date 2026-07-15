@@ -7678,15 +7678,15 @@ export class Feed {
       }
     } else {
       track('lose', { mechanic_id: mechanicId, mode: 'manual' }, runId);
-      // In a series, a loss on ANY level restarts the whole series from level 1
-      // (with a "so close, try again" beat). Outside a series, the normal loss state.
+      // In a series, a loss retries the same exact ordinal (with a short
+      // "so close, try again" beat). Outside a series, use the normal loss state.
       if (this.series && this.series.index === i) this.handleSeriesFail(i);
       else this.handleLoss(i);
     }
   }
 
-  // Series loss: reset to level 1 and replay the whole run, masked by a short
-  // "so close" congratulation so the reboot doesn't flash the mechanic's intro.
+  // Series loss: retry the current exact ordinal, masked by a short "so close"
+  // beat so the reboot doesn't flash the mechanic's intro.
   private handleSeriesFail(i: number): void {
     if (!this.series || this.series.index !== i) { this.handleLoss(i); return; }
     track('series_fail', { mechanic_id: this.effectivePlayableId(i), level: this.series.done + 1 });

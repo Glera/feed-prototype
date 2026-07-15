@@ -7,7 +7,7 @@ const child = spawn(process.execPath, ['scripts/serve-catalog-feed-dogfood-harne
   stdio: ['ignore', 'pipe', 'pipe'],
   env: {
     ...process.env,
-    CATALOG_DOGFOOD_LEVEL_COUNT: '1',
+    CATALOG_DOGFOOD_LEVEL_COUNT: '2',
     CATALOG_DOGFOOD_TIMEOUT_MS: '15000',
     VITE_OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS: '500',
   },
@@ -29,7 +29,7 @@ const endpoints = await new Promise((resolve, reject) => {
     for (const line of stdout.split(/\r?\n/)) {
       try {
         const parsed = JSON.parse(line);
-        if (parsed.successUrl && parsed.transientResultUrl && parsed.replayedCanaryUrl
+        if (parsed.successUrl && parsed.retryUrl && parsed.transientResultUrl && parsed.replayedCanaryUrl
           && parsed.timeoutResultUrl && parsed.disabledUrl && parsed.stateUrl) {
           clearTimeout(timeout);
           resolve(parsed);
@@ -46,10 +46,10 @@ const endpoints = await new Promise((resolve, reject) => {
   });
 });
 
-const exactSpecHash = '1'.repeat(64);
+const exactSpecHashes = ['1'.repeat(64), '2'.repeat(64)];
 const browser = await chromium.launch();
 
-const runScenario = async (url, { firstFailure }) => {
+const runScenario = async (url, { firstFailure, expectLevelRetry = false }) => {
   const page = await browser.newPage();
   const browserErrors = [];
   page.on('pageerror', (error) => browserErrors.push(error.stack || error.message));
@@ -80,37 +80,33 @@ const runScenario = async (url, { firstFailure }) => {
     assert.equal(state.client.rewardSeen, true, diagnostic);
     assert.equal(state.diagnostics.length, 0, diagnostic);
     assert.deepEqual(browserErrors, [], diagnostic);
-    assert.equal(
-      state.runtimeEvents.some((item) => item.stage === 'completed_sent'),
-      true,
-      diagnostic,
-    );
+    const completions = state.runtimeEvents.filter((item) => item.stage === 'completed_sent');
+    assert.equal(completions.length, exactSpecHashes.length + (expectLevelRetry ? 1 : 0), diagnostic);
+    assert.deepEqual(completions.map((item) => item.detail.outcome), expectLevelRetry
+      ? ['won', 'lost', 'won'] : ['won', 'won'], diagnostic);
 
     const levelResults = state.results.filter((item) => item.kind === 'level');
     const chestResults = state.results.filter((item) => item.kind === 'chest');
-    assert.equal(levelResults.length, 1, diagnostic);
-    assert.equal(levelResults[0].outcome, 'confirmed', diagnostic);
-    assert.equal(levelResults[0].body.ordinal, 1, diagnostic);
-    assert.equal(levelResults[0].body.series_level, 1, diagnostic);
-    assert.equal(levelResults[0].body.applied_spec_hash, exactSpecHash, diagnostic);
+    assert.equal(levelResults.length, exactSpecHashes.length, diagnostic);
+    assert.deepEqual(levelResults.map((item) => item.outcome), ['confirmed', 'confirmed'], diagnostic);
+    assert.deepEqual(levelResults.map((item) => item.body.ordinal), [1, 2], diagnostic);
+    assert.deepEqual(levelResults.map((item) => item.body.series_level), [1, 2], diagnostic);
+    assert.deepEqual(levelResults.map((item) => item.body.applied_spec_hash), exactSpecHashes, diagnostic);
     assert.equal(chestResults.length, 1, diagnostic);
     assert.equal(chestResults[0].outcome, 'confirmed', diagnostic);
     assert.equal(chestResults[0].body.metric_key, 'series', diagnostic);
-    assert.equal(chestResults[0].body.metric_value, 1, diagnostic);
+    assert.equal(chestResults[0].body.metric_value, exactSpecHashes.length, diagnostic);
     assert.equal(state.checkpoints.chestAfterExactReceipts?.pass, true, diagnostic);
     assert.equal(state.checkpoints.rewardAfterChestReceipt?.pass, true, diagnostic);
 
     const levelAttempts = state.resultAttempts.filter((item) => item.kind === 'level');
     const chestAttempts = state.resultAttempts.filter((item) => item.kind === 'chest');
-    assert.deepEqual(
-      levelAttempts.map((item) => [item.outcome, item.status]),
-      firstFailure === 'transient'
-        ? [['transient', 503], ['confirmed', 200]]
-        : firstFailure === 'timeout'
-          ? [['hung', 0], ['confirmed', 200]]
-          : [['confirmed', 200]],
-      diagnostic,
-    );
+    const expectedAttempts = firstFailure === 'transient'
+      ? [['transient', 503], ['confirmed', 200], ['confirmed', 200]]
+      : firstFailure === 'timeout'
+        ? [['hung', 0], ['confirmed', 200], ['confirmed', 200]]
+        : [['confirmed', 200], ['confirmed', 200]];
+    assert.deepEqual(levelAttempts.map((item) => [item.outcome, item.status]), expectedAttempts, diagnostic);
     if (firstFailure) {
       assert.deepEqual(levelAttempts[0].body, levelAttempts[1].body, diagnostic);
     }
@@ -126,6 +122,7 @@ const runScenario = async (url, { firstFailure }) => {
 
 try {
   await runScenario(endpoints.successUrl, { firstFailure: null });
+  await runScenario(endpoints.retryUrl, { firstFailure: null, expectLevelRetry: true });
   await runScenario(endpoints.replayedCanaryUrl, { firstFailure: null });
   await runScenario(endpoints.disabledUrl, { firstFailure: null });
   await runScenario(endpoints.transientResultUrl, { firstFailure: 'transient' });

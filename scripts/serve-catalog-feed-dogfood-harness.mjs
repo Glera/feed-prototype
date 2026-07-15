@@ -41,13 +41,13 @@ let canaryDisabledBuildHtml = '';
 
 const scenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
-  'no-invite', 'replayed-canary', 'wrong-account', 'disabled',
+  'level-retry', 'no-invite', 'replayed-canary', 'wrong-account', 'disabled',
 ]);
 const canaryScenarios = new Set([
-  'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
+  'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict', 'level-retry',
 ]);
 const successfulCatalogScenarios = new Set([
-  'success', 'result-transient', 'result-timeout', 'replayed-canary', 'disabled',
+  'success', 'result-transient', 'result-timeout', 'level-retry', 'replayed-canary', 'disabled',
 ]);
 const normalizedScenario = (scenario) => scenarios.has(scenario) ? scenario : 'success';
 const dogfoodUserId = 424242;
@@ -82,6 +82,7 @@ const freshState = (scenario, instanceToken) => ({
   resultTimeoutInjected: false,
   diagnostics: [],
   runtimeEvents: [],
+  runtimeDocumentRequests: 0,
   replayConflictTransportAttempts: 0,
   authorityPending: false,
   pendingSamples: 0,
@@ -533,7 +534,7 @@ clearOriginState().then(()=>{
 }).catch(error=>{status.dataset.state='fail';status.textContent='FAIL: origin reset: '+error});
 </script></body></html>`;
 
-const catalogRuntimeHtml = (instanceToken, scenario) => `<!doctype html><html><body><p>Catalog Sort fixture</p><script>
+const catalogRuntimeHtml = (instanceToken, scenario, documentRequest) => `<!doctype html><html><body><p>Catalog Sort fixture</p><script>
 const send=(value)=>parent.postMessage(value,location.origin);
 const report=(stage,detail={})=>fetch('/__harness/runtime',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({harnessInstance:${JSON.stringify(instanceToken)},harnessScenario:${JSON.stringify(scenario)},stage,detail})}).catch(()=>{});
 report('script_evaluated',{visibility:document.visibilityState});
@@ -546,7 +547,8 @@ addEventListener('message',(event)=>{
   report('configured_sent',{visibility:document.visibilityState});
   setTimeout(()=>{report('host_gesture_sent',{visibility:document.visibilityState});send({source:'playable',type:'host_gesture'})},900);
   setTimeout(()=>{report('manual_action_sent',{visibility:document.visibilityState});send({source:'playable',type:'manual_action',actionType:'fixture.sort',actionSeq:1,accepted:true,changedState:true})},1050);
-  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState});send({source:'playable',type:'completed',outcome:'won'})},1350);
+  const outcome=${JSON.stringify(scenario === 'level-retry' && documentRequest === 2 ? 'lost' : 'won')};
+  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState,outcome,documentRequest:${documentRequest}});send({source:'playable',type:'completed',success:outcome==='won',outcome})},1350);
 });
 addEventListener('load',()=>{report('load',{visibility:document.visibilityState});send({type:'configure_ready',nonce:'a'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}})});
 </script></body></html>`;
@@ -976,8 +978,13 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (url.pathname === `/runtime-releases/marble-sort-swipe/${artifactHex}/index.html`) {
+    if (state) state.runtimeDocumentRequests += 1;
     response.setHeader('content-type', 'text/html; charset=utf-8');
-    response.end(catalogRuntimeHtml(state?.instanceToken ?? '', state?.scenario ?? ''));
+    response.end(catalogRuntimeHtml(
+      state?.instanceToken ?? '',
+      state?.scenario ?? '',
+      state?.runtimeDocumentRequests ?? 0,
+    ));
     return;
   }
   if (url.pathname.endsWith('.html')) {
@@ -1038,6 +1045,7 @@ canaryDisabledBuildHtml = disabledBuild.html;
 
 console.log(JSON.stringify({
   successUrl: `${origin}/harness.html?scenario=success`,
+  retryUrl: `${origin}/harness.html?scenario=level-retry`,
   transientResultUrl: `${origin}/harness.html?scenario=result-transient`,
   timeoutResultUrl: `${origin}/harness.html?scenario=result-timeout`,
   recallUrl: `${origin}/harness.html?scenario=recall`,
