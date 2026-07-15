@@ -53,6 +53,7 @@ import {
 } from './outbox';
 import { ActiveDwellAccumulator } from './active-dwell.mjs';
 import { catalogResultAllowsProgress } from './result-receipts.mjs';
+import { loadCatalogGeneratedPreview } from './catalog-generated-preview.mjs';
 import {
   CatalogPlayerV2Session,
   buildCatalogLevelImpression,
@@ -71,18 +72,18 @@ import {
   catalogCanaryDogfoodEnabled,
   catalogCanaryInvitationMissing,
   catalogCanaryTicketStartIsSafe,
+  catalogGeneratedPreviewUrl,
   catalogFallbackMatchesBinding,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
-  catalogFeedShouldClaimSlot,
   catalogPendingSlotShouldFallbackForBinding,
   catalogSourceDecisionProjectionReady,
   catalogDogfoodAccountEligible,
   catalogFeedDogfoodEnabled,
-  catalogFeedMustEvictFrame,
   catalogFeedSurface,
   catalogFeedUsesBuiltinImpression,
   catalogRecallRecoveryEffect,
+  generatedInsertionTarget,
   validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
   type CatalogCanaryAuthorityResultV1,
@@ -329,6 +330,15 @@ type CatalogFeedSlot = {
   ordinal: number;
   failureEmitted: boolean;
   canaryProjectionRequired: boolean;
+  insertionKind: 'source-bound' | 'generated';
+};
+type PreparedGeneratedOffer = {
+  authority: CatalogCanaryAuthorityResultV1;
+  allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }>;
+  ticketRequest: CatalogRunTicketRequestV2;
+  ticket: CatalogRunTicketViewV2 | CatalogRunTicketViewV3;
+  bundle: CatalogTicketLevelSpecBundle;
+  previewUrls: Readonly<{ mobile: string; compact: string }>;
 };
 type SwipeApi = {
   version: number;
@@ -503,7 +513,6 @@ export class Feed {
   // reveals are retained briefly so a cold /session does not erase the first
   // unit's honest dwell/exit.
   private builtinFeedBindings = new Map<string, BuiltinFeedBindingV1>();
-  private builtinFeedBindingsResolved = false;
   private cpExposure: ControlPlaneExposure | null = null;
   private cpPendingExposure: ControlPlaneExposure | null = null;
   private cpDeferredExposures: ControlPlaneExposure[] = [];
@@ -526,6 +535,10 @@ export class Feed {
   // lifetime; every other slot continues through ordinary effectful policy.
   private catalogCanaryClaimed = false;
   private catalogSlots = new Map<number, CatalogFeedSlot>();
+  private generatedOfferState: 'idle' | 'loading' | 'ready' | 'reserved' | 'empty' | 'failed' = 'idle';
+  private generatedOffer: PreparedGeneratedOffer | null = null;
+  private generatedTargetIndex: number | null = null;
+  private generatedPrefetchScheduled = false;
   private catalogFrameEpoch = 0;
   private preloaderMountedAt = 0;
   // Preloader waits for BOTH the first mechanic AND the first server seed (capped).
@@ -823,6 +836,185 @@ export class Feed {
     this.applyConfirmedBalances(await flushResults());
     await this.syncDaily(false);
     void this.refreshChallengeRail();
+    this.scheduleGeneratedOfferPrefetch();
+  }
+
+  /**
+   * Generated discovery is deliberately detached from page navigation. The
+   * browser may spend idle time on this work, but no feed slot waits for it.
+   */
+  private scheduleGeneratedOfferPrefetch(): void {
+    if (!this.catalogCanaryDogfoodEnabled || this.generatedPrefetchScheduled
+      || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
+    this.generatedPrefetchScheduled = true;
+    const run = () => {
+      this.generatedPrefetchScheduled = false;
+      void this.prefetchGeneratedOffer();
+    };
+    const idle = (window as typeof window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+    }).requestIdleCallback;
+    if (typeof idle === 'function') idle(run, { timeout: 2_000 });
+    else window.setTimeout(run, 0);
+  }
+
+  private generatedPreviewBaseUrl(): string {
+    let base = new URLSearchParams(location.search).get('base') || './';
+    if (!base.endsWith('/')) base += '/';
+    return new URL(base, location.href).toString();
+  }
+
+  private generatedPreviewUrl(offer: PreparedGeneratedOffer): string {
+    return this.coverBucket === '.c' ? offer.previewUrls.compact : offer.previewUrls.mobile;
+  }
+
+  private async loadGeneratedPreview(
+    allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }>,
+  ): Promise<Readonly<{ mobile: string; compact: string }>> {
+    // Keep the public URL construction executable in the feed contract tests;
+    // the loader then verifies the sidecar and both exact JPEG digests.
+    catalogGeneratedPreviewUrl({
+      baseUrl: this.generatedPreviewBaseUrl(),
+      contentHash: allocation.manifest.contentHash,
+      runtimeArtifactDigest: allocation.runtime.runtimeArtifactDigest,
+    });
+    const preview = await loadCatalogGeneratedPreview({
+      baseUrl: this.generatedPreviewBaseUrl(),
+      contentHash: allocation.manifest.contentHash,
+      runtimeArtifactDigest: allocation.runtime.runtimeArtifactDigest,
+    });
+    const objectUrl = (bytes: Uint8Array) => URL.createObjectURL(new Blob(
+      [bytes.slice().buffer],
+      { type: 'image/jpeg' },
+    ));
+    return Object.freeze({
+      mobile: objectUrl(preview.mobile.bytes),
+      compact: objectUrl(preview.compact.bytes),
+    });
+  }
+
+  private releaseGeneratedPreview(offer: PreparedGeneratedOffer | null): void {
+    if (!offer) return;
+    URL.revokeObjectURL(offer.previewUrls.mobile);
+    URL.revokeObjectURL(offer.previewUrls.compact);
+  }
+
+  private retireGeneratedSlot(i: number): void {
+    const slot = this.catalogSlots.get(i);
+    if (slot?.insertionKind !== 'generated') return;
+    this.disposeCatalogSlot(i);
+    this.games[i]?.classList.remove('game--generated');
+    this.releaseGeneratedPreview(this.generatedOffer);
+    this.generatedOffer = null;
+    this.generatedOfferState = 'idle';
+    this.generatedTargetIndex = null;
+    this.catalogCanaryClaimed = false;
+    this.coverLoaded.delete(i);
+    this.ensureCover(i);
+    this.incomingIndex = -1;
+    this.updateIncomingPoster();
+    this.scheduleGeneratedOfferPrefetch();
+  }
+
+  private async prefetchGeneratedOffer(): Promise<void> {
+    if (!this.catalogCanaryDogfoodEnabled
+      || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
+    this.generatedOfferState = 'loading';
+    try {
+      const authority = validateCatalogCanaryAuthorityResult(
+        await apiGetCatalogCanaryAuthorityRequired(),
+      );
+      if (!catalogCanaryAuthorityAllowsAllocation(authority)) {
+        throw new Error('generated authority expired before background allocation');
+      }
+      const authorized = await apiAllocateAuthorizedCatalogRequired({
+        schema: 'catalog.allocate-authorized.v2',
+        authorizationId: authority.authorizationId,
+      });
+      if (authorized.schema !== 'catalog.allocate-authorized-result.v2'
+        || authorized.authorizationId !== authority.authorizationId
+        || authorized.authorizationDigest !== authority.authorizationDigest
+        || authorized.allocation.allocationId !== authority.authorizationId
+        || authorized.allocation.outcome !== 'allocated'
+        || authorized.allocation.catalog.entryState !== 'canary'
+        || authorized.allocation.slotType !== 'canary-dogfood'
+        || authorized.allocation.policyVersion !== 'catalog-canary-dogfood.v1'
+        || authorized.allocation.runtime.capabilities.catalogRequiredHandshake !== true) {
+        throw new Error('background generated allocation differs from its exact authority');
+      }
+      const runIdentity = buildCatalogCanaryRunIdentity(authority.authorizationId);
+      const ticketRequest: CatalogRunTicketRequestV2 = {
+        schema: 'run.start.v2',
+        ticket_id: runIdentity.ticketId,
+        run_id: runIdentity.runId,
+        mechanic_id: authorized.allocation.runtime.playableId,
+        variant_id: authorized.allocation.runtime.legacyVariantId,
+        kind: 'series',
+        decision_id: authorized.allocation.decisionId,
+      };
+      const start = await queueRunTicketStart(ticketRequest);
+      const ticket = start.latest;
+      if (start.status !== 'ok' || start.pending !== 0 || !ticket
+        || !('schema' in ticket) || !['run.ticket.v2', 'run.ticket.v3'].includes(ticket.schema)
+        || ticket.ticket_id !== ticketRequest.ticket_id
+        || ticket.run_id !== ticketRequest.run_id
+        || ticket.decision_id !== ticketRequest.decision_id
+        || !catalogCanaryTicketStartIsSafe(ticket)) {
+        throw new Error(`background generated ticket did not confirm (${start.status})`);
+      }
+      const bundle = validateCatalogTicketLevelSpecBundle(
+        await apiGetCatalogTicketSpecsRequired(ticket.ticket_id),
+      );
+      this.assertCatalogDeliveryClosure(authorized.allocation, ticket, bundle);
+      const previewUrls = await this.loadGeneratedPreview(authorized.allocation);
+      const offer: PreparedGeneratedOffer = {
+        authority,
+        allocation: authorized.allocation,
+        ticketRequest,
+        ticket,
+        bundle,
+        previewUrls,
+      };
+      this.generatedOffer = offer;
+      this.generatedOfferState = 'ready';
+      this.planGeneratedInsertion();
+      track('generated_offer_prepared', {
+        mechanic_id: offer.bundle.runtime.playableId,
+        catalog_entry_id: offer.allocation.catalog.entryId,
+      });
+    } catch (error) {
+      if (error instanceof ApiRequestError
+        && catalogCanaryInvitationMissing(error.status, error.code)) {
+        this.generatedOfferState = 'empty';
+        return;
+      }
+      this.releaseGeneratedPreview(this.generatedOffer);
+      this.generatedOffer = null;
+      this.generatedOfferState = 'failed';
+      console.warn('[generated-feed] background offer unavailable; builtin loop continues', error);
+      track('generated_offer_unavailable', {
+        reason: error instanceof ApiRequestError ? error.code ?? `http_${error.status}` : 'preparation_failure',
+      });
+    }
+  }
+
+  private planGeneratedInsertion(): void {
+    if (this.generatedOfferState !== 'ready' || !this.generatedOffer
+      || this.generatedTargetIndex !== null) return;
+    const blocked = [...this.catalogSlots.keys()];
+    if (this.activeChallenge) {
+      for (let index = 0; index < this.N; index += 1) {
+        if (this.playables[index]?.id === this.activeChallenge.mechanic_id) blocked.push(index);
+      }
+    }
+    const target = generatedInsertionTarget(this.realIndex(), this.N, blocked, 2);
+    if (target === null) return;
+    this.generatedTargetIndex = target;
+    this.games[target]?.classList.add('game--generated');
+    this.coverLoaded.delete(target);
+    this.ensureCover(target);
+    this.incomingIndex = -1;
+    this.updateIncomingPoster();
   }
 
   private syncSessionBootstrap(): Promise<boolean> {
@@ -848,7 +1040,6 @@ export class Feed {
   // legacy feed/results path continues unchanged.
   private applyBuiltinFeedBindings(bindings?: BuiltinFeedBindingsV1): void {
     if (!controlPlaneEnabled()) return;
-    this.builtinFeedBindingsResolved = true;
     if (!bindings || bindings.schema !== 'feed.builtin-bindings.v1' || !bindings.available) {
       // A later fail-closed bootstrap must not leave a previously installed
       // mapping available for new tickets/decisions in this page.
@@ -906,7 +1097,8 @@ export class Feed {
   }
 
   private controlPlaneExposureNeedsRetry(exposure: ControlPlaneExposure): boolean {
-    return !exposure.binding
+    const generated = this.catalogSlotForExposure(exposure)?.insertionKind === 'generated';
+    return (!exposure.binding && !generated)
       || !exposure.decisionEmitted
       || Boolean(exposure.revealedAt && !exposure.impressionEmitted)
       || Boolean(exposure.exit);
@@ -983,53 +1175,60 @@ export class Feed {
       exit: null,
     };
     dwell.reset(now);
-    if (catalogFeedShouldClaimSlot(
-      this.catalogDogfoodEnabled,
-      this.builtinFeedBindingsResolved,
-      exposure.binding !== null,
-    )) {
-      this.disposeCatalogSlot(i);
-      const existingFrame = this.frames.get(i);
-      if (existingFrame && catalogFeedMustEvictFrame('authority_pending', true)) {
-        // A target can already hold a warm legacy iframe before goTo commits its
-        // server-owned opportunity. Poster-only starts by physically removing it;
-        // otherwise mount() would return at frames.has(i) and leak false seen.
-        this.clearAutoplayLoopTimer(i);
-        this.disposeFrame(i, existingFrame);
-        this.frames.delete(i);
-        this.resetFrameReadiness(i);
-        this.games[i]?.classList.add('game--loading');
-        this.games[i]?.classList.remove('game--ready');
-      }
-      const slot: CatalogFeedSlot = {
-        index: i,
-        exposure,
-        phase: 'authority_pending',
-        request: buildCatalogFeedAuthorityRequest(ticketUid(), exposure.decisionId),
-        authorityStarted: false,
-        sourceDecisionAcknowledged: false,
-        authorityClaimCommitted: true,
-        authorityTimer: null,
-        authorityTimerEpoch: 0,
-        authorityTimerStage: null,
-        configurationTimer: null,
-        ticketRequest: null,
-        ticket: null,
-        allocation: null,
-        bundle: null,
-        frameEpoch: 0,
-        session: null,
-        ordinal: 1,
-        failureEmitted: false,
-        canaryProjectionRequired: false,
-      };
-      this.catalogSlots.set(i, slot);
-      this.armCatalogAuthorityFallback(slot);
-    }
+    this.attachPreparedGeneratedOffer(i, exposure);
     this.cpPendingExposure = exposure;
     if (exposure.binding) this.emitControlPlaneExposure(exposure);
     this.deferControlPlaneExposure(exposure);
     return exposure;
+  }
+
+  private attachPreparedGeneratedOffer(i: number, exposure: ControlPlaneExposure): void {
+    if (this.generatedTargetIndex !== i || this.generatedOfferState !== 'ready'
+      || !this.generatedOffer) return;
+    const prepared = this.generatedOffer;
+    this.disposeCatalogSlot(i);
+    const existingFrame = this.frames.get(i);
+    if (existingFrame) {
+      // The page may have a warm built-in iframe. It is replaced only now, when
+      // the complete generated closure is already in memory; no navigation ever
+      // waits for discovery/allocation/spec delivery.
+      this.clearAutoplayLoopTimer(i);
+      this.disposeFrame(i, existingFrame);
+      this.frames.delete(i);
+      this.resetFrameReadiness(i);
+    }
+    const slot: CatalogFeedSlot = {
+      index: i,
+      exposure,
+      phase: 'catalog_ready',
+      request: buildCatalogFeedAuthorityRequest(ticketUid(), exposure.decisionId),
+      authorityStarted: true,
+      sourceDecisionAcknowledged: false,
+      authorityClaimCommitted: true,
+      authorityTimer: null,
+      authorityTimerEpoch: 0,
+      authorityTimerStage: null,
+      configurationTimer: null,
+      ticketRequest: prepared.ticketRequest,
+      ticket: prepared.ticket,
+      allocation: prepared.allocation,
+      bundle: prepared.bundle,
+      frameEpoch: 0,
+      session: null,
+      ordinal: 1,
+      failureEmitted: false,
+      canaryProjectionRequired: true,
+      insertionKind: 'generated',
+    };
+    this.catalogSlots.set(i, slot);
+    // The catalog allocation already owns its durable decision. There is no
+    // synthetic builtin_feed_decision for an additive generated insertion.
+    exposure.decisionEmitted = true;
+    this.generatedTargetIndex = null;
+    this.generatedOfferState = 'reserved';
+    this.catalogCanaryClaimed = true;
+    this.games[i]?.classList.add('game--generated', 'game--loading');
+    this.games[i]?.classList.remove('game--ready');
   }
 
   private revealControlPlaneExposure(i: number, playableId: string): void {
@@ -1048,6 +1247,18 @@ export class Feed {
   }
 
   private emitControlPlaneExposure(exposure: ControlPlaneExposure): void {
+    const preparedSlot = this.catalogSlotForExposure(exposure);
+    if (preparedSlot?.insertionKind === 'generated'
+      && !catalogFeedUsesBuiltinImpression(preparedSlot.phase)) {
+      if (exposure.revealedAt) this.revealCatalogLevel(preparedSlot);
+      if (exposure.impressionEmitted) {
+        if (exposure.exit) this.emitControlPlaneExit(exposure);
+        for (const attempt of this.cpAttempts.values()) {
+          if (attempt.exposure === exposure) this.flushControlPlaneAttempt(attempt);
+        }
+      }
+      return;
+    }
     if (!exposure.binding) return;
     if (!exposure.decisionEmitted) {
       const decisionEvent = queueControlPlaneEvent('builtin_feed_decision', {
@@ -1458,6 +1669,18 @@ export class Feed {
     }
 
     slot.phase = 'builtin_fallback';
+    if (slot.insertionKind === 'generated') {
+      this.games[slot.index]?.classList.remove('game--generated');
+      this.releaseGeneratedPreview(this.generatedOffer);
+      this.generatedOffer = null;
+      this.generatedOfferState = 'failed';
+      this.generatedTargetIndex = null;
+      this.catalogCanaryClaimed = false;
+      this.coverLoaded.delete(slot.index);
+      this.ensureCover(slot.index);
+      this.incomingIndex = -1;
+      this.updateIncomingPoster();
+    }
     if (this.series?.catalog === slot) {
       this.clearSeriesUi();
       this.series = null;
@@ -1644,14 +1867,16 @@ export class Feed {
 
   private flushControlPlaneAttempt(attempt: ControlPlaneAttempt): void {
     const exposure = attempt.exposure;
+    const catalogSlot = this.catalogSlotForExposure(exposure);
+    const generated = catalogSlot?.insertionKind === 'generated';
     // A transient persistence failure must not permanently strand the parent
     // decision/impression while child attempt events keep accumulating.
-    if (!exposure.decisionEmitted || (exposure.revealedAt && !exposure.impressionEmitted)) {
+    if ((!exposure.decisionEmitted || (exposure.revealedAt && !exposure.impressionEmitted))
+      && !generated) {
       this.emitControlPlaneExposure(exposure);
     }
     this.deferControlPlaneExposure(exposure);
-    if (!exposure.impressionEmitted || !exposure.binding) return;
-    const catalogSlot = this.catalogSlotForExposure(exposure);
+    if (!exposure.impressionEmitted || (!exposure.binding && !generated)) return;
     const catalogAttempt = Boolean(catalogSlot
       && catalogSlot.phase !== 'builtin_fallback'
       && attempt.ticket.schema === 'run.start.v2');
@@ -1666,7 +1891,7 @@ export class Feed {
       // An attempt created before a cold /session answered is a legacy attempt.
       // Its ticket identity is already frozen and must never be retroactively
       // relabelled or sent into the bound chain if the reviewed variant differs.
-      if (attempt.ticket.variant_id !== exposure.binding.variant_id) return;
+      if (!exposure.binding || attempt.ticket.variant_id !== exposure.binding.variant_id) return;
       if (!level) {
         level = {
           levelImpressionId: ticketUid(),
@@ -3712,6 +3937,7 @@ export class Feed {
         state,
         ms_since_shown: Math.round(performance.now() - this.shownAt),
       });
+      this.retireGeneratedSlot(prev);
     }
     this.dismissChallengePill();
     // Left the series' mechanic (swiped to another unit) → tear the series down.
@@ -4023,6 +4249,14 @@ export class Feed {
       reward.className = 'game__reward';
       game.appendChild(reward);
       this.rewardEls[i] = reward;
+
+      // Host-owned provenance: visible on the baked arrival preview and on
+      // autoplay regardless of what the mechanic runtime renders.
+      const generatedBadge = document.createElement('div');
+      generatedBadge.className = 'game__generated-badge';
+      generatedBadge.setAttribute('aria-label', 'Generated catalog level');
+      generatedBadge.innerHTML = '<span aria-hidden="true">✦</span> GENERATED';
+      game.appendChild(generatedBadge);
 
       // Full-screen dim over the GAME AREA (inset above the swipe bar) shown only
       // while autoplay runs — a "this is a demo" veil that also captures tap-anywhere
@@ -4771,7 +5005,7 @@ export class Feed {
     if (next === this.incomingIndex) return;
     this.incomingIndex = next;
     this.incomingPosterOk = false;
-    this.incomingImg.src = coverSrc(this.playables[next].id);
+    this.incomingImg.src = this.coverForIndex(next);
     const game = this.games[next];
     const slot = game?.querySelector<HTMLElement>('.game__slot');
     if (game && slot) {
@@ -5414,7 +5648,17 @@ export class Feed {
     const poster = this.posterEls[n];
     if (!poster) return;
     this.coverLoaded.add(n);
-    poster.src = coverSrc(this.playables[n].id);
+    poster.src = this.coverForIndex(n);
+  }
+
+  private coverForIndex(i: number): string {
+    const slot = this.catalogSlotForIndex(i);
+    const generated = this.generatedOffer && (
+      this.generatedTargetIndex === i
+      || (slot?.insertionKind === 'generated'
+        && slot.allocation?.decisionId === this.generatedOffer.allocation.decisionId)
+    );
+    return generated ? this.generatedPreviewUrl(this.generatedOffer!) : coverSrc(this.playables[i].id);
   }
 
   /** Covers for the window the user can reach next: prev (back-swipe), current,
@@ -8332,6 +8576,7 @@ export class Feed {
     // swipe. That's the "level-up breaks the next mechanic's warming" bug.
     if (leavingLevelUp) this.removeLevelUpPage();
     this.scheduleWarmNext();
+    this.planGeneratedInsertion();
     this.prefetchReserve();
     this.pumpPrefetchQueue();
     // Arrived: re-park the resident poster layer under the new current page

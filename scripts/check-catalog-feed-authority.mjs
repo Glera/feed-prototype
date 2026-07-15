@@ -9,6 +9,7 @@ import {
   buildCatalogFeedAuthorityRequest,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
+  catalogGeneratedPreviewUrl,
   catalogFeedShouldClaimSlot,
   catalogPendingSlotShouldFallbackForBinding,
   catalogSourceDecisionProjectionReady,
@@ -23,6 +24,7 @@ import {
   catalogFeedSurface,
   catalogFeedUsesBuiltinImpression,
   catalogRecallRecoveryEffect,
+  generatedInsertionTarget,
   validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
 } from '../src/catalog-feed-authority.mjs';
@@ -182,6 +184,35 @@ equal(
   catalogFeedShouldClaimSlot(false, false, true),
   false,
   'resolved state cannot bypass the dogfood gate',
+);
+equal(generatedInsertionTarget(0, 10), 2,
+  'the first generated reservation stays two pages ahead');
+equal(generatedInsertionTarget(9, 10), 1,
+  'generated reservations wrap around the ring');
+equal(generatedInsertionTarget(0, 4, [2]), 3,
+  'a blocked future page is skipped without touching the next page');
+equal(generatedInsertionTarget(0, 3, [2]), null,
+  'no safe future page leaves the built-in loop unchanged');
+equal(generatedInsertionTarget(0, 2), null,
+  'a two-page ring cannot host a non-blocking insertion');
+equal(
+  catalogGeneratedPreviewUrl({
+    baseUrl: 'https://swipe-platform.example/app/',
+    contentHash: 'a'.repeat(64),
+    runtimeArtifactDigest: `sha256:${'b'.repeat(64)}`,
+  }),
+  `https://swipe-platform.example/app/catalog-previews/${'a'.repeat(64)}.cover.jpg?v=${'b'.repeat(64)}`,
+  'generated previews are content-addressed by the exact catalog/runtime closure',
+);
+equal(
+  catalogGeneratedPreviewUrl({
+    baseUrl: 'https://swipe-platform.example/',
+    contentHash: 'c'.repeat(64),
+    runtimeArtifactDigest: `sha256:${'d'.repeat(64)}`,
+    compact: true,
+  }),
+  `https://swipe-platform.example/catalog-previews/${'c'.repeat(64)}.cover.c.jpg?v=${'d'.repeat(64)}`,
+  'compact feed previews use their own immutable aspect bucket',
 );
 
 // Deterministic clock/epoch regression for the production race. Binding may

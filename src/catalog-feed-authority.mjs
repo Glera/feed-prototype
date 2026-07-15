@@ -219,6 +219,49 @@ export function catalogFeedShouldClaimSlot(dogfoodEnabled, bindingsResolved, has
     && (bindingsResolved !== true || hasBinding === true);
 }
 
+/** Reserve only a future ring page; current navigation never waits for discovery. */
+export function generatedInsertionTarget(currentIndex, pageCount, blocked = [], minimumDistance = 2) {
+  if (!Number.isInteger(currentIndex) || !Number.isInteger(pageCount) || pageCount < 3
+    || currentIndex < 0 || currentIndex >= pageCount
+    || !Number.isInteger(minimumDistance) || minimumDistance < 2 || minimumDistance >= pageCount
+    || !Array.isArray(blocked) || blocked.some((value) => !Number.isInteger(value))) return null;
+  const unavailable = new Set(blocked);
+  for (let distance = minimumDistance; distance < pageCount; distance += 1) {
+    const candidate = (currentIndex + distance) % pageCount;
+    if (!unavailable.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** Immutable, content-addressed host cover. No player device captures frames. */
+export function catalogGeneratedPreviewUrl({
+  baseUrl,
+  contentHash,
+  runtimeArtifactDigest,
+  compact = false,
+}) {
+  hash(contentHash, 'preview.contentHash');
+  if (typeof runtimeArtifactDigest !== 'string'
+    || !/^sha256:[0-9a-f]{64}$/.test(runtimeArtifactDigest)) {
+    fail('invalid_preview', 'preview runtimeArtifactDigest must be a sha256: digest');
+  }
+  if (typeof baseUrl !== 'string' || !baseUrl || typeof compact !== 'boolean') {
+    fail('invalid_preview', 'preview baseUrl and aspect bucket are required');
+  }
+  let base;
+  try { base = new URL(baseUrl, globalThis.location?.href ?? 'https://invalid.local/'); }
+  catch { fail('invalid_preview', 'preview baseUrl is invalid'); }
+  if (!['http:', 'https:'].includes(base.protocol)) fail('invalid_preview', 'preview baseUrl must be HTTP(S)');
+  base.search = '';
+  base.hash = '';
+  if (!base.pathname.endsWith('/')) base.pathname += '/';
+  const artifact = runtimeArtifactDigest.slice('sha256:'.length);
+  return new URL(
+    `catalog-previews/${contentHash}.cover${compact ? '.c' : ''}.jpg?v=${artifact}`,
+    base,
+  ).toString();
+}
+
 export function buildCatalogFeedAuthorityRequest(requestId, sourceDecisionId) {
   return Object.freeze({
     schema: 'feed.catalog-authority-request.v1',

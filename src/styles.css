@@ -645,6 +645,34 @@ body {
 }
 .game__label--show { opacity: 1; }
 
+/* Catalog provenance is owned by the feed host, so generated content remains
+   identifiable on the baked poster and throughout autoplay even if a runtime
+   does not draw any badge of its own. */
+.game__generated-badge {
+  position: absolute;
+  top: 13px;
+  right: 14px;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 999px;
+  background: rgba(18, 13, 35, 0.78);
+  color: #f2eaff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32), 0 0 18px rgba(163, 111, 255, 0.24);
+  font: 800 10px/1 system-ui, sans-serif;
+  letter-spacing: 0.72px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
+}
+.game__generated-badge > span { color: #c9a7ff; font-size: 13px; line-height: 1; }
+.game--generated .game__generated-badge { opacity: 1; transform: translateY(0); }
+.game--generated.game--manual .game__generated-badge { opacity: 0.72; }
+
 /* Reward badge (top-left): the single star this mechanic awards on a win. Hidden until
    the live mechanic/autoplay is up (not during init), like the reel chrome. */
 .game__reward {

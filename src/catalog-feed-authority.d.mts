@@ -129,6 +129,18 @@ export function catalogFeedShouldClaimSlot(
   bindingsResolved: boolean,
   hasBinding: boolean,
 ): boolean;
+export function generatedInsertionTarget(
+  currentIndex: number,
+  pageCount: number,
+  blocked?: number[],
+  minimumDistance?: number,
+): number | null;
+export function catalogGeneratedPreviewUrl(options: {
+  baseUrl: string;
+  contentHash: string;
+  runtimeArtifactDigest: string;
+  compact?: boolean;
+}): string;
 export function buildCatalogFeedAuthorityRequest(
   requestId: string,
   sourceDecisionId: string,

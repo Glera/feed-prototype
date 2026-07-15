@@ -235,31 +235,26 @@ try {
   };
 
   const delayedPage = await openScenario('delayed');
-  await waitFor(
-    () => scenarios.delayed.authorityRequests.length === 1,
-    12_000,
-    'authority did not start after the >3.5s delayed binding',
-  );
-  assert.ok(scenarios.delayed.authorityRequests[0].atMs >= 3500,
-    'fixture must reproduce binding later than the former timeout');
-  assert.ok(scenarios.delayed.authorityRequests[0].atMs < 65_000,
-    'delayed binding must still fit inside the new bootstrap budget');
-  await delayedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 8000 });
+  await delayedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  assert.ok(Date.now() - scenarios.delayed.startedAt < 3500,
+    'the built-in must become interactive before the deliberately delayed session binding');
   await waitFor(
     () => scenarios.delayed.cpEvents.some((event) => event.event_name === 'unit_impression'),
     8000,
-    'server fallback did not produce the exact built-in impression',
+    'late binding did not project the already-visible built-in impression',
   );
+  assert.equal(scenarios.delayed.authorityRequests.length, 0,
+    'built-in navigation must not synchronously ask effectful catalog authority');
   assert.equal(
     scenarios.delayed.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
     1,
-    'delayed authority fallback produces exactly one built-in impression',
+    'late binding produces exactly one built-in impression',
   );
   await delayedPage.close();
 
   // Exercise the real Feed lifecycle beyond both former 15s stage boundaries.
-  // The browser clock advances while the fixture holds each network response,
-  // so this remains fast without replacing the production timers or helpers.
+  // Neither a cold session nor a held control-plane projection may withhold the
+  // built-in iframe; generated discovery is an independent background concern.
   const stagedPage = await openScenario('staged', true);
   await waitFor(
     () => scenarios.staged.sessionPending,
@@ -268,9 +263,9 @@ try {
   );
   await stagedPage.clock.fastForward(20_000);
   assert.equal(scenarios.staged.authorityRequests.length, 0,
-    'authority cannot start before the >15s delayed session binding arrives');
-  assert.equal(await stagedPage.locator(`iframe[title="${playableId}"]`).count(), 0,
-    'bootstrap remains poster-only while the delayed session binding is unresolved');
+    'cold session bootstrap must not ask effectful catalog authority');
+  assert.equal(await stagedPage.locator(`iframe[title="${playableId}"]`).count(), 1,
+    'cold session bootstrap must leave the current built-in interactive');
   scenarios.staged.sessionRelease();
   await stagedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
   assert.equal(scenarios.staged.authorityRequests.length, 0,
@@ -290,24 +285,18 @@ try {
     'only the mapped Sort opportunity enters the staged authority path');
   await stagedPage.clock.fastForward(20_000);
   assert.equal(scenarios.staged.authorityRequests.length, 0,
-    'authority cannot start before the >15s delayed source projection is acknowledged');
-  assert.equal(await stagedPage.locator(`iframe[title="${stagedPlayableId}"]`).count(), 0,
-    'projection wait remains poster-only without leaking the reviewed builtin frame');
+    'held source projection must not start synchronous catalog authority');
+  assert.equal(await stagedPage.locator(`iframe[title="${stagedPlayableId}"]`).count(), 1,
+    'held source projection must not withhold the navigated built-in frame');
   scenarios.staged.projectionRelease();
-  await waitFor(
-    () => scenarios.staged.authorityRequests.length === 1,
-    3000,
-    'authority did not start after the delayed source decision projected',
-  );
-  await stagedPage.waitForSelector(`iframe[title="${stagedPlayableId}"]`, { timeout: 3000 });
   await stagedPage.clock.fastForward(500);
   await waitFor(
     () => scenarios.staged.cpEvents.some((event) => event.event_name === 'unit_impression'),
     3000,
-    'delayed staged authority fallback did not produce its exact built-in impression',
+    'delayed projection did not produce its exact built-in impression',
   );
-  assert.equal(scenarios.staged.authorityRequests.length, 1,
-    'late binding and projection still invoke exact authority once');
+  assert.equal(scenarios.staged.authorityRequests.length, 0,
+    'late binding and projection never invoke effectful authority on the swipe path');
   assert.equal(
     scenarios.staged.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
     1,
@@ -328,7 +317,7 @@ try {
   );
   await noBindingPage.close();
 
-  console.log('catalog authority timing browser: staged late binding/projection and known-unbound fallback passed');
+  console.log('catalog authority timing browser: builtin swipe stays interactive through late binding/projection');
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));

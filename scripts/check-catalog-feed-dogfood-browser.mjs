@@ -52,7 +52,7 @@ const browser = await chromium.launch();
 const runScenario = async (url, { firstFailure }) => {
   const page = await browser.newPage();
   const browserErrors = [];
-  page.on('pageerror', (error) => browserErrors.push(error.message));
+  page.on('pageerror', (error) => browserErrors.push(error.stack || error.message));
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => {
@@ -74,7 +74,8 @@ const runScenario = async (url, { firstFailure }) => {
 
     assert.equal(state.status, 'pass', diagnostic);
     assert.equal(state.client.catalogSeen, true, diagnostic);
-    assert.equal(state.client.builtinSeen, false, diagnostic);
+    assert.equal(state.client.builtinSeen, true, diagnostic);
+    assert.equal(state.client.generatedBadgeVisible, true, diagnostic);
     assert.equal(state.client.chestSeen, true, diagnostic);
     assert.equal(state.client.rewardSeen, true, diagnostic);
     assert.equal(state.diagnostics.length, 0, diagnostic);

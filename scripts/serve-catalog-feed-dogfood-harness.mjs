@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -9,6 +9,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const contractDigest = 'c'.repeat(64);
 const artifactHex = 'd'.repeat(64);
 const artifactDigest = `sha256:${artifactHex}`;
+const previewJpeg = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABAf/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPxB//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPxB//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxB//9k=', 'base64');
+const previewDigest = `sha256:${createHash('sha256').update(previewJpeg).digest('hex')}`;
 const configuredLevelCount = Number(process.env.CATALOG_DOGFOOD_LEVEL_COUNT ?? '2');
 if (!Number.isInteger(configuredLevelCount) || configuredLevelCount < 1 || configuredLevelCount > 6) {
   throw new Error('CATALOG_DOGFOOD_LEVEL_COUNT must be an integer from 1 to 6');
@@ -102,6 +104,7 @@ const freshState = (scenario, instanceToken) => ({
     chestSeen: false,
     rewardSeen: false,
     recoverySeen: false,
+    generatedBadgeVisible: false,
     preloaderVisible: true,
   },
   lastClientSignature: '',
@@ -288,7 +291,7 @@ const evaluate = () => {
 
   if (state.pendingViolation) {
     state.status = 'fail';
-    state.message = 'authority_pending exposed an iframe instead of poster-only (expected iframe count=0)';
+    state.message = 'background generated discovery withheld or replaced the current built-in';
     return;
   }
   if (['recall', 'replay-conflict', 'no-invite', 'wrong-account'].includes(state.scenario)
@@ -304,12 +307,7 @@ const evaluate = () => {
   const canaryPath = exactCanaryGet
     && state.canaryRequests.length === 1
     && state.authorityRequests.length === 0;
-  const normalPath = state.canaryRequests.length === 0
-    && state.authorityRequests.length === 1
-    && state.authorityRequests[0]?.sourceDecisionId === source[0]?.payload.decision_id;
-  const catalogAuthorityPath = canaryScenarios.has(state.scenario)
-    ? canaryPath
-    : state.scenario === 'disabled' && normalPath;
+  const catalogAuthorityPath = canaryScenarios.has(state.scenario) && canaryPath;
   const allocationResponse = state.allocationResponses[0];
   const exactAllocationClass = canaryScenarios.has(state.scenario)
     ? allocationResponse?.catalog?.entryState === 'canary'
@@ -319,7 +317,7 @@ const evaluate = () => {
       && allocationResponse?.catalog?.entryState === 'published'
       && allocationResponse?.slotType === 'anchor'
       && allocationResponse?.policyVersion === 'dogfood.fixture.v1';
-  const exactTransport = source.length === 1
+  const exactTransport = source.length >= 1
     && catalogAuthorityPath
     && exactAllocationClass
     && state.allocationRequests[0]?.authorizationId === ids.authorization
@@ -359,7 +357,9 @@ const evaluate = () => {
       && state.checkpoints.levelReceipts.every((checkpoint) => checkpoint.pass)
       && state.checkpoints.chestAfterExactReceipts?.pass === true
       && state.checkpoints.rewardAfterChestReceipt?.pass === true
-      && builtinImpressions.length === 0 && state.client.chestSeen && state.client.rewardSeen) {
+      && builtinImpressions.length >= 1 && state.client.builtinSeen
+      && state.client.generatedBadgeVisible
+      && state.client.chestSeen && state.client.rewardSeen) {
       state.status = 'pass';
       state.message = state.scenario === 'disabled'
         ? 'disabled canary left the normal effectful catalog path unchanged'
@@ -452,9 +452,10 @@ window.Telegram={WebApp:{
 }};
 addEventListener('DOMContentLoaded',()=>{
   let chestHandled=false;
+  let advancing=false;
   let catalogSeen=false,builtinSeen=false,chestSeen=false,rewardSeen=false,recoverySeen=false;
   const tick=()=>{
-    const current=document.querySelectorAll('.game')[0];
+    const current=document.querySelector('.page--in-viewport .game')||document.querySelectorAll('.game')[0];
     const frame=current?.querySelector('iframe')||null;
     const currentIframeCount=current?.querySelectorAll('iframe').length||0;
     const currentFrame=!frame?'none':frame.dataset.catalogPlayerV2==='1'?'catalog':'builtin';
@@ -467,13 +468,23 @@ addEventListener('DOMContentLoaded',()=>{
     chestSeen ||= Boolean(chest);
     rewardSeen ||= Boolean(document.querySelector('.game__state--earned .reward'));
     recoverySeen ||= (document.body.textContent||'').includes('Серия обновилась');
+    const generatedBadgeVisible=Boolean(current?.classList.contains('game--generated')&&current?.querySelector('.game__generated-badge'));
+    const preparedGenerated=document.querySelector('.game--generated');
+    if(preparedGenerated&&!generatedBadgeVisible&&!advancing){
+      // The production contract reserves a future page. Move through the same
+      // built-in pages a user would swipe past; no network completion drives
+      // this navigation and the generated page is never substituted in place.
+      advancing=true;
+      current?.querySelector('.game__close')?.click();
+      setTimeout(()=>{advancing=false},520);
+    }
     if(chest&&!chestHandled){
       chestHandled=true;
       chest.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:7}));
       setTimeout(()=>chest.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7})),650);
     }
     fetch('/__harness/client?harness_instance='+encodeURIComponent(harnessInstance)+'&scenario='+encodeURIComponent(harnessScenario),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      harnessInstance,harnessScenario,currentFrame,currentIframeCount,currentGameClasses,frameNavigated,frameVisibility,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,
+      harnessInstance,harnessScenario,currentFrame,currentIframeCount,currentGameClasses,frameNavigated,frameVisibility,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,generatedBadgeVisible,
       preloaderVisible:Boolean(document.querySelector('.preloader:not(.preloader--hidden)'))
     })}).catch(()=>{});
   };
@@ -587,7 +598,8 @@ const server = createServer(async (request, response) => {
       if (state.authorityPending) {
         state.pendingSamples += 1;
         const iframeCount = Number(snapshot.currentIframeCount ?? -1);
-        const pass = snapshot.currentFrame === 'none' && iframeCount === 0;
+        const pass = snapshot.currentFrame === 'builtin' && iframeCount === 1
+          && snapshot.generatedBadgeVisible !== true;
         if (!state.checkpoints.pendingSurface) {
           state.checkpoints.pendingSurface = { iframeCount, currentFrame: snapshot.currentFrame, pass };
           record('checkpoint_pending_iframe_count', state.checkpoints.pendingSurface);
@@ -938,6 +950,25 @@ const server = createServer(async (request, response) => {
     return json(response, { code: 'daily_not_configured' }, 404);
   }
   if (url.pathname === '/versions.json') return json(response, {});
+  if (url.pathname === `/catalog-previews/${manifest.contentHash}.preview.json`) {
+    return json(response, {
+      schema: 'catalog.generated-preview.v1',
+      captureContract: 'sort.generated-preview.v1',
+      contentHash: manifest.contentHash,
+      runtimeArtifactDigest: artifactDigest,
+      covers: {
+        mobile: { file: `${manifest.contentHash}.cover.jpg`, sha256: previewDigest, width: 390, height: 600 },
+        compact: { file: `${manifest.contentHash}.cover.c.jpg`, sha256: previewDigest, width: 390, height: 488 },
+      },
+    });
+  }
+  if (url.pathname === `/catalog-previews/${manifest.contentHash}.cover.jpg`
+    || url.pathname === `/catalog-previews/${manifest.contentHash}.cover.c.jpg`) {
+    response.setHeader('content-type', 'image/jpeg');
+    response.setHeader('content-length', String(previewJpeg.byteLength));
+    response.end(previewJpeg);
+    return;
+  }
   if (url.pathname === `/runtime-releases/marble-sort-swipe/${artifactHex}/index.html`) {
     response.setHeader('content-type', 'text/html; charset=utf-8');
     response.end(catalogRuntimeHtml(state?.instanceToken ?? '', state?.scenario ?? ''));
