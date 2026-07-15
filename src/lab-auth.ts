@@ -77,41 +77,67 @@ function promotionSummaryView(summary: CatalogPromotionSummary): HTMLElement {
   const header = document.createElement('div');
   header.className = 'lab-auth__promotion-header';
   const heading = document.createElement('h3');
-  heading.textContent = 'Exact series to publish';
+  const batch = summary.schema === 'catalog.promotion-summary-batch.v1';
+  heading.textContent = batch ? 'Exact publication batch' : 'Exact series to publish';
   const count = document.createElement('span');
   count.className = 'lab-auth__promotion-count';
-  count.textContent = `${summary.levels.length} ${summary.levels.length === 1 ? 'level' : 'levels'}`;
+  count.textContent = batch
+    ? `${summary.items.length} visual variants`
+    : `${summary.levels.length} ${summary.levels.length === 1 ? 'level' : 'levels'}`;
   header.append(heading, count);
 
   const identity = document.createElement('div');
   identity.className = 'lab-auth__promotion-identity';
+  identity.append(detail(batch ? 'Batch ID' : 'Publish ID', summary.publishId));
+  if (!batch) {
+    identity.append(
+      detail('Mechanic', summary.mechanic),
+      detail('Variant', summary.variant),
+      detail('Runtime artifact', summary.runtimeArtifactDigest),
+    );
+  }
   identity.append(
-    detail('Mechanic', summary.mechanic),
-    detail('Variant', summary.variant),
-    detail('Publish ID', summary.publishId),
     detail('Request hash', summary.requestHash),
     detail('Content hash', summary.contentHash),
-    detail('Runtime artifact', summary.runtimeArtifactDigest),
     detail('Reason', summary.reason),
   );
 
   const levels = document.createElement('ol');
   levels.className = 'lab-auth__promotion-levels';
-  levels.setAttribute('aria-label', 'Ordered series levels');
-  for (const level of summary.levels) {
-    const item = document.createElement('li');
-    item.className = 'lab-auth__promotion-level';
-    const levelHeading = document.createElement('strong');
-    levelHeading.textContent = `Level ${level.ordinal}`;
-    const levelDetails = document.createElement('div');
-    levelDetails.className = 'lab-auth__promotion-level-details';
-    levelDetails.append(
-      detail('Spec hash', level.specHash),
-      detail('Evaluation', level.evaluationId),
-      detail('Review target', level.reviewTargetId),
-    );
-    item.append(levelHeading, levelDetails);
-    levels.appendChild(item);
+  levels.setAttribute('aria-label', batch ? 'Ordered publication batch' : 'Ordered series levels');
+  if (batch) {
+    for (const entry of summary.items) {
+      const item = document.createElement('li');
+      item.className = 'lab-auth__promotion-level';
+      const levelHeading = document.createElement('strong');
+      levelHeading.textContent = `${entry.ordinal}. ${entry.summary.skin ? 'Sort skin' : 'Sort series'}`;
+      const levelDetails = document.createElement('div');
+      levelDetails.className = 'lab-auth__promotion-level-details';
+      levelDetails.append(
+        detail('Publish ID', entry.publishId),
+        detail('Content hash', entry.contentHash),
+        detail('Skin hash', entry.summary.skin?.skinHash ?? 'default'),
+        detail('Skin review', entry.summary.skin?.reviewTargetId ?? 'n/a'),
+      );
+      item.append(levelHeading, levelDetails);
+      levels.appendChild(item);
+    }
+  } else {
+    for (const level of summary.levels) {
+      const item = document.createElement('li');
+      item.className = 'lab-auth__promotion-level';
+      const levelHeading = document.createElement('strong');
+      levelHeading.textContent = `Level ${level.ordinal}`;
+      const levelDetails = document.createElement('div');
+      levelDetails.className = 'lab-auth__promotion-level-details';
+      levelDetails.append(
+        detail('Spec hash', level.specHash),
+        detail('Evaluation', level.evaluationId),
+        detail('Review target', level.reviewTargetId),
+      );
+      item.append(levelHeading, levelDetails);
+      levels.appendChild(item);
+    }
   }
 
   section.append(header, identity, levels);
@@ -353,13 +379,20 @@ export async function mountCatalogLabAuth(): Promise<void> {
 
   const renderRequest = (authorization: CatalogLabDeviceAuthorization): void => {
     const promotion = authorization.promotionSummary;
-    title.textContent = promotion ? 'Approve an exact series' : 'Authorize a Lab computer';
+    const promotionBatch = promotion?.schema === 'catalog.promotion-summary-batch.v1';
+    title.textContent = promotion
+      ? promotionBatch ? 'Approve an exact batch' : 'Approve an exact series'
+      : 'Authorize a Lab computer';
     copy.textContent = promotion
       ? 'This is a one-time publication decision, not general access. Compare the immutable series identity below with the reviewed morning candidate.'
       : 'Review the device and permission before you approve it.';
-    requestEyebrow.textContent = promotion ? 'Exact series publication' : 'Permission request';
+    requestEyebrow.textContent = promotion
+      ? promotionBatch ? 'Exact batch publication' : 'Exact series publication'
+      : 'Permission request';
     requestTitle.textContent = promotion
-      ? `${promotion.mechanic} · ${promotion.variant}`
+      ? promotionBatch
+        ? `${promotion.items.length} approved visual variants`
+        : `${promotion.mechanic} · ${promotion.variant}`
       : authorization.clientName;
     requestDetails.replaceChildren(
       detail('Computer', authorization.clientName),
@@ -369,9 +402,13 @@ export async function mountCatalogLabAuth(): Promise<void> {
     );
     if (promotion) requestDetails.appendChild(promotionSummaryView(promotion));
     requestWarning.textContent = promotion
-      ? 'Approval authorizes this exact immutable series once. Verify the content identity and every ordered level before approving; no other series can use this authorization.'
+      ? promotionBatch
+        ? 'Approval authorizes only this immutable ordered batch. Each item keeps its own idempotent publish receipt; no item outside the batch can use this authorization.'
+        : 'Approval authorizes this exact immutable series once. Verify the content identity and every ordered level before approving; no other series can use this authorization.'
       : 'Approval lets this computer submit validated evaluation results. It does not grant feed, reset, or model API access.';
-    approve.textContent = promotion ? 'Approve exact publication' : 'Approve';
+    approve.textContent = promotion
+      ? promotionBatch ? 'Approve exact batch' : 'Approve exact publication'
+      : 'Approve';
     const pending = authorization.state === 'pending';
     decisionButtons.hidden = !pending;
     if (!pending) {

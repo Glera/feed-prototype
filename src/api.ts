@@ -844,8 +844,8 @@ export interface CatalogPromotionSummaryLevel {
   reviewTargetId: string;
 }
 
-export interface CatalogPromotionSummary {
-  schema: 'catalog.promotion-summary.v1';
+export interface CatalogPromotionSingleSummary {
+  schema: 'catalog.promotion-summary.v1' | 'catalog.promotion-summary.v2';
   publishId: string;
   requestHash: string;
   contentHash: string;
@@ -854,7 +854,33 @@ export interface CatalogPromotionSummary {
   runtimeArtifactDigest: string;
   levels: CatalogPromotionSummaryLevel[];
   reason: string;
+  skin?: {
+    skinHash: string;
+    skinContractDigest: string;
+    reviewTargetId: string;
+    params: Record<string, unknown>;
+  };
 }
+
+export interface CatalogPromotionBatchSummaryItem {
+  ordinal: number;
+  publishId: string;
+  requestHash: string;
+  contentHash: string;
+  bindingHash: string;
+  summary: CatalogPromotionSingleSummary;
+}
+
+export interface CatalogPromotionBatchSummary {
+  schema: 'catalog.promotion-summary-batch.v1';
+  publishId: string;
+  requestHash: string;
+  contentHash: string;
+  reason: string;
+  items: CatalogPromotionBatchSummaryItem[];
+}
+
+export type CatalogPromotionSummary = CatalogPromotionSingleSummary | CatalogPromotionBatchSummary;
 
 export interface CatalogLabDeviceAuthorization {
   authorizationId: string;
