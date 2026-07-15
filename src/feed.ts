@@ -68,6 +68,7 @@ import {
   CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
   buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
+  catalogCanaryAuthorityAllowsBackgroundAllocation,
   catalogCanaryAuthorityAllowsAllocation,
   catalogCanaryDogfoodEnabled,
   catalogCanaryInvitationMissing,
@@ -952,9 +953,11 @@ export class Feed {
           if (!catalogCanaryAuthorityAllowsAllocation(canary)) {
             throw new Error('generated canary authority expired before background allocation');
           }
-          authority = canary;
-          canaryProjectionRequired = true;
-          this.catalogCanaryClaimed = true;
+          if (catalogCanaryAuthorityAllowsBackgroundAllocation(canary)) {
+            authority = canary;
+            canaryProjectionRequired = true;
+            this.catalogCanaryClaimed = true;
+          }
         } catch (error) {
           if (!(error instanceof ApiRequestError
             && catalogCanaryInvitationMissing(error.status, error.code))) throw error;

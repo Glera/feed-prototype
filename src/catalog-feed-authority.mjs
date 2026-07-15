@@ -128,6 +128,19 @@ export function catalogCanaryAuthorityAllowsAllocation(authority, nowMs = Date.n
 }
 
 /**
+ * Detached discovery may consume only a fresh invitation. A replayed canary is
+ * reserved for exact reload recovery of its already-created ticket; treating it
+ * as a new additive offer would starve the ordinary published-feed fallback.
+ */
+export function catalogCanaryAuthorityAllowsBackgroundAllocation(
+  authority,
+  nowMs = Date.now(),
+) {
+  return authority?.replayed === false
+    && catalogCanaryAuthorityAllowsAllocation(authority, nowMs);
+}
+
+/**
  * A delivered canary invitation is also the bounded reload-recovery identity.
  * Repeating the same exact start request after a lost response replays the
  * manifest-bound ticket instead of colliding on decision uniqueness. This is

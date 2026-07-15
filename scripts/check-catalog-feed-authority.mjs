@@ -14,6 +14,7 @@ import {
   catalogPendingSlotShouldFallbackForBinding,
   catalogSourceDecisionProjectionReady,
   catalogCanaryAuthorityAllowsAllocation,
+  catalogCanaryAuthorityAllowsBackgroundAllocation,
   catalogCanaryDogfoodEnabled,
   catalogCanaryInvitationMissing,
   catalogCanaryTicketStartIsSafe,
@@ -308,6 +309,12 @@ equal(catalogCanaryAuthorityAllowsAllocation(canary, Date.parse('2026-07-14T12:0
   'an uncommitted invitation cannot allocate after expiry');
 equal(catalogCanaryAuthorityAllowsAllocation({ ...canary, replayed: true }, Date.parse('2030-01-01T00:00:00Z')), true,
   'a committed invitation remains usable only through exact allocation replay');
+equal(catalogCanaryAuthorityAllowsBackgroundAllocation(canary, Date.parse('2026-07-14T11:59:59Z')), true,
+  'detached discovery may consume a fresh canary invitation');
+equal(catalogCanaryAuthorityAllowsBackgroundAllocation({ ...canary, replayed: true }, Date.parse('2026-07-14T11:59:59Z')), false,
+  'detached discovery falls through to published policy after a canary was already delivered');
+equal(catalogCanaryAuthorityAllowsBackgroundAllocation(canary, Date.parse('2026-07-14T12:00:01Z')), false,
+  'detached discovery rejects an expired fresh invitation');
 const canaryRun = buildCatalogCanaryRunIdentity(ids.auth);
 equal(canaryRun.ticketId, ids.auth, 'canary reload repeats the opaque authorization as ticket identity');
 equal(canaryRun.runId, `catalog-canary:${ids.auth}`, 'canary reload repeats one bounded run identity');

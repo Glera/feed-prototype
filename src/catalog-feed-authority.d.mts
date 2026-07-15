@@ -75,6 +75,10 @@ export function catalogCanaryAuthorityAllowsAllocation(
   authority: CatalogCanaryAuthorityResultV1,
   nowMs?: number,
 ): boolean;
+export function catalogCanaryAuthorityAllowsBackgroundAllocation(
+  authority: CatalogCanaryAuthorityResultV1,
+  nowMs?: number,
+): boolean;
 export function buildCatalogCanaryRunIdentity(authorizationId: string): Readonly<{
   ticketId: string;
   runId: string;

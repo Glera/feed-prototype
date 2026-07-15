@@ -41,13 +41,13 @@ let canaryDisabledBuildHtml = '';
 
 const scenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
-  'no-invite', 'wrong-account', 'disabled',
+  'no-invite', 'replayed-canary', 'wrong-account', 'disabled',
 ]);
 const canaryScenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
 ]);
 const successfulCatalogScenarios = new Set([
-  'success', 'result-transient', 'result-timeout', 'disabled',
+  'success', 'result-transient', 'result-timeout', 'replayed-canary', 'disabled',
 ]);
 const normalizedScenario = (scenario) => scenarios.has(scenario) ? scenario : 'success';
 const dogfoodUserId = 424242;
@@ -309,15 +309,15 @@ const evaluate = () => {
     && state.authorityRequests.length === 0;
   const catalogAuthorityPath = canaryScenarios.has(state.scenario)
     ? canaryPath
-    : state.scenario === 'disabled'
-      && state.canaryRequests.length === 0
+    : ['disabled', 'replayed-canary'].includes(state.scenario)
+      && state.canaryRequests.length === (state.scenario === 'replayed-canary' ? 1 : 0)
       && state.authorityRequests.length === 1;
   const allocationResponse = state.allocationResponses[0];
   const exactAllocationClass = canaryScenarios.has(state.scenario)
     ? allocationResponse?.catalog?.entryState === 'canary'
       && allocationResponse?.slotType === 'canary-dogfood'
       && allocationResponse?.policyVersion === 'catalog-canary-dogfood.v1'
-    : state.scenario === 'disabled'
+    : ['disabled', 'replayed-canary'].includes(state.scenario)
       && allocationResponse?.catalog?.entryState === 'published'
       && allocationResponse?.slotType === 'anchor'
       && allocationResponse?.policyVersion === 'dogfood.fixture.v1';
@@ -367,6 +367,8 @@ const evaluate = () => {
       state.status = 'pass';
       state.message = state.scenario === 'disabled'
         ? 'disabled canary left the normal effectful catalog path unchanged'
+        : state.scenario === 'replayed-canary'
+          ? 'completed canary fell through to the published generated feed path'
         : `canary invitation completed the exact ${specHashes.length}-level catalog series and confirmed chest`;
       record('assertions_passed', { scenario: state.scenario });
       return;
@@ -507,7 +509,7 @@ output{display:block;padding:6px;border-radius:6px;background:#26313f;font-weigh
 pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0 0}a{color:#8ecbff}
 </style></head><body>
 <div data-testid="feed-root" data-harness-instance="${instanceToken}"></div>
-<aside class="panel"><div><a href="/harness.html?scenario=success">canary success</a> · <a href="/harness.html?scenario=result-transient">transient result recovery</a> · <a href="/harness.html?scenario=result-timeout">hung result recovery</a> · <a href="/harness.html?scenario=recall">hard recall</a> · <a href="/harness.html?scenario=replay-conflict">replay conflict</a> · <a href="/harness.html?scenario=no-invite">no invite</a> · <a href="/harness.html?scenario=wrong-account">wrong account</a> · <a href="/harness.html?scenario=disabled">canary disabled</a></div>
+<aside class="panel"><div><a href="/harness.html?scenario=success">canary success</a> · <a href="/harness.html?scenario=result-transient">transient result recovery</a> · <a href="/harness.html?scenario=result-timeout">hung result recovery</a> · <a href="/harness.html?scenario=recall">hard recall</a> · <a href="/harness.html?scenario=replay-conflict">replay conflict</a> · <a href="/harness.html?scenario=no-invite">no invite</a> · <a href="/harness.html?scenario=replayed-canary">replayed canary</a> · <a href="/harness.html?scenario=wrong-account">wrong account</a> · <a href="/harness.html?scenario=disabled">canary disabled</a></div>
 <output data-testid="status" data-state="running">RUNNING</output><pre data-testid="trace">[]</pre></aside>
 <script>
 const status=document.querySelector('[data-testid=status]');const trace=document.querySelector('[data-testid=trace]');
@@ -804,7 +806,7 @@ const server = createServer(async (request, response) => {
       record('canary_authority_missing');
       return json(response, { code: 'catalog_canary_invitation_not_found' }, 404);
     }
-    if (!canaryScenarios.has(state?.scenario ?? '')) {
+    if (!canaryScenarios.has(state?.scenario ?? '') && state?.scenario !== 'replayed-canary') {
       if (state) {
         state.status = 'fail';
         state.message = `canary endpoint was called in ${state.scenario}`;
@@ -819,7 +821,7 @@ const server = createServer(async (request, response) => {
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
       // replay-conflict models two tabs which both observed fresh authority;
       // only the allocation/closure reveals that one tab committed first.
-      replayed: false,
+      replayed: state?.scenario === 'replayed-canary',
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/feed/catalog-authority') {
@@ -844,7 +846,7 @@ const server = createServer(async (request, response) => {
         },
       });
     }
-    if (state?.scenario !== 'disabled') {
+    if (!['disabled', 'replayed-canary'].includes(state?.scenario ?? '')) {
       if (state) {
         state.status = 'fail';
         state.message = `normal authority was called after a canary invitation in ${state.scenario}`;
@@ -1041,6 +1043,7 @@ console.log(JSON.stringify({
   recallUrl: `${origin}/harness.html?scenario=recall`,
   replayConflictUrl: `${origin}/harness.html?scenario=replay-conflict`,
   noInviteUrl: `${origin}/harness.html?scenario=no-invite`,
+  replayedCanaryUrl: `${origin}/harness.html?scenario=replayed-canary`,
   wrongAccountUrl: `${origin}/harness.html?scenario=wrong-account`,
   disabledUrl: `${origin}/harness.html?scenario=disabled`,
   stateUrl: `${origin}/__harness/state`,

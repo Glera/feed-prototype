@@ -29,7 +29,7 @@ const endpoints = await new Promise((resolve, reject) => {
     for (const line of stdout.split(/\r?\n/)) {
       try {
         const parsed = JSON.parse(line);
-        if (parsed.successUrl && parsed.transientResultUrl
+        if (parsed.successUrl && parsed.transientResultUrl && parsed.replayedCanaryUrl
           && parsed.timeoutResultUrl && parsed.disabledUrl && parsed.stateUrl) {
           clearTimeout(timeout);
           resolve(parsed);
@@ -126,6 +126,7 @@ const runScenario = async (url, { firstFailure }) => {
 
 try {
   await runScenario(endpoints.successUrl, { firstFailure: null });
+  await runScenario(endpoints.replayedCanaryUrl, { firstFailure: null });
   await runScenario(endpoints.disabledUrl, { firstFailure: null });
   await runScenario(endpoints.transientResultUrl, { firstFailure: 'transient' });
   await runScenario(endpoints.timeoutResultUrl, { firstFailure: 'timeout' });
