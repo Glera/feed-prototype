@@ -287,6 +287,11 @@ type ControlPlaneExposure = {
     occurredAt: string;
   } | null;
 };
+type GeneratedAuthoritySource = {
+  decisionId: string;
+  decisionEventId: string;
+  binding: BuiltinFeedBindingV1;
+};
 type ControlPlaneAttempt = {
   runId: string;
   exposure: ControlPlaneExposure;
@@ -924,17 +929,47 @@ export class Feed {
     this.scheduleGeneratedOfferPrefetch();
   }
 
-  private generatedAuthoritySource(): ControlPlaneExposure | null {
+  private generatedAuthoritySource(): GeneratedAuthoritySource | null {
     const candidates = [
       this.cpExposure,
       this.cpPendingExposure,
       ...this.cpDeferredExposures,
     ].filter((item): item is ControlPlaneExposure => Boolean(item));
     const unique = new Map(candidates.map((item) => [item.decisionId, item]));
-    return [...unique.values()]
+    const exposure = [...unique.values()]
       .filter((item) => item.binding && item.decisionEmitted && item.decisionEventId
         && !this.generatedAuthoritySourceIds.has(item.decisionId))
       .sort((left, right) => right.feedPosition - left.feedPosition)[0] ?? null;
+    if (!exposure?.binding || !exposure.decisionEventId) return null;
+    return {
+      decisionId: exposure.decisionId,
+      decisionEventId: exposure.decisionEventId,
+      binding: exposure.binding,
+    };
+  }
+
+  /**
+   * Additive generated insertion is a policy opportunity, not a replacement
+   * for the currently visible built-in.  The reviewed registry can initially
+   * contain fewer mechanics than the local ring (today it contains Sort only),
+   * so waiting for a mapped page would reduce a five-slot policy to one probe
+   * per full loop.  Issue a fresh, durable, impression-less opportunity from
+   * any reviewed binding instead.  The server still owns exact identity and a
+   * fallback remains a no-op: the visible built-in continues untouched.
+   */
+  private generatedAuthorityProbe(): GeneratedAuthoritySource | null {
+    const binding = this.builtinFeedBindings.get('marble-sort-swipe')
+      ?? [...this.builtinFeedBindings.values()][0]
+      ?? null;
+    if (!binding) return null;
+    const decisionId = ticketUid();
+    const decisionEventId = queueControlPlaneEvent('builtin_feed_decision', {
+      decision_id: decisionId,
+      mapping_id: binding.mapping_id,
+      feed_position: this.cpFeedPosition++,
+    }, new Date().toISOString());
+    if (!decisionEventId) return null;
+    return { decisionId, decisionEventId, binding };
   }
 
   private async prefetchGeneratedOffer(): Promise<void> {
@@ -965,8 +1000,8 @@ export class Feed {
       }
 
       if (!authority) {
-        const source = this.generatedAuthoritySource();
-        if (!source || !source.binding || !source.decisionEventId) {
+        const source = this.generatedAuthoritySource() ?? this.generatedAuthorityProbe();
+        if (!source) {
           this.generatedOfferState = 'idle';
           return;
         }
@@ -8682,6 +8717,10 @@ export class Feed {
       this.closeControlPlaneExposure('swipe', false);
       const targetPlayableId = this.playables[targetIndex]?.id;
       if (targetPlayableId) this.beginControlPlaneDecision(targetIndex, targetPlayableId);
+      // Every settled navigation is an additive factory opportunity.  This is
+      // intentionally independent of whether the target built-in has already
+      // received its own reviewed control-plane mapping.
+      this.scheduleGeneratedOfferPrefetch();
       if (!this.series) this.removeSeriesRow(true);
       this.clearWarmTimer();
       this.warmIndex = null;

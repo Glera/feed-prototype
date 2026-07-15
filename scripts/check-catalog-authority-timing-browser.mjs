@@ -116,7 +116,11 @@ const server = createServer(async (request, response) => {
     const body = await bodyOf(request);
     const state = scenarios[scenario];
     state.cpEvents.push(...body.events);
+    const stagedBuiltinDecisionCount = state.cpEvents.filter(
+      (event) => event.event_name === 'builtin_feed_decision',
+    ).length;
     if (scenario === 'staged' && !state.projectionHeld
+      && stagedBuiltinDecisionCount >= 2
       && body.events.some((event) => event.event_name === 'builtin_feed_decision')) {
       state.projectionHeld = true;
       state.projectionPending = true;
@@ -255,6 +259,39 @@ try {
     1,
     'late binding produces exactly one built-in impression',
   );
+  // The reviewed registry is intentionally incomplete in this fixture.  A
+  // swipe onto the unbound Sort page must still create another additive
+  // factory opportunity from the reviewed Merge binding; otherwise production
+  // degrades to one generated probe per full ten-card loop.
+  const delayedSwipeSurface = delayedPage.locator('.page--in-viewport .game__autoplay');
+  const delayedSwipeBox = await delayedSwipeSurface.boundingBox();
+  assert.ok(delayedSwipeBox, 'current delayed-scenario swipe surface is missing');
+  const delayedSwipeX = delayedSwipeBox.x + delayedSwipeBox.width / 2;
+  await delayedPage.mouse.move(delayedSwipeX, delayedSwipeBox.y + delayedSwipeBox.height * 0.85);
+  await delayedPage.mouse.down();
+  await delayedPage.mouse.move(
+    delayedSwipeX,
+    delayedSwipeBox.y + delayedSwipeBox.height * 0.15,
+    { steps: 8 },
+  );
+  await delayedPage.mouse.up();
+  await waitFor(
+    () => scenarios.delayed.authorityRequests.length === 2,
+    3000,
+    'unmapped navigation did not create the next additive generated opportunity',
+  );
+  const delayedDecisionEvents = scenarios.delayed.cpEvents.filter(
+    (event) => event.event_name === 'builtin_feed_decision',
+  );
+  assert.equal(delayedDecisionEvents.length, 2,
+    'one visible source plus one impression-less generated probe are expected');
+  assert.equal(delayedDecisionEvents[1].payload?.mapping_id, binding.mapping_id,
+    'generated probe must still use an exact reviewed server binding');
+  assert.equal(
+    scenarios.delayed.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
+    1,
+    'the additive probe must not invent a visible built-in impression',
+  );
   await delayedPage.close();
 
   // Exercise the real Feed lifecycle beyond both former 15s stage boundaries.
@@ -273,8 +310,13 @@ try {
     'cold session bootstrap must leave the current built-in interactive');
   scenarios.staged.sessionRelease();
   await stagedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
-  assert.equal(scenarios.staged.authorityRequests.length, 0,
-    'authoritatively unbound initial Merge falls back without calling authority');
+  await waitFor(
+    () => scenarios.staged.authorityRequests.length === 1,
+    3000,
+    'reviewed Sort binding did not create an impression-less initial factory opportunity',
+  );
+  assert.equal(await stagedPage.locator(`iframe[title="${playableId}"]`).count(), 1,
+    'initial additive opportunity must leave the unbound Merge frame interactive');
   await stagedPage.clock.fastForward(500);
   const swipeSurface = stagedPage.locator('.page--in-viewport .game__autoplay');
   const swipeBox = await swipeSurface.boundingBox();
@@ -292,14 +334,14 @@ try {
     3000,
     'mapped Sort navigation did not reach the held control-plane projection',
   );
-  const stagedDecision = scenarios.staged.cpEvents.find(
+  const stagedDecision = scenarios.staged.cpEvents.findLast(
     (event) => event.event_name === 'builtin_feed_decision',
   );
   assert.equal(stagedDecision?.payload?.mapping_id, stagedBinding.mapping_id,
     'only the mapped Sort opportunity enters the staged authority path');
   await stagedPage.clock.fastForward(20_000);
-  assert.equal(scenarios.staged.authorityRequests.length, 0,
-    'held source projection must not start synchronous catalog authority');
+  assert.equal(scenarios.staged.authorityRequests.length, 1,
+    'held source projection must not start another synchronous catalog authority');
   assert.equal(await stagedPage.locator(`iframe[title="${stagedPlayableId}"]`).count(), 1,
     'held source projection must not withhold the navigated built-in frame');
   scenarios.staged.projectionRelease();
@@ -310,7 +352,7 @@ try {
     'delayed projection did not produce its exact built-in impression',
   );
   await waitFor(
-    () => scenarios.staged.authorityRequests.length === 1,
+    () => scenarios.staged.authorityRequests.length === 2,
     3000,
     'released source projection did not start detached generated discovery',
   );
