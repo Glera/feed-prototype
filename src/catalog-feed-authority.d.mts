@@ -61,11 +61,11 @@ export function catalogDogfoodAccountEligible(
 export function catalogFeedDogfoodEnabled(
   env: Record<string, unknown> | undefined,
   controlPlaneEnabled: boolean,
-  accountEligible: boolean,
 ): boolean;
 export function catalogCanaryDogfoodEnabled(
   env: Record<string, unknown> | undefined,
   feedDogfoodEnabled: boolean,
+  accountEligible: boolean,
 ): boolean;
 export function catalogCanaryInvitationMissing(status: number, code: string | null): boolean;
 export function validateCatalogCanaryAuthorityResult(

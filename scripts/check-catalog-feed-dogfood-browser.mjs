@@ -30,7 +30,7 @@ const endpoints = await new Promise((resolve, reject) => {
       try {
         const parsed = JSON.parse(line);
         if (parsed.successUrl && parsed.transientResultUrl
-          && parsed.timeoutResultUrl && parsed.stateUrl) {
+          && parsed.timeoutResultUrl && parsed.disabledUrl && parsed.stateUrl) {
           clearTimeout(timeout);
           resolve(parsed);
           return;
@@ -126,10 +126,11 @@ const runScenario = async (url, { firstFailure }) => {
 
 try {
   await runScenario(endpoints.successUrl, { firstFailure: null });
+  await runScenario(endpoints.disabledUrl, { firstFailure: null });
   await runScenario(endpoints.transientResultUrl, { firstFailure: 'transient' });
   await runScenario(endpoints.timeoutResultUrl, { firstFailure: 'timeout' });
   console.log(
-    'catalog feed dogfood browser: one-level happy path, transient recovery, and hung-request recovery verified',
+    'catalog feed dogfood browser: canary + public background paths, transient recovery, and hung-request recovery verified',
   );
 } finally {
   await browser.close();

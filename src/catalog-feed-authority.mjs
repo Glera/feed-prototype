@@ -80,17 +80,17 @@ export function catalogDogfoodAccountEligible(env, initData) {
   }
 }
 
-/** Three independent build/runtime gates plus an exact account; no query escape. */
-export function catalogFeedDogfoodEnabled(env, controlPlaneEnabled, accountEligible) {
+/** Published catalog delivery is available to every authenticated CP player. */
+export function catalogFeedDogfoodEnabled(env, controlPlaneEnabled) {
   return controlPlaneEnabled === true
-    && accountEligible === true
     && String(env?.VITE_CATALOG_PLAYER_V2_ENABLED ?? '').toLowerCase() === 'true'
     && String(env?.VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED ?? '').toLowerCase() === 'true';
 }
 
-/** Additive invitation probe; it can never widen the existing effectful surface. */
-export function catalogCanaryDogfoodEnabled(env, feedDogfoodEnabled) {
+/** Canary invitations remain pinned to the one explicitly configured account. */
+export function catalogCanaryDogfoodEnabled(env, feedDogfoodEnabled, accountEligible) {
   return feedDogfoodEnabled === true
+    && accountEligible === true
     && String(env?.VITE_CATALOG_CANARY_DOGFOOD_ENABLED ?? '').toLowerCase() === 'true';
 }
 

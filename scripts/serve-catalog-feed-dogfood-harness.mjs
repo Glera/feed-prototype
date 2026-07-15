@@ -307,7 +307,11 @@ const evaluate = () => {
   const canaryPath = exactCanaryGet
     && state.canaryRequests.length === 1
     && state.authorityRequests.length === 0;
-  const catalogAuthorityPath = canaryScenarios.has(state.scenario) && canaryPath;
+  const catalogAuthorityPath = canaryScenarios.has(state.scenario)
+    ? canaryPath
+    : state.scenario === 'disabled'
+      && state.canaryRequests.length === 0
+      && state.authorityRequests.length === 1;
   const allocationResponse = state.allocationResponses[0];
   const exactAllocationClass = canaryScenarios.has(state.scenario)
     ? allocationResponse?.catalog?.entryState === 'canary'

@@ -243,8 +243,13 @@ try {
     8000,
     'late binding did not project the already-visible built-in impression',
   );
-  assert.equal(scenarios.delayed.authorityRequests.length, 0,
-    'built-in navigation must not synchronously ask effectful catalog authority');
+  await waitFor(
+    () => scenarios.delayed.authorityRequests.length === 1,
+    3000,
+    'projected built-in opportunity did not start detached generated discovery',
+  );
+  assert.equal(await delayedPage.locator(`iframe[title="${playableId}"]`).count(), 1,
+    'background authority must leave the already-visible built-in interactive');
   assert.equal(
     scenarios.delayed.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
     1,
@@ -295,8 +300,13 @@ try {
     3000,
     'delayed projection did not produce its exact built-in impression',
   );
-  assert.equal(scenarios.staged.authorityRequests.length, 0,
-    'late binding and projection never invoke effectful authority on the swipe path');
+  await waitFor(
+    () => scenarios.staged.authorityRequests.length === 1,
+    3000,
+    'released source projection did not start detached generated discovery',
+  );
+  assert.equal(await stagedPage.locator(`iframe[title="${stagedPlayableId}"]`).count(), 1,
+    'detached generated discovery must not replace the navigated built-in');
   assert.equal(
     scenarios.staged.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
     1,

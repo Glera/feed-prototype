@@ -67,17 +67,19 @@ equal(catalogDogfoodAccountEligible({ VITE_CATALOG_DOGFOOD_USER_ID: '424242' },
   'a different authenticated account is excluded');
 equal(catalogDogfoodAccountEligible({ VITE_CATALOG_DOGFOOD_USER_ID: '424242' }, dogfoodInitData), true,
   'the one exact configured Telegram account is eligible');
-equal(catalogFeedDogfoodEnabled({}, true, true), false, 'dogfood is off by default');
+equal(catalogFeedDogfoodEnabled({}, true), false, 'published catalog delivery is off by default');
 equal(catalogFeedDogfoodEnabled({
   VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
   VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
-}, false, true), false, 'control-plane is an independent gate');
-equal(catalogFeedDogfoodEnabled(dogfoodEnv, true, false), false, 'account scope is an independent gate');
-equal(catalogFeedDogfoodEnabled(dogfoodEnv, true, true), true, 'all gates plus exact account enable the bridge');
-equal(catalogCanaryDogfoodEnabled({}, true), false, 'canary invitation lookup is independently off by default');
-equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'true' }, false), false,
+}, false), false, 'control-plane is an independent gate');
+equal(catalogFeedDogfoodEnabled(dogfoodEnv, true), true,
+  'published catalog delivery does not depend on the canary account');
+equal(catalogCanaryDogfoodEnabled({}, true, true), false, 'canary invitation lookup is independently off by default');
+equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'true' }, false, true), false,
   'the canary flag cannot widen the existing effectful bridge');
-equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'TRUE' }, true), true,
+equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'TRUE' }, true, false), false,
+  'the canary flag cannot widen beyond the exact configured account');
+equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'TRUE' }, true, true), true,
   'the explicit canary flag adds invitation precedence to an eligible bridge');
 equal(catalogCanaryInvitationMissing(404, 'catalog_canary_invitation_not_found'), true,
   'only the exact no-invitation code falls through to normal effectful policy');

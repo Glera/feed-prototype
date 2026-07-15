@@ -333,12 +333,14 @@ type CatalogFeedSlot = {
   insertionKind: 'source-bound' | 'generated';
 };
 type PreparedGeneratedOffer = {
-  authority: CatalogCanaryAuthorityResultV1;
+  authority: CatalogCanaryAuthorityResultV1
+    | Extract<CatalogFeedAuthorityResultV1, { outcome: 'catalog_authorized' }>;
   allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }>;
   ticketRequest: CatalogRunTicketRequestV2;
   ticket: CatalogRunTicketViewV2 | CatalogRunTicketViewV3;
   bundle: CatalogTicketLevelSpecBundle;
   previewUrls: Readonly<{ mobile: string; compact: string }>;
+  canaryProjectionRequired: boolean;
 };
 type SwipeApi = {
   version: number;
@@ -521,14 +523,18 @@ export class Feed {
   // Default-off dogfood bridge. It never derives a catalog candidate locally:
   // every slot starts from a projected built-in opportunity and accepts only
   // the server's opaque authority → allocation → ticket → exact spec bundle.
+  private readonly catalogDogfoodAccountEligible = catalogDogfoodAccountEligible(
+    (import.meta as any).env,
+    getInitData(),
+  );
   private readonly catalogDogfoodEnabled = catalogFeedDogfoodEnabled(
     (import.meta as any).env,
     controlPlaneEnabled(),
-    catalogDogfoodAccountEligible((import.meta as any).env, getInitData()),
   );
   private readonly catalogCanaryDogfoodEnabled = catalogCanaryDogfoodEnabled(
     (import.meta as any).env,
     this.catalogDogfoodEnabled,
+    this.catalogDogfoodAccountEligible,
   );
   // One invitation can be offered to many nearby feed opportunities while
   // warm-up decisions overlap. The first eligible source owns it for this page
@@ -539,6 +545,7 @@ export class Feed {
   private generatedOffer: PreparedGeneratedOffer | null = null;
   private generatedTargetIndex: number | null = null;
   private generatedPrefetchScheduled = false;
+  private generatedAuthoritySourceIds = new Set<string>();
   private catalogFrameEpoch = 0;
   private preloaderMountedAt = 0;
   // Preloader waits for BOTH the first mechanic AND the first server seed (capped).
@@ -844,7 +851,7 @@ export class Feed {
    * browser may spend idle time on this work, but no feed slot waits for it.
    */
   private scheduleGeneratedOfferPrefetch(): void {
-    if (!this.catalogCanaryDogfoodEnabled || this.generatedPrefetchScheduled
+    if (!this.catalogDogfoodEnabled || this.generatedPrefetchScheduled
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedPrefetchScheduled = true;
     const run = () => {
@@ -916,17 +923,77 @@ export class Feed {
     this.scheduleGeneratedOfferPrefetch();
   }
 
+  private generatedAuthoritySource(): ControlPlaneExposure | null {
+    const candidates = [
+      this.cpExposure,
+      this.cpPendingExposure,
+      ...this.cpDeferredExposures,
+    ].filter((item): item is ControlPlaneExposure => Boolean(item));
+    const unique = new Map(candidates.map((item) => [item.decisionId, item]));
+    return [...unique.values()]
+      .filter((item) => item.binding && item.decisionEmitted && item.decisionEventId
+        && !this.generatedAuthoritySourceIds.has(item.decisionId))
+      .sort((left, right) => right.feedPosition - left.feedPosition)[0] ?? null;
+  }
+
   private async prefetchGeneratedOffer(): Promise<void> {
-    if (!this.catalogCanaryDogfoodEnabled
+    if (!this.catalogDogfoodEnabled
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedOfferState = 'loading';
     try {
-      const authority = validateCatalogCanaryAuthorityResult(
-        await apiGetCatalogCanaryAuthorityRequired(),
-      );
-      if (!catalogCanaryAuthorityAllowsAllocation(authority)) {
-        throw new Error('generated authority expired before background allocation');
+      let authority: PreparedGeneratedOffer['authority'] | null = null;
+      let canaryProjectionRequired = false;
+
+      if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed) {
+        try {
+          const canary = validateCatalogCanaryAuthorityResult(
+            await apiGetCatalogCanaryAuthorityRequired(),
+          );
+          if (!catalogCanaryAuthorityAllowsAllocation(canary)) {
+            throw new Error('generated canary authority expired before background allocation');
+          }
+          authority = canary;
+          canaryProjectionRequired = true;
+          this.catalogCanaryClaimed = true;
+        } catch (error) {
+          if (!(error instanceof ApiRequestError
+            && catalogCanaryInvitationMissing(error.status, error.code))) throw error;
+        }
       }
+
+      if (!authority) {
+        const source = this.generatedAuthoritySource();
+        if (!source || !source.binding || !source.decisionEventId) {
+          this.generatedOfferState = 'idle';
+          return;
+        }
+        this.generatedAuthoritySourceIds.add(source.decisionId);
+        const flushed = await flushControlPlane({ force: true });
+        if (!catalogSourceDecisionProjectionReady(
+          Boolean(flushed),
+          controlPlaneEventState(source.decisionEventId),
+          controlPlaneEventReceiptStatus(source.decisionEventId),
+        )) {
+          throw new Error('background generated source decision was not durably projected');
+        }
+        const request = buildCatalogFeedAuthorityRequest(ticketUid(), source.decisionId);
+        const result = validateCatalogFeedAuthorityResult(
+          await apiGetCatalogFeedAuthorityRequired(request),
+          request,
+        );
+        if (result.outcome === 'builtin_fallback') {
+          if (!catalogFallbackMatchesBinding(result.fallback, source.binding)) {
+            throw new Error('background generated fallback differs from its source opportunity');
+          }
+          this.generatedOfferState = 'empty';
+          return;
+        }
+        if (Date.parse(result.expiresAt) <= Date.now()) {
+          throw new Error('background generated authority expired before allocation');
+        }
+        authority = result;
+      }
+
       const authorized = await apiAllocateAuthorizedCatalogRequired({
         schema: 'catalog.allocate-authorized.v2',
         authorizationId: authority.authorizationId,
@@ -936,17 +1003,25 @@ export class Feed {
         || authorized.authorizationDigest !== authority.authorizationDigest
         || authorized.allocation.allocationId !== authority.authorizationId
         || authorized.allocation.outcome !== 'allocated'
-        || authorized.allocation.catalog.entryState !== 'canary'
-        || authorized.allocation.slotType !== 'canary-dogfood'
-        || authorized.allocation.policyVersion !== 'catalog-canary-dogfood.v1'
         || authorized.allocation.runtime.capabilities.catalogRequiredHandshake !== true) {
         throw new Error('background generated allocation differs from its exact authority');
       }
-      const runIdentity = buildCatalogCanaryRunIdentity(authority.authorizationId);
+      if (canaryProjectionRequired && (
+        authorized.allocation.catalog.entryState !== 'canary'
+        || authorized.allocation.slotType !== 'canary-dogfood'
+        || authorized.allocation.policyVersion !== 'catalog-canary-dogfood.v1'
+      )) throw new Error('background canary allocation escaped its bounded invitation');
+      if (!canaryProjectionRequired
+        && authorized.allocation.catalog.entryState !== 'published') {
+        throw new Error('background public authority selected non-published content');
+      }
+      const runIdentity = canaryProjectionRequired
+        ? buildCatalogCanaryRunIdentity(authority.authorizationId)
+        : null;
       const ticketRequest: CatalogRunTicketRequestV2 = {
         schema: 'run.start.v2',
-        ticket_id: runIdentity.ticketId,
-        run_id: runIdentity.runId,
+        ticket_id: runIdentity?.ticketId ?? ticketUid(),
+        run_id: runIdentity?.runId ?? `series-${runUid()}`,
         mechanic_id: authorized.allocation.runtime.playableId,
         variant_id: authorized.allocation.runtime.legacyVariantId,
         kind: 'series',
@@ -974,6 +1049,7 @@ export class Feed {
         ticket,
         bundle,
         previewUrls,
+        canaryProjectionRequired,
       };
       this.generatedOffer = offer;
       this.generatedOfferState = 'ready';
@@ -983,14 +1059,10 @@ export class Feed {
         catalog_entry_id: offer.allocation.catalog.entryId,
       });
     } catch (error) {
-      if (error instanceof ApiRequestError
-        && catalogCanaryInvitationMissing(error.status, error.code)) {
-        this.generatedOfferState = 'empty';
-        return;
-      }
       this.releaseGeneratedPreview(this.generatedOffer);
       this.generatedOffer = null;
       this.generatedOfferState = 'failed';
+      this.catalogCanaryClaimed = false;
       console.warn('[generated-feed] background offer unavailable; builtin loop continues', error);
       track('generated_offer_unavailable', {
         reason: error instanceof ApiRequestError ? error.code ?? `http_${error.status}` : 'preparation_failure',
@@ -1217,7 +1289,7 @@ export class Feed {
       session: null,
       ordinal: 1,
       failureEmitted: false,
-      canaryProjectionRequired: true,
+      canaryProjectionRequired: prepared.canaryProjectionRequired,
       insertionKind: 'generated',
     };
     this.catalogSlots.set(i, slot);
@@ -1226,7 +1298,7 @@ export class Feed {
     exposure.decisionEmitted = true;
     this.generatedTargetIndex = null;
     this.generatedOfferState = 'reserved';
-    this.catalogCanaryClaimed = true;
+    this.catalogCanaryClaimed = prepared.canaryProjectionRequired;
     this.games[i]?.classList.add('game--generated', 'game--loading');
     this.games[i]?.classList.remove('game--ready');
   }
@@ -1269,6 +1341,7 @@ export class Feed {
       if (!decisionEvent) return;
       exposure.decisionEmitted = true;
       exposure.decisionEventId = decisionEvent;
+      this.scheduleGeneratedOfferPrefetch();
       const slot = this.catalogSlotForExposure(exposure);
       if (slot) this.beginCatalogAuthority(slot);
     }
