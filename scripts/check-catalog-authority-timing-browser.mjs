@@ -276,8 +276,17 @@ try {
   assert.equal(scenarios.staged.authorityRequests.length, 0,
     'authoritatively unbound initial Merge falls back without calling authority');
   await stagedPage.clock.fastForward(500);
-  await stagedPage.evaluate((id) => window.__feedHostGesture(id), playableId);
-  await stagedPage.locator('.game--show-close .game__close').click();
+  const swipeSurface = stagedPage.locator('.page--in-viewport .game__autoplay');
+  const swipeBox = await swipeSurface.boundingBox();
+  assert.ok(swipeBox, 'current built-in swipe surface is missing');
+  const swipeX = swipeBox.x + swipeBox.width / 2;
+  // Cross half a page deliberately. Before the navigation-source fix this made
+  // the fractional visual position round to the target, so goTo() skipped the
+  // source exit and the target decision even though the UI visibly advanced.
+  await stagedPage.mouse.move(swipeX, swipeBox.y + swipeBox.height * 0.85);
+  await stagedPage.mouse.down();
+  await stagedPage.mouse.move(swipeX, swipeBox.y + swipeBox.height * 0.15, { steps: 8 });
+  await stagedPage.mouse.up();
   await waitFor(
     () => scenarios.staged.projectionPending,
     3000,

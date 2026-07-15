@@ -7148,10 +7148,10 @@ export class Feed {
       if (step > 0 || tapToLeave) {
         this.levelUpPageState = 'leaving';
         this.unlockAudioForCurrentAndNext(fromIndex);
-        this.goTo(commitBasePos + (step > 0 ? step : 1));
+        this.goTo(commitBasePos + (step > 0 ? step : 1), false, commitBasePos);
       } else {
         this.levelUpPageState = 'settled';
-        this.goTo(commitBasePos);
+        this.goTo(commitBasePos, false, commitBasePos);
       }
       return;
     }
@@ -7199,12 +7199,12 @@ export class Feed {
           // them to the counter one-by-one — no clones, so nothing visibly disappears
           // /reappears. They animate independently while the won page slides away.
           this.flyRewardStarsInPlace(units, () => this.creditPendingRewardImmediate(rewardIndex));
-          this.slideToNext(rewardIndex, commitBasePos + 1);
+          this.slideToNext(rewardIndex, commitBasePos + 1, commitBasePos);
         }
         return;
       }
       this.removeLevelUpPage();
-      this.goTo(commitBasePos + step);
+      this.goTo(commitBasePos + step, false, commitBasePos);
       return;
     }
 
@@ -7215,7 +7215,7 @@ export class Feed {
     this.dragAllowsBack = false;
     if (step === 0 && autoplayTapIndex !== null && !movedPastTap) {
       this.unlockAudioForCurrentAndNext(autoplayTapIndex, true);
-      this.goTo(commitBasePos);
+      this.goTo(commitBasePos, false, commitBasePos);
       if (this.HOLD_COVER && !this.holdReleased.has(autoplayTapIndex)) {
         // TEMP: first tap RELEASES the held cover → start autoplay + fade the poster
         // (NOT a takeover to manual), so the live autoplay frame can be screenshotted.
@@ -7232,13 +7232,13 @@ export class Feed {
     if (this.heldLevelUpOverlay && step === 0 && !movedPastTap) {
       this.unlockAudioForCurrentAndNext(fromIndex);
       this.releaseHeldLevelUp();
-      this.goTo(commitBasePos + 1);
+      this.goTo(commitBasePos + 1, false, commitBasePos);
       return;
     }
     // During an in-progress series, a swipe never pages away — only the × exits
     // (breaks the series). Snap back in place.
     if (this.series && this.series.playing && step !== 0) {
-      this.goTo(commitBasePos);
+      this.goTo(commitBasePos, false, commitBasePos);
       return;
     }
     if (step !== 0 && autoplayTapIndex !== null) {
@@ -7246,7 +7246,7 @@ export class Feed {
     }
     if (step !== 0) this.unlockAudioForCurrentAndNext(fromIndex, allowsBack);
     if (step > 0) this.releaseHeldLevelUp();
-    this.goTo(commitBasePos + step);
+    this.goTo(commitBasePos + step, false, commitBasePos);
   }
 
   private autoplayTapIndexFor(surface: HTMLElement): number | null {
@@ -8133,12 +8133,12 @@ export class Feed {
   // (game--leaving / game--arriving) to avoid compositing judder; the incoming
   // autoplay starts once it has arrived. Runs IMMEDIATELY — the star credit is a
   // parallel background op, so it never gates this transition.
-  private slideToNext(leavingIdx: number, advanceToPos: number) {
+  private slideToNext(leavingIdx: number, advanceToPos: number, fromPos?: number) {
     this.holdNextAutoplay = true;
     const arrivingIdx = this.indexForPos(advanceToPos);
     this.games[arrivingIdx]?.classList.add('game--arriving');
     this.games[leavingIdx]?.classList.add('game--leaving');
-    this.goTo(advanceToPos);
+    this.goTo(advanceToPos, false, fromPos);
     window.setTimeout(() => {
       this.games[arrivingIdx]?.classList.remove('game--arriving');
       this.games[leavingIdx]?.classList.remove('game--leaving');
@@ -8665,8 +8665,12 @@ export class Feed {
   }
 
   // ── Paging ───────────────────────────────────────────────────────────────
-  goTo(targetPos: number, instant: boolean = false) {
-    const fromPos = Math.round(this.pos);
+  goTo(targetPos: number, instant: boolean = false, navigationFromPos?: number) {
+    // During a long pointer drag `this.pos` can already round to the target page
+    // before pointerup.  The visual interpolation must keep that fractional pos,
+    // but the navigation commit (exit/source decision) still belongs to the page
+    // where the gesture started.  Callers from onUp pass that stable base pos.
+    const fromPos = navigationFromPos ?? Math.round(this.pos);
     const fromIndex = this.indexForPos(fromPos);
     const targetIndex = this.indexForPos(targetPos);
     const changed = targetPos !== this.pos;
