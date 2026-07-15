@@ -852,6 +852,7 @@ export interface CatalogPromotionSingleSummary {
   mechanic: string;
   variant: string;
   runtimeArtifactDigest: string;
+  seriesReviewTargetId?: string;
   levels: CatalogPromotionSummaryLevel[];
   reason: string;
   skin?: {
