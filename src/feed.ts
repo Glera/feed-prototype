@@ -8911,7 +8911,18 @@ export function createFeed(
         ...rosterEntries.slice(idx + 1),
       ];
     }
-    else if (idx < 0) ch = null;
+    else if (idx < 0) {
+      // Roster controls only the default built-in ring. A deep-link challenge
+      // is a forced social slot with its own immutable variant, so removing its
+      // mechanic from the roster must not invalidate an already-issued link.
+      // Keep it outside roster attribution and continue with the exact roster
+      // immediately afterwards. The deploy manifest remains the local mount
+      // authority; an unavailable challenge still degrades to the normal feed.
+      if (mechanicIsAvailable(ch.mechanic_id)) {
+        order = [{ id: ch.mechanic_id }, ...order];
+        rosterEntries = [null, ...rosterEntries];
+      } else ch = null;
+    }
   }
   return new Feed(
     viewport,
