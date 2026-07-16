@@ -26,7 +26,20 @@ const nextRoster = {
   rosterHash: createHash('sha256').update(reversedIdentityJcs).digest('hex'),
   entries: reversedEntries,
 };
+const challengeId = '88888888-8888-4888-8888-888888888888';
+const challengePlayableId = 'merge-timepress-v1-swipe';
+const challengeVariantId = '99999999-9999-4999-8999-999999999999';
+const challenge = {
+  id: challengeId,
+  mechanic_id: challengePlayableId,
+  variant_id: challengeVariantId,
+  metric_key: 'time_ms',
+  challenger_value: 1500,
+  status: 'open',
+  challenger: { id: 99, first_name: 'Roster fixture', username: null },
+};
 const cpEvents = [];
+const ticketRequests = [];
 let origin = '';
 
 const json = (response, value, status = 200) => {
@@ -44,12 +57,13 @@ const bodyOf = async (request) => {
 
 const fakePlayable = (playableId) => `<!doctype html><html><body><canvas></canvas><script>
 const id=${JSON.stringify(playableId)};
-const send=(type)=>parent.postMessage({source:'playable',id,type},'*');
+const send=(type,extra={})=>parent.postMessage({source:'playable',id,type,...extra},'*');
 addEventListener('message',(event)=>{
   const data=event.data||{};
   if(data.target==='playable-swipe'&&data.type==='prepareInteractive')send('interactive_ready');
 });
 addEventListener('load',()=>send('static_ready'));
+window.triggerAcceptedAction=()=>send('manual_action',{actionType:'fixture.accepted',actionSeq:1,accepted:true,changedState:true});
 </script></body></html>`;
 
 const server = createServer(async (request, response) => {
@@ -81,11 +95,32 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/api/daily/sync') {
     return json(response, { code: 'daily_not_configured' }, 404);
   }
+  if (request.method === 'POST' && url.pathname === '/api/runs/start') {
+    const ticket = await bodyOf(request);
+    ticketRequests.push(ticket);
+    const now = Date.now();
+    return json(response, {
+      ticket_id: ticket.ticket_id,
+      run_id: ticket.run_id,
+      kind: ticket.kind,
+      expected_levels: ticket.kind === 'series' ? 5 : 1,
+      completed_levels: 0,
+      next_result_at: new Date(now - 1000).toISOString(),
+      expires_at: new Date(now + 60_000).toISOString(),
+      state: 'active',
+    });
+  }
+  if (request.method === 'GET' && url.pathname === `/api/challenges/${challengeId}`) {
+    return json(response, challenge);
+  }
+  if (request.method === 'POST' && url.pathname === `/api/challenges/${challengeId}/accept`) {
+    return json(response, challenge);
+  }
   if (url.pathname === '/versions.json') {
-    return json(response, Object.fromEntries(initialRoster.entries.map((entry) => [
+    return json(response, Object.fromEntries([...initialRoster.entries.map((entry) => [
       entry.playableId,
       { version: 'roster-browser', mountCost: 'light' },
-    ])));
+    ]), [challengePlayableId, { version: 'roster-browser', mountCost: 'light' }]]));
   }
   if (url.pathname === '/' || url.pathname === '/index.html') {
     response.setHeader('content-type', 'text/html; charset=utf-8');
@@ -191,7 +226,81 @@ try {
     'decision_id', 'feed_position', 'mapping_id', 'roster_activation_id',
   ]);
   assert.equal(nextV2.payload.mapping_id, nextRoster.entries[0].builtinMappingId);
-  console.log('feed roster browser: frozen session order, next-session activation and CP v2 verified');
+  await page.close();
+
+  // A challenge is a forced social slot, not part of the default roster. A
+  // roster which omits its mechanic must not invalidate the issued deep link.
+  const challengeContext = await browser.newContext({ viewport: { width: 390, height: 760 } });
+  const challengePage = await challengeContext.newPage();
+  await challengePage.addInitScript(({ data, snapshot, challengeStart }) => {
+    window.Telegram = { WebApp: {
+      initData: data,
+      initDataUnsafe: { user: { id: 42 }, start_param: challengeStart },
+      platform: 'web',
+      ready() {}, expand() {}, disableVerticalSwipes() {}, lockOrientation() {},
+      setHeaderColor() {}, setBackgroundColor() {}, onEvent() {},
+    } };
+    localStorage.setItem('swipe_feed_roster_next_session_v1', JSON.stringify(snapshot));
+  }, { data: initData, snapshot: initialRoster, challengeStart: challengeId });
+  const challengeEventOffset = cpEvents.length;
+  const challengeTicketOffset = ticketRequests.length;
+  await challengePage.goto(
+    `${origin}/?initData=${encodeURIComponent(initData)}&c=${challengeId}`,
+    { waitUntil: 'domcontentloaded' },
+  );
+  await challengePage.waitForSelector(
+    `.page--in-viewport iframe[title="${challengePlayableId}"]`,
+    { timeout: 5000 },
+  );
+  assert.equal(
+    await challengePage.locator('.page--in-viewport iframe').getAttribute('title'),
+    challengePlayableId,
+    'an available challenged mechanic omitted from roster remains the first forced slot',
+  );
+  await challengePage.locator('.challenge-ov__btn', { hasText: 'Принять' }).click();
+  await challengePage.waitForSelector('.challenge-ov', { state: 'detached' });
+  await challengePage.waitForTimeout(200);
+  assert.equal(
+    cpEvents.slice(challengeEventOffset).some((event) =>
+      event.event_name === 'builtin_feed_decision'
+      || event.event_name === 'builtin_feed_decision_v2'),
+    false,
+    'forced challenge must remain outside built-in roster attribution',
+  );
+
+  const challengeFrame = challengePage.frames()
+    .find((candidate) => candidate.url().includes(`${challengePlayableId}.html`));
+  assert.ok(challengeFrame, 'forced challenge mechanic mounted');
+  await challengePage.evaluate((playableId) => window.__feedHostGesture(playableId), challengePlayableId);
+  await challengeFrame.evaluate(() => window.triggerAcceptedAction());
+  let challengeTicket = ticketRequests.slice(challengeTicketOffset)
+    .find((ticket) => ticket.challenge_id === challengeId);
+  for (let retry = 0; retry < 40 && !challengeTicket; retry += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    challengeTicket = ticketRequests.slice(challengeTicketOffset)
+      .find((ticket) => ticket.challenge_id === challengeId);
+  }
+  assert.ok(challengeTicket, 'forced challenge action created its bound ticket');
+  assert.equal(challengeTicket.variant_id, challengeVariantId,
+    'forced challenge retains its immutable challenge variant');
+
+  await challengePage.locator('.game--show-close .game__close').click();
+  await challengePage.waitForFunction((playableId) =>
+    document.querySelector('.page--in-viewport iframe')?.getAttribute('title') === playableId,
+  initialRoster.entries[0].playableId, { timeout: 5000 });
+  let rosterV2 = cpEvents.slice(challengeEventOffset).find((event) =>
+    event.event_name === 'builtin_feed_decision_v2');
+  for (let retry = 0; retry < 80 && !rosterV2; retry += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    rosterV2 = cpEvents.slice(challengeEventOffset).find((event) =>
+      event.event_name === 'builtin_feed_decision_v2');
+  }
+  assert.ok(rosterV2, 'the first default roster unit after challenge emits CP v2');
+  assert.equal(rosterV2.payload.mapping_id, initialRoster.entries[0].builtinMappingId);
+  assert.equal(rosterV2.payload.roster_activation_id, initialRoster.activationId);
+  await challengeContext.close();
+
+  console.log('feed roster browser: next-session order, forced challenge isolation and CP v2 verified');
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
