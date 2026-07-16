@@ -7,6 +7,7 @@ import {
   mechanicMountCost,
   mechanicPrefetchBytes,
   mechanicAssetUrls,
+  mechanicIsAvailable,
   type Playable,
 } from './playables';
 // Series-reward gift icons (inlined into the single-file feed bundle). One is picked
@@ -109,6 +110,14 @@ import {
   catalogLabAuthorizationAvailable,
   catalogLabAuthUrl,
 } from './catalog-lab-navigation.mjs';
+import {
+  buildBuiltinFeedDecisionV2,
+  resolveFeedRosterSession,
+  stageFeedRosterForNextSession,
+  type FeedRosterResolutionV1,
+  type FeedRosterSessionEntryV1,
+  type FeedRosterSessionV1,
+} from './feed-roster.mjs';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
@@ -264,6 +273,10 @@ type ControlPlaneLevel = {
   occurredAt: string;
   emitted: boolean;
 };
+type BuiltinDecisionBinding = Pick<
+  BuiltinFeedBindingV1,
+  'mapping_id' | 'playable_id' | 'variant_id' | 'catalog_mechanic'
+>;
 type ControlPlaneExposure = {
   index: number;
   feedPosition: number;
@@ -272,7 +285,9 @@ type ControlPlaneExposure = {
   impressionId: string;
   decisionAt: string;
   revealedAt: string | null;
-  binding: BuiltinFeedBindingV1 | null;
+  binding: BuiltinDecisionBinding | null;
+  rosterEntry: FeedRosterSessionEntryV1 | null;
+  rosterActivationId: string | null;
   decisionEmitted: boolean;
   decisionEventId: string | null;
   impressionEmitted: boolean;
@@ -290,7 +305,7 @@ type ControlPlaneExposure = {
 type GeneratedAuthoritySource = {
   decisionId: string;
   decisionEventId: string;
-  binding: BuiltinFeedBindingV1;
+  binding: BuiltinDecisionBinding;
 };
 type ControlPlaneAttempt = {
   runId: string;
@@ -419,6 +434,8 @@ export class Feed {
   private feedEl: HTMLElement;
   private playables: Playable[];
   private N: number;
+  private feedRosterEntries: ReadonlyArray<FeedRosterSessionEntryV1 | null>;
+  private feedRosterActivationId: string | null;
 
   private pageH = 0;
   private pos = 0;                  // continuous ring position (settles to an integer)
@@ -729,11 +746,15 @@ export class Feed {
     playables: Playable[],
     challenge: ChallengeView | null = null,
     publicIsland: PublicIslandView | null = null,
+    rosterEntries: ReadonlyArray<FeedRosterSessionEntryV1 | null> = [],
+    rosterActivationId: string | null = null,
   ) {
     this.viewport = viewport;
     this.feedEl = feedEl;
     this.playables = playables;
     this.N = playables.length;
+    this.feedRosterEntries = rosterEntries;
+    this.feedRosterActivationId = rosterActivationId;
     this.activeChallenge = challenge;
     this.publicIsland = publicIsland;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
@@ -837,6 +858,10 @@ export class Feed {
     // created/refreshed the user row. This avoids a first-run FK race while
     // still flushing any events persisted by an earlier app launch.
     initControlPlane();
+    const rosterStage = await stageFeedRosterForNextSession(localStorage, session.feedRoster);
+    if (rosterStage.status === 'rejected') {
+      track('roster_snapshot_rejected', { reason: rosterStage.reason });
+    }
     this.applyBuiltinFeedBindings(session.builtin_feed_bindings);
     this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
     this.applyServerBalance(session.balance);
@@ -1161,10 +1186,17 @@ export class Feed {
       // A later fail-closed bootstrap must not leave a previously installed
       // mapping available for new tickets/decisions in this page.
       this.builtinFeedBindings.clear();
+      const stillDeferred: ControlPlaneExposure[] = [];
       for (const exposure of this.cpDeferredExposures) {
-        if (!exposure.decisionEmitted) exposure.binding = null;
+        if (!exposure.decisionEmitted && !exposure.rosterEntry) exposure.binding = null;
+        // Roster v2 carries its own exact mapping+activation identity and must
+        // not depend on the legacy by_playable_id projection being enabled.
+        if (exposure.rosterEntry) this.emitControlPlaneExposure(exposure);
+        if (this.controlPlaneExposureNeedsRetry(exposure)) stillDeferred.push(exposure);
       }
+      this.cpDeferredExposures = stillDeferred.slice(-64);
       this.failCatalogClaimsWithoutBinding(null);
+      for (const attempt of this.cpAttempts.values()) this.flushControlPlaneAttempt(attempt);
       return;
     }
 
@@ -1178,7 +1210,7 @@ export class Feed {
 
     const stillDeferred: ControlPlaneExposure[] = [];
     for (const exposure of this.cpDeferredExposures) {
-      const binding = next.get(exposure.playableId);
+      const binding = exposure.binding ?? next.get(exposure.playableId);
       if (!binding) {
         stillDeferred.push(exposure);
         continue;
@@ -1203,7 +1235,7 @@ export class Feed {
       if (!catalogPendingSlotShouldFallbackForBinding(
         slot.phase,
         true,
-        bindings?.has(slot.exposure.playableId) === true,
+        Boolean(slot.exposure.binding) || bindings?.has(slot.exposure.playableId) === true,
       )) continue;
       // The 65s bootstrap exists only while /session is unresolved. Once the
       // authoritative document says this playable is absent (or bindings are
@@ -1241,6 +1273,12 @@ export class Feed {
     return this.builtinFeedBindings.get(playableId)?.variant_id ?? variantIdForMechanic(playableId);
   }
 
+  private variantIdForIndex(i: number): string {
+    const playableId = this.playables[i]?.id ?? '';
+    return this.feedRosterEntries[i]?.variantId
+      ?? this.variantIdForPlayable(playableId);
+  }
+
   private effectivePlayableId(i: number): string | undefined {
     const slot = this.catalogSlotForIndex(i);
     return slot && slot.phase !== 'builtin_fallback' && slot.bundle
@@ -1254,7 +1292,7 @@ export class Feed {
       return slot.bundle.runtime.legacyVariantId;
     }
     const playableId = this.playables[i]?.id;
-    return playableId ? this.variantIdForPlayable(playableId) : null;
+    return playableId ? this.variantIdForIndex(i) : null;
   }
 
   private beginControlPlaneDecision(i: number, playableId: string): ControlPlaneExposure | null {
@@ -1274,6 +1312,13 @@ export class Feed {
     ) return this.cpPendingExposure;
     const now = performance.now();
     const dwell = new ActiveDwellAccumulator(now);
+    const rosterEntry = this.feedRosterEntries[i] ?? null;
+    const rosterBinding: BuiltinDecisionBinding | null = rosterEntry ? {
+      mapping_id: rosterEntry.builtinMappingId,
+      playable_id: rosterEntry.playableId,
+      variant_id: rosterEntry.variantId,
+      catalog_mechanic: rosterEntry.catalogMechanic,
+    } : null;
     const exposure: ControlPlaneExposure = {
       index: i,
       feedPosition: this.cpFeedPosition++,
@@ -1282,7 +1327,9 @@ export class Feed {
       impressionId: ticketUid(),
       decisionAt: new Date().toISOString(),
       revealedAt: null,
-      binding: this.builtinFeedBindings.get(playableId) ?? null,
+      binding: rosterBinding ?? this.builtinFeedBindings.get(playableId) ?? null,
+      rosterEntry,
+      rosterActivationId: rosterEntry ? this.feedRosterActivationId : null,
       decisionEmitted: false,
       decisionEventId: null,
       impressionEmitted: false,
@@ -1378,11 +1425,22 @@ export class Feed {
     }
     if (!exposure.binding) return;
     if (!exposure.decisionEmitted) {
-      const decisionEvent = queueControlPlaneEvent('builtin_feed_decision', {
-        decision_id: exposure.decisionId,
-        mapping_id: exposure.binding.mapping_id,
-        feed_position: exposure.feedPosition,
-      }, exposure.decisionAt);
+      const decisionEvent = exposure.rosterEntry && exposure.rosterActivationId
+        ? queueControlPlaneEvent(
+          'builtin_feed_decision_v2',
+          buildBuiltinFeedDecisionV2(
+            exposure.decisionId,
+            exposure.rosterEntry,
+            exposure.rosterActivationId,
+            exposure.feedPosition,
+          ),
+          exposure.decisionAt,
+        )
+        : queueControlPlaneEvent('builtin_feed_decision', {
+          decision_id: exposure.decisionId,
+          mapping_id: exposure.binding.mapping_id,
+          feed_position: exposure.feedPosition,
+        }, exposure.decisionAt);
       if (!decisionEvent) return;
       exposure.decisionEmitted = true;
       exposure.decisionEventId = decisionEvent;
@@ -2479,7 +2537,7 @@ export class Feed {
       mechanic_id: mechanicId,
       // A deep-linked challenge is bound to its creator's immutable variant.
       // A later reviewed built-in mapping must not relabel that challenge run.
-      variant_id: challengeVariant ?? exposureVariant ?? this.variantIdForPlayable(mechanicId),
+      variant_id: challengeVariant ?? exposureVariant ?? this.variantIdForIndex(i),
       kind,
       challenge_id: challengeId,
     };
@@ -2536,7 +2594,7 @@ export class Feed {
       // Ticket identity is frozen at attempt start. A slow /session may install
       // a reviewed binding while the run is already in flight; never mutate the
       // result's variant underneath that existing ticket.
-      variant_id: ticket?.variant_id ?? this.variantIdForPlayable(mechanicId),
+      variant_id: ticket?.variant_id ?? this.variantIdForIndex(i),
       run_id: runId,
       metric_key: 'time_ms',
       metric_value: solveMs,
@@ -8813,16 +8871,55 @@ export function createFeed(
   feedEl: HTMLElement,
   challenge: ChallengeView | null = null,
   publicIsland: PublicIslandView | null = null,
+  rosterSnapshot: FeedRosterSessionV1 | null = null,
 ) {
-  let order = PLAYABLES;
+  const resolution: FeedRosterResolutionV1 = resolveFeedRosterSession(
+    rosterSnapshot,
+    PLAYABLES,
+    mechanicIsAvailable,
+  );
+  for (const unavailable of resolution.unavailable) {
+    track('roster_entry_unavailable', {
+      roster_hash: resolution.rosterHash,
+      activation_id: resolution.activationId,
+      mapping_id: unavailable.builtinMappingId,
+      playable_id: unavailable.playableId,
+      reason: unavailable.reason,
+    });
+  }
+  if (resolution.source === 'fallback') {
+    track('roster_fallback', {
+      roster_hash: resolution.rosterHash,
+      activation_id: resolution.activationId,
+      available_count: resolution.availableCount,
+      required_minimum: 3,
+    });
+  }
+  let order = [...resolution.playables];
+  let rosterEntries = [...resolution.entries];
   let ch = challenge;
   // Arriving via a challenge deep-link: put the challenged mechanic first so the
   // recipient lands right on it (no runtime pager surgery). If it isn't in the
   // feed, ignore the challenge and boot normally.
   if (ch) {
-    const idx = PLAYABLES.findIndex((p) => p.id === ch!.mechanic_id);
-    if (idx > 0) order = [PLAYABLES[idx], ...PLAYABLES.slice(0, idx), ...PLAYABLES.slice(idx + 1)];
+    const idx = order.findIndex((p) => p.id === ch!.mechanic_id);
+    if (idx > 0) {
+      order = [order[idx], ...order.slice(0, idx), ...order.slice(idx + 1)];
+      rosterEntries = [
+        rosterEntries[idx],
+        ...rosterEntries.slice(0, idx),
+        ...rosterEntries.slice(idx + 1),
+      ];
+    }
     else if (idx < 0) ch = null;
   }
-  return new Feed(viewport, feedEl, order, ch, publicIsland);
+  return new Feed(
+    viewport,
+    feedEl,
+    order,
+    ch,
+    publicIsland,
+    rosterEntries,
+    resolution.source === 'roster' ? resolution.activationId : null,
+  );
 }

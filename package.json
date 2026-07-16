@@ -6,7 +6,7 @@
   "description": "Swipe platform (Telegram Mini App): vertical feed of playable mini-games with a social layer (stars, series, challenges) and generative UGC meta experiments. See README.md and ISLAND.md.",
   "scripts": {
     "dev": "vite",
-    "lint": "tsc --noEmit && npm run check:telegram-start-param && npm run check:catalog-lab-navigation && npm run check:rewards && npm run check:series && npm run check:dwell && npm run check:cp-outbox && npm run check:run-ticket-outbox && npm run check:result-receipts && npm run check:catalog-player-v2 && npm run check:catalog-feed-authority && npm run check:catalog-generated-preview && npm run check:catalog-authority-timing-browser && npm run check:catalog-feed-dogfood && npm run check:catalog-feed-dogfood-browser",
+    "lint": "tsc --noEmit && npm run check:telegram-start-param && npm run check:catalog-lab-navigation && npm run check:rewards && npm run check:series && npm run check:dwell && npm run check:cp-outbox && npm run check:run-ticket-outbox && npm run check:result-receipts && npm run check:catalog-player-v2 && npm run check:catalog-feed-authority && npm run check:catalog-generated-preview && npm run check:feed-roster && npm run check:feed-roster-browser && npm run check:catalog-authority-timing-browser && npm run check:catalog-feed-dogfood && npm run check:catalog-feed-dogfood-browser",
     "check:telegram-start-param": "node scripts/check-telegram-start-param.mjs",
     "check:catalog-lab-navigation": "node scripts/check-catalog-lab-navigation.mjs",
     "check:rewards": "node scripts/check-reward-vectors.mjs",
@@ -18,6 +18,8 @@
     "check:catalog-player-v2": "node scripts/check-catalog-player-v2.mjs",
     "check:catalog-feed-authority": "node scripts/check-catalog-feed-authority.mjs",
     "check:catalog-generated-preview": "node scripts/check-catalog-generated-preview.mjs",
+    "check:feed-roster": "node scripts/check-feed-roster.mjs",
+    "check:feed-roster-browser": "node scripts/check-feed-roster-browser.mjs",
     "check:catalog-authority-timing-browser": "node scripts/check-catalog-authority-timing-browser.mjs",
     "check:catalog-feed-dogfood": "node scripts/check-catalog-feed-dogfood-harness.mjs",
     "check:catalog-feed-dogfood-browser": "node scripts/check-catalog-feed-dogfood-browser.mjs",

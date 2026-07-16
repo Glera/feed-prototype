@@ -17,6 +17,7 @@ import type {
   CatalogFeedAuthorityRequestV1,
   CatalogFeedAuthorityResultV1,
 } from './catalog-feed-authority.mjs';
+import type { FeedRosterSessionV1 } from './feed-roster.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -235,6 +236,7 @@ export interface SessionResp {
   backend_version?: string;
   catalog_lab_authorization_available?: boolean;
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
+  feedRoster?: FeedRosterSessionV1;
 }
 
 export interface BuiltinFeedBindingV1 {

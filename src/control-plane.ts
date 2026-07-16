@@ -19,6 +19,10 @@ export interface BuiltinFeedDecisionPayload {
   feed_position: number;
 }
 
+export interface BuiltinFeedDecisionPayloadV2 extends BuiltinFeedDecisionPayload {
+  roster_activation_id: Uuid;
+}
+
 export interface ClientFeedDecisionPayload {
   decision_id: Uuid;
   slot_type: string;
@@ -94,6 +98,7 @@ export interface MoreLikeThisPayload {
 export interface ControlPlanePayloadMap {
   client_feed_decision: ClientFeedDecisionPayload;
   builtin_feed_decision: BuiltinFeedDecisionPayload;
+  builtin_feed_decision_v2: BuiltinFeedDecisionPayloadV2;
   unit_impression: UnitImpressionPayload;
   level_impression: LevelImpressionPayload;
   catalog_level_impression: CatalogLevelImpressionPayload;

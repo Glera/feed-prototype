@@ -46,6 +46,11 @@ function manifestEntry(id: string): MechanicManifestEntry | null {
   if (!raw) return null;
   return typeof raw === 'string' ? { version: raw } : raw;
 }
+
+/** True only when this exact deployment manifest can mount the playable. */
+export function mechanicIsAvailable(id: string): boolean {
+  return manifestEntry(id) !== null;
+}
 function mechanicVersion(id: string): string {
   return manifestEntry(id)?.version || BUILD_TAG;   // shared HTML → shared cache-bust hash
 }

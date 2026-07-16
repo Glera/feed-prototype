@@ -1,10 +1,11 @@
 import './styles.css';
 import { createFeed } from './feed';
 import { setMechanicVersions } from './playables';
-import { initTelegram, getStartParam, islandOwnerFromParam, isChallengeParam } from './telegram';
+import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
+import { loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
@@ -41,7 +42,13 @@ async function boot(): Promise<void> {
   if (ownerId != null) {
     try { publicIsland = await apiPublicIsland(ownerId); } catch { /* unavailable/private → normal feed */ }
   }
-  createFeed(viewport, feedEl, challenge, publicIsland);
+  // Read exactly once. /session may stage a newer activation later, but a live
+  // ring is immutable under the user's finger; that activation starts on the
+  // next page/session load.
+  const rosterSnapshot = getInitData()
+    ? await loadVerifiedFeedRosterSessionSnapshot(localStorage)
+    : null;
+  createFeed(viewport, feedEl, challenge, publicIsland, rosterSnapshot);
 }
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
