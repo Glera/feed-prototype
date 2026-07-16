@@ -137,7 +137,27 @@ configured-impression CP conflict или terminal result conflict немедле
 impression остаётся paused/non-interactive: это закрывает гонку двух вкладок,
 которые обе могли увидеть `replayed=false` до первого allocation commit.
 
-Smoke с настоящими backend и content-addressed runtime запускается отдельно:
+Durable fixture-аудит exact трёхуровневого content
+`2c0efd621a0acddeadc395b1f285bc9242043481a60264b001b70faf10601ccc`
+запускается отдельно:
+
+```bash
+npm run check:catalog-three-level-audit
+```
+
+Он собирает content-addressed receipt по production-сборке клиента: exact
+`series.manifest.v2 → run.ticket.v3 → ticket-level-spec-bundle.v2 →
+catalog_level_impression_v2 → catalog.result.v2`, включая один и тот же
+`skinHash + skinContractDigest` до configured-impression и exact ticket-bound
+digest вместе с `applied_skin_hash` на result-v2 (его wire-схема намеренно не
+дублирует contract digest), ordinal 1→3, три различных
+level `run_id` и ровно один root-run chest. Отдельными browser-сценариями проверяются zero-progress reload,
+результат до задержанного CP ACK и cross-origin spoof. Receipt намеренно имеет
+`productionBackend:false` и никогда не разрешает rollout: fixture не заменяет
+настоящий backend/runtime.
+
+Полный аудит с настоящими backend и content-addressed runtime запускается
+отдельно:
 
 ```bash
 VITE_API_BASE=https://backend.example \
@@ -149,10 +169,21 @@ npm run serve:catalog-feed-real-e2e
 InitData читается только процессом локального E2E-сервера и инжектируется в
 отдаваемую браузеру страницу — в bundle, URL и stdout секрет не записывается.
 Harness не подменяет и не проксирует API/runtime: он требует от backend абсолютный
-HTTPS locator вида `runtime-releases/<playable>/<artifact-digest>/…`, требует
-fresh opaque canary invitation (normal authority в этом гейте запрещён),
-проверяет canary allocation и deterministic zero-progress ticket и ставит
-`PASS` только после specialized impression от сконфигурированного runtime.
+HTTPS locator вида `runtime-releases/<playable>/<artifact-digest>/…`, fresh
+opaque canary invitation (normal authority в этом гейте запрещён), exact content
+hash, canary allocation и deterministic ticket. `PASS` появляется только после
+трёх projected specialized impressions, accepted result receipt для ordinal
+1→3, одного accepted chest receipt и видимых chest+reward. В stdout печатается
+ограниченный `catalog.three-level-production-operator-observation.v1` без
+initData и без полного browser snapshot. Локальный audit-server выдаёт странице
+одноразовый nonce, повторно проверяет exact content/skin/runtime closure и
+канонически хэширует evidence. Это **не server-authoritative rollout receipt**:
+`eligibleForLevelSeriesRollout:false` остаётся жёстким до отдельного backend
+evidence-контура. `p95Ms` считается ровно по трём дельтам
+`projected configured-impression ACK → accepted ordinal result`, а не по общим
+HTTP latency. По умолчанию
+оператору даётся 180 секунд; `CATALOG_REAL_E2E_TIMEOUT_MS` можно менять только в
+fail-closed диапазоне 5–180 секунд.
 
 Деплой — из `playables/`: `bash scripts/deploy-swipe.sh [<id>…|--all]` —
 пересобирает ленту со свежим стампом (виден в левом нижнем углу бара),

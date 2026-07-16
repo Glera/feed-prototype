@@ -3,6 +3,12 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
+  EXACT_THREE_LEVEL_SKIN_HASH,
+  EXACT_THREE_LEVEL_SPEC_HASHES,
+} from '../src/catalog-three-level-production-fixture.mjs';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const child = spawn(process.execPath, ['scripts/serve-catalog-feed-dogfood-harness.mjs'], {
   cwd: root,
@@ -178,7 +184,9 @@ try {
   });
   assert.equal(catalogStart.status, 200);
   const catalogTicket = await catalogStart.json();
-  assert.equal(catalogTicket.schema, 'run.ticket.v2');
+  assert.equal(catalogTicket.schema, 'run.ticket.v3');
+  assert.equal(catalogTicket.skin_hash, EXACT_THREE_LEVEL_SKIN_HASH);
+  assert.equal(catalogTicket.skin_contract_digest, EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST);
   assert.equal(catalogTicket.ticket_id, '10000000-0000-4000-8000-000000000004');
   assert.equal(catalogTicket.run_id, 'catalog-canary:10000000-0000-4000-8000-000000000004');
   assert.equal(catalogTicket.decision_id, '10000000-0000-4000-8000-000000000005');
@@ -274,8 +282,16 @@ try {
     },
     body: JSON.stringify({ events: [{
       event_id: '30000000-0000-4000-8000-000000000001',
-      event_name: 'catalog_level_impression',
-      payload: { ticket_id: '10000000-0000-4000-8000-000000000004', ordinal: 1 },
+      event_name: 'catalog_level_impression_v2',
+      payload: {
+        ticket_id: '10000000-0000-4000-8000-000000000004',
+        ordinal: 1,
+        level_spec_hash: EXACT_THREE_LEVEL_SPEC_HASHES[0],
+        applied_spec_hash: EXACT_THREE_LEVEL_SPEC_HASHES[0],
+        skin_hash: EXACT_THREE_LEVEL_SKIN_HASH,
+        applied_skin_hash: EXACT_THREE_LEVEL_SKIN_HASH,
+        skin_contract_digest: EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
+      },
     }] }),
   });
   for (let attempt = 1; attempt <= 2; attempt += 1) {

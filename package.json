@@ -23,6 +23,7 @@
     "check:catalog-authority-timing-browser": "node scripts/check-catalog-authority-timing-browser.mjs",
     "check:catalog-feed-dogfood": "node scripts/check-catalog-feed-dogfood-harness.mjs",
     "check:catalog-feed-dogfood-browser": "node scripts/check-catalog-feed-dogfood-browser.mjs",
+    "check:catalog-three-level-audit": "node scripts/check-catalog-feed-dogfood-browser.mjs",
     "check:catalog-lab-entry-browser": "node scripts/check-catalog-lab-entry-browser.mjs",
     "serve:catalog-player-v2-browser": "node scripts/serve-catalog-player-v2-browser-harness.mjs",
     "serve:catalog-feed-dogfood": "node scripts/serve-catalog-feed-dogfood-harness.mjs",

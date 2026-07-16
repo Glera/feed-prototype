@@ -5,20 +5,31 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  EXACT_THREE_LEVEL_CONTENT_HASH,
+  EXACT_THREE_LEVEL_PRODUCTION_FIXTURE,
+  EXACT_THREE_LEVEL_RUNTIME_ARTIFACT_DIGEST,
+  EXACT_THREE_LEVEL_RUNTIME_CONTRACT_DIGEST,
+  EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
+  EXACT_THREE_LEVEL_SKIN_HASH,
+  EXACT_THREE_LEVEL_SPEC_HASHES,
+} from '../src/catalog-three-level-production-fixture.mjs';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const contractDigest = 'c'.repeat(64);
-const artifactHex = 'd'.repeat(64);
-const artifactDigest = `sha256:${artifactHex}`;
+const exactThreeLevelContentHash = EXACT_THREE_LEVEL_CONTENT_HASH;
+const contractDigest = EXACT_THREE_LEVEL_RUNTIME_CONTRACT_DIGEST;
+const artifactDigest = EXACT_THREE_LEVEL_RUNTIME_ARTIFACT_DIGEST;
+const artifactHex = artifactDigest.replace(/^sha256:/, '');
 const previewJpeg = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABAf/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPxB//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPxB//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxB//9k=', 'base64');
 const previewDigest = `sha256:${createHash('sha256').update(previewJpeg).digest('hex')}`;
-const configuredLevelCount = Number(process.env.CATALOG_DOGFOOD_LEVEL_COUNT ?? '2');
+const configuredLevelCount = Number(process.env.CATALOG_DOGFOOD_LEVEL_COUNT ?? '3');
 if (!Number.isInteger(configuredLevelCount) || configuredLevelCount < 1 || configuredLevelCount > 6) {
   throw new Error('CATALOG_DOGFOOD_LEVEL_COUNT must be an integer from 1 to 6');
 }
-const specHashes = Array.from(
-  { length: configuredLevelCount },
-  (_, index) => String(index + 1).repeat(64),
-);
+if (configuredLevelCount !== EXACT_THREE_LEVEL_SPEC_HASHES.length) {
+  throw new Error('the exact production audit fixture requires CATALOG_DOGFOOD_LEVEL_COUNT=3');
+}
+const specHashes = EXACT_THREE_LEVEL_SPEC_HASHES;
 const harnessTimeoutMs = Number(process.env.CATALOG_DOGFOOD_TIMEOUT_MS ?? '45000');
 if (!Number.isInteger(harnessTimeoutMs) || harnessTimeoutMs < 5_000 || harnessTimeoutMs > 60_000) {
   throw new Error('CATALOG_DOGFOOD_TIMEOUT_MS must be an integer from 5000 to 60000');
@@ -41,13 +52,16 @@ let canaryDisabledBuildHtml = '';
 
 const scenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
-  'level-retry', 'no-invite', 'replayed-canary', 'wrong-account', 'disabled',
+  'level-retry', 'reload-zero-progress', 'event-order', 'cross-origin-spoof',
+  'no-invite', 'replayed-canary', 'wrong-account', 'disabled',
 ]);
 const canaryScenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict', 'level-retry',
+  'reload-zero-progress', 'event-order', 'cross-origin-spoof',
 ]);
 const successfulCatalogScenarios = new Set([
-  'success', 'result-transient', 'result-timeout', 'level-retry', 'replayed-canary', 'disabled',
+  'success', 'result-transient', 'result-timeout', 'level-retry', 'reload-zero-progress',
+  'event-order', 'cross-origin-spoof', 'replayed-canary', 'disabled',
 ]);
 const normalizedScenario = (scenario) => scenarios.has(scenario) ? scenario : 'success';
 const dogfoodUserId = 424242;
@@ -75,7 +89,9 @@ const freshState = (scenario, instanceToken) => ({
   allocationRequests: [],
   allocationResponses: [],
   ticketRequests: [],
+  ticketResponses: [],
   specRequests: 0,
+  specResponses: [],
   results: [],
   resultAttempts: [],
   resultTransientInjected: false,
@@ -84,6 +100,8 @@ const freshState = (scenario, instanceToken) => ({
   runtimeEvents: [],
   runtimeDocumentRequests: 0,
   replayConflictTransportAttempts: 0,
+  eventOrderAckPending: false,
+  eventOrderResultBeforeAck: false,
   authorityPending: false,
   pendingSamples: 0,
   pendingViolation: false,
@@ -155,22 +173,6 @@ const ignoreStaleInstance = (response) => json(response, {
   ignored: 'stale_harness_instance',
 }, 202);
 
-const spec = (specHash, seed) => ({
-  schema: 'sort.level-spec.v1',
-  specHash,
-  runtimeContractDigest: contractDigest,
-  seed,
-  params: {
-    gridCols: 6,
-    gridRows: 5,
-    colorsUsed: 3,
-    cellColorMap: Array.from({ length: 30 }, (_, index) => index % 3),
-    targetStacks: [[0], [1], [2], [0]],
-    convSpeedMul: 1,
-    modifiers: [],
-  },
-});
-
 const runtime = {
   releaseId: ids.release,
   playableId: 'marble-sort-swipe',
@@ -179,19 +181,27 @@ const runtime = {
   runtimeArtifactDigest: artifactDigest,
   indexLocator: `runtime-releases/marble-sort-swipe/${artifactHex}/index.html`,
   sidecarLocator: `runtime-releases/marble-sort-swipe/${artifactHex}/runtime-artifact.json`,
-  capabilities: { catalogRequiredHandshake: true, sortLevelSpecV1: true },
+  capabilities: {
+    catalogRequiredHandshake: true,
+    sortLevelSpecV1: true,
+    sortSkinSpecV1: true,
+  },
 };
 
 const manifest = {
-  schema: 'series.manifest.v1',
-  contentHash: 'e'.repeat(64),
-  seriesFingerprint: 'f'.repeat(64),
-  fingerprintVersion: 'fixture.v1',
+  schema: 'series.manifest.v2',
+  contentHash: exactThreeLevelContentHash,
+  seriesFingerprint: EXACT_THREE_LEVEL_PRODUCTION_FIXTURE.seriesFingerprint,
+  fingerprintVersion: EXACT_THREE_LEVEL_PRODUCTION_FIXTURE.fingerprintVersion,
   levels: specHashes.map((specHash, index) => ({ ordinal: index + 1, specHash })),
+  skinHash: EXACT_THREE_LEVEL_SKIN_HASH,
+  skinContractDigest: EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
+  gameplayFingerprint: EXACT_THREE_LEVEL_PRODUCTION_FIXTURE.manifest.gameplayFingerprint,
+  presentationFingerprint: EXACT_THREE_LEVEL_PRODUCTION_FIXTURE.manifest.presentationFingerprint,
 };
 
 const allocation = {
-  schema: 'catalog.allocate-decision-result.v1',
+  schema: 'catalog.allocate-decision-result.v2',
   decisionId: ids.allocationDecision,
   allocationId: ids.authorization,
   requestHash: 'a'.repeat(64),
@@ -226,7 +236,7 @@ const allocationForScenario = (scenario) => {
 };
 
 const bundle = (ticketId) => ({
-  schema: 'catalog.ticket-level-spec-bundle.v1',
+  schema: 'catalog.ticket-level-spec-bundle.v2',
   ticketId,
   ticketState: 'active',
   decisionId: ids.allocationDecision,
@@ -234,10 +244,13 @@ const bundle = (ticketId) => ({
   seriesId: ids.series,
   manifestContentHash: manifest.contentHash,
   runtime,
+  skinHash: EXACT_THREE_LEVEL_SKIN_HASH,
+  skinContractDigest: EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
+  skin: EXACT_THREE_LEVEL_PRODUCTION_FIXTURE.skin,
   levels: specHashes.map((specHash, index) => ({
     ordinal: index + 1,
     specHash,
-    spec: spec(specHash, 137 + index),
+    spec: EXACT_THREE_LEVEL_PRODUCTION_FIXTURE.specs[index],
   })),
 });
 
@@ -254,7 +267,7 @@ const ticketView = (request) => {
   };
   if (request.schema !== 'run.start.v2') return common;
   return {
-    schema: 'run.ticket.v2',
+    schema: 'run.ticket.v3',
     ...common,
     kind: 'series',
     mechanic_id: runtime.playableId,
@@ -266,6 +279,8 @@ const ticketView = (request) => {
     runtime_contract_digest: contractDigest,
     runtime_artifact_digest: artifactDigest,
     manifest_content_hash: manifest.contentHash,
+    skin_hash: EXACT_THREE_LEVEL_SKIN_HASH,
+    skin_contract_digest: EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
     levels: specHashes.map((specHash, index) => ({ ordinal: index + 1, spec_hash: specHash })),
     expected_levels: specHashes.length,
     completed_levels: state?.results.filter((item) => item.kind === 'level'
@@ -284,7 +299,8 @@ const uniqueEvents = (name) => {
 const evaluate = () => {
   if (!state || state.status !== 'running') return;
   const source = uniqueEvents('builtin_feed_decision');
-  const catalogImpressions = uniqueEvents('catalog_level_impression');
+  const catalogImpressions = uniqueEvents('catalog_level_impression_v2');
+  const legacyCatalogImpressions = uniqueEvents('catalog_level_impression');
   const builtinImpressions = uniqueEvents('unit_impression');
   const levelResults = state.results.filter((item) => item.kind === 'level');
   const chestResults = state.results.filter((item) => item.kind === 'chest');
@@ -305,8 +321,9 @@ const evaluate = () => {
   const exactCanaryGet = state.canaryRequests.every((item) => item.method === 'GET'
     && item.path === '/api/catalog/canary-authority'
     && item.query === '' && item.contentLength === null);
+  const expectedCanaryRequests = state.scenario === 'reload-zero-progress' ? 2 : 1;
   const canaryPath = exactCanaryGet
-    && state.canaryRequests.length === 1
+    && state.canaryRequests.length === expectedCanaryRequests
     && state.authorityRequests.length === 0;
   const catalogAuthorityPath = canaryScenarios.has(state.scenario)
     ? canaryPath
@@ -327,19 +344,44 @@ const evaluate = () => {
     && exactAllocationClass
     && state.allocationRequests[0]?.authorizationId === ids.authorization
     && v2Ticket?.decision_id === ids.allocationDecision
+    && legacyCatalogImpressions.length === 0
     && catalogImpressions.every((event) => event.payload.ticket_id === v2Ticket?.ticket_id
       && event.payload.decision_id === ids.allocationDecision
-      && event.payload.series_id === ids.series);
+      && event.payload.series_id === ids.series
+      && event.payload.skin_hash === EXACT_THREE_LEVEL_SKIN_HASH
+      && event.payload.applied_skin_hash === EXACT_THREE_LEVEL_SKIN_HASH
+      && event.payload.skin_contract_digest === EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST);
   const exactCanaryTicketIdentity = !canaryScenarios.has(state.scenario)
     || (v2Ticket?.ticket_id === ids.authorization
       && v2Ticket?.run_id === `catalog-canary:${ids.authorization}`);
-  const expectedAllocationCount = state.scenario === 'replayed-canary' ? 2 : 1;
+  const expectedAllocationCount = ['replayed-canary', 'reload-zero-progress'].includes(state.scenario) ? 2 : 1;
+  const exactResponses = state.ticketResponses.length === state.ticketRequests.length
+    && state.ticketResponses.every((ticket) => ticket.schema === 'run.ticket.v3'
+      && ticket.catalog_entry_id === ids.entry
+      && ticket.series_id === ids.series
+      && ticket.manifest_content_hash === exactThreeLevelContentHash
+      && ticket.skin_hash === EXACT_THREE_LEVEL_SKIN_HASH
+      && ticket.skin_contract_digest === EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST
+      && ticket.expected_levels === specHashes.length
+      && ticket.levels.every((level, index) => level.ordinal === index + 1
+        && level.spec_hash === specHashes[index]))
+    && state.specResponses.length >= 1
+    && state.specResponses.every((specBundle) => specBundle.schema === 'catalog.ticket-level-spec-bundle.v2'
+      && specBundle.catalogEntryId === ids.entry
+      && specBundle.seriesId === ids.series
+      && specBundle.manifestContentHash === exactThreeLevelContentHash
+      && specBundle.skinHash === EXACT_THREE_LEVEL_SKIN_HASH
+      && specBundle.skinContractDigest === EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST
+      && specBundle.levels.every((level, index) => level.ordinal === index + 1
+        && level.specHash === specHashes[index]));
   const common = exactTransport
     && exactCanaryTicketIdentity
     && state.allocationRequests.length === expectedAllocationCount
     && state.allocationResponses.length === expectedAllocationCount
+    && state.allocationResponses.every((candidate) => candidate.manifest.contentHash === exactThreeLevelContentHash)
     && Boolean(v2Ticket)
     && state.specRequests >= 1
+    && exactResponses
     && state.pendingSamples > 0
     && state.checkpoints.pendingSurface?.pass === true
     && state.client.catalogSeen;
@@ -349,13 +391,30 @@ const evaluate = () => {
       && new Set(catalogImpressions.map((event) => event.payload.level_impression_id)).size === specHashes.length
       && catalogImpressions.every((event, index) => event.payload.ordinal === index + 1);
     const exactLevels = levelResults.length === specHashes.length
+      && new Set(levelResults.map((item) => item.body.run_id)).size === specHashes.length
+      && levelResults.every((item) => item.body.run_id !== v2Ticket?.run_id)
       && levelResults.every((item, index) => item.outcome === 'confirmed'
+        && item.body.schema === 'catalog.result.v2'
         && item.body.ordinal === index + 1
         && item.body.applied_spec_hash === specHashes[index]
+        && item.body.applied_skin_hash === EXACT_THREE_LEVEL_SKIN_HASH
         && item.body.series_id === ids.series);
     const exactChest = chestResults.length === 1
       && chestResults[0].outcome === 'confirmed'
+      && chestResults[0].body.schema === 'catalog.result.v2'
+      && chestResults[0].body.run_id === v2Ticket?.run_id
       && chestResults[0].body.series_id === ids.series;
+    const reloadEvidence = state.scenario !== 'reload-zero-progress'
+      || (state.runtimeDocumentRequests >= specHashes.length + 1
+        && state.canaryRequests.length === 2
+        && state.allocationRequests.length === 2
+        && state.ticketResponses.length >= 2
+        && state.ticketResponses[0]?.completed_levels === 0
+        && state.ticketResponses[1]?.completed_levels === 0);
+    const eventOrderEvidence = state.scenario !== 'event-order'
+      || (state.eventOrderResultBeforeAck === true && state.eventOrderAckPending === false);
+    const crossOriginEvidence = state.scenario !== 'cross-origin-spoof'
+      || state.runtimeEvents.some((item) => item.stage === 'cross_origin_spoof_sent');
     if (common && impressionIdentity && exactLevels && exactChest
       && state.checkpoints.configuredImpressions.length === specHashes.length
       && state.checkpoints.configuredImpressions.every((checkpoint) => checkpoint.pass)
@@ -365,6 +424,7 @@ const evaluate = () => {
       && state.checkpoints.rewardAfterChestReceipt?.pass === true
       && builtinImpressions.length >= 1 && state.client.builtinSeen
       && state.client.generatedBadgeVisible
+      && reloadEvidence && eventOrderEvidence && crossOriginEvidence
       && state.client.chestSeen && state.client.rewardSeen) {
       state.status = 'pass';
       state.message = state.scenario === 'disabled'
@@ -439,7 +499,7 @@ const evaluate = () => {
   }
   if (Date.now() - state.startedAt > harnessTimeoutMs) {
     state.status = 'fail';
-    state.message = `timeout: source=${source.length}, catalogImpressions=${catalogImpressions.length}, levels=${levelResults.length}, chest=${chestResults.length}`;
+    state.message = `timeout: source=${source.length}, catalogImpressions=${catalogImpressions.length}, levels=${levelResults.length}, chest=${chestResults.length}, canary=${state.canaryRequests.length}/${expectedCanaryRequests}, allocations=${state.allocationRequests.length}/${expectedAllocationCount}, tickets=${state.ticketRequests.length}/${state.ticketResponses.length}, specs=${state.specRequests}/${state.specResponses.length}, common=${common}`;
   }
 };
 
@@ -461,6 +521,7 @@ window.Telegram={WebApp:{
 addEventListener('DOMContentLoaded',()=>{
   let chestHandled=false;
   let advancing=false;
+  let spoofStarted=false;
   let catalogSeen=false,builtinSeen=false,chestSeen=false,rewardSeen=false,recoverySeen=false;
   const tick=()=>{
     const current=document.querySelector('.page--in-viewport .game')||document.querySelectorAll('.game')[0];
@@ -477,6 +538,13 @@ addEventListener('DOMContentLoaded',()=>{
     rewardSeen ||= Boolean(document.querySelector('.game__state--earned .reward'));
     recoverySeen ||= (document.body.textContent||'').includes('Серия обновилась');
     const generatedBadgeVisible=Boolean(current?.classList.contains('game--generated')&&current?.querySelector('.game__generated-badge'));
+    if(harnessScenario==='cross-origin-spoof'&&currentFrame==='catalog'&&!spoofStarted){
+      spoofStarted=true;
+      const attacker=document.createElement('iframe');
+      attacker.hidden=true;
+      attacker.src=${JSON.stringify(`${origin.replace('127.0.0.1', 'localhost')}/__harness/spoof?instance=${encodeURIComponent(instanceToken)}&scenario=${encodeURIComponent(scenario)}`)};
+      document.body.appendChild(attacker);
+    }
     const preparedGenerated=document.querySelector('.game--generated');
     if(preparedGenerated&&!generatedBadgeVisible&&!advancing){
       // The production contract reserves a future page. Move through the same
@@ -511,7 +579,7 @@ output{display:block;padding:6px;border-radius:6px;background:#26313f;font-weigh
 pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0 0}a{color:#8ecbff}
 </style></head><body>
 <div data-testid="feed-root" data-harness-instance="${instanceToken}"></div>
-<aside class="panel"><div><a href="/harness.html?scenario=success">canary success</a> · <a href="/harness.html?scenario=result-transient">transient result recovery</a> · <a href="/harness.html?scenario=result-timeout">hung result recovery</a> · <a href="/harness.html?scenario=recall">hard recall</a> · <a href="/harness.html?scenario=replay-conflict">replay conflict</a> · <a href="/harness.html?scenario=no-invite">no invite</a> · <a href="/harness.html?scenario=replayed-canary">replayed canary</a> · <a href="/harness.html?scenario=wrong-account">wrong account</a> · <a href="/harness.html?scenario=disabled">canary disabled</a></div>
+<aside class="panel"><div><a href="/harness.html?scenario=success">canary success</a> · <a href="/harness.html?scenario=reload-zero-progress">zero-progress reload</a> · <a href="/harness.html?scenario=event-order">event order</a> · <a href="/harness.html?scenario=cross-origin-spoof">cross-origin spoof</a> · <a href="/harness.html?scenario=result-transient">transient result recovery</a> · <a href="/harness.html?scenario=result-timeout">hung result recovery</a> · <a href="/harness.html?scenario=recall">hard recall</a> · <a href="/harness.html?scenario=replay-conflict">replay conflict</a> · <a href="/harness.html?scenario=no-invite">no invite</a> · <a href="/harness.html?scenario=replayed-canary">replayed canary</a> · <a href="/harness.html?scenario=wrong-account">wrong account</a> · <a href="/harness.html?scenario=disabled">canary disabled</a></div>
 <output data-testid="status" data-state="running">RUNNING</output><pre data-testid="trace">[]</pre></aside>
 <script>
 const status=document.querySelector('[data-testid=status]');const trace=document.querySelector('[data-testid=trace]');
@@ -535,7 +603,14 @@ clearOriginState().then(()=>{
 }).catch(error=>{status.dataset.state='fail';status.textContent='FAIL: origin reset: '+error});
 </script></body></html>`;
 
-const catalogRuntimeHtml = (instanceToken, scenario, documentRequest) => `<!doctype html><html><body><p>Catalog Sort fixture</p><script>
+const catalogRuntimeHtml = (instanceToken, scenario, documentRequest) => scenario === 'reload-zero-progress'
+  && documentRequest === 1
+  ? `<!doctype html><html><body><p>Catalog reload fence fixture</p><script>
+const report=(stage,detail={})=>fetch('/__harness/runtime',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({harnessInstance:${JSON.stringify(instanceToken)},harnessScenario:${JSON.stringify(scenario)},stage,detail})}).catch(()=>{});
+report('zero_progress_reload_requested',{documentRequest:1});
+setTimeout(()=>parent.location.reload(),80);
+</script></body></html>`
+  : `<!doctype html><html><body><p>Catalog Sort fixture</p><script>
 const send=(value)=>parent.postMessage(value,location.origin);
 const report=(stage,detail={})=>fetch('/__harness/runtime',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({harnessInstance:${JSON.stringify(instanceToken)},harnessScenario:${JSON.stringify(scenario)},stage,detail})}).catch(()=>{});
 report('script_evaluated',{visibility:document.visibilityState});
@@ -543,15 +618,18 @@ addEventListener('message',(event)=>{
   if(event.origin!==location.origin||event.source!==parent)return;
   const data=event.data||{};
   if(data.type!=='configure_level')return;
-  report('configure_level_received',{visibility:document.visibilityState,specHash:data.spec?.specHash||null});
-  send({type:'configured',appliedSpecHash:data.spec.specHash,runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}});
+  const exactSkin=data.skin?.skinHash===${JSON.stringify(EXACT_THREE_LEVEL_SKIN_HASH)}
+    &&data.skin?.skinContractDigest===${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)};
+  report('configure_level_received',{visibility:document.visibilityState,specHash:data.spec?.specHash||null,skinHash:data.skin?.skinHash||null,exactSkin});
+  if(!exactSkin)return;
+  send({type:'configured',appliedSpecHash:data.spec.specHash,appliedSkinHash:data.skin.skinHash,skinContractDigest:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)},runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}});
   report('configured_sent',{visibility:document.visibilityState});
   setTimeout(()=>{report('host_gesture_sent',{visibility:document.visibilityState});send({source:'playable',type:'host_gesture'})},900);
   setTimeout(()=>{report('manual_action_sent',{visibility:document.visibilityState});send({source:'playable',type:'manual_action',actionType:'fixture.sort',actionSeq:1,accepted:true,changedState:true})},1050);
   const outcome=${JSON.stringify(scenario === 'level-retry' && documentRequest === 2 ? 'lost' : 'won')};
   setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState,outcome,documentRequest:${documentRequest}});send({source:'playable',type:'completed',success:outcome==='won',outcome})},1350);
 });
-addEventListener('load',()=>{report('load',{visibility:document.visibilityState});send({type:'configure_ready',nonce:'a'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}})});
+addEventListener('load',()=>{report('load',{visibility:document.visibilityState});send({type:'configure_ready',nonce:'a'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},skinContractDigest:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}})});
 </script></body></html>`;
 
 const builtinRuntimeHtml = (playableId) => `<!doctype html><html><body><p>Reviewed builtin ${playableId}</p><script>
@@ -562,6 +640,20 @@ addEventListener('load',()=>send('static_ready'));
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
+  if (request.method === 'GET' && url.pathname === '/__harness/spoof') {
+    const instanceToken = url.searchParams.get('instance') ?? '';
+    const scenario = url.searchParams.get('scenario') ?? '';
+    response.setHeader('content-type', 'text/html; charset=utf-8');
+    response.setHeader('cache-control', 'no-store');
+    response.end(`<!doctype html><script>
+const report=()=>fetch('/__harness/runtime',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({harnessInstance:${JSON.stringify(instanceToken)},harnessScenario:${JSON.stringify(scenario)},stage:'cross_origin_spoof_sent',detail:{origin:location.origin}})}).catch(()=>{});
+report();
+parent.postMessage({type:'configure_ready',nonce:'b'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},skinContractDigest:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}},'*');
+parent.postMessage({type:'configured',appliedSpecHash:${JSON.stringify(specHashes[0])},appliedSkinHash:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_HASH)},skinContractDigest:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)},runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}},'*');
+parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won'},'*');
+</script>`);
+    return;
+  }
   if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/harness.html')) {
     const scenario = normalizedScenario(url.searchParams.get('scenario'));
     const instanceToken = randomUUID();
@@ -735,7 +827,7 @@ const server = createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/api/cp/events') {
     const body = await bodyOf(request);
     const replayConflictBatch = state?.scenario === 'replay-conflict'
-      && body.events.some((event) => event.event_name === 'catalog_level_impression');
+      && body.events.some((event) => event.event_name === 'catalog_level_impression_v2');
     if (replayConflictBatch && state.replayConflictTransportAttempts < 2) {
       state.replayConflictTransportAttempts += 1;
       record('replay_conflict_cp_transport_failure', {
@@ -753,17 +845,24 @@ const server = createServer(async (request, response) => {
     state?.cpEvents.push(...body.events);
     for (const event of body.events) {
       record('cp', { name: event.event_name, eventId: event.event_id });
-      if (state && event.event_name === 'catalog_level_impression' && !previousIds.has(event.event_id)) {
+      if (state && event.event_name === 'catalog_level_impression_v2' && !previousIds.has(event.event_id)) {
         const ordinal = event.payload?.ordinal;
-        const ordinalCount = uniqueEvents('catalog_level_impression')
+        const ordinalCount = uniqueEvents('catalog_level_impression_v2')
           .filter((candidate) => candidate.payload?.ordinal === ordinal).length;
         const checkpoint = {
           ordinal,
           impressionId: event.payload?.impression_id ?? null,
           levelImpressionId: event.payload?.level_impression_id ?? null,
           uniqueConfiguredImpressionsForOrdinal: ordinalCount,
+          skinHash: event.payload?.skin_hash ?? null,
+          skinContractDigest: event.payload?.skin_contract_digest ?? null,
           pass: Number.isInteger(ordinal) && ordinal >= 1 && ordinal <= specHashes.length
-            && ordinalCount === 1,
+            && ordinalCount === 1
+            && event.payload?.level_spec_hash === specHashes[ordinal - 1]
+            && event.payload?.applied_spec_hash === specHashes[ordinal - 1]
+            && event.payload?.skin_hash === EXACT_THREE_LEVEL_SKIN_HASH
+            && event.payload?.applied_skin_hash === EXACT_THREE_LEVEL_SKIN_HASH
+            && event.payload?.skin_contract_digest === EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
         };
         state.checkpoints.configuredImpressions.push(checkpoint);
         record('checkpoint_configured_specialized_impression_once', checkpoint);
@@ -773,9 +872,9 @@ const server = createServer(async (request, response) => {
         }
       }
     }
-    return json(response, { events: body.events.map((event, item_index) => {
+    const eventReceipts = body.events.map((event, item_index) => {
       const replayConflict = state?.scenario === 'replay-conflict'
-        && event.event_name === 'catalog_level_impression';
+        && event.event_name === 'catalog_level_impression_v2';
       if (replayConflict && state) {
         state.checkpoints.replayConflict = {
           eventId: event.event_id,
@@ -791,7 +890,18 @@ const server = createServer(async (request, response) => {
         status: replayConflict ? 'rejected' : 'projected',
         reject_reason: replayConflict ? 'catalog_level_impression_conflict' : null,
       };
-    }) });
+    });
+    const delayedOrdinalTwoAck = state?.scenario === 'event-order'
+      && body.events.some((event) => event.event_name === 'catalog_level_impression_v2'
+        && event.payload?.ordinal === 2);
+    if (delayedOrdinalTwoAck && state) {
+      state.eventOrderAckPending = true;
+      record('event_order_cp_ack_delayed', { ordinal: 2 });
+      await new Promise((resolve) => setTimeout(resolve, 1900));
+      state.eventOrderAckPending = false;
+      record('event_order_cp_ack_released', { ordinal: 2 });
+    }
+    return json(response, { events: eventReceipts });
   }
   if (request.method === 'GET' && url.pathname === '/api/catalog/canary-authority') {
     const requestEvidence = {
@@ -824,7 +934,8 @@ const server = createServer(async (request, response) => {
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
       // replay-conflict models two tabs which both observed fresh authority;
       // only the allocation/closure reveals that one tab committed first.
-      replayed: state?.scenario === 'replayed-canary',
+      replayed: state?.scenario === 'replayed-canary'
+        || (state?.scenario === 'reload-zero-progress' && (state?.allocationRequests.length ?? 0) > 0),
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/feed/catalog-authority') {
@@ -880,17 +991,26 @@ const server = createServer(async (request, response) => {
     const body = await bodyOf(request);
     state?.ticketRequests.push(body);
     record('ticket', { ticketId: body.ticket_id, runId: body.run_id });
-    return json(response, ticketView(body));
+    const ticket = ticketView(body);
+    state?.ticketResponses.push(ticket);
+    return json(response, ticket);
   }
   const specsMatch = url.pathname.match(/^\/api\/catalog\/tickets\/([^/]+)\/specs$/);
   if (request.method === 'GET' && specsMatch) {
     if (state) state.specRequests += 1;
     record('spec_bundle', { ticketId: specsMatch[1] });
-    return json(response, bundle(specsMatch[1]));
+    const exactBundle = bundle(specsMatch[1]);
+    state?.specResponses.push(exactBundle);
+    return json(response, exactBundle);
   }
   if (request.method === 'POST' && url.pathname === '/api/results') {
     const body = await bodyOf(request);
     const kind = body.metric_key === 'series' ? 'chest' : 'level';
+    if (state?.scenario === 'event-order' && kind === 'level' && body.ordinal === 2
+      && state.eventOrderAckPending) {
+      state.eventOrderResultBeforeAck = true;
+      record('event_order_result_before_cp_ack', { ordinal: 2 });
+    }
     if (state?.scenario === 'result-transient' && kind === 'level' && !state.resultTransientInjected) {
       state.resultTransientInjected = true;
       state.resultAttempts.push({ kind, outcome: 'transient', status: 503, body });
@@ -927,9 +1047,13 @@ const server = createServer(async (request, response) => {
         ordinal: body.ordinal,
         runId: body.run_id,
         specHash: body.applied_spec_hash,
+        skinHash: body.applied_skin_hash,
         seriesId: body.series_id,
         pass: Number.isInteger(body.ordinal) && expectedHash !== undefined
-          && body.applied_spec_hash === expectedHash && body.series_id === ids.series,
+          && body.schema === 'catalog.result.v2'
+          && body.applied_spec_hash === expectedHash
+          && body.applied_skin_hash === EXACT_THREE_LEVEL_SKIN_HASH
+          && body.series_id === ids.series,
       };
       state.checkpoints.levelReceipts.push(checkpoint);
       record('checkpoint_exact_level_result_confirmed', checkpoint);
@@ -941,7 +1065,8 @@ const server = createServer(async (request, response) => {
       const checkpoint = {
         runId: body.run_id,
         seriesId: body.series_id,
-        pass: body.series_id === ids.series,
+        pass: body.schema === 'catalog.result.v2'
+          && body.series_id === ids.series,
       };
       record('checkpoint_exact_chest_result_confirmed', checkpoint);
       if (!checkpoint.pass && state) {
@@ -1046,6 +1171,9 @@ canaryDisabledBuildHtml = disabledBuild.html;
 
 console.log(JSON.stringify({
   successUrl: `${origin}/harness.html?scenario=success`,
+  reloadUrl: `${origin}/harness.html?scenario=reload-zero-progress`,
+  eventOrderUrl: `${origin}/harness.html?scenario=event-order`,
+  crossOriginUrl: `${origin}/harness.html?scenario=cross-origin-spoof`,
   retryUrl: `${origin}/harness.html?scenario=level-retry`,
   transientResultUrl: `${origin}/harness.html?scenario=result-transient`,
   timeoutResultUrl: `${origin}/harness.html?scenario=result-timeout`,
