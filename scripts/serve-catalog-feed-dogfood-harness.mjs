@@ -333,10 +333,11 @@ const evaluate = () => {
   const exactCanaryTicketIdentity = !canaryScenarios.has(state.scenario)
     || (v2Ticket?.ticket_id === ids.authorization
       && v2Ticket?.run_id === `catalog-canary:${ids.authorization}`);
+  const expectedAllocationCount = state.scenario === 'replayed-canary' ? 2 : 1;
   const common = exactTransport
     && exactCanaryTicketIdentity
-    && state.allocationRequests.length === 1
-    && state.allocationResponses.length === 1
+    && state.allocationRequests.length === expectedAllocationCount
+    && state.allocationResponses.length === expectedAllocationCount
     && Boolean(v2Ticket)
     && state.specRequests >= 1
     && state.pendingSamples > 0

@@ -311,8 +311,8 @@ equal(catalogCanaryAuthorityAllowsAllocation({ ...canary, replayed: true }, Date
   'a committed invitation remains usable only through exact allocation replay');
 equal(catalogCanaryAuthorityAllowsBackgroundAllocation(canary, Date.parse('2026-07-14T11:59:59Z')), true,
   'detached discovery may consume a fresh canary invitation');
-equal(catalogCanaryAuthorityAllowsBackgroundAllocation({ ...canary, replayed: true }, Date.parse('2026-07-14T11:59:59Z')), false,
-  'detached discovery falls through to published policy after a canary was already delivered');
+equal(catalogCanaryAuthorityAllowsBackgroundAllocation({ ...canary, replayed: true }, Date.parse('2026-07-14T11:59:59Z')), true,
+  'detached discovery may recover an allocation-to-ticket transport gap');
 equal(catalogCanaryAuthorityAllowsBackgroundAllocation(canary, Date.parse('2026-07-14T12:00:01Z')), false,
   'detached discovery rejects an expired fresh invitation');
 const canaryRun = buildCatalogCanaryRunIdentity(ids.auth);

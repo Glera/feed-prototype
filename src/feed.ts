@@ -976,6 +976,7 @@ export class Feed {
     if (!this.catalogDogfoodEnabled
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedOfferState = 'loading';
+    let canaryReplayAttempted = false;
     try {
       let authority: PreparedGeneratedOffer['authority'] | null = null;
       let canaryProjectionRequired = false;
@@ -991,6 +992,7 @@ export class Feed {
           if (catalogCanaryAuthorityAllowsBackgroundAllocation(canary)) {
             authority = canary;
             canaryProjectionRequired = true;
+            canaryReplayAttempted = canary.replayed;
             this.catalogCanaryClaimed = true;
           }
         } catch (error) {
@@ -1100,11 +1102,16 @@ export class Feed {
       this.releaseGeneratedPreview(this.generatedOffer);
       this.generatedOffer = null;
       this.generatedOfferState = 'failed';
-      this.catalogCanaryClaimed = false;
+      // One exact replay is the recovery path for allocation -> ticket gaps.
+      // If it still cannot produce a fresh zero-progress ticket, retire that
+      // canary for this page so the next background opportunity can use normal
+      // published content instead of retrying a played/terminal invitation.
+      this.catalogCanaryClaimed = canaryReplayAttempted;
       console.warn('[generated-feed] background offer unavailable; builtin loop continues', error);
       track('generated_offer_unavailable', {
         reason: error instanceof ApiRequestError ? error.code ?? `http_${error.status}` : 'preparation_failure',
       });
+      if (canaryReplayAttempted) this.scheduleGeneratedOfferPrefetch();
     }
   }
 

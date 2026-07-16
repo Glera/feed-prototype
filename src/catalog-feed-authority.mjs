@@ -128,16 +128,17 @@ export function catalogCanaryAuthorityAllowsAllocation(authority, nowMs = Date.n
 }
 
 /**
- * Detached discovery may consume only a fresh invitation. A replayed canary is
- * reserved for exact reload recovery of its already-created ticket; treating it
- * as a new additive offer would starve the ordinary published-feed fallback.
+ * Detached discovery may consume a fresh invitation or recover its exact
+ * committed allocation after navigation won the allocation race but vanished
+ * before creating the deterministic ticket. The caller must retire a failed
+ * replay for the rest of the page so a played/terminal canary cannot starve the
+ * ordinary published-feed fallback.
  */
 export function catalogCanaryAuthorityAllowsBackgroundAllocation(
   authority,
   nowMs = Date.now(),
 ) {
-  return authority?.replayed === false
-    && catalogCanaryAuthorityAllowsAllocation(authority, nowMs);
+  return catalogCanaryAuthorityAllowsAllocation(authority, nowMs);
 }
 
 /**
