@@ -7,7 +7,7 @@ const child = spawn(process.execPath, ['scripts/serve-catalog-feed-dogfood-harne
   stdio: ['ignore', 'pipe', 'pipe'],
   env: {
     ...process.env,
-    CATALOG_DOGFOOD_LEVEL_COUNT: '2',
+    CATALOG_DOGFOOD_LEVEL_COUNT: '3',
     CATALOG_DOGFOOD_TIMEOUT_MS: '15000',
     VITE_OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS: '500',
   },
@@ -46,7 +46,7 @@ const endpoints = await new Promise((resolve, reject) => {
   });
 });
 
-const exactSpecHashes = ['1'.repeat(64), '2'.repeat(64)];
+const exactSpecHashes = ['1'.repeat(64), '2'.repeat(64), '3'.repeat(64)];
 const browser = await chromium.launch();
 
 const runScenario = async (url, { firstFailure, expectLevelRetry = false }) => {
@@ -83,14 +83,14 @@ const runScenario = async (url, { firstFailure, expectLevelRetry = false }) => {
     const completions = state.runtimeEvents.filter((item) => item.stage === 'completed_sent');
     assert.equal(completions.length, exactSpecHashes.length + (expectLevelRetry ? 1 : 0), diagnostic);
     assert.deepEqual(completions.map((item) => item.detail.outcome), expectLevelRetry
-      ? ['won', 'lost', 'won'] : ['won', 'won'], diagnostic);
+      ? ['won', 'lost', 'won', 'won'] : exactSpecHashes.map(() => 'won'), diagnostic);
 
     const levelResults = state.results.filter((item) => item.kind === 'level');
     const chestResults = state.results.filter((item) => item.kind === 'chest');
     assert.equal(levelResults.length, exactSpecHashes.length, diagnostic);
-    assert.deepEqual(levelResults.map((item) => item.outcome), ['confirmed', 'confirmed'], diagnostic);
-    assert.deepEqual(levelResults.map((item) => item.body.ordinal), [1, 2], diagnostic);
-    assert.deepEqual(levelResults.map((item) => item.body.series_level), [1, 2], diagnostic);
+    assert.deepEqual(levelResults.map((item) => item.outcome), exactSpecHashes.map(() => 'confirmed'), diagnostic);
+    assert.deepEqual(levelResults.map((item) => item.body.ordinal), [1, 2, 3], diagnostic);
+    assert.deepEqual(levelResults.map((item) => item.body.series_level), [1, 2, 3], diagnostic);
     assert.deepEqual(levelResults.map((item) => item.body.applied_spec_hash), exactSpecHashes, diagnostic);
     assert.equal(chestResults.length, 1, diagnostic);
     assert.equal(chestResults[0].outcome, 'confirmed', diagnostic);
@@ -101,11 +101,12 @@ const runScenario = async (url, { firstFailure, expectLevelRetry = false }) => {
 
     const levelAttempts = state.resultAttempts.filter((item) => item.kind === 'level');
     const chestAttempts = state.resultAttempts.filter((item) => item.kind === 'chest');
+    const confirmedAttempts = exactSpecHashes.map(() => ['confirmed', 200]);
     const expectedAttempts = firstFailure === 'transient'
-      ? [['transient', 503], ['confirmed', 200], ['confirmed', 200]]
+      ? [['transient', 503], ...confirmedAttempts]
       : firstFailure === 'timeout'
-        ? [['hung', 0], ['confirmed', 200], ['confirmed', 200]]
-        : [['confirmed', 200], ['confirmed', 200]];
+        ? [['hung', 0], ...confirmedAttempts]
+        : confirmedAttempts;
     assert.deepEqual(levelAttempts.map((item) => [item.outcome, item.status]), expectedAttempts, diagnostic);
     if (firstFailure) {
       assert.deepEqual(levelAttempts[0].body, levelAttempts[1].body, diagnostic);
