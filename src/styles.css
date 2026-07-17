@@ -733,7 +733,11 @@ body {
   background: rgba(255, 255, 255, 0.12);
   color: #fff;
 }
-.game__operator-flag-status { display: block; min-height: 17px; margin-top: 8px; color: #e7dbff; }
+.game__operator-flag-status { display: block; min-height: 17px; margin-top: 8px; color: #e7dbff; font-weight: 600; }
+.game__operator-flag-status.is-ok { color: #7dffb0; }
+.game__operator-flag-status.is-error { color: #ff9d9d; }
+.game__operator-flag-status.is-busy { color: #ffe08a; }
+.game__operator-flag-open--done { opacity: 0.85; color: #7dffb0; }
 
 /* Reward badge (top-left): the single star this mechanic awards on a win. Hidden until
    the live mechanic/autoplay is up (not during init), like the reel chrome. */

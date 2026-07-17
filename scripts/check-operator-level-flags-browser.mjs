@@ -122,6 +122,14 @@ try {
     'a constructed immutable retry request must not become a mutable remount draft');
   await enabled.locator('button[type="submit"]').click();
   await enabled.locator('.game__operator-flag-status').filter({ hasText: 'Пометка сохранена' }).waitFor();
+  // Success must visibly close the form and pin an explicit landed marker:
+  // a dead-open disabled form is indistinguishable from a stuck submit.
+  await enabled.locator('.game__operator-flag-form[hidden]').waitFor({ state: 'attached' });
+  await enabled.locator('.game__operator-flag-open--done').filter({ hasText: 'Помечено ✓' }).waitFor();
+  assert.equal(
+    await enabled.locator('.game__operator-flag-open').isDisabled(), true,
+    'the landed marker must not accept another submit for the same occurrence',
+  );
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[0], requests[1], 'retry changed the immutable mutation request');
   assert.equal(requests[0].schema, 'catalog.operator-flag.request.v1');

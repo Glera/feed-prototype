@@ -265,13 +265,28 @@ export function mountOperatorLevelFlagControl(host, options) {
     intent.disabled = true;
     comment.disabled = true;
     status.textContent = 'Сохраняю…';
+    status.className = 'game__operator-flag-status is-busy';
     void Promise.resolve(options.submit(pending)).then(() => {
       if (destroyed) return;
-      status.textContent = 'Пометка сохранена';
+      // Success closes the form: a dead-open disabled form reads as "stuck"
+      // and hides whether the flag actually landed. The trigger collapses to
+      // an explicit landed marker; the frozen `pending` request still blocks
+      // a duplicate submit for this exact occurrence.
+      status.textContent = 'Пометка сохранена ✓';
+      status.className = 'game__operator-flag-status is-ok';
       form.querySelectorAll('select, textarea, button').forEach((element) => { element.disabled = true; });
+      setTimeout(() => {
+        if (destroyed) return;
+        form.hidden = true;
+        open.hidden = false;
+        open.disabled = true;
+        open.textContent = 'Помечено ✓';
+        open.classList.add('game__operator-flag-open--done');
+      }, 1400);
     }).catch((error) => {
       if (destroyed) return;
       status.textContent = operatorLevelFlagErrorMessage(error);
+      status.className = 'game__operator-flag-status is-error';
       submitButton.disabled = false;
       cancelButton.disabled = false;
       intent.disabled = false;
