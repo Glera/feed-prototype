@@ -5,7 +5,9 @@ import { chromium } from 'playwright';
 import {
   buildThreeLevelFixtureAudit,
   buildThreeLevelLiveOperatorObservation,
+  bindThreeLevelServerEvidenceToObservation,
   EXACT_THREE_LEVEL_CONTENT_HASH,
+  validateThreeLevelServerEvidenceReceipt,
 } from '../src/catalog-three-level-production-audit.mjs';
 import {
   EXACT_THREE_LEVEL_RUNTIME_ARTIFACT_DIGEST,
@@ -13,6 +15,7 @@ import {
   EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
   EXACT_THREE_LEVEL_SKIN_HASH,
   EXACT_THREE_LEVEL_SPEC_HASHES,
+  sha256Jcs,
 } from '../src/catalog-three-level-production-fixture.mjs';
 
 const child = spawn(process.execPath, ['scripts/serve-catalog-feed-dogfood-harness.mjs'], {
@@ -201,6 +204,7 @@ try {
       ));
       return {
         eventId: event.event_id,
+        levelImpressionId: event.payload.level_impression_id,
         eventName: event.event_name,
         ordinal: event.payload.ordinal,
         specHash: event.payload.level_spec_hash,
@@ -248,6 +252,7 @@ try {
     ordinalLatenciesMs,
     p95Ms: Math.max(...ordinalLatenciesMs),
     closure: {
+      allocationId: allocation.allocationId,
       manifestContentHash: allocation.manifest.contentHash,
       skinHash: allocation.manifest.skinHash,
       skinContractDigest: allocation.manifest.skinContractDigest,
@@ -261,6 +266,7 @@ try {
       decisionId: allocation.decisionId,
       ticketId: ticket.ticket_id,
       runId: ticket.run_id,
+      runtimeReleaseId: ticket.runtime_release_id,
     },
   };
   assert.equal(liveSnapshot.closure.runtimeContractDigest, EXACT_THREE_LEVEL_RUNTIME_CONTRACT_DIGEST);
@@ -278,6 +284,111 @@ try {
     () => buildThreeLevelLiveOperatorObservation(forgedLatency, { auditNonce: 'ab'.repeat(32) }),
     /exact three-level production closure/,
     'receipt builder must recompute ordinal deltas instead of trusting browser p95',
+  );
+  const baseTime = Date.parse('2026-07-16T10:00:00.000Z');
+  const serverReceipt = {
+    schema: 'catalog.three-level-production-evidence.v1',
+    receiptId: '10000000-0000-4000-8000-000000000001',
+    authority: 'server_authoritative',
+    evidenceScope: 'production-control-plane',
+    contentHash: EXACT_THREE_LEVEL_CONTENT_HASH,
+    allocationId: allocation.allocationId,
+    decisionId: allocation.decisionId,
+    decisionRequestHash: 'a'.repeat(64),
+    ticketId: ticket.ticket_id,
+    catalogEntryId: allocation.catalog.entryId,
+    seriesId: allocation.catalog.seriesId,
+    runtimeReleaseId: ticket.runtime_release_id,
+    runtimeContractDigest: EXACT_THREE_LEVEL_RUNTIME_CONTRACT_DIGEST,
+    runtimeArtifactDigest: EXACT_THREE_LEVEL_RUNTIME_ARTIFACT_DIGEST,
+    skinHash: EXACT_THREE_LEVEL_SKIN_HASH,
+    skinContractDigest: EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
+    rootRunId: ticket.run_id,
+    levels: impressions.map((item, index) => {
+      const configuredAt = new Date(baseTime + index * 10_000);
+      const acceptedAt = new Date(configuredAt.getTime() + ordinalLatenciesMs[index]);
+      const sourceEvent = positive.cpEvents.find((event) => event.event_id === item.eventId);
+      return {
+        ordinal: index + 1,
+        specHash: EXACT_THREE_LEVEL_SPEC_HASHES[index],
+        skinHash: EXACT_THREE_LEVEL_SKIN_HASH,
+        skinContractDigest: EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
+        levelImpressionId: sourceEvent.payload.level_impression_id,
+        configurationEventId: item.eventId,
+        runtimeConfiguredAt: configuredAt.toISOString(),
+        configurationReceivedAt: configuredAt.toISOString(),
+        configuredAt: configuredAt.toISOString(),
+        acceptedRunId: acceptedLevelResults[index].body.run_id,
+        acceptedAt: acceptedAt.toISOString(),
+        configuredToAcceptedMs: ordinalLatenciesMs[index],
+      };
+    }),
+    acceptedChest: {
+      runId: ticket.run_id,
+      acceptedAt: new Date(baseTime + 60_000).toISOString(),
+      metricValue: 3,
+    },
+    timings: {
+      metric: 'configured_to_accepted_ms',
+      samples: ordinalLatenciesMs,
+      sampleCount: 3,
+      p95Ms: Math.max(...ordinalLatenciesMs),
+      derivedBy: 'server_from_durable_timestamps',
+    },
+    materializedAt: new Date(baseTime + 61_000).toISOString(),
+    eligibleForLevelSeriesRollout: false,
+  };
+  const serverEnvelope = {
+    schema: 'catalog.three-level-production-evidence-receipt.v1',
+    receiptDigest: sha256Jcs(serverReceipt),
+    receipt: serverReceipt,
+  };
+  assert.equal(
+    validateThreeLevelServerEvidenceReceipt(serverEnvelope).receipt.authority,
+    'server_authoritative',
+  );
+  assert.equal(
+    bindThreeLevelServerEvidenceToObservation(
+      serverEnvelope,
+      { ...liveSnapshot, status: 'running' },
+      { auditNonce: 'ab'.repeat(32) },
+    ).receipt.ticketId,
+    ticket.ticket_id,
+  );
+  const newerTicketEvidence = structuredClone(serverEnvelope);
+  newerTicketEvidence.receipt.ticketId = '20000000-0000-4000-8000-000000000001';
+  newerTicketEvidence.receiptDigest = sha256Jcs(newerTicketEvidence.receipt);
+  assert.throws(
+    () => bindThreeLevelServerEvidenceToObservation(
+      newerTicketEvidence,
+      { ...liveSnapshot, status: 'running' },
+      { auditNonce: 'ab'.repeat(32) },
+    ),
+    /different browser-observed production play/,
+    'a newer exact-content ticket must not replace the browser-observed play',
+  );
+  const duplicateConfigurationEvidence = structuredClone(serverEnvelope);
+  duplicateConfigurationEvidence.receipt.levels[1].configurationEventId = (
+    duplicateConfigurationEvidence.receipt.levels[0].configurationEventId
+  );
+  duplicateConfigurationEvidence.receipt.levels[1].levelImpressionId = (
+    duplicateConfigurationEvidence.receipt.levels[0].levelImpressionId
+  );
+  duplicateConfigurationEvidence.receiptDigest = sha256Jcs(
+    duplicateConfigurationEvidence.receipt,
+  );
+  assert.throws(
+    () => validateThreeLevelServerEvidenceReceipt(duplicateConfigurationEvidence),
+    /content-addressed three-level production closure/,
+    'three ordinals must have three distinct configured impressions and events',
+  );
+  const forgedServerEvidence = structuredClone(serverEnvelope);
+  forgedServerEvidence.receipt.levels[0].acceptedRunId = ticket.run_id;
+  forgedServerEvidence.receiptDigest = sha256Jcs(forgedServerEvidence.receipt);
+  assert.throws(
+    () => validateThreeLevelServerEvidenceReceipt(forgedServerEvidence),
+    /exact content-addressed three-level production closure/,
+    'content-addressing cannot make a root-run substitution authoritative',
   );
   console.log(JSON.stringify(audit));
   console.log(

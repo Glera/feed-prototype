@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { catalogDogfoodAccountEligible } from '../src/catalog-feed-authority.mjs';
-import { buildThreeLevelLiveOperatorObservation } from '../src/catalog-three-level-production-audit.mjs';
+import { bindThreeLevelServerEvidenceToObservation } from '../src/catalog-three-level-production-audit.mjs';
 import {
   EXACT_THREE_LEVEL_CONTENT_HASH,
   EXACT_THREE_LEVEL_PRODUCTION_FIXTURE,
@@ -114,17 +114,18 @@ window.Telegram={WebApp:{
   const state={
     schema:'catalog.real-three-level-audit-state.v1',status:'running',message:'waiting for exact three-level canary',
     startedAt:Date.now(),apiOrigin,expectedContentHash,requests:[],eventNames:[],
-    projectedImpressions:[],acceptedLevelResults:[],acceptedChestResults:[],ordinalLatenciesMs:[],closure:{
+    projectedImpressions:[],acceptedLevelResults:[],acceptedChestResults:[],ordinalLatenciesMs:[],
+    serverEvidenceRequested:false,serverEvidenceReceipt:null,closure:{
       session:false,canaryFresh:false,canaryAuthorizationId:null,canaryAuthorizationDigest:null,
       normalAuthorityRequests:0,allocation:null,allocationCanary:false,ticketV2:false,specBundle:false,
-      decisionId:null,entryId:null,seriesId:null,ticketId:null,runId:null,
+      allocationId:null,decisionId:null,entryId:null,seriesId:null,ticketId:null,runId:null,runtimeReleaseId:null,
       ticketSchema:null,bundleSchema:null,runtimeLocator:null,runtimeContractDigest:null,runtimeArtifactDigest:null,
       manifestContentHash:null,skinHash:null,skinContractDigest:null,specHashes:[],specHash:null,runtimeAbsolute:false,
       catalogFrame:false,frameExact:false,catalogImpression:false,chestSeen:false,rewardSeen:false
     },currentFrame:'none',p95Ms:null
   };
   Object.defineProperty(window,'__catalogRealE2E',{value:state});
-  const publish=()=>{try{const snapshot=structuredClone(state);parent.postMessage({source:'catalog-real-e2e',snapshot},location.origin);nativeFetch('/__audit/snapshot',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({auditNonce,snapshot})}).catch(()=>{})}catch{}};
+  const publish=()=>{try{parent.postMessage({source:'catalog-real-e2e',snapshot:structuredClone(state)},location.origin)}catch{}};
   const record=(route,status,detail={})=>{
     state.requests.push({atMs:Date.now()-state.startedAt,route,status,...detail});
     if(state.requests.length>80)state.requests.shift();publish();
@@ -154,6 +155,7 @@ window.Telegram={WebApp:{
           state.closure.catalogImpression=true;
           if(!state.projectedImpressions.some(item=>item.eventId===event.event_id))state.projectedImpressions.push({
             eventId:event.event_id,eventName:event.event_name,ordinal:event.payload?.ordinal,
+            levelImpressionId:event.payload?.level_impression_id,
             specHash:event.payload?.level_spec_hash,appliedSpecHash:event.payload?.applied_spec_hash,
             skinHash:event.payload?.skin_hash,appliedSkinHash:event.payload?.applied_skin_hash,
             skinContractDigest:event.payload?.skin_contract_digest,
@@ -192,6 +194,7 @@ window.Telegram={WebApp:{
         &&data?.authorizationId===state.closure.canaryAuthorizationId
         &&data?.authorizationDigest===state.closure.canaryAuthorizationDigest
         &&body?.authorizationId===state.closure.canaryAuthorizationId;
+      state.closure.allocationId=allocation?.allocationId??null;
       state.closure.decisionId=allocation?.decisionId??null;
       state.closure.entryId=allocation?.catalog?.entryId??null;
       state.closure.seriesId=allocation?.catalog?.seriesId??null;
@@ -234,7 +237,7 @@ window.Telegram={WebApp:{
         &&Array.isArray(data?.levels)&&data.levels.length===3
         &&data.levels.every((level,index)=>level?.ordinal===index+1&&level?.spec_hash===expectedSpecHashes[index]);
       if(exactTicket)state.closure.ticketSchema=data.schema;
-      if(firstTicket&&exactTicket){state.closure.ticketId=data.ticket_id;state.closure.runId=data.run_id;state.closure.ticketV2=true}
+      if(firstTicket&&exactTicket){state.closure.ticketId=data.ticket_id;state.closure.runId=data.run_id;state.closure.runtimeReleaseId=data.runtime_release_id;state.closure.ticketV2=true}
       if(!exactTicket)stop('real backend did not confirm the exact manifest-bound v3 skin ticket');
     }else if(/^\\/api\\/catalog\\/tickets\\/[^/]+\\/specs$/.test(route)){
       const runtime=data?.runtime;
@@ -282,6 +285,34 @@ window.Telegram={WebApp:{
     if(!response.ok)stop(route+' returned HTTP '+response.status);
   };
   const nativeFetch=window.fetch.bind(window);
+  const requestServerEvidence=async()=>{
+    if(state.serverEvidenceRequested)return;
+    state.serverEvidenceRequested=true;publish();
+    try{
+      const response=await nativeFetch('/__audit/snapshot',{
+        method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({auditNonce,snapshot:structuredClone(state)})
+      });
+      const data=await responseJson(response);
+      record('/__audit/snapshot',response.status,{});
+      if(!response.ok){stop('server-authoritative production evidence was rejected by the local exact binder');return}
+      const bound=data?.schema==='catalog.three-level-production-evidence-receipt.v1'
+        &&data?.receipt?.authority==='server_authoritative'
+        &&data?.receipt?.contentHash===expectedContentHash
+        &&data?.receipt?.allocationId===state.closure.allocationId
+        &&data?.receipt?.decisionId===state.closure.decisionId
+        &&data?.receipt?.ticketId===state.closure.ticketId
+        &&data?.receipt?.catalogEntryId===state.closure.entryId
+        &&data?.receipt?.seriesId===state.closure.seriesId
+        &&data?.receipt?.runtimeReleaseId===state.closure.runtimeReleaseId
+        &&data?.receipt?.rootRunId===state.closure.runId
+        &&data?.receipt?.eligibleForLevelSeriesRollout===false;
+      if(!bound){stop('local exact binder returned evidence for another production play');return}
+      if(state.status!=='running')return;
+      state.serverEvidenceReceipt=data;
+      state.status='pass';state.message='server-authoritative evidence committed and bound to exact ordinals 1..3 and root chest';publish();
+    }catch(error){record('/__audit/snapshot',0,{error:String(error)});stop('server-authoritative production evidence network failure')}
+  };
   window.fetch=async(input,init)=>{
     const url=requestUrl(input);const body=requestJson(init);
     const started=performance.now();
@@ -351,7 +382,7 @@ window.Telegram={WebApp:{
       ?levelResults.map((item,index)=>item.atMs-impressions[index].atMs):[];
     state.p95Ms=state.ordinalLatenciesMs.length===3
       ?[...state.ordinalLatenciesMs].sort((a,b)=>a-b)[2]:null;
-    if(c.session&&c.canaryFresh&&c.normalAuthorityRequests===0&&c.allocation==='allocated'
+    const readyForServerEvidence=c.session&&c.canaryFresh&&c.normalAuthorityRequests===0&&c.allocation==='allocated'
       &&c.allocationCanary&&c.ticketV2
       &&c.specBundle&&c.runtimeAbsolute&&c.catalogFrame&&c.frameExact&&c.catalogImpression
       &&c.ticketSchema==='run.ticket.v3'&&c.bundleSchema==='catalog.ticket-level-spec-bundle.v2'
@@ -359,9 +390,9 @@ window.Telegram={WebApp:{
       &&c.runtimeContractDigest===expectedRuntimeContractDigest
       &&c.runtimeArtifactDigest===expectedRuntimeArtifactDigest
       &&exactImpressions&&exactLevels&&exactChest&&causalOrder
-      &&state.ordinalLatenciesMs.length===3&&c.chestSeen&&c.rewardSeen){
-      state.status='pass';state.message='exact production canary completed ordinals 1..3, three accepted receipts, and one chest';
-    }else if(Date.now()-state.startedAt>timeoutMs){
+      &&state.ordinalLatenciesMs.length===3&&c.chestSeen&&c.rewardSeen;
+    if(readyForServerEvidence&&!state.serverEvidenceReceipt){void requestServerEvidence()}
+    if(Date.now()-state.startedAt>timeoutMs){
       stop('timeout before exact ordinals 1..3, three accepted receipts, and one chest completed');
     }
     publish();
@@ -385,6 +416,7 @@ const contentType = (file) => ({
 
 let auditReceiptPrinted = false;
 let auditNonceConsumed = false;
+let auditNonceInFlight = false;
 const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1');
   response.setHeader('cache-control', 'no-store');
@@ -398,19 +430,38 @@ const server = createServer(async (request, response) => {
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
       response.statusCode = 403; response.end('invalid audit nonce'); return;
     }
-    if (body?.snapshot?.status !== 'pass') {
-      response.statusCode = 202; response.end('observation pending'); return;
+    if (body?.snapshot?.status !== 'running') {
+      response.statusCode = 409; response.end('observation is not an uncommitted ready snapshot'); return;
     }
-    if (auditNonceConsumed) {
-      response.statusCode = 409; response.end('audit nonce already consumed'); return;
+    if (auditNonceConsumed || auditNonceInFlight) {
+      response.statusCode = 409; response.end('audit nonce already consumed or in flight'); return;
     }
+    auditNonceInFlight = true;
     let receipt;
     try {
-      receipt = buildThreeLevelLiveOperatorObservation(body.snapshot, { auditNonce });
+      // Refetch authority directly from production. The browser snapshot is a
+      // readiness signal only and can never supply the receipt we persist.
+      const evidenceResponse = await fetch(`${apiBaseRaw}/api/catalog/three-level-production-evidence`, {
+        method: 'POST',
+        headers: { Authorization: `tma ${initData}` },
+      });
+      if (!evidenceResponse.ok) {
+        auditNonceInFlight = false;
+        response.statusCode = 502;
+        response.end(`production evidence refetch returned HTTP ${evidenceResponse.status}`);
+        return;
+      }
+      receipt = bindThreeLevelServerEvidenceToObservation(
+        await evidenceResponse.json(),
+        body.snapshot,
+        { auditNonce },
+      );
     } catch (error) {
-      response.statusCode = 422; response.end(error instanceof Error ? error.message : 'invalid observation'); return;
+      auditNonceInFlight = false;
+      response.statusCode = 422; response.end(error instanceof Error ? error.message : 'invalid evidence'); return;
     }
     auditNonceConsumed = true;
+    auditNonceInFlight = false;
     response.setHeader('content-type', 'application/json; charset=utf-8');
     response.end(JSON.stringify(receipt));
     if (!auditReceiptPrinted) {
@@ -461,7 +512,7 @@ console.log(JSON.stringify({
   dogfoodUserId,
   runtimePolicy: 'backend-absolute-https-only',
   expectedContentHash,
-  auditReceiptAuthority: 'local-non-authoritative',
+  auditReceiptAuthority: 'server-authoritative-direct-refetch',
 }));
 
 const close = () => server.close(() => process.exit(0));

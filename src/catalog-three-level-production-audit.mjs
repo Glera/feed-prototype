@@ -14,6 +14,8 @@ import {
 export { EXACT_THREE_LEVEL_CONTENT_HASH };
 
 const LEVEL_COUNT = 3;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
 
 const deepFreeze = (value) => {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
@@ -26,6 +28,14 @@ const percentile95 = (values) => {
   const ordered = [...values].sort((a, b) => a - b);
   return ordered[Math.ceil(ordered.length * 0.95) - 1];
 };
+
+const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+
+const canonicalMillis = (value) => typeof value === 'string'
+  && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+  && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value
+    ? Date.parse(value) : Number.NaN;
 
 const orderedLevels = (levels, hashKey) => Array.isArray(levels)
   && levels.length === LEVEL_COUNT
@@ -202,6 +212,129 @@ export function buildThreeLevelFixtureAudit({ positive, reload, eventOrder, cros
   return deepFreeze({ ...core, evidenceDigest: sha256Jcs(core) });
 }
 
+/** Validate the backend's append-only receipt; this is rollout evidence, not browser opinion. */
+export function validateThreeLevelServerEvidenceReceipt(raw) {
+  if (!exactKeys(raw, ['receipt', 'receiptDigest', 'schema'])
+    || raw.schema !== 'catalog.three-level-production-evidence-receipt.v1'
+    || !HEX64.test(raw.receiptDigest ?? '')
+    || !exactKeys(raw.receipt, [
+      'acceptedChest', 'allocationId', 'authority', 'catalogEntryId', 'contentHash',
+      'decisionId', 'decisionRequestHash', 'eligibleForLevelSeriesRollout', 'evidenceScope',
+      'levels', 'materializedAt', 'receiptId', 'rootRunId', 'runtimeArtifactDigest',
+      'runtimeContractDigest', 'runtimeReleaseId', 'schema', 'seriesId', 'skinContractDigest',
+      'skinHash', 'ticketId', 'timings',
+    ])
+    || sha256Jcs(raw.receipt) !== raw.receiptDigest) {
+    throw new TypeError('server evidence envelope is not exact or content-addressed');
+  }
+  const receipt = raw.receipt;
+  const ids = [
+    receipt.receiptId, receipt.allocationId, receipt.decisionId, receipt.ticketId,
+    receipt.catalogEntryId, receipt.seriesId, receipt.runtimeReleaseId,
+  ];
+  const levels = Array.isArray(receipt.levels) ? receipt.levels : [];
+  const samples = Array.isArray(receipt.timings?.samples) ? receipt.timings.samples : [];
+  const acceptedRunIds = levels.map((item) => item?.acceptedRunId);
+  const levelImpressionIds = levels.map((item) => item?.levelImpressionId);
+  const configurationEventIds = levels.map((item) => item?.configurationEventId);
+  const exactLevels = levels.length === LEVEL_COUNT && levels.every((item, index) => {
+    if (!exactKeys(item, [
+      'acceptedAt', 'acceptedRunId', 'configurationEventId', 'configurationReceivedAt',
+      'configuredAt', 'configuredToAcceptedMs', 'runtimeConfiguredAt',
+      'levelImpressionId', 'ordinal', 'skinContractDigest', 'skinHash', 'specHash',
+    ])) return false;
+    const configuredAt = canonicalMillis(item.configuredAt);
+    const receivedAt = canonicalMillis(item.configurationReceivedAt);
+    const acceptedAt = canonicalMillis(item.acceptedAt);
+    return item.ordinal === index + 1
+      && item.specHash === EXACT_THREE_LEVEL_SPEC_HASHES[index]
+      && item.skinHash === EXACT_THREE_LEVEL_SKIN_HASH
+      && item.skinContractDigest === EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST
+      && UUID.test(item.levelImpressionId ?? '')
+      && UUID.test(item.configurationEventId ?? '')
+      && Number.isFinite(receivedAt)
+      && Number.isFinite(canonicalMillis(item.runtimeConfiguredAt))
+      && typeof item.acceptedRunId === 'string' && item.acceptedRunId.length > 0
+      && Number.isInteger(item.configuredToAcceptedMs)
+      && item.configuredToAcceptedMs >= 0
+      && receivedAt <= configuredAt
+      && acceptedAt - configuredAt === item.configuredToAcceptedMs;
+  });
+  const chestAcceptedAt = canonicalMillis(receipt.acceptedChest?.acceptedAt);
+  const exactChest = exactKeys(receipt.acceptedChest, ['acceptedAt', 'metricValue', 'runId'])
+    && receipt.acceptedChest.runId === receipt.rootRunId
+    && receipt.acceptedChest.metricValue === LEVEL_COUNT
+    && Number.isFinite(chestAcceptedAt)
+    && levels.every((item) => canonicalMillis(item.acceptedAt) <= chestAcceptedAt);
+  const exactTimings = exactKeys(
+    receipt.timings,
+    ['derivedBy', 'metric', 'p95Ms', 'sampleCount', 'samples'],
+  )
+    && receipt.timings.metric === 'configured_to_accepted_ms'
+    && receipt.timings.derivedBy === 'server_from_durable_timestamps'
+    && receipt.timings.sampleCount === LEVEL_COUNT
+    && samples.length === LEVEL_COUNT
+    && samples.every((value, index) => value === levels[index]?.configuredToAcceptedMs)
+    && receipt.timings.p95Ms === percentile95(samples);
+  if (receipt.schema !== 'catalog.three-level-production-evidence.v1'
+    || receipt.authority !== 'server_authoritative'
+    || receipt.evidenceScope !== 'production-control-plane'
+    || receipt.eligibleForLevelSeriesRollout !== false
+    || receipt.contentHash !== EXACT_THREE_LEVEL_CONTENT_HASH
+    || receipt.skinHash !== EXACT_THREE_LEVEL_SKIN_HASH
+    || receipt.skinContractDigest !== EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST
+    || receipt.runtimeContractDigest !== EXACT_THREE_LEVEL_RUNTIME_CONTRACT_DIGEST
+    || receipt.runtimeArtifactDigest !== EXACT_THREE_LEVEL_RUNTIME_ARTIFACT_DIGEST
+    || !ids.every((value) => UUID.test(value ?? ''))
+    || !HEX64.test(receipt.decisionRequestHash ?? '')
+    || typeof receipt.rootRunId !== 'string' || receipt.rootRunId.length === 0
+    || new Set(acceptedRunIds).size !== LEVEL_COUNT
+    || new Set(levelImpressionIds).size !== LEVEL_COUNT
+    || new Set(configurationEventIds).size !== LEVEL_COUNT
+    || acceptedRunIds.includes(receipt.rootRunId)
+    || !Number.isFinite(canonicalMillis(receipt.materializedAt))
+    || canonicalMillis(receipt.materializedAt) < chestAcceptedAt
+    || !exactLevels || !exactChest || !exactTimings) {
+    throw new TypeError('server evidence lacks the exact content-addressed three-level production closure');
+  }
+  return deepFreeze(structuredClone(raw));
+}
+
+/**
+ * Bind one server-authoritative receipt to the exact production play observed
+ * by the local browser.  The backend intentionally selects the newest exact
+ * completed ticket, so content identity alone is insufficient when two plays
+ * finish close together.
+ */
+export function bindThreeLevelServerEvidenceToObservation(raw, snapshot, { auditNonce }) {
+  const envelope = validateThreeLevelServerEvidenceReceipt(raw);
+  const observation = buildThreeLevelLiveOperatorObservation(
+    { ...structuredClone(snapshot), status: 'pass' },
+    { auditNonce },
+  );
+  const receipt = envelope.receipt;
+  const evidence = observation.evidence;
+  const exactLevels = receipt.levels.every((level, index) => (
+    level.ordinal === evidence.impressions[index]?.ordinal
+    && level.specHash === evidence.impressions[index]?.specHash
+    && level.configurationEventId === evidence.impressions[index]?.eventId
+    && level.levelImpressionId === evidence.impressions[index]?.levelImpressionId
+    && level.acceptedRunId === evidence.acceptedLevelResults[index]?.runId
+  ));
+  if (receipt.allocationId !== evidence.allocationId
+    || receipt.decisionId !== evidence.decisionId
+    || receipt.ticketId !== evidence.ticketId
+    || receipt.catalogEntryId !== evidence.entryId
+    || receipt.seriesId !== evidence.seriesId
+    || receipt.runtimeReleaseId !== evidence.runtimeReleaseId
+    || receipt.rootRunId !== evidence.rootRunId
+    || receipt.acceptedChest.runId !== evidence.acceptedChest.runId
+    || !exactLevels) {
+    throw new TypeError('server evidence belongs to a different browser-observed production play');
+  }
+  return envelope;
+}
+
 /**
  * Revalidates the browser observation and emits a bounded, canonically hashed
  * local receipt. The nonce is issued by the local audit server, not production;
@@ -231,6 +364,8 @@ export function buildThreeLevelLiveOperatorObservation(snapshot, { auditNonce })
     && closure?.skinContractDigest === EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST
     && closure?.runtimeContractDigest === EXACT_THREE_LEVEL_RUNTIME_CONTRACT_DIGEST
     && closure?.runtimeArtifactDigest === EXACT_THREE_LEVEL_RUNTIME_ARTIFACT_DIGEST
+    && UUID.test(closure?.allocationId ?? '')
+    && UUID.test(closure?.runtimeReleaseId ?? '')
     && closure?.ticketSchema === 'run.ticket.v3'
     && closure?.bundleSchema === 'catalog.ticket-level-spec-bundle.v2'
     && Array.isArray(closure?.specHashes)
@@ -246,6 +381,7 @@ export function buildThreeLevelLiveOperatorObservation(snapshot, { auditNonce })
       && item.skinContractDigest === EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST
       && item.runtimeContractDigest === EXACT_THREE_LEVEL_RUNTIME_CONTRACT_DIGEST
       && item.runtimeArtifactDigest === EXACT_THREE_LEVEL_RUNTIME_ARTIFACT_DIGEST
+      && UUID.test(item.levelImpressionId ?? '')
       && item.ticketId === closure.ticketId && item.decisionId === closure.decisionId
       && item.entryId === closure.entryId && item.seriesId === closure.seriesId)
     && results.length === LEVEL_COUNT
@@ -276,6 +412,7 @@ export function buildThreeLevelLiveOperatorObservation(snapshot, { auditNonce })
 
   const evidence = {
     contentHash: EXACT_THREE_LEVEL_CONTENT_HASH,
+    allocationId: closure.allocationId,
     entryId: closure.entryId,
     seriesId: closure.seriesId,
     decisionId: closure.decisionId,
@@ -285,9 +422,11 @@ export function buildThreeLevelLiveOperatorObservation(snapshot, { auditNonce })
     skinContractDigest: EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST,
     runtimeContractDigest: EXACT_THREE_LEVEL_RUNTIME_CONTRACT_DIGEST,
     runtimeArtifactDigest: EXACT_THREE_LEVEL_RUNTIME_ARTIFACT_DIGEST,
+    runtimeReleaseId: closure.runtimeReleaseId,
     specHashes: [...EXACT_THREE_LEVEL_SPEC_HASHES],
     impressions: impressions.map((item) => ({
       eventId: item.eventId,
+      levelImpressionId: item.levelImpressionId,
       ordinal: item.ordinal,
       specHash: item.specHash,
       skinHash: item.skinHash,
