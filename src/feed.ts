@@ -32,6 +32,7 @@ import {
 } from './collections';
 import {
   apiSession, apiMe, variantIdForMechanic,
+  apiCreateOperatorLevelFlagRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
@@ -118,6 +119,15 @@ import {
   type FeedRosterSessionEntryV1,
   type FeedRosterSessionV1,
 } from './feed-roster.mjs';
+import {
+  mountOperatorLevelFlagControl,
+  operatorLevelFlaggingAvailable,
+  operatorLevelFlagOccurrenceKey,
+  validateOperatorLevelFlagResponse,
+  type OperatorLevelFlagControl,
+  type OperatorLevelFlagOccurrence,
+  type OperatorLevelFlagRequestV1,
+} from './operator-level-flags.mjs';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
@@ -269,6 +279,7 @@ type ControlPlaneManualAction = {
 };
 type ControlPlaneLevel = {
   levelImpressionId: string;
+  eventId: string | null;
   levelIndex: number;
   occurredAt: string;
   emitted: boolean;
@@ -315,6 +326,7 @@ type ControlPlaneAttempt = {
   startedAt: string;
   readyAt: string | null;
   emitted: boolean;
+  startEventId: string | null;
   actions: Array<ControlPlaneManualAction & { occurredAt: string; emitted: boolean }>;
   result: {
     outcome: 'win' | 'lose';
@@ -577,6 +589,8 @@ export class Feed {
   // Bottom-bar version label: platform (build) + backend (git SHA, after auth).
   private versionEl: HTMLElement | null = null;
   private catalogLabNavEl: HTMLButtonElement | null = null;
+  private operatorLevelFlaggingAvailable = false;
+  private operatorLevelFlagControl: OperatorLevelFlagControl | null = null;
   private backendVersion: string | null = null;
   private sessionSyncPromise: Promise<boolean> | null = null;
   private earnedThisCycle = new Set<number>();
@@ -864,6 +878,7 @@ export class Feed {
     }
     this.applyBuiltinFeedBindings(session.builtin_feed_bindings);
     this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
+    this.applyOperatorLevelFlaggingCapability(session.operator_level_flagging_available);
     this.applyServerBalance(session.balance);
     if (typeof session.puzzles === 'number') this.applyServerPuzzles(session.puzzles);
     await this.syncDaily(false);
@@ -1924,6 +1939,7 @@ export class Feed {
     }
     slot.phase = 'disposed';
     this.catalogSlots.delete(i);
+    this.refreshOperatorLevelFlagControl();
   }
 
   private controlPlaneDwellGates(exposure: ControlPlaneExposure): {
@@ -2033,11 +2049,13 @@ export class Feed {
       startedAt: new Date().toISOString(),
       readyAt: this.frameInteractiveReadyAt.get(i) ?? null,
       emitted: false,
+      startEventId: null,
       actions: [],
       result: null,
     };
     this.cpAttempts.set(runId, attempt);
     this.flushControlPlaneAttempt(attempt);
+    this.refreshOperatorLevelFlagControl();
     return attempt;
   }
 
@@ -2071,6 +2089,7 @@ export class Feed {
       if (!level) {
         level = {
           levelImpressionId: ticketUid(),
+          eventId: null,
           levelIndex: attempt.levelIndex,
           occurredAt: attempt.readyAt,
           emitted: false,
@@ -2084,6 +2103,7 @@ export class Feed {
           level_index: level.levelIndex,
         }, level.occurredAt);
         if (!eventId) return;
+        level.eventId = eventId;
         level.emitted = true;
       }
     }
@@ -2099,6 +2119,7 @@ export class Feed {
         level_index: attempt.levelIndex,
       }, attemptOccurredAt);
       if (!eventId) return;
+      attempt.startEventId = eventId;
       attempt.emitted = true;
       if (catalogAttempt && catalogSlot) this.watchCatalogControlPlaneConflict(catalogSlot, eventId);
     }
@@ -2232,6 +2253,101 @@ export class Feed {
   private applyCatalogLabAuthorizationCapability(value: unknown): void {
     if (!this.catalogLabNavEl) return;
     this.catalogLabNavEl.hidden = !catalogLabAuthorizationAvailable(value);
+  }
+
+  private applyOperatorLevelFlaggingCapability(value: unknown): void {
+    this.operatorLevelFlaggingAvailable = operatorLevelFlaggingAvailable(value);
+    this.refreshOperatorLevelFlagControl();
+  }
+
+  private currentOperatorLevelFlagOccurrence(): OperatorLevelFlagOccurrence | null {
+    if (!this.operatorLevelFlaggingAvailable) return null;
+    const index = this.realIndex();
+    const slot = this.catalogSlotForIndex(index);
+    if (!slot || slot.insertionKind !== 'generated' || slot.phase !== 'catalog_mounted'
+      || slot.index !== this.shownIndex || slot.exposure !== this.cpExposure
+      || !slot.exposure.impressionEmitted || !slot.session
+      || slot.session.snapshot().phase !== 'configured' || !this.feedActuallyVisible(index)) return null;
+    const binding = slot.session.binding;
+    const level = slot.exposure.levels.get(slot.ordinal);
+    if (!level?.emitted || !level.eventId || level.levelIndex !== slot.ordinal
+      || binding.decisionId !== slot.allocation?.decisionId
+      || binding.catalogEntryId !== slot.bundle?.catalogEntryId
+      || binding.seriesId !== slot.bundle?.seriesId) return null;
+    const activeLevel = this.manualRuns.has(index);
+    const frameRunId = activeLevel ? this.frames.get(index)?.dataset.runId ?? null : null;
+    const attempt = frameRunId ? this.cpAttempts.get(frameRunId) : null;
+    const runId = attempt?.emitted && attempt.startEventId && attempt.exposure === slot.exposure
+      && attempt.levelIndex === slot.ordinal ? frameRunId : null;
+    return {
+      flagSurface: activeLevel ? 'active_level' : 'preview',
+      decisionId: binding.decisionId,
+      contentImpressionId: slot.exposure.impressionId,
+      catalogEntryId: binding.catalogEntryId,
+      seriesId: binding.seriesId,
+      ordinal: binding.ordinal,
+      levelSpecHash: binding.specHash,
+      skinHash: binding.skinHash,
+      levelEventId: level.eventId,
+      levelImpressionId: activeLevel ? level.levelImpressionId : null,
+      runId,
+      attemptEventId: runId ? attempt?.startEventId ?? null : null,
+    };
+  }
+
+  private refreshOperatorLevelFlagControl(): void {
+    const occurrence = this.currentOperatorLevelFlagOccurrence();
+    const key = occurrence ? operatorLevelFlagOccurrenceKey(occurrence) : null;
+    if (this.operatorLevelFlagControl?.occurrenceKey === key) return;
+    this.operatorLevelFlagControl?.destroy();
+    this.operatorLevelFlagControl = null;
+    if (!occurrence) return;
+    const host = this.games[this.realIndex()];
+    if (!host) return;
+    this.operatorLevelFlagControl = mountOperatorLevelFlagControl(host, {
+      occurrence,
+      createMutationId: ticketUid,
+      submit: (request) => this.submitOperatorLevelFlag(request, occurrence),
+    });
+  }
+
+  private requireProjectedOperatorFlagEvent(eventId: string | null): void {
+    if (eventId && controlPlaneEventState(eventId) === 'acknowledged'
+      && controlPlaneEventReceiptStatus(eventId) === 'projected') return;
+    if (eventId && (controlPlaneEventState(eventId) === 'rejected'
+      || controlPlaneEventReceiptStatus(eventId) === 'rejected')) {
+      throw new ApiRequestError(409, 'Control-plane identity was rejected', 'operator_level_flag_stale');
+    }
+    throw new ApiRequestError(503, 'Control-plane identity is not projected yet', 'operator_level_flag_cp_unconfirmed');
+  }
+
+  private async submitOperatorLevelFlag(
+    request: OperatorLevelFlagRequestV1,
+    occurrence: OperatorLevelFlagOccurrence,
+  ): Promise<void> {
+    const current = this.currentOperatorLevelFlagOccurrence();
+    if (!current || operatorLevelFlagOccurrenceKey(current)
+      !== operatorLevelFlagOccurrenceKey(occurrence)) {
+      throw new ApiRequestError(409, 'The active generated level changed', 'operator_level_flag_stale');
+    }
+    // Delivery is background-only: this awaits only inside the small operator
+    // form and never participates in paging, mount, reveal or gameplay paths.
+    try {
+      await flushControlPlane({ force: true });
+    } catch {
+      throw new ApiRequestError(503, 'Control-plane delivery failed', 'operator_level_flag_cp_unconfirmed');
+    }
+    const afterFlush = this.currentOperatorLevelFlagOccurrence();
+    if (!afterFlush || operatorLevelFlagOccurrenceKey(afterFlush)
+      !== operatorLevelFlagOccurrenceKey(occurrence)) {
+      throw new ApiRequestError(409, 'The active generated level changed', 'operator_level_flag_stale');
+    }
+    this.requireProjectedOperatorFlagEvent(occurrence.levelEventId);
+    if (occurrence.runId !== null) {
+      this.requireProjectedOperatorFlagEvent(occurrence.attemptEventId);
+    }
+    const response = await apiCreateOperatorLevelFlagRequired(request);
+    validateOperatorLevelFlagResponse(response, request);
   }
 
   // Apply a server balance WITHOUT clobbering optimistic local progress: if the
@@ -5785,6 +5901,7 @@ export class Feed {
     this.pollAutoplayUi();
     this.markCurrentUnitShownIfVisible();
     this.syncControlPlaneDwell();
+    this.refreshOperatorLevelFlagControl();
   }
 
   /** Pick the cover aspect bucket for THIS device from the real slot box (covers
@@ -7487,6 +7604,7 @@ export class Feed {
     if (!level) {
       level = {
         levelImpressionId: ticketUid(),
+        eventId: null,
         levelIndex: slot.ordinal,
         occurredAt: new Date().toISOString(),
         emitted: false,
@@ -7502,6 +7620,7 @@ export class Feed {
       level.occurredAt,
     );
     if (!eventId) return;
+    level.eventId = eventId;
     level.emitted = true;
     if (slot.canaryProjectionRequired) {
       if (slot.configurationTimer !== null) window.clearTimeout(slot.configurationTimer);
@@ -7524,6 +7643,7 @@ export class Feed {
     for (const attempt of this.cpAttempts.values()) {
       if (attempt.exposure === exposure) this.flushControlPlaneAttempt(attempt);
     }
+    this.refreshOperatorLevelFlagControl();
   }
 
   private async confirmCanaryCatalogProjection(
