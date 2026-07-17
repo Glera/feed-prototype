@@ -45,6 +45,8 @@ const ids = {
   series: '10000000-0000-4000-8000-000000000007',
   release: '10000000-0000-4000-8000-000000000008',
   runtimeVariant: '10000000-0000-4000-8000-000000000009',
+  replacementAuthorization: '10000000-0000-4000-8000-000000000010',
+  replacementDecision: '10000000-0000-4000-8000-000000000011',
 };
 let origin = '';
 let state = null;
@@ -54,11 +56,11 @@ let canaryDisabledBuildHtml = '';
 const scenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
   'level-retry', 'reload-zero-progress', 'event-order', 'cross-origin-spoof',
-  'no-invite', 'replayed-canary', 'wrong-account', 'disabled',
+  'supersession', 'no-invite', 'replayed-canary', 'wrong-account', 'disabled',
 ]);
 const canaryScenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict', 'level-retry',
-  'reload-zero-progress', 'event-order', 'cross-origin-spoof',
+  'reload-zero-progress', 'event-order', 'cross-origin-spoof', 'supersession',
 ]);
 const successfulCatalogScenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'level-retry', 'reload-zero-progress',
@@ -67,6 +69,19 @@ const successfulCatalogScenarios = new Set([
 const normalizedScenario = (scenario) => scenarios.has(scenario) ? scenario : 'success';
 const dogfoodUserId = 424242;
 const userIdForScenario = (scenario) => scenario === 'wrong-account' ? 7 : dogfoodUserId;
+const catalogBindingForAuthorization = (authorizationId) => {
+  if (authorizationId === ids.authorization) {
+    return { authorizationId, decisionId: ids.allocationDecision, digest: '8'.repeat(64) };
+  }
+  if (authorizationId === ids.replacementAuthorization) {
+    return { authorizationId, decisionId: ids.replacementDecision, digest: '7'.repeat(64) };
+  }
+  return null;
+};
+const catalogBindingAllowed = (scenario, authorizationId) => (
+  authorizationId === ids.authorization
+  || (scenario === 'supersession' && authorizationId === ids.replacementAuthorization)
+);
 
 const initDataFor = (instanceToken, scenario) => new URLSearchParams({
   query_id: 'dogfood',
@@ -91,6 +106,8 @@ const freshState = (scenario, instanceToken) => ({
   allocationResponses: [],
   ticketRequests: [],
   ticketResponses: [],
+  ticketConflicts: [],
+  catalogBindingConflicts: [],
   specRequests: 0,
   specResponses: [],
   results: [],
@@ -109,9 +126,14 @@ const freshState = (scenario, instanceToken) => ({
   runtimeEvents: [],
   runtimeDocumentRequests: 0,
   replayConflictTransportAttempts: 0,
+  supersessionActive: false,
+  supersessionResult: null,
   eventOrderAckPending: false,
   eventOrderResultBeforeAck: false,
   authorityPending: false,
+  authorityPendingByTab: {},
+  authorityExpectedBuiltinByTab: {},
+  lastClientSurfaceByTab: {},
   pendingSamples: 0,
   pendingViolation: false,
   checkpoints: {
@@ -231,10 +253,13 @@ const allocation = {
   manifest,
 };
 
-const allocationForScenario = (scenario) => {
+const allocationForScenario = (scenario, authorizationId = ids.authorization) => {
   const canary = canaryScenarios.has(scenario);
+  const replacement = authorizationId === ids.replacementAuthorization;
   return {
     ...allocation,
+    decisionId: replacement ? ids.replacementDecision : allocation.decisionId,
+    allocationId: authorizationId,
     slotType: canary ? 'canary-dogfood' : allocation.slotType,
     policyVersion: canary ? 'catalog-canary-dogfood.v1' : allocation.policyVersion,
     catalog: {
@@ -248,7 +273,9 @@ const bundle = (ticketId) => ({
   schema: 'catalog.ticket-level-spec-bundle.v2',
   ticketId,
   ticketState: 'active',
-  decisionId: ids.allocationDecision,
+  decisionId: ticketId === ids.replacementAuthorization
+    ? ids.replacementDecision
+    : ids.allocationDecision,
   catalogEntryId: ids.entry,
   seriesId: ids.series,
   manifestContentHash: manifest.contentHash,
@@ -263,10 +290,15 @@ const bundle = (ticketId) => ({
   })),
 });
 
-const ticketView = (request) => {
+const ticketView = (request, scenario = state?.scenario ?? 'disabled') => {
+  const serverBinding = scenario === 'supersession'
+    ? catalogBindingForAuthorization(request.ticket_id)
+    : null;
   const common = {
     ticket_id: request.ticket_id,
-    run_id: request.run_id,
+    run_id: serverBinding
+      ? `catalog-canary:${serverBinding.authorizationId}`
+      : request.run_id,
     kind: request.kind,
     expected_levels: request.kind === 'series' ? specHashes.length : 1,
     completed_levels: 0,
@@ -281,7 +313,7 @@ const ticketView = (request) => {
     kind: 'series',
     mechanic_id: runtime.playableId,
     variant_id: runtime.legacyVariantId,
-    decision_id: ids.allocationDecision,
+    decision_id: serverBinding?.decisionId ?? ids.allocationDecision,
     catalog_entry_id: ids.entry,
     series_id: ids.series,
     runtime_release_id: ids.release,
@@ -320,7 +352,7 @@ const evaluate = () => {
     state.message = 'background generated discovery withheld or replaced the current built-in';
     return;
   }
-  if (['recall', 'replay-conflict', 'no-invite', 'wrong-account'].includes(state.scenario)
+  if (['recall', 'replay-conflict', 'supersession', 'no-invite', 'wrong-account'].includes(state.scenario)
     && (state.client.chestSeen || state.client.rewardSeen || chestResults.length > 0)) {
     state.status = 'fail';
     state.message = `${state.scenario} leaked a chest or reward`;
@@ -330,7 +362,9 @@ const evaluate = () => {
   const exactCanaryGet = state.canaryRequests.every((item) => item.method === 'GET'
     && item.path === '/api/catalog/canary-authority'
     && item.query === '' && item.contentLength === null);
-  const expectedCanaryRequests = state.scenario === 'reload-zero-progress' ? 2 : 1;
+  const expectedCanaryRequests = ['reload-zero-progress', 'supersession'].includes(state.scenario)
+    ? 2
+    : 1;
   const canaryPath = exactCanaryGet
     && state.canaryRequests.length === expectedCanaryRequests
     && state.authorityRequests.length === 0;
@@ -363,7 +397,7 @@ const evaluate = () => {
   const exactCanaryTicketIdentity = !canaryScenarios.has(state.scenario)
     || (v2Ticket?.ticket_id === ids.authorization
       && v2Ticket?.run_id === `catalog-canary:${ids.authorization}`);
-  const expectedAllocationCount = ['replayed-canary', 'reload-zero-progress'].includes(state.scenario) ? 2 : 1;
+  const expectedAllocationCount = ['replayed-canary', 'reload-zero-progress', 'supersession'].includes(state.scenario) ? 2 : 1;
   const exactResponses = state.ticketResponses.length === state.ticketRequests.length
     && state.ticketResponses.every((ticket) => ticket.schema === 'run.ticket.v3'
       && ticket.catalog_entry_id === ids.entry
@@ -444,6 +478,47 @@ const evaluate = () => {
       record('assertions_passed', { scenario: state.scenario });
       return;
     }
+  } else if (state.scenario === 'supersession') {
+    const canaryAuthorizations = state.allocationRequests.map((item) => item.authorizationId);
+    const catalogTicketRequests = state.ticketRequests.filter((item) => item.schema === 'run.start.v2');
+    const replacementAllocation = state.allocationResponses.find(
+      (item) => item.allocationId === ids.replacementAuthorization,
+    );
+    const replacementTicket = state.ticketResponses.find(
+      (item) => item.ticket_id === ids.replacementAuthorization,
+    );
+    const replacementBundle = state.specResponses.find(
+      (item) => item.ticketId === ids.replacementAuthorization,
+    );
+    const terminalSurface = state.ticketConflicts.some((item) => (
+      item.ticketId === ids.authorization && item.code === 'catalog_ticket_superseded'
+    )) || state.supersessionResult?.code === 'catalog_ticket_superseded'
+      || state.trace.some((item) => (
+        item.type === 'checkpoint_stale_tab_cp_superseded'
+        && item.ticketId === ids.authorization
+      ));
+    const exactReplacement = state.supersessionActive
+      && canaryPath
+      && canaryAuthorizations[0] === ids.authorization
+      && canaryAuthorizations[1] === ids.replacementAuthorization
+      && replacementAllocation?.decisionId === ids.replacementDecision
+      && replacementAllocation?.allocationId === ids.replacementAuthorization
+      && catalogTicketRequests.some((item) => (
+        item.ticket_id === ids.replacementAuthorization
+        && item.decision_id === ids.replacementDecision
+      ))
+      && replacementTicket?.decision_id === ids.replacementDecision
+      && replacementBundle?.decisionId === ids.replacementDecision
+      && state.catalogBindingConflicts.length === 0;
+    if (exactReplacement && terminalSurface
+      && state.client.recoverySeen && state.client.currentFrame === 'builtin'
+      && !state.client.chestSeen && !state.client.rewardSeen
+      && chestResults.length === 0) {
+      state.status = 'pass';
+      state.message = 'replacement in the second tab terminally superseded the stale tab without chest or reward';
+      record('assertions_passed', { scenario: state.scenario });
+      return;
+    }
   } else if (state.scenario === 'recall') {
     const revoked = levelResults.length === 1 && levelResults[0].outcome === 'revoked';
     if (common && catalogImpressions.length === 1 && revoked
@@ -512,9 +587,18 @@ const evaluate = () => {
   }
 };
 
-const injectedBootstrap = (instanceToken, scenario) => `<script>
+const injectedBootstrap = (instanceToken, scenario, harnessTab = 'primary') => `<script>
 const harnessInstance=${JSON.stringify(instanceToken)};
 const harnessScenario=${JSON.stringify(scenario)};
+const harnessTab=${JSON.stringify(harnessTab)};
+const harnessFetch=window.fetch.bind(window);
+window.fetch=(input,init={})=>{
+  const target=new URL(typeof input==='string'||input instanceof URL?input:input.url,location.href);
+  if(target.origin!==location.origin)return harnessFetch(input,init);
+  const headers=new Headers(init.headers||(typeof input==='object'&&input?.headers)||undefined);
+  headers.set('x-dogfood-harness-tab',harnessTab);
+  return harnessFetch(input,{...init,headers});
+};
 const reportHarnessDiagnostic=(kind,args)=>fetch('/__harness/diagnostic?harness_instance='+encodeURIComponent(harnessInstance)+'&scenario='+encodeURIComponent(harnessScenario),{
   method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({harnessInstance,harnessScenario,kind,args:args.map(value=>value instanceof Error?{name:value.name,message:value.message,stack:value.stack}:String(value))})
 }).catch(()=>{});
@@ -569,7 +653,7 @@ addEventListener('DOMContentLoaded',()=>{
       setTimeout(()=>chest.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7})),650);
     }
     fetch('/__harness/client?harness_instance='+encodeURIComponent(harnessInstance)+'&scenario='+encodeURIComponent(harnessScenario),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      harnessInstance,harnessScenario,currentFrame,currentIframeCount,currentGameClasses,frameNavigated,frameVisibility,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,generatedBadgeVisible,
+      harnessInstance,harnessScenario,harnessTab,currentFrame,currentIframeCount,currentGameClasses,frameNavigated,frameVisibility,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,generatedBadgeVisible,
       preloaderVisible:Boolean(document.querySelector('.preloader:not(.preloader--hidden)'))
     })}).catch(()=>{});
   };
@@ -636,7 +720,7 @@ addEventListener('message',(event)=>{
   setTimeout(()=>{report('host_gesture_sent',{visibility:document.visibilityState});send({source:'playable',type:'host_gesture'})},${operatorLevelFlagsHarness ? 8000 : 900});
   setTimeout(()=>{report('manual_action_sent',{visibility:document.visibilityState});send({source:'playable',type:'manual_action',actionType:'fixture.sort',actionSeq:1,accepted:true,changedState:true})},${operatorLevelFlagsHarness ? 15000 : 1050});
   const outcome=${JSON.stringify(scenario === 'level-retry' && documentRequest === 2 ? 'lost' : 'won')};
-  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState,outcome,documentRequest:${documentRequest}});send({source:'playable',type:'completed',success:outcome==='won',outcome})},${operatorLevelFlagsHarness ? 20000 : 1350});
+  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState,outcome,documentRequest:${documentRequest}});send({source:'playable',type:'completed',success:outcome==='won',outcome})},${operatorLevelFlagsHarness ? 20000 : scenario === 'supersession' ? 7000 : 1350});
 });
 addEventListener('load',()=>{report('load',{visibility:document.visibilityState});send({type:'configure_ready',nonce:'a'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},skinContractDigest:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}})});
 </script></body></html>`;
@@ -676,6 +760,7 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     const instanceToken = url.searchParams.get('harness_instance');
     const scenario = url.searchParams.get('scenario');
     if (!activeInstance(instanceToken, scenario)) return ignoreStaleInstance(response);
+    const harnessTab = url.searchParams.get('harness_tab') || 'primary';
     const source = scenario === 'disabled' ? canaryDisabledBuildHtml : canaryBuildHtml;
     if (!source) return json(response, { code: 'harness_build_unavailable' }, 503);
     response.setHeader('content-type', 'text/html; charset=utf-8');
@@ -683,7 +768,7 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     // `window.Telegram` in a plain browser. Install the harness identity after
     // it, but still before the bundled module, so user-scoped durable queues do
     // not silently fall back to a shared anonymous localStorage key.
-    response.end(source.replace('</head>', `${injectedBootstrap(instanceToken, scenario)}</head>`));
+    response.end(source.replace('</head>', `${injectedBootstrap(instanceToken, scenario, harnessTab)}</head>`));
     return;
   }
   if (request.method === 'GET' && url.pathname === '/__harness/state') {
@@ -705,16 +790,21 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     }
     const { harnessInstance: _instance, harnessScenario: _scenario, ...snapshot } = report;
     if (state) {
-      if (state.authorityPending) {
-        state.pendingSamples += 1;
-        const iframeCount = Number(snapshot.currentIframeCount ?? -1);
-        const pass = snapshot.currentFrame === 'builtin' && iframeCount === 1
-          && snapshot.generatedBadgeVisible !== true;
-        if (!state.checkpoints.pendingSurface) {
-          state.checkpoints.pendingSurface = { iframeCount, currentFrame: snapshot.currentFrame, pass };
-          record('checkpoint_pending_iframe_count', state.checkpoints.pendingSurface);
+      const harnessTab = report.harnessTab || 'primary';
+      if (state.authorityPendingByTab[harnessTab] === true) {
+        const existingBuiltinMustRemain = state.authorityExpectedBuiltinByTab[harnessTab] === true;
+        if (snapshot.currentFrame !== 'none' || existingBuiltinMustRemain) {
+          state.pendingSamples += 1;
+          const iframeCount = Number(snapshot.currentIframeCount ?? -1);
+          const pass = snapshot.currentFrame === 'builtin' && iframeCount === 1
+            && snapshot.generatedBadgeVisible !== true;
+          if (!state.checkpoints.pendingSurface) {
+            state.checkpoints.pendingSurface = { iframeCount, currentFrame: snapshot.currentFrame, pass };
+            record('checkpoint_pending_iframe_count', state.checkpoints.pendingSurface);
+          }
+          if (pass) state.authorityExpectedBuiltinByTab[harnessTab] = true;
+          if (!pass) state.pendingViolation = true;
         }
-        if (!pass) state.pendingViolation = true;
       }
       const previous = state.client;
       const signature = JSON.stringify(snapshot);
@@ -723,6 +813,7 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
         record('client_surface', snapshot);
       }
       state.client = snapshot;
+      state.lastClientSurfaceByTab[harnessTab] = snapshot;
       if (snapshot.chestSeen && !previous.chestSeen && !state.checkpoints.chestAfterExactReceipts) {
         const receipts = state.checkpoints.levelReceipts.filter((checkpoint) => checkpoint.pass);
         const confirmedChestReceipts = state.results.filter((item) => item.kind === 'chest'
@@ -906,7 +997,9 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
       if (state && event.event_name === 'catalog_level_impression_v2' && !previousIds.has(event.event_id)) {
         const ordinal = event.payload?.ordinal;
         const ordinalCount = uniqueEvents('catalog_level_impression_v2')
-          .filter((candidate) => candidate.payload?.ordinal === ordinal).length;
+          .filter((candidate) => candidate.payload?.ordinal === ordinal
+            && (state.scenario !== 'supersession'
+              || candidate.payload?.ticket_id === event.payload?.ticket_id)).length;
         const checkpoint = {
           ordinal,
           impressionId: event.payload?.impression_id ?? null,
@@ -942,11 +1035,48 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
         };
         record('checkpoint_allocation_race_configured_impression_conflict', state.checkpoints.replayConflict);
       }
+      let rejectReason = replayConflict ? 'catalog_level_impression_conflict' : null;
+      const attemptStart = event.payload?.run_id
+        ? uniqueEvents('attempt_start').find(
+          (candidate) => candidate.payload?.run_id === event.payload.run_id,
+        )
+        : null;
+      const boundTicketId = event.payload?.ticket_id ?? attemptStart?.payload?.ticket_id ?? null;
+      if (state?.scenario === 'supersession'
+        && event.event_name === 'catalog_level_impression_v2') {
+        const binding = catalogBindingForAuthorization(event.payload?.ticket_id);
+        if (!binding || !catalogBindingAllowed(state.scenario, event.payload?.ticket_id)
+          || event.payload?.decision_id !== binding.decisionId) {
+          rejectReason = 'catalog_level_impression_binding_mismatch';
+          state.catalogBindingConflicts.push({
+            surface: 'control_plane',
+            ticketId: event.payload?.ticket_id ?? null,
+            decisionId: event.payload?.decision_id ?? null,
+          });
+        } else if (state.supersessionActive && event.payload.ticket_id === ids.authorization) {
+          rejectReason = 'ticket_superseded';
+          record('checkpoint_stale_tab_cp_superseded', {
+            ticketId: event.payload.ticket_id,
+            decisionId: event.payload.decision_id,
+            eventId: event.event_id,
+          });
+        }
+      }
+      if (state?.scenario === 'supersession' && state.supersessionActive
+        && boundTicketId === ids.authorization) {
+        rejectReason = 'ticket_superseded';
+        record('stale_tab_server_surface', {
+          surface: `cp:${event.event_name}`,
+          ticketId: boundTicketId,
+          terminal: true,
+          code: rejectReason,
+        });
+      }
       return {
         event_id: event.event_id,
         item_index,
-        status: replayConflict ? 'rejected' : 'projected',
-        reject_reason: replayConflict ? 'catalog_level_impression_conflict' : null,
+        status: rejectReason ? 'rejected' : 'projected',
+        reject_reason: rejectReason,
       };
     });
     const delayedOrdinalTwoAck = state?.scenario === 'event-order'
@@ -998,6 +1128,7 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     });
   }
   if (request.method === 'GET' && url.pathname === '/api/catalog/canary-authority') {
+    const harnessTab = request.headers['x-dogfood-harness-tab'] || 'primary';
     const requestEvidence = {
       method: request.method,
       path: url.pathname,
@@ -1005,10 +1136,20 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
       contentLength: request.headers['content-length'] ?? null,
     };
     state?.canaryRequests.push(requestEvidence);
-    if (state) state.authorityPending = true;
+    if (state) {
+      const previousSurface = state.lastClientSurfaceByTab[harnessTab];
+      state.authorityPending = true;
+      state.authorityPendingByTab[harnessTab] = true;
+      state.authorityExpectedBuiltinByTab[harnessTab] = previousSurface?.currentFrame === 'builtin'
+        && previousSurface?.currentIframeCount === 1;
+    }
     record('canary_authority_pending', requestEvidence);
     await new Promise((resolve) => setTimeout(resolve, 650));
-    if (state) state.authorityPending = false;
+    if (state) {
+      state.authorityPendingByTab[harnessTab] = false;
+      delete state.authorityExpectedBuiltinByTab[harnessTab];
+      state.authorityPending = Object.values(state.authorityPendingByTab).some(Boolean);
+    }
     if (state?.scenario === 'no-invite') {
       record('canary_authority_missing');
       return json(response, { code: 'catalog_canary_invitation_not_found' }, 404);
@@ -1020,11 +1161,20 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
       }
       return json(response, { code: 'catalog_canary_not_available' }, 404);
     }
-    record('canary_authority', { authorizationId: ids.authorization });
+    const replacement = state?.scenario === 'supersession' && state.canaryRequests.length >= 2;
+    const authorizationId = replacement ? ids.replacementAuthorization : ids.authorization;
+    if (replacement && state) {
+      state.supersessionActive = true;
+      record('replacement_invitation_committed', {
+        supersededAuthorizationId: ids.authorization,
+        replacementAuthorizationId: authorizationId,
+      });
+    }
+    record('canary_authority', { authorizationId });
     return json(response, {
       schema: 'catalog.canary-authority-result.v1',
-      authorizationId: ids.authorization,
-      authorizationDigest: '8'.repeat(64),
+      authorizationId,
+      authorizationDigest: replacement ? '7'.repeat(64) : '8'.repeat(64),
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
       // replay-conflict models two tabs which both observed fresh authority;
       // only the allocation/closure reveals that one tab committed first.
@@ -1034,11 +1184,22 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
   }
   if (request.method === 'POST' && url.pathname === '/api/feed/catalog-authority') {
     const body = await bodyOf(request);
+    const harnessTab = request.headers['x-dogfood-harness-tab'] || 'primary';
     state?.authorityRequests.push(body);
-    if (state) state.authorityPending = true;
+    if (state) {
+      const previousSurface = state.lastClientSurfaceByTab[harnessTab];
+      state.authorityPending = true;
+      state.authorityPendingByTab[harnessTab] = true;
+      state.authorityExpectedBuiltinByTab[harnessTab] = previousSurface?.currentFrame === 'builtin'
+        && previousSurface?.currentIframeCount === 1;
+    }
     record('authority_pending', { sourceDecisionId: body.sourceDecisionId });
     await new Promise((resolve) => setTimeout(resolve, 650));
-    if (state) state.authorityPending = false;
+    if (state) {
+      state.authorityPendingByTab[harnessTab] = false;
+      delete state.authorityExpectedBuiltinByTab[harnessTab];
+      state.authorityPending = Object.values(state.authorityPendingByTab).some(Boolean);
+    }
     if (state?.scenario === 'no-invite') {
       record('authority_builtin_fallback');
       return json(response, {
@@ -1073,17 +1234,57 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
   if (request.method === 'POST' && url.pathname === '/api/catalog/allocate-authorized') {
     const body = await bodyOf(request);
     state?.allocationRequests.push(body);
-    record('allocated', { authorizationId: body.authorizationId });
-    const exactAllocation = allocationForScenario(state?.scenario ?? 'disabled');
+    const binding = catalogBindingForAuthorization(body.authorizationId);
+    if (!binding || !catalogBindingAllowed(state?.scenario ?? '', body.authorizationId)) {
+      state?.catalogBindingConflicts.push({
+        surface: 'allocation',
+        authorizationId: body.authorizationId ?? null,
+      });
+      return json(response, { code: 'catalog_authorization_binding_mismatch' }, 409);
+    }
+    if (state?.scenario === 'supersession' && state.supersessionActive
+      && binding.authorizationId === ids.authorization) {
+      return json(response, { code: 'catalog_ticket_superseded' }, 409);
+    }
+    record('allocated', { authorizationId: binding.authorizationId });
+    const exactAllocation = allocationForScenario(
+      state?.scenario ?? 'disabled',
+      binding.authorizationId,
+    );
     state?.allocationResponses.push(exactAllocation);
     return json(response, {
       schema: 'catalog.allocate-authorized-result.v2',
-      authorizationId: ids.authorization, authorizationDigest: '8'.repeat(64), allocation: exactAllocation,
+      authorizationId: binding.authorizationId,
+      authorizationDigest: binding.digest,
+      allocation: exactAllocation,
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/runs/start') {
     const body = await bodyOf(request);
     state?.ticketRequests.push(body);
+    if (state?.scenario === 'supersession' && body.schema === 'run.start.v2') {
+      const binding = catalogBindingForAuthorization(body.ticket_id);
+      if (!binding || !catalogBindingAllowed(state?.scenario ?? '', body.ticket_id)
+        || body.decision_id !== binding.decisionId
+        || body.run_id !== `catalog-canary:${binding.authorizationId}`) {
+        state?.catalogBindingConflicts.push({
+          surface: 'run_start',
+          ticketId: body.ticket_id ?? null,
+          decisionId: body.decision_id ?? null,
+        });
+        return json(response, { detail: { code: 'catalog_ticket_binding_mismatch' } }, 409);
+      }
+    }
+    if (state?.scenario === 'supersession' && state.supersessionActive
+      && body.ticket_id === ids.authorization) {
+      const conflict = { ticketId: body.ticket_id, code: 'catalog_ticket_superseded' };
+      state.ticketConflicts.push(conflict);
+      record('stale_tab_server_surface', {
+        surface: 'run_start', ticketId: body.ticket_id, terminal: true, code: conflict.code,
+      });
+      record('checkpoint_stale_tab_ticket_start_superseded', conflict);
+      return json(response, { detail: conflict }, 409);
+    }
     record('ticket', { ticketId: body.ticket_id, runId: body.run_id });
     const ticket = ticketView(body);
     state?.ticketResponses.push(ticket);
@@ -1091,15 +1292,53 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
   }
   const specsMatch = url.pathname.match(/^\/api\/catalog\/tickets\/([^/]+)\/specs$/);
   if (request.method === 'GET' && specsMatch) {
+    const ticketId = specsMatch[1];
+    if (state?.scenario === 'supersession') {
+      const binding = catalogBindingForAuthorization(ticketId);
+      if (!binding || !catalogBindingAllowed(state.scenario, ticketId)) {
+        state.catalogBindingConflicts.push({ surface: 'specs', ticketId });
+        return json(response, { code: 'catalog_ticket_binding_mismatch' }, 409);
+      }
+      if (state.supersessionActive && ticketId === ids.authorization) {
+        return json(response, { code: 'catalog_ticket_superseded' }, 410);
+      }
+    }
     if (state) state.specRequests += 1;
-    record('spec_bundle', { ticketId: specsMatch[1] });
-    const exactBundle = bundle(specsMatch[1]);
+    record('spec_bundle', { ticketId });
+    const exactBundle = bundle(ticketId);
     state?.specResponses.push(exactBundle);
     return json(response, exactBundle);
   }
   if (request.method === 'POST' && url.pathname === '/api/results') {
     const body = await bodyOf(request);
     const kind = body.metric_key === 'series' ? 'chest' : 'level';
+    if (state?.scenario === 'supersession' && state.supersessionActive
+      && body.ticket_id === ids.authorization) {
+      const rejected = { kind, outcome: 'superseded', status: 409, body };
+      state.resultAttempts.push(rejected);
+      state.results.push(rejected);
+      state.supersessionResult = {
+        ticketId: body.ticket_id,
+        replacementAuthorizationId: ids.replacementAuthorization,
+        code: 'catalog_ticket_superseded',
+      };
+      record('stale_tab_server_surface', {
+        surface: 'result', ticketId: body.ticket_id, terminal: true,
+        code: state.supersessionResult.code,
+      });
+      record('checkpoint_stale_tab_ticket_superseded', state.supersessionResult);
+      return json(response, { code: 'catalog_ticket_superseded' }, 409);
+    }
+    if (state?.scenario === 'supersession' && body.schema === 'catalog.result.v2') {
+      const binding = catalogBindingForAuthorization(body.ticket_id);
+      if (!binding || !catalogBindingAllowed(state?.scenario ?? '', body.ticket_id)) {
+        state?.catalogBindingConflicts.push({
+          surface: 'result',
+          ticketId: body.ticket_id ?? null,
+        });
+        return json(response, { code: 'catalog_ticket_binding_mismatch' }, 409);
+      }
+    }
     if (state?.scenario === 'event-order' && kind === 'level' && body.ordinal === 2
       && state.eventOrderAckPending) {
       state.eventOrderResultBeforeAck = true;
@@ -1273,6 +1512,7 @@ console.log(JSON.stringify({
   timeoutResultUrl: `${origin}/harness.html?scenario=result-timeout`,
   recallUrl: `${origin}/harness.html?scenario=recall`,
   replayConflictUrl: `${origin}/harness.html?scenario=replay-conflict`,
+  supersessionUrl: `${origin}/harness.html?scenario=supersession`,
   noInviteUrl: `${origin}/harness.html?scenario=no-invite`,
   replayedCanaryUrl: `${origin}/harness.html?scenario=replayed-canary`,
   wrongAccountUrl: `${origin}/harness.html?scenario=wrong-account`,
