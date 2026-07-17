@@ -111,8 +111,15 @@ try {
   await enabled.locator('.game__operator-flag-open').click();
   await enabled.locator('select[name="intent"]').selectOption('delete_candidate');
   await enabled.locator('textarea[name="comment"]').fill('Слишком похож на прошлый уровень');
+  assert.deepEqual(await enabled.evaluate(() => window.control.captureDraft()), {
+    intent: 'delete_candidate',
+    comment: 'Слишком похож на прошлый уровень',
+    opened: true,
+  });
   await enabled.locator('button[type="submit"]').click();
   await enabled.locator('.game__operator-flag-status').filter({ hasText: 'временно недоступен' }).waitFor();
+  assert.equal(await enabled.evaluate(() => window.control.captureDraft()), null,
+    'a constructed immutable retry request must not become a mutable remount draft');
   await enabled.locator('button[type="submit"]').click();
   await enabled.locator('.game__operator-flag-status').filter({ hasText: 'Пометка сохранена' }).waitFor();
   assert.equal(requests.length, 2);

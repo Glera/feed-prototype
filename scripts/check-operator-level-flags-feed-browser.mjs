@@ -59,6 +59,85 @@ const waitForState = (page, predicateSource, arg = null, timeout = 20_000) => pa
 
 const browser = await chromium.launch();
 try {
+  const draftPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await draftPage.goto(endpoints.successUrl, { waitUntil: 'domcontentloaded' });
+  await draftPage.locator('.panel').evaluate((element) => { element.style.pointerEvents = 'none'; });
+  const draftFeed = draftPage.frameLocator('iframe[data-testid="feed"]');
+  const draftPreview = draftFeed.locator(
+    '.page--in-viewport .game__operator-flag[data-flag-surface="preview"]',
+  );
+  await draftPreview.waitFor({ state: 'visible', timeout: 20_000 });
+  await draftPage.evaluate(async () => {
+    const response = await fetch('/__harness/operator-cp-release?kind=attempt', { method: 'POST' });
+    if (!response.ok) throw new Error('failed to release operator attempt CP fixture');
+  });
+  await draftPreview.locator('.game__operator-flag-open').click();
+  await draftPreview.locator('select[name="intent"]').selectOption('delete_candidate');
+  await draftPreview.locator('textarea[name="comment"]')
+    .fill('Черновик должен пережить подтверждение ручной попытки');
+
+  await draftFeed.locator('[data-bar-tab="collections"]').click();
+  await draftFeed.locator('.collections-view').waitFor({ state: 'visible' });
+  assert.equal(await draftFeed.locator('.game__operator-flag').count(), 0,
+    'a temporary null occurrence must remove the operator DOM surface');
+  await draftFeed.locator('[data-bar-tab="feed"]').click();
+  await draftPreview.waitFor({ state: 'visible' });
+  assert.equal(await draftPreview.locator('.game__operator-flag-form').getAttribute('hidden'), null,
+    'same subject after a null occurrence closed the open draft form');
+  assert.equal(await draftPreview.locator('select[name="intent"]').inputValue(), 'delete_candidate');
+  assert.equal(
+    await draftPreview.locator('textarea[name="comment"]').inputValue(),
+    'Черновик должен пережить подтверждение ручной попытки',
+    'same subject after a null occurrence discarded typed text',
+  );
+
+  const remountedActive = draftFeed.locator(
+    '.page--in-viewport .game__operator-flag[data-flag-surface="active_level"]',
+  );
+  await remountedActive.waitFor({ state: 'visible', timeout: 20_000 });
+  assert.equal(await remountedActive.locator('.game__operator-flag-form').getAttribute('hidden'), null,
+    'same-subject preview→active remount closed the open draft form');
+  assert.equal(await remountedActive.locator('select[name="intent"]').inputValue(), 'delete_candidate');
+  assert.equal(
+    await remountedActive.locator('textarea[name="comment"]').inputValue(),
+    'Черновик должен пережить подтверждение ручной попытки',
+    'same-subject preview→active remount discarded typed text',
+  );
+  await waitForState(draftPage, `(state) => state.operatorAttemptCpTransportAttempts >= 1`);
+  await waitForState(draftPage, `(state) => state.operatorAttemptCpAckPending === false
+    && state.cpEvents.some((event) => event.event_name === 'attempt_start')`);
+  assert.equal(
+    await remountedActive.locator('textarea[name="comment"]').inputValue(),
+    'Черновик должен пережить подтверждение ручной попытки',
+    'delayed attempt receipt discarded the same-subject draft',
+  );
+
+  const catalogRuntime = draftPage.frames().find(
+    (frame) => frame.parentFrame()?.parentFrame() === draftPage.mainFrame()
+      && frame.url().includes('/runtime-releases/'),
+  );
+  assert.ok(catalogRuntime, 'configured catalog runtime frame was not found');
+  await catalogRuntime.evaluate(() => {
+    parent.postMessage({ source: 'playable', type: 'completed', success: true, outcome: 'won' }, location.origin);
+  });
+  await waitForState(
+    draftPage,
+    `(state) => state.checkpoints.configuredImpressions.length >= 2`,
+    null,
+    15_000,
+  );
+  const nextSubject = draftFeed.locator('.page--in-viewport .game__operator-flag');
+  await nextSubject.waitFor({ state: 'visible', timeout: 10_000 });
+  assert.equal(await nextSubject.locator('select[name="intent"]').inputValue(), 'edit_candidate',
+    'a different generated subject inherited the previous intent');
+  assert.equal(await nextSubject.locator('textarea[name="comment"]').inputValue(), '',
+    'a different generated subject inherited the previous comment');
+  assert.notEqual(await nextSubject.locator('.game__operator-flag-form').getAttribute('hidden'), null,
+    'a different generated subject inherited the open form state');
+  assert.equal((await stateOf(draftPage)).operatorFlagRequests.length, 0,
+    'draft preservation created a request without explicit submit');
+  await draftPage.close();
+
   const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await page.goto(endpoints.successUrl, { waitUntil: 'domcontentloaded' });
   await page.locator('.panel').evaluate((element) => { element.style.pointerEvents = 'none'; });

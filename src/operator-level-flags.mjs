@@ -97,6 +97,17 @@ export function operatorLevelFlagOccurrenceKey(value) {
   return JSON.stringify(occurrence);
 }
 
+export function operatorLevelFlagSubjectKey(value) {
+  const occurrence = validateOperatorLevelFlagOccurrence(value);
+  return JSON.stringify([
+    occurrence.catalogEntryId,
+    occurrence.seriesId,
+    occurrence.ordinal,
+    occurrence.levelSpecHash,
+    occurrence.skinHash,
+  ]);
+}
+
 export function buildOperatorLevelFlagRequest({ mutationId, intent, comment, occurrence }) {
   uuid(mutationId, 'mutationId');
   if (!INTENTS.has(intent)) fail('invalid_intent', 'intent is unsupported');
@@ -199,6 +210,19 @@ export function mountOperatorLevelFlagControl(host, options) {
   let inFlight = false;
   let destroyed = false;
 
+  const initialDraft = options?.initialDraft;
+  if (initialDraft !== undefined && initialDraft !== null) {
+    if (!exactKeys(initialDraft, ['intent', 'comment', 'opened'])
+      || !INTENTS.has(initialDraft.intent) || typeof initialDraft.comment !== 'string'
+      || typeof initialDraft.opened !== 'boolean') {
+      fail('invalid_options', 'initialDraft has an unsupported shape');
+    }
+    intent.value = initialDraft.intent;
+    comment.value = initialDraft.comment;
+    form.hidden = !initialDraft.opened;
+    open.hidden = initialDraft.opened;
+  }
+
   const invalidatePending = () => {
     if (inFlight) return;
     pending = null;
@@ -257,6 +281,17 @@ export function mountOperatorLevelFlagControl(host, options) {
 
   return Object.freeze({
     occurrenceKey: operatorLevelFlagOccurrenceKey(occurrence),
+    subjectKey: operatorLevelFlagSubjectKey(occurrence),
+    captureDraft() {
+      // Submit freezes mutation id + occurrence in `pending`. Never turn that
+      // immutable request back into an editable draft for a newer occurrence.
+      if (destroyed || inFlight || pending) return null;
+      return Object.freeze({
+        intent: intent.value,
+        comment: comment.value,
+        opened: !form.hidden,
+      });
+    },
     destroy() {
       destroyed = true;
       root.remove();
