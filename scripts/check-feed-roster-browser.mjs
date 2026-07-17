@@ -2,18 +2,29 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const canonicalFixturePath = path.resolve(
+// Localized copy of the backend-owned golden so this check is self-contained in CI;
+// drift vs the sibling backend is guarded below.
+const canonicalFixturePath = path.resolve(root, 'test-fixtures/feed-roster-session-v1.golden.json');
+const backendFixturePath = path.resolve(
   root,
   '../swipe-backend/docs/specs/fixtures/feed-roster-session-v1.golden.json',
 );
-const fixture = JSON.parse(readFileSync(canonicalFixturePath, 'utf8'));
+const fixtureBytes = readFileSync(canonicalFixturePath);
+if (existsSync(backendFixturePath)) {
+  assert.ok(
+    readFileSync(backendFixturePath).equals(fixtureBytes),
+    'local test-fixtures/feed-roster-session-v1.golden.json drifted from ../swipe-backend'
+      + ` — refresh it: cp "${backendFixturePath}" "${canonicalFixturePath}"`,
+  );
+}
+const fixture = JSON.parse(fixtureBytes.toString('utf8'));
 const initialRoster = fixture.sessionProjection;
 const reversedEntries = [...initialRoster.entries].reverse();
 const reversedIdentityJcs = JSON.stringify({

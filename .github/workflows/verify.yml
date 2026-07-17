@@ -1,0 +1,50 @@
+name: verify
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feed-prototype-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: lint + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # Self-contained: the one backend-owned golden is vendored under
+      # test-fixtures/feed-roster-session-v1.golden.json (drift vs the private
+      # swipe-backend sibling is guarded in check-feed-roster*.mjs and skipped
+      # when it is absent), so no cross-repo checkout is required.
+      - name: Checkout feed-prototype
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      # lint runs tsc --noEmit plus 20 check scripts; 7 launch chromium via
+      # playwright (pinned to the exact version in package-lock.json).
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Lint (tsc --noEmit + contract check scripts)
+        run: npm run lint
+
+      - name: Build (tsc + vite build)
+        run: npm run build

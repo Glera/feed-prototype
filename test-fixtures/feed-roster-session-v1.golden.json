@@ -1,0 +1,50 @@
+{
+  "fixtureSchema": "feed.roster-session-v1.golden",
+  "identityInput": {
+    "schema": "feed.roster-config.v1",
+    "entries": [
+      {
+        "builtinMappingId": "11111111-1111-4111-8111-111111111111"
+      },
+      {
+        "builtinMappingId": "22222222-2222-4222-8222-222222222222"
+      },
+      {
+        "builtinMappingId": "33333333-3333-4333-8333-333333333333"
+      }
+    ]
+  },
+  "expectedIdentityJcs": "{\"entries\":[{\"builtinMappingId\":\"11111111-1111-4111-8111-111111111111\"},{\"builtinMappingId\":\"22222222-2222-4222-8222-222222222222\"},{\"builtinMappingId\":\"33333333-3333-4333-8333-333333333333\"}],\"schema\":\"feed.roster-config.v1\"}",
+  "expectedRosterHash": "7f887df956347dc95b68af61b46320319391a082b15476220f8ea0ebbd0ff62f",
+  "sessionProjection": {
+    "schema": "feed.roster-config.v1",
+    "activationId": "44444444-4444-4444-8444-444444444444",
+    "rosterHash": "7f887df956347dc95b68af61b46320319391a082b15476220f8ea0ebbd0ff62f",
+    "entries": [
+      {
+        "builtinMappingId": "11111111-1111-4111-8111-111111111111",
+        "playableId": "marble-sort-swipe",
+        "variantId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "catalogMechanic": "sort",
+        "mappingDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "mappingState": "active"
+      },
+      {
+        "builtinMappingId": "22222222-2222-4222-8222-222222222222",
+        "playableId": "merge-locked-v1-swipe",
+        "variantId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "catalogMechanic": "merge",
+        "mappingDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "mappingState": "active"
+      },
+      {
+        "builtinMappingId": "33333333-3333-4333-8333-333333333333",
+        "playableId": "pins-swipe",
+        "variantId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "catalogMechanic": "pins",
+        "mappingDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+        "mappingState": "active"
+      }
+    ]
+  }
+}

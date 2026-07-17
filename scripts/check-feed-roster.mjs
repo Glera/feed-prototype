@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, webcrypto } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,20 +17,33 @@ import {
 } from '../src/feed-roster.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const fixturePath = path.resolve(
+// Localized copy of the backend-owned golden so this check is self-contained in CI
+// (the private swipe-backend repo is not checked out). Drift vs the sibling is
+// guarded below.
+const fixturePath = path.resolve(root, 'test-fixtures/feed-roster-session-v1.golden.json');
+const backendFixturePath = path.resolve(
   root,
   '../swipe-backend/docs/specs/fixtures/feed-roster-session-v1.golden.json',
 );
 const EXPECTED_FIXTURE_FILE_SHA256 = '03d64c156d706d98d88d4c103b5a940fc5313f310a84a80289a64c2052454272';
 let fixtureBytes;
 try { fixtureBytes = readFileSync(fixturePath); } catch (error) {
-  throw new Error(`canonical backend roster fixture is required at ${fixturePath}: ${error.message}`);
+  throw new Error(`canonical roster fixture is required at ${fixturePath}: ${error.message}`);
 }
 assert.equal(
   createHash('sha256').update(fixtureBytes).digest('hex'),
   EXPECTED_FIXTURE_FILE_SHA256,
   'canonical roster fixture changed without a reviewed schema/version update',
 );
+// Drift guard: when the private backend is checked out as a sibling, the local
+// copy must match it byte-for-byte; in CI (no sibling) this is skipped.
+if (existsSync(backendFixturePath)) {
+  assert.ok(
+    readFileSync(backendFixturePath).equals(fixtureBytes),
+    'local test-fixtures/feed-roster-session-v1.golden.json drifted from ../swipe-backend'
+      + ` — refresh it: cp "${backendFixturePath}" "${fixturePath}"`,
+  );
+}
 const fixture = JSON.parse(fixtureBytes.toString('utf8'));
 const golden = fixture.sessionProjection;
 
