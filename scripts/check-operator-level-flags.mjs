@@ -4,6 +4,7 @@ import {
   OperatorLevelFlagContractError,
   buildOperatorLevelFlagRequest,
   operatorLevelFlagOccurrenceKey,
+  operatorLevelFlagSubjectKey,
   operatorLevelFlagErrorMessage,
   operatorLevelFlaggingAvailable,
   validateOperatorLevelFlagResponse,
@@ -40,6 +41,22 @@ assert.equal(
     attemptEventId: occurrence.attemptEventId,
   }),
   'occurrence identity must not depend on caller object key order',
+);
+assert.equal(
+  operatorLevelFlagSubjectKey(occurrence),
+  operatorLevelFlagSubjectKey({
+    ...occurrence,
+    flagSurface: 'preview',
+    levelImpressionId: null,
+    runId: null,
+    attemptEventId: null,
+  }),
+  'preview and active evidence for one exact catalog subject must share draft identity',
+);
+assert.notEqual(
+  operatorLevelFlagSubjectKey(occurrence),
+  operatorLevelFlagSubjectKey({ ...occurrence, ordinal: 3 }),
+  'a different manifest ordinal must not inherit another subject draft',
 );
 const request = buildOperatorLevelFlagRequest({
   mutationId: '10000000-0000-4000-8000-000000000007',
