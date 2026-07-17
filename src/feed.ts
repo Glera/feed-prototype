@@ -123,8 +123,10 @@ import {
   mountOperatorLevelFlagControl,
   operatorLevelFlaggingAvailable,
   operatorLevelFlagOccurrenceKey,
+  operatorLevelFlagSubjectKey,
   validateOperatorLevelFlagResponse,
   type OperatorLevelFlagControl,
+  type OperatorLevelFlagDraft,
   type OperatorLevelFlagOccurrence,
   type OperatorLevelFlagRequestV1,
 } from './operator-level-flags.mjs';
@@ -591,6 +593,10 @@ export class Feed {
   private catalogLabNavEl: HTMLButtonElement | null = null;
   private operatorLevelFlaggingAvailable = false;
   private operatorLevelFlagControl: OperatorLevelFlagControl | null = null;
+  private operatorLevelFlagDraft: Readonly<{
+    subjectKey: string;
+    draft: Readonly<OperatorLevelFlagDraft>;
+  }> | null = null;
   private backendVersion: string | null = null;
   private sessionSyncPromise: Promise<boolean> | null = null;
   private earnedThisCycle = new Set<number>();
@@ -2299,16 +2305,33 @@ export class Feed {
     const occurrence = this.currentOperatorLevelFlagOccurrence();
     const key = occurrence ? operatorLevelFlagOccurrenceKey(occurrence) : null;
     if (this.operatorLevelFlagControl?.occurrenceKey === key) return;
+    const subjectKey = occurrence ? operatorLevelFlagSubjectKey(occurrence) : null;
+    if (this.operatorLevelFlagControl) {
+      const captured = this.operatorLevelFlagControl.captureDraft();
+      this.operatorLevelFlagDraft = captured
+        ? Object.freeze({ subjectKey: this.operatorLevelFlagControl.subjectKey, draft: captured })
+        : null;
+    }
     this.operatorLevelFlagControl?.destroy();
     this.operatorLevelFlagControl = null;
-    if (!occurrence) return;
+    if (!occurrence) {
+      // Visibility/overlay transitions may temporarily remove the occurrence
+      // while the exact catalog subject stays current. Capability revocation is
+      // different: it must erase both the DOM surface and any retained draft.
+      if (!this.operatorLevelFlaggingAvailable) this.operatorLevelFlagDraft = null;
+      return;
+    }
+    if (this.operatorLevelFlagDraft?.subjectKey !== subjectKey) this.operatorLevelFlagDraft = null;
     const host = this.games[this.realIndex()];
     if (!host) return;
+    const draft = this.operatorLevelFlagDraft?.draft ?? null;
     this.operatorLevelFlagControl = mountOperatorLevelFlagControl(host, {
       occurrence,
+      initialDraft: draft,
       createMutationId: ticketUid,
       submit: (request) => this.submitOperatorLevelFlag(request, occurrence),
     });
+    this.operatorLevelFlagDraft = null;
   }
 
   private requireProjectedOperatorFlagEvent(eventId: string | null): void {

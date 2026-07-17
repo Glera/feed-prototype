@@ -47,6 +47,7 @@ export class OperatorLevelFlagContractError extends Error { readonly code: strin
 export function operatorLevelFlaggingAvailable(value: unknown): boolean;
 export function validateOperatorLevelFlagOccurrence(value: unknown): Readonly<OperatorLevelFlagOccurrence>;
 export function operatorLevelFlagOccurrenceKey(value: unknown): string;
+export function operatorLevelFlagSubjectKey(value: unknown): string;
 export function buildOperatorLevelFlagRequest(input: {
   mutationId: string;
   intent: OperatorLevelFlagIntent;
@@ -58,9 +59,20 @@ export function validateOperatorLevelFlagResponse(
   request: OperatorLevelFlagRequestV1,
 ): Readonly<OperatorLevelFlagResponseV1>;
 export function operatorLevelFlagErrorMessage(error: unknown): string;
-export interface OperatorLevelFlagControl { readonly occurrenceKey: string; destroy(): void; }
+export interface OperatorLevelFlagDraft {
+  readonly intent: OperatorLevelFlagIntent;
+  readonly comment: string;
+  readonly opened: boolean;
+}
+export interface OperatorLevelFlagControl {
+  readonly occurrenceKey: string;
+  readonly subjectKey: string;
+  captureDraft(): Readonly<OperatorLevelFlagDraft> | null;
+  destroy(): void;
+}
 export function mountOperatorLevelFlagControl(host: HTMLElement, options: {
   occurrence: OperatorLevelFlagOccurrence;
+  initialDraft?: OperatorLevelFlagDraft | null;
   createMutationId(): string;
   submit(request: OperatorLevelFlagRequestV1): Promise<unknown>;
 }): OperatorLevelFlagControl;
