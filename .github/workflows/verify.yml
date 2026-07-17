@@ -19,14 +19,27 @@ jobs:
     name: lint + build
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: feed-prototype
     steps:
-      # Self-contained: the one backend-owned golden is vendored under
-      # test-fixtures/feed-roster-session-v1.golden.json (drift vs the private
-      # swipe-backend sibling is guarded in check-feed-roster*.mjs and skipped
-      # when it is absent), so no cross-repo checkout is required.
+      # vite.config.ts imports ../swipe-ugc/recipes/sort/recipe.mjs, so the
+      # public sibling is checked out next to the repo at an exact ref — the
+      # same sha pinned by swipe-generator CI (the worker-surface contract sha).
+      # The one backend-owned golden is vendored under test-fixtures/ (drift vs
+      # the private swipe-backend sibling is guarded and skipped when absent).
       - name: Checkout feed-prototype
         uses: actions/checkout@v4
         with:
+          path: feed-prototype
+          persist-credentials: false
+
+      - name: Checkout pinned public swipe-ugc sibling
+        uses: actions/checkout@v4
+        with:
+          repository: Glera/swipe-ugc
+          ref: 65f1d52bca68afc976b0ea9e0a4d0a1e7685016b
+          path: swipe-ugc
           persist-credentials: false
 
       - name: Set up Node 22
@@ -34,6 +47,7 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+          cache-dependency-path: feed-prototype/package-lock.json
 
       - name: Install exact dependencies
         run: npm ci
