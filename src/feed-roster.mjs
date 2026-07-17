@@ -1,6 +1,11 @@
 const ROSTER_SCHEMA = 'feed.roster-config.v1';
 const SNAPSHOT_KEY = 'swipe_feed_roster_next_session_v1';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// Variant ids are deterministic digest-derived identifiers, not RFC-versioned
+// UUIDs (production example: 87ad934c-8d95-d598-dfc7-d60c61034667). The backend
+// accepts any hex UUID shape for them; requiring version/variant bits here
+// would reject the first live /session roster.
+const HEX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const PLAYABLE_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,94}[a-z0-9])?$/;
 
@@ -49,6 +54,13 @@ function canonicalUuid(value, label) {
   return value;
 }
 
+function hexUuid(value, label) {
+  if (typeof value !== 'string' || !HEX_UUID_RE.test(value)) {
+    fail('invalid_uuid', `${label} must be a lowercase hex UUID shape`);
+  }
+  return value;
+}
+
 function canonicalHash(value, label) {
   if (typeof value !== 'string' || !HASH_RE.test(value)) {
     fail('invalid_hash', `${label} must be a lowercase SHA-256 hash`);
@@ -82,7 +94,7 @@ export function parseFeedRosterSessionV1(value) {
       'mappingState',
     ])) fail('invalid_entry', `${label} contains missing or unknown fields`);
     canonicalUuid(entry.builtinMappingId, `${label}.builtinMappingId`);
-    canonicalUuid(entry.variantId, `${label}.variantId`);
+    hexUuid(entry.variantId, `${label}.variantId`);
     canonicalHash(entry.mappingDigest, `${label}.mappingDigest`);
     if (mappingIds.has(entry.builtinMappingId)) {
       fail('duplicate_mapping', `${label}.builtinMappingId must be unique`);

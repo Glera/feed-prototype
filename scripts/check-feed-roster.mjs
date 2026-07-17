@@ -64,6 +64,38 @@ await assert.rejects(
   /does not match/,
 );
 
+// Production variant ids are digest-derived hex UUIDs without RFC version and
+// variant bits (real feed_mechanic_mappings.source_variant_id shape). The
+// roster identity hashes only builtinMappingId, so this derivation still
+// verifies against the golden rosterHash without touching the fixture bytes.
+const productionVariantId = '87ad934c-8d95-d598-dfc7-d60c61034667';
+const digestVariantProjection = {
+  ...golden,
+  entries: golden.entries.map((entry) => ({ ...entry, variantId: productionVariantId })),
+};
+assert.deepEqual(parseFeedRosterSessionV1(digestVariantProjection), digestVariantProjection);
+assert.equal(
+  (await verifyFeedRosterSessionV1(digestVariantProjection, webcrypto)).rosterHash,
+  fixture.expectedRosterHash,
+);
+assert.throws(
+  () => parseFeedRosterSessionV1({
+    ...golden,
+    entries: golden.entries.map((entry) => ({ ...entry, variantId: 'not-a-uuid' })),
+  }),
+  /variantId must be a lowercase hex UUID shape/,
+);
+assert.throws(
+  () => parseFeedRosterSessionV1({
+    ...golden,
+    entries: golden.entries.map((entry, index) => index === 0
+      ? { ...entry, builtinMappingId: productionVariantId }
+      : entry),
+  }),
+  /builtinMappingId must be a canonical lowercase UUID/,
+  'only variantId is relaxed — mapping ids still require RFC version/variant bits',
+);
+
 const baked = [
   { id: 'baked-one' }, { id: 'baked-two' }, { id: 'baked-three' }, { id: 'baked-four' },
 ];
@@ -183,4 +215,4 @@ assert.deepEqual(buildBuiltinFeedDecisionV2(
   feed_position: 7,
 });
 
-console.log('feed roster contract: 37 assertions');
+console.log('feed roster contract: 41 assertions');
