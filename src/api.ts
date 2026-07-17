@@ -18,6 +18,10 @@ import type {
   CatalogFeedAuthorityResultV1,
 } from './catalog-feed-authority.mjs';
 import type { FeedRosterSessionV1 } from './feed-roster.mjs';
+import type {
+  OperatorLevelFlagRequestV1,
+  OperatorLevelFlagResponseV1,
+} from './operator-level-flags.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -235,8 +239,20 @@ export interface SessionResp {
   is_new: boolean;
   backend_version?: string;
   catalog_lab_authorization_available?: boolean;
+  operator_level_flagging_available?: boolean;
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
+}
+
+/** Pilot-only exact field annotation. The server rechecks the Telegram user. */
+export function apiCreateOperatorLevelFlagRequired(
+  payload: OperatorLevelFlagRequestV1,
+): Promise<OperatorLevelFlagResponseV1> {
+  return postRequired<OperatorLevelFlagResponseV1>(
+    '/api/operator-level-flags',
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
 }
 
 export interface BuiltinFeedBindingV1 {

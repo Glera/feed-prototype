@@ -34,6 +34,7 @@ const harnessTimeoutMs = Number(process.env.CATALOG_DOGFOOD_TIMEOUT_MS ?? '45000
 if (!Number.isInteger(harnessTimeoutMs) || harnessTimeoutMs < 5_000 || harnessTimeoutMs > 60_000) {
   throw new Error('CATALOG_DOGFOOD_TIMEOUT_MS must be an integer from 5000 to 60000');
 }
+const operatorLevelFlagsHarness = process.env.CATALOG_OPERATOR_LEVEL_FLAGS_HARNESS === 'true';
 const ids = {
   mapping: '10000000-0000-4000-8000-000000000001',
   builtinVariant: '10000000-0000-4000-8000-000000000002',
@@ -96,6 +97,14 @@ const freshState = (scenario, instanceToken) => ({
   resultAttempts: [],
   resultTransientInjected: false,
   resultTimeoutInjected: false,
+  operatorFlagRequests: [],
+  operatorFlagResponses: 0,
+  operatorAttemptCpTransportAttempts: 0,
+  operatorAttemptCpAckPending: false,
+  operatorAttemptCpRelease: false,
+  operatorCatalogCpTransportAttempts: 0,
+  operatorCatalogCpAckPending: false,
+  operatorCatalogCpRelease: false,
   diagnostics: [],
   runtimeEvents: [],
   runtimeDocumentRequests: 0,
@@ -624,10 +633,10 @@ addEventListener('message',(event)=>{
   if(!exactSkin)return;
   send({type:'configured',appliedSpecHash:data.spec.specHash,appliedSkinHash:data.skin.skinHash,skinContractDigest:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)},runtimeContractDigest:${JSON.stringify(contractDigest)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}});
   report('configured_sent',{visibility:document.visibilityState});
-  setTimeout(()=>{report('host_gesture_sent',{visibility:document.visibilityState});send({source:'playable',type:'host_gesture'})},900);
-  setTimeout(()=>{report('manual_action_sent',{visibility:document.visibilityState});send({source:'playable',type:'manual_action',actionType:'fixture.sort',actionSeq:1,accepted:true,changedState:true})},1050);
+  setTimeout(()=>{report('host_gesture_sent',{visibility:document.visibilityState});send({source:'playable',type:'host_gesture'})},${operatorLevelFlagsHarness ? 8000 : 900});
+  setTimeout(()=>{report('manual_action_sent',{visibility:document.visibilityState});send({source:'playable',type:'manual_action',actionType:'fixture.sort',actionSeq:1,accepted:true,changedState:true})},${operatorLevelFlagsHarness ? 15000 : 1050});
   const outcome=${JSON.stringify(scenario === 'level-retry' && documentRequest === 2 ? 'lost' : 'won')};
-  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState,outcome,documentRequest:${documentRequest}});send({source:'playable',type:'completed',success:outcome==='won',outcome})},1350);
+  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState,outcome,documentRequest:${documentRequest}});send({source:'playable',type:'completed',success:outcome==='won',outcome})},${operatorLevelFlagsHarness ? 20000 : 1350});
 });
 addEventListener('load',()=>{report('load',{visibility:document.visibilityState});send({type:'configure_ready',nonce:'a'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},skinContractDigest:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}})});
 </script></body></html>`;
@@ -790,6 +799,20 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     record('runtime', exact);
     return json(response, { ok: true });
   }
+  if (request.method === 'POST' && url.pathname === '/__harness/operator-cp-release') {
+    if (!state || !operatorLevelFlagsHarness) return json(response, { code: 'fixture_not_configured' }, 404);
+    const kind = url.searchParams.get('kind');
+    if (kind === 'attempt') {
+      state.operatorAttemptCpRelease = true;
+      record('operator_attempt_cp_release');
+    } else if (kind === 'level') {
+      state.operatorCatalogCpRelease = true;
+      record('operator_catalog_cp_release');
+    } else {
+      return json(response, { code: 'fixture_release_kind_invalid' }, 400);
+    }
+    return json(response, { ok: true });
+  }
   const statefulHarnessApi = (request.method === 'POST' && [
     '/api/session',
     '/api/cp/events',
@@ -797,6 +820,7 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     '/api/catalog/allocate-authorized',
     '/api/runs/start',
     '/api/results',
+    '/api/operator-level-flags',
   ].includes(url.pathname)) || (request.method === 'GET'
     && (url.pathname === '/api/catalog/canary-authority'
       || /^\/api\/catalog\/tickets\/[^/]+\/specs$/.test(url.pathname)));
@@ -808,6 +832,8 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     return json(response, {
       user: { id: state.userId, ref_code: 'dogfood' }, ref_code: 'dogfood',
       balance: 0, puzzles: 0, is_new: false, backend_version: 'dogfood-harness',
+      operator_level_flagging_available: operatorLevelFlagsHarness
+        && ['success', 'disabled'].includes(state.scenario),
       builtin_feed_bindings: {
         schema: 'feed.builtin-bindings.v1', available: true, unavailable_reason: null,
         by_playable_id: {
@@ -826,6 +852,38 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
   }
   if (request.method === 'POST' && url.pathname === '/api/cp/events') {
     const body = await bodyOf(request);
+    const operatorCatalogBatch = operatorLevelFlagsHarness && state?.scenario === 'disabled'
+      && body.events.some((event) => event.event_name === 'catalog_level_impression_v2');
+    if (operatorCatalogBatch && state) {
+      state.operatorCatalogCpTransportAttempts += 1;
+      record('operator_catalog_cp_transport', {
+        attempt: state.operatorCatalogCpTransportAttempts,
+      });
+      if (!state.operatorCatalogCpRelease) {
+        return json(response, { code: 'fixture_transient_cp_failure' }, 503);
+      }
+      state.operatorCatalogCpAckPending = true;
+      record('operator_catalog_cp_ack_delayed');
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      state.operatorCatalogCpAckPending = false;
+      record('operator_catalog_cp_ack_released');
+    }
+    const operatorAttemptBatch = operatorLevelFlagsHarness && state?.scenario === 'success'
+      && body.events.some((event) => event.event_name === 'attempt_start');
+    if (operatorAttemptBatch && state) {
+      state.operatorAttemptCpTransportAttempts += 1;
+      record('operator_attempt_cp_transport', {
+        attempt: state.operatorAttemptCpTransportAttempts,
+      });
+      if (!state.operatorAttemptCpRelease) {
+        return json(response, { code: 'fixture_transient_cp_failure' }, 503);
+      }
+      state.operatorAttemptCpAckPending = true;
+      record('operator_attempt_cp_ack_delayed');
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      state.operatorAttemptCpAckPending = false;
+      record('operator_attempt_cp_ack_released');
+    }
     const replayConflictBatch = state?.scenario === 'replay-conflict'
       && body.events.some((event) => event.event_name === 'catalog_level_impression_v2');
     if (replayConflictBatch && state.replayConflictTransportAttempts < 2) {
@@ -902,6 +960,42 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
       record('event_order_cp_ack_released', { ordinal: 2 });
     }
     return json(response, { events: eventReceipts });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/operator-level-flags') {
+    const body = await bodyOf(request);
+    const evidence = {
+      body,
+      receivedAtMs: Date.now() - state.startedAt,
+      responseSentAtMs: null,
+      cpEventsAtPost: structuredClone(state.cpEvents),
+    };
+    state.operatorFlagRequests.push(evidence);
+    record('operator_level_flag_received', {
+      surface: body.flagSurface ?? null,
+      mutationId: body.mutationId ?? null,
+    });
+    // The active-level request stays in flight long enough for the browser test
+    // to prove that navigation is independent of this advisory write.
+    await new Promise((resolve) => setTimeout(
+      resolve,
+      body.flagSurface === 'active_level' ? 3000 : 120,
+    ));
+    evidence.responseSentAtMs = Date.now() - state.startedAt;
+    state.operatorFlagResponses += 1;
+    return json(response, {
+      schema: 'catalog.operator-flag.v1',
+      flagId: body.mutationId,
+      mutationId: body.mutationId,
+      requestHash: 'f'.repeat(64),
+      actorUserId: state.userId,
+      intent: body.intent,
+      comment: body.comment,
+      flagSurface: body.flagSurface,
+      subject: body.subject,
+      causal: body.causal,
+      createdAt: new Date().toISOString(),
+      replayed: false,
+    });
   }
   if (request.method === 'GET' && url.pathname === '/api/catalog/canary-authority') {
     const requestEvidence = {

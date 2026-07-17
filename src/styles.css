@@ -673,6 +673,68 @@ body {
 .game--generated .game__generated-badge { opacity: 1; transform: translateY(0); }
 .game--generated.game--manual .game__generated-badge { opacity: 0.72; }
 
+/* Pilot-only operator annotation. The node is mounted only when /session grants
+   the exact capability and the current generated catalog level has a causal
+   configured impression. It is not an overlay and never pauses the feed. */
+.game__operator-flag {
+  position: absolute;
+  right: 12px;
+  bottom: calc(var(--bar-reserve) + 18px);
+  z-index: 20;
+  width: min(310px, calc(100% - 24px));
+  color: #fff;
+  font: 600 13px/1.3 system-ui, sans-serif;
+  pointer-events: auto;
+}
+.game__operator-flag button,
+.game__operator-flag select,
+.game__operator-flag textarea {
+  font: inherit;
+}
+.game__operator-flag-open {
+  display: block;
+  margin-left: auto;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: rgba(26, 18, 43, 0.9);
+  color: #f4edff;
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.38);
+}
+.game__operator-flag-form {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(202, 169, 255, 0.5);
+  border-radius: 14px;
+  background: rgba(20, 14, 34, 0.96);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
+}
+.game__operator-flag-form[hidden] { display: none; }
+.game__operator-flag-form label { display: grid; gap: 5px; margin-bottom: 9px; }
+.game__operator-flag-form select,
+.game__operator-flag-form textarea {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 9px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+}
+.game__operator-flag-form textarea { resize: vertical; min-height: 70px; }
+.game__operator-flag-actions { display: flex; gap: 8px; }
+.game__operator-flag-actions button {
+  border: 0;
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: #a879ff;
+  color: #160c26;
+}
+.game__operator-flag-actions button[data-action="cancel"] {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.game__operator-flag-status { display: block; min-height: 17px; margin-top: 8px; color: #e7dbff; }
+
 /* Reward badge (top-left): the single star this mechanic awards on a win. Hidden until
    the live mechanic/autoplay is up (not during init), like the reel chrome. */
 .game__reward {
