@@ -33,6 +33,7 @@ import {
 import {
   apiSession, apiMe, variantIdForMechanic,
   apiCreateOperatorLevelFlagRequired,
+  apiMaterializeThreeLevelProductionEvidence,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
@@ -840,6 +841,20 @@ export class Feed {
     (window as unknown as { __feedWarm?: () => unknown }).__feedWarm = () => this.warmSnapshot();
     // Debug-panel hook: after seeding a test challenge, refresh the rail in place.
     (window as unknown as { __feedRefreshRail?: () => void }).__feedRefreshRail = () => { void this.refreshChallengeRail(); };
+    // Temporary exact-user bridge for closing the server-authoritative
+    // three-level production receipt. It reuses the one release-profile
+    // account decision already owned by Feed; the backend owns every evidence
+    // identity and verifies fresh TMA auth.
+    if (this.catalogDogfoodAccountEligible) {
+      void apiMaterializeThreeLevelProductionEvidence().then((result) => {
+        console.info('[catalog-three-level-evidence] materialized', {
+          receiptId: result.receipt.receiptId,
+          receiptDigest: result.receiptDigest,
+        });
+      }).catch((error) => {
+        console.warn('[catalog-three-level-evidence] materialization unavailable', error);
+      });
+    }
     this.bootServer();
   }
 
