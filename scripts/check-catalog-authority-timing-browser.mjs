@@ -30,12 +30,12 @@ const stagedBinding = {
   mapping_digest: 'c'.repeat(64),
 };
 const scenarios = {
-  delayed: { startedAt: 0, sessionRequests: 0, authorityRequests: [], cpEvents: [] },
-  'no-binding': { startedAt: 0, sessionRequests: 0, authorityRequests: [], cpEvents: [] },
+  delayed: { startedAt: 0, sessionRequests: 0, generatedOfferRequests: [], cpEvents: [] },
+  'no-binding': { startedAt: 0, sessionRequests: 0, generatedOfferRequests: [], cpEvents: [] },
   staged: {
     startedAt: 0,
     sessionRequests: 0,
-    authorityRequests: [],
+    generatedOfferRequests: [],
     cpEvents: [],
     sessionPending: false,
     sessionRelease: null,
@@ -116,11 +116,7 @@ const server = createServer(async (request, response) => {
     const body = await bodyOf(request);
     const state = scenarios[scenario];
     state.cpEvents.push(...body.events);
-    const stagedBuiltinDecisionCount = state.cpEvents.filter(
-      (event) => event.event_name === 'builtin_feed_decision',
-    ).length;
     if (scenario === 'staged' && !state.projectionHeld
-      && stagedBuiltinDecisionCount >= 2
       && body.events.some((event) => event.event_name === 'builtin_feed_decision')) {
       state.projectionHeld = true;
       state.projectionPending = true;
@@ -137,27 +133,20 @@ const server = createServer(async (request, response) => {
       })),
     });
   }
-  if (request.method === 'POST' && url.pathname === '/api/feed/catalog-authority') {
+  if (request.method === 'POST' && url.pathname === '/api/feed/generated-offer') {
     if (!scenario) return json(response, { code: 'fixture_identity_missing' }, 401);
     const body = await bodyOf(request);
-    scenarios[scenario].authorityRequests.push({ atMs: Date.now() - scenarios[scenario].startedAt, body });
-    const exactBinding = scenario === 'staged' ? stagedBinding : binding;
+    scenarios[scenario].generatedOfferRequests.push({
+      atMs: Date.now() - scenarios[scenario].startedAt,
+      body,
+    });
     return json(response, {
-      schema: 'feed.catalog-authority-result.v1',
+      schema: 'feed.generated-offer-result.v1',
       requestId: body.requestId,
-      sourceDecisionId: body.sourceDecisionId,
-      planId: '30000000-0000-4000-8000-000000000003',
-      planDigest: 'b'.repeat(64),
-      outcome: 'builtin_fallback',
-      authorizationId: null,
-      authorizationDigest: null,
-      expiresAt: null,
-      fallback: {
-        mappingId: exactBinding.mapping_id,
-        playableId: exactBinding.playable_id,
-        variantId: exactBinding.variant_id,
-        catalogMechanic: exactBinding.catalog_mechanic,
-      },
+      outcome: 'no_offer',
+      selectionMode: null,
+      selectionReason: null,
+      allocation: null,
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/daily/sync') {
@@ -215,7 +204,7 @@ const waitFor = async (predicate, timeoutMs, message) => {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  assert.fail(message);
+  assert.fail(`${message}\n${JSON.stringify(scenarios, null, 2)}`);
 };
 
 const browser = await chromium.launch();
@@ -243,26 +232,14 @@ try {
   assert.ok(Date.now() - scenarios.delayed.startedAt < 3500,
     'the built-in must become interactive before the deliberately delayed session binding');
   await waitFor(
-    () => scenarios.delayed.cpEvents.some((event) => event.event_name === 'unit_impression'),
-    8000,
-    'late binding did not project the already-visible built-in impression',
-  );
-  await waitFor(
-    () => scenarios.delayed.authorityRequests.length === 1,
-    3000,
-    'projected built-in opportunity did not start detached generated discovery',
+    () => scenarios.delayed.generatedOfferRequests.length === 1,
+    10000,
+    'session bootstrap did not start request-id-only generated discovery',
   );
   assert.equal(await delayedPage.locator(`iframe[title="${playableId}"]`).count(), 1,
     'background authority must leave the already-visible built-in interactive');
-  assert.equal(
-    scenarios.delayed.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
-    1,
-    'late binding produces exactly one built-in impression',
-  );
-  // The reviewed registry is intentionally incomplete in this fixture.  A
-  // swipe onto the unbound Sort page must still create another additive
-  // factory opportunity from the reviewed Merge binding; otherwise production
-  // degrades to one generated probe per full ten-card loop.
+  // Navigation is not an opportunity source. It must remain fluid while the
+  // detached selector retains its own bounded retry lifecycle.
   const delayedSwipeSurface = delayedPage.locator('.page--in-viewport .game__autoplay');
   const delayedSwipeBox = await delayedSwipeSurface.boundingBox();
   assert.ok(delayedSwipeBox, 'current delayed-scenario swipe surface is missing');
@@ -275,22 +252,18 @@ try {
     { steps: 8 },
   );
   await delayedPage.mouse.up();
-  await waitFor(
-    () => scenarios.delayed.authorityRequests.length === 2,
-    3000,
-    'unmapped navigation did not create the next additive generated opportunity',
-  );
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(scenarios.delayed.generatedOfferRequests.length, 1,
+    'navigation must not mint another generated-offer request');
   const delayedDecisionEvents = scenarios.delayed.cpEvents.filter(
     (event) => event.event_name === 'builtin_feed_decision',
   );
-  assert.equal(delayedDecisionEvents.length, 2,
-    'one visible source plus one impression-less generated probe are expected');
-  assert.equal(delayedDecisionEvents[1].payload?.mapping_id, binding.mapping_id,
-    'generated probe must still use an exact reviewed server binding');
+  assert.equal(delayedDecisionEvents.length, 1,
+    'background discovery must not synthesize an impression-less built-in decision');
   assert.equal(
     scenarios.delayed.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
     1,
-    'the additive probe must not invent a visible built-in impression',
+    'the additive selector must not invent a visible built-in impression',
   );
   await delayedPage.close();
 
@@ -304,16 +277,16 @@ try {
     'staged session request did not reach the held fixture response',
   );
   await stagedPage.clock.fastForward(20_000);
-  assert.equal(scenarios.staged.authorityRequests.length, 0,
-    'cold session bootstrap must not ask effectful catalog authority');
+  assert.equal(scenarios.staged.generatedOfferRequests.length, 0,
+    'cold session bootstrap must not start discovery before authentication resolves');
   assert.equal(await stagedPage.locator(`iframe[title="${playableId}"]`).count(), 1,
     'cold session bootstrap must leave the current built-in interactive');
   scenarios.staged.sessionRelease();
   await stagedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
   await waitFor(
-    () => scenarios.staged.authorityRequests.length === 1,
-    3000,
-    'reviewed Sort binding did not create an impression-less initial factory opportunity',
+    () => scenarios.staged.generatedOfferRequests.length === 1,
+    10000,
+    'resolved session did not start source-independent generated discovery',
   );
   assert.equal(await stagedPage.locator(`iframe[title="${playableId}"]`).count(), 1,
     'initial additive opportunity must leave the unbound Merge frame interactive');
@@ -340,8 +313,9 @@ try {
   assert.equal(stagedDecision?.payload?.mapping_id, stagedBinding.mapping_id,
     'only the mapped Sort opportunity enters the staged authority path');
   await stagedPage.clock.fastForward(20_000);
-  assert.equal(scenarios.staged.authorityRequests.length, 1,
-    'held source projection must not start another synchronous catalog authority');
+  assert.ok(scenarios.staged.generatedOfferRequests.length >= 1
+    && scenarios.staged.generatedOfferRequests.length <= 3,
+  'held source projection may overlap only the selector\'s bounded timer retries');
   assert.equal(await stagedPage.locator(`iframe[title="${stagedPlayableId}"]`).count(), 1,
     'held source projection must not withhold the navigated built-in frame');
   scenarios.staged.projectionRelease();
@@ -351,11 +325,8 @@ try {
     3000,
     'delayed projection did not produce its exact built-in impression',
   );
-  await waitFor(
-    () => scenarios.staged.authorityRequests.length === 2,
-    3000,
-    'released source projection did not start detached generated discovery',
-  );
+  assert.ok(scenarios.staged.generatedOfferRequests.length <= 3,
+    'released projection may overlap only the selector timer retry, not mint an unbounded opportunity');
   assert.equal(await stagedPage.locator(`iframe[title="${stagedPlayableId}"]`).count(), 1,
     'detached generated discovery must not replace the navigated built-in');
   assert.equal(
@@ -369,8 +340,16 @@ try {
   await noBindingPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
   assert.ok(Date.now() - scenarios['no-binding'].startedAt < 3000,
     'an authoritative unavailable binding document must restore builtin immediately');
-  assert.equal(scenarios['no-binding'].authorityRequests.length, 0,
-    'missing binding cannot call authority without a durable source decision');
+  await waitFor(
+    () => scenarios['no-binding'].generatedOfferRequests.length === 1,
+    10000,
+    'source-independent selector must not depend on a reviewed builtin binding',
+  );
+  assert.deepEqual(
+    Object.keys(scenarios['no-binding'].generatedOfferRequests[0].body).sort(),
+    ['requestId', 'schema'],
+    'generated discovery sends only its replay identity',
+  );
   assert.equal(
     scenarios['no-binding'].cpEvents.filter((event) => event.event_name === 'unit_impression').length,
     0,

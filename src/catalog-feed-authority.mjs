@@ -284,6 +284,151 @@ export function buildCatalogFeedAuthorityRequest(requestId, sourceDecisionId) {
   });
 }
 
+export function buildCatalogGeneratedOfferRequest(requestId) {
+  return Object.freeze({
+    schema: 'feed.generated-offer-request.v1',
+    requestId: canonicalUuid(requestId, 'requestId'),
+  });
+}
+
+function generatedConfigRef(value, kind, label) {
+  if (!exactKeys(value, ['kind', 'version', 'digest']) || value.kind !== kind
+    || typeof value.version !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/.test(value.version)) {
+    fail('invalid_generated_offer', `${label} is invalid`);
+  }
+  hash(value.digest, `${label}.digest`);
+}
+
+function validateGeneratedSelection(value) {
+  if (!exactKeys(value, [
+    'schema', 'mode', 'reason', 'asOf', 'affinityConfig', 'slotConfig', 'runwayConfig',
+    'affinitySnapshotId', 'preferredMechanic', 'poolKind', 'poolDigest', 'tieDigest',
+  ]) || value.schema !== 'feed.generated-offer-selection.v1'
+    || !['affinity', 'fallback_any'].includes(value.mode)
+    || !['favorite_eligible', 'insufficient_affinity', 'affinity_stale', 'preferred_runway_empty']
+      .includes(value.reason)
+    || typeof value.asOf !== 'string' || !ISO_MILLIS_RE.test(value.asOf)
+    || !['unseen', 'released_repeat'].includes(value.poolKind)) {
+    fail('invalid_generated_offer', 'generated offer selection is invalid');
+  }
+  generatedConfigRef(value.affinityConfig, 'affinity', 'selection.affinityConfig');
+  generatedConfigRef(value.slotConfig, 'slot', 'selection.slotConfig');
+  generatedConfigRef(value.runwayConfig, 'runway', 'selection.runwayConfig');
+  hash(value.poolDigest, 'selection.poolDigest');
+  hash(value.tieDigest, 'selection.tieDigest');
+  const hasAffinity = value.affinitySnapshotId !== null || value.preferredMechanic !== null;
+  if ((value.affinitySnapshotId === null) !== (value.preferredMechanic === null)) {
+    fail('invalid_generated_offer', 'preferred affinity identity is all-or-none');
+  }
+  if (hasAffinity) {
+    canonicalUuid(value.affinitySnapshotId, 'selection.affinitySnapshotId');
+    if (typeof value.preferredMechanic !== 'string'
+      || !CATALOG_MECHANIC_RE.test(value.preferredMechanic)) {
+      fail('invalid_generated_offer', 'selection preferred mechanic is invalid');
+    }
+  }
+  if (value.mode === 'affinity' && (value.reason !== 'favorite_eligible' || !hasAffinity)) {
+    fail('invalid_generated_offer', 'affinity selection requires exact favorite evidence');
+  }
+  if (value.mode === 'fallback_any' && value.reason === 'favorite_eligible') {
+    fail('invalid_generated_offer', 'fallback_any cannot claim favorite selection');
+  }
+}
+
+function validateGeneratedAllocation(value, request) {
+  if (!exactKeys(value, [
+    'schema', 'outcome', 'decisionId', 'allocationId', 'requestHash',
+    'requestedCatalogMechanic', 'slotType', 'policyVersion', 'holdExpiresAt',
+    'catalog', 'runtime', 'manifest', 'offerSelection',
+  ]) || value.schema !== 'catalog.allocate-decision-result.v3'
+    || value.outcome !== 'allocated' || value.allocationId !== request.requestId
+    || value.slotType !== 'generated-offer' || value.policyVersion !== 'feed.generated-offer.v1'
+    || typeof value.holdExpiresAt !== 'string' || !ISO_MILLIS_RE.test(value.holdExpiresAt)) {
+    fail('invalid_generated_offer', 'generated allocation has an unsupported shape');
+  }
+  canonicalUuid(value.decisionId, 'allocation.decisionId');
+  canonicalUuid(value.allocationId, 'allocation.allocationId');
+  hash(value.requestHash, 'allocation.requestHash');
+  if (typeof value.requestedCatalogMechanic !== 'string'
+    || !CATALOG_MECHANIC_RE.test(value.requestedCatalogMechanic)) {
+    fail('invalid_generated_offer', 'generated allocation mechanic is invalid');
+  }
+  if (!exactKeys(value.catalog, [
+    'entryId', 'entryState', 'entryStateVersion', 'mechanic', 'variant', 'seriesId',
+  ]) || value.catalog.entryState !== 'published'
+    || !Number.isInteger(value.catalog.entryStateVersion) || value.catalog.entryStateVersion < 0
+    || typeof value.catalog.mechanic !== 'string' || typeof value.catalog.variant !== 'string'
+    || `${value.catalog.mechanic}/${value.catalog.variant}` !== value.requestedCatalogMechanic) {
+    fail('invalid_generated_offer', 'generated catalog identity is invalid');
+  }
+  canonicalUuid(value.catalog.entryId, 'allocation.catalog.entryId');
+  canonicalUuid(value.catalog.seriesId, 'allocation.catalog.seriesId');
+  if (!exactKeys(value.runtime, [
+    'releaseId', 'playableId', 'legacyVariantId', 'runtimeContractDigest',
+    'runtimeArtifactDigest', 'indexLocator', 'sidecarLocator', 'capabilities',
+  ]) || typeof value.runtime.playableId !== 'string' || !PLAYABLE_RE.test(value.runtime.playableId)
+    || typeof value.runtime.runtimeArtifactDigest !== 'string'
+    || !/^sha256:[0-9a-f]{64}$/.test(value.runtime.runtimeArtifactDigest)
+    || !plainObject(value.runtime.capabilities)
+    || value.runtime.capabilities.catalogRequiredHandshake !== true) {
+    fail('invalid_generated_offer', 'generated runtime identity is invalid');
+  }
+  canonicalUuid(value.runtime.releaseId, 'allocation.runtime.releaseId');
+  canonicalUuid(value.runtime.legacyVariantId, 'allocation.runtime.legacyVariantId');
+  hash(value.runtime.runtimeContractDigest, 'allocation.runtime.runtimeContractDigest');
+  if (!plainObject(value.manifest)
+    || !['series.manifest.v1', 'series.manifest.v2'].includes(value.manifest.schema)) {
+    fail('invalid_generated_offer', 'generated manifest identity is invalid');
+  }
+  const manifestKeys = value.manifest.schema === 'series.manifest.v2'
+    ? ['schema', 'contentHash', 'seriesFingerprint', 'fingerprintVersion', 'levels',
+      'skinHash', 'skinContractDigest', 'gameplayFingerprint', 'presentationFingerprint']
+    : ['schema', 'contentHash', 'seriesFingerprint', 'fingerprintVersion', 'levels'];
+  if (!exactKeys(value.manifest, manifestKeys) || !Array.isArray(value.manifest.levels)
+    || value.manifest.levels.length < 1 || value.manifest.levels.length > 6
+    || value.manifest.levels.some((item, index) => !exactKeys(item, ['ordinal', 'specHash'])
+      || item.ordinal !== index + 1 || typeof item.specHash !== 'string' || !HASH_RE.test(item.specHash))) {
+    fail('invalid_generated_offer', 'generated manifest levels are invalid');
+  }
+  hash(value.manifest.contentHash, 'allocation.manifest.contentHash');
+  hash(value.manifest.seriesFingerprint, 'allocation.manifest.seriesFingerprint');
+  if (value.manifest.schema === 'series.manifest.v2') {
+    for (const key of ['skinHash', 'skinContractDigest', 'gameplayFingerprint', 'presentationFingerprint']) {
+      hash(value.manifest[key], `allocation.manifest.${key}`);
+    }
+  }
+  validateGeneratedSelection(value.offerSelection);
+}
+
+/** Validate the direct selector union and bind allocated bytes to requestId. */
+export function validateCatalogGeneratedOfferResult(value, request) {
+  if (!exactKeys(value, [
+    'schema', 'requestId', 'outcome', 'selectionMode', 'selectionReason', 'allocation',
+  ]) || value.schema !== 'feed.generated-offer-result.v1'
+    || value.requestId !== request.requestId) {
+    fail('invalid_generated_offer', 'generated offer result differs from its request');
+  }
+  canonicalUuid(value.requestId, 'result.requestId');
+  if (value.outcome === 'no_offer') {
+    if (value.selectionMode !== null || value.selectionReason !== null || value.allocation !== null) {
+      fail('invalid_generated_offer', 'no_offer cannot expose selection or allocation');
+    }
+  } else if (value.outcome === 'allocated') {
+    if (!['affinity', 'fallback_any'].includes(value.selectionMode)
+      || typeof value.selectionReason !== 'string' || !plainObject(value.allocation)) {
+      fail('invalid_generated_offer', 'allocated offer is missing selection evidence');
+    }
+    validateGeneratedAllocation(value.allocation, request);
+    if (value.selectionMode !== value.allocation.offerSelection.mode
+      || value.selectionReason !== value.allocation.offerSelection.reason) {
+      fail('invalid_generated_offer', 'offer selection differs from allocation snapshot');
+    }
+  } else {
+    fail('invalid_generated_offer', 'generated offer outcome is unsupported');
+  }
+  return cloneAndFreeze(value);
+}
+
 /** Validate the exact server-owned union and bind it back to the request. */
 export function validateCatalogFeedAuthorityResult(value, request) {
   if (!exactKeys(value, [

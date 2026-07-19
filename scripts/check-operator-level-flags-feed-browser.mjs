@@ -66,7 +66,14 @@ try {
   const draftPreview = draftFeed.locator(
     '.page--in-viewport .game__operator-flag[data-flag-surface="preview"]',
   );
-  await draftPreview.waitFor({ state: 'visible', timeout: 20_000 });
+  try {
+    await draftPreview.waitFor({ state: 'visible', timeout: 20_000 });
+  } catch (error) {
+    assert.fail(JSON.stringify({
+      message: error.message,
+      state: await stateOf(draftPage),
+    }, null, 2));
+  }
   await draftPage.evaluate(async () => {
     const response = await fetch('/__harness/operator-cp-release?kind=attempt', { method: 'POST' });
     if (!response.ok) throw new Error('failed to release operator attempt CP fixture');
@@ -254,7 +261,14 @@ try {
   const levelGatePreview = levelGateFeed.locator(
     '.page--in-viewport .game__operator-flag[data-flag-surface="preview"]',
   );
-  await levelGatePreview.waitFor({ state: 'visible', timeout: 20_000 });
+  try {
+    await levelGatePreview.waitFor({ state: 'visible', timeout: 20_000 });
+  } catch (error) {
+    assert.fail(JSON.stringify({
+      message: error.message,
+      state: await stateOf(levelGatePage),
+    }, null, 2));
+  }
   await waitForState(
     levelGatePage,
     `(state) => state.operatorCatalogCpTransportAttempts >= 1
@@ -288,7 +302,14 @@ try {
   await disabledPage.goto(endpoints.replayedCanaryUrl, { waitUntil: 'domcontentloaded' });
   await disabledPage.locator('.panel').evaluate((element) => { element.style.pointerEvents = 'none'; });
   const disabledFeed = disabledPage.frameLocator('iframe[data-testid="feed"]');
-  await waitForState(disabledPage, `(state) => state.client.currentFrame === 'catalog'`, null, 20_000);
+  try {
+    await waitForState(disabledPage, `(state) => state.client.currentFrame === 'catalog'`, null, 20_000);
+  } catch (error) {
+    assert.fail(JSON.stringify({
+      message: error.message,
+      state: await stateOf(disabledPage),
+    }, null, 2));
+  }
   assert.equal(await disabledFeed.locator('.game__operator-flag').count(), 0,
     'a configured generated catalog occurrence must expose no DOM when capability=false');
   await disabledPage.close();

@@ -102,6 +102,7 @@ const freshState = (scenario, instanceToken) => ({
   cpEvents: [],
   canaryRequests: [],
   authorityRequests: [],
+  generatedOfferRequests: [],
   allocationRequests: [],
   allocationResponses: [],
   ticketRequests: [],
@@ -367,25 +368,48 @@ const evaluate = () => {
     : 1;
   const canaryPath = exactCanaryGet
     && state.canaryRequests.length === expectedCanaryRequests
-    && state.authorityRequests.length === 0;
+    && state.authorityRequests.length === 0
+    && state.generatedOfferRequests.length === 0;
   const catalogAuthorityPath = canaryScenarios.has(state.scenario)
     ? canaryPath
-    : ['disabled', 'replayed-canary'].includes(state.scenario)
-      && state.canaryRequests.length === (state.scenario === 'replayed-canary' ? 1 : 0)
-      && state.authorityRequests.length === 1;
-  const allocationResponse = state.allocationResponses[0];
+    : state.scenario === 'disabled'
+      ? state.canaryRequests.length === 0
+        && state.authorityRequests.length === 0
+        && state.generatedOfferRequests.length === 1
+        && Object.keys(state.generatedOfferRequests[0] ?? {}).sort().join(',') === 'requestId,schema'
+      : state.scenario === 'replayed-canary'
+        && state.canaryRequests.length >= 1
+        && state.authorityRequests.length === 0
+        && state.generatedOfferRequests.length === 1;
+  const allocationResponse = ['disabled', 'replayed-canary'].includes(state.scenario)
+    ? state.allocationResponses.find((item) => item.schema === 'catalog.allocate-decision-result.v3')
+    : state.allocationResponses[0];
   const exactAllocationClass = canaryScenarios.has(state.scenario)
     ? allocationResponse?.catalog?.entryState === 'canary'
       && allocationResponse?.slotType === 'canary-dogfood'
       && allocationResponse?.policyVersion === 'catalog-canary-dogfood.v1'
     : ['disabled', 'replayed-canary'].includes(state.scenario)
-      && allocationResponse?.catalog?.entryState === 'published'
-      && allocationResponse?.slotType === 'anchor'
-      && allocationResponse?.policyVersion === 'dogfood.fixture.v1';
-  const exactTransport = source.length >= 1
+      ? allocationResponse?.schema === 'catalog.allocate-decision-result.v3'
+        && allocationResponse?.catalog?.entryState === 'published'
+        && allocationResponse?.slotType === 'generated-offer'
+        && allocationResponse?.policyVersion === 'feed.generated-offer.v1'
+        && allocationResponse?.offerSelection?.mode === 'fallback_any'
+      : allocationResponse?.catalog?.entryState === 'published'
+        && allocationResponse?.slotType === 'anchor'
+        && allocationResponse?.policyVersion === 'dogfood.fixture.v1';
+  const exactOpportunityProjection = ['disabled', 'replayed-canary'].includes(state.scenario)
+    ? true
+    : source.length >= 1;
+  const exactAllocationRequest = state.scenario === 'disabled'
+    ? state.allocationRequests.length === 0
+    : state.scenario === 'replayed-canary'
+      ? state.allocationRequests.length >= 1
+        && state.allocationRequests.every((item) => item.authorizationId === ids.authorization)
+    : state.allocationRequests[0]?.authorizationId === ids.authorization;
+  const exactTransport = exactOpportunityProjection
     && catalogAuthorityPath
     && exactAllocationClass
-    && state.allocationRequests[0]?.authorizationId === ids.authorization
+    && exactAllocationRequest
     && v2Ticket?.decision_id === ids.allocationDecision
     && legacyCatalogImpressions.length === 0
     && catalogImpressions.every((event) => event.payload.ticket_id === v2Ticket?.ticket_id
@@ -397,7 +421,16 @@ const evaluate = () => {
   const exactCanaryTicketIdentity = !canaryScenarios.has(state.scenario)
     || (v2Ticket?.ticket_id === ids.authorization
       && v2Ticket?.run_id === `catalog-canary:${ids.authorization}`);
-  const expectedAllocationCount = ['replayed-canary', 'reload-zero-progress', 'supersession'].includes(state.scenario) ? 2 : 1;
+  const expectedAllocationCount = ['reload-zero-progress', 'supersession'].includes(state.scenario) ? 2 : 1;
+  const exactAllocationCardinality = state.scenario === 'disabled'
+    ? state.allocationRequests.length === 0 && state.allocationResponses.length === 1
+    : state.scenario === 'replayed-canary'
+      ? state.allocationResponses.length === state.allocationRequests.length + 1
+      : state.allocationRequests.length === expectedAllocationCount
+        && state.allocationResponses.length === expectedAllocationCount;
+  const exactPendingEvidence = ['disabled', 'replayed-canary'].includes(state.scenario)
+    ? state.pendingViolation === false
+    : state.pendingSamples > 0 && state.checkpoints.pendingSurface?.pass === true;
   const exactResponses = state.ticketResponses.length === state.ticketRequests.length
     && state.ticketResponses.every((ticket) => ticket.schema === 'run.ticket.v3'
       && ticket.catalog_entry_id === ids.entry
@@ -419,14 +452,12 @@ const evaluate = () => {
         && level.specHash === specHashes[index]));
   const common = exactTransport
     && exactCanaryTicketIdentity
-    && state.allocationRequests.length === expectedAllocationCount
-    && state.allocationResponses.length === expectedAllocationCount
+    && exactAllocationCardinality
     && state.allocationResponses.every((candidate) => candidate.manifest.contentHash === exactThreeLevelContentHash)
     && Boolean(v2Ticket)
     && state.specRequests >= 1
     && exactResponses
-    && state.pendingSamples > 0
-    && state.checkpoints.pendingSurface?.pass === true
+    && exactPendingEvidence
     && state.client.catalogSeen;
   if (successfulCatalogScenarios.has(state.scenario)) {
     const impressionIdentity = catalogImpressions.length === specHashes.length
@@ -458,6 +489,28 @@ const evaluate = () => {
       || (state.eventOrderResultBeforeAck === true && state.eventOrderAckPending === false);
     const crossOriginEvidence = state.scenario !== 'cross-origin-spoof'
       || state.runtimeEvents.some((item) => item.stage === 'cross_origin_spoof_sent');
+    const builtinSeenEvidence = ['disabled', 'replayed-canary'].includes(state.scenario)
+      ? state.client.builtinSeen
+      : builtinImpressions.length >= 1 && state.client.builtinSeen;
+    state.successEvidence = {
+      common,
+      impressionIdentity,
+      exactLevels,
+      exactChest,
+      configuredImpressions: state.checkpoints.configuredImpressions.length === specHashes.length
+        && state.checkpoints.configuredImpressions.every((checkpoint) => checkpoint.pass),
+      levelReceipts: state.checkpoints.levelReceipts.length === specHashes.length
+        && state.checkpoints.levelReceipts.every((checkpoint) => checkpoint.pass),
+      chestReceipt: state.checkpoints.chestAfterExactReceipts?.pass === true,
+      rewardReceipt: state.checkpoints.rewardAfterChestReceipt?.pass === true,
+      builtinSeen: builtinSeenEvidence,
+      generatedBadgeVisible: state.client.generatedBadgeVisible,
+      reloadEvidence,
+      eventOrderEvidence,
+      crossOriginEvidence,
+      chestSeen: state.client.chestSeen,
+      rewardSeen: state.client.rewardSeen,
+    };
     if (common && impressionIdentity && exactLevels && exactChest
       && state.checkpoints.configuredImpressions.length === specHashes.length
       && state.checkpoints.configuredImpressions.every((checkpoint) => checkpoint.pass)
@@ -465,7 +518,7 @@ const evaluate = () => {
       && state.checkpoints.levelReceipts.every((checkpoint) => checkpoint.pass)
       && state.checkpoints.chestAfterExactReceipts?.pass === true
       && state.checkpoints.rewardAfterChestReceipt?.pass === true
-      && builtinImpressions.length >= 1 && state.client.builtinSeen
+      && builtinSeenEvidence
       && state.client.generatedBadgeVisible
       && reloadEvidence && eventOrderEvidence && crossOriginEvidence
       && state.client.chestSeen && state.client.rewardSeen) {
@@ -908,6 +961,7 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     '/api/session',
     '/api/cp/events',
     '/api/feed/catalog-authority',
+    '/api/feed/generated-offer',
     '/api/catalog/allocate-authorized',
     '/api/runs/start',
     '/api/results',
@@ -1229,6 +1283,55 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
       planDigest: '9'.repeat(64), outcome: 'catalog_authorized',
       authorizationId: ids.authorization, authorizationDigest: '8'.repeat(64),
       expiresAt: new Date(Date.now() + 30_000).toISOString(), fallback: null,
+    });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/feed/generated-offer') {
+    const body = await bodyOf(request);
+    state?.generatedOfferRequests.push(body);
+    if (!['disabled', 'replayed-canary'].includes(state?.scenario ?? '')) {
+      if (state) {
+        state.status = 'fail';
+        state.message = `generated selector was called in ${state.scenario}`;
+      }
+      return json(response, { code: 'unexpected_generated_offer' }, 500);
+    }
+    const offerSelection = {
+      schema: 'feed.generated-offer-selection.v1',
+      mode: 'fallback_any',
+      reason: 'insufficient_affinity',
+      asOf: '2026-07-19T12:00:00.000Z',
+      affinityConfig: { kind: 'affinity', version: 'affinity.pilot.v1', digest: '1'.repeat(64) },
+      slotConfig: { kind: 'slot', version: 'slot.pilot.v2', digest: '2'.repeat(64) },
+      runwayConfig: { kind: 'runway', version: 'runway.pilot.v1', digest: '3'.repeat(64) },
+      affinitySnapshotId: null,
+      preferredMechanic: null,
+      poolKind: 'unseen',
+      poolDigest: '4'.repeat(64),
+      tieDigest: '5'.repeat(64),
+    };
+    const exactAllocation = {
+      ...allocationForScenario('disabled', body.requestId),
+      schema: 'catalog.allocate-decision-result.v3',
+      allocationId: body.requestId,
+      requestHash: '6'.repeat(64),
+      slotType: 'generated-offer',
+      policyVersion: 'feed.generated-offer.v1',
+      catalog: {
+        ...allocation.catalog,
+        mechanic: 'sort',
+        variant: 'marble',
+      },
+      offerSelection,
+    };
+    state?.allocationResponses.push(exactAllocation);
+    record('generated_offer_allocated', { requestId: body.requestId });
+    return json(response, {
+      schema: 'feed.generated-offer-result.v1',
+      requestId: body.requestId,
+      outcome: 'allocated',
+      selectionMode: 'fallback_any',
+      selectionReason: 'insufficient_affinity',
+      allocation: exactAllocation,
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/catalog/allocate-authorized') {
