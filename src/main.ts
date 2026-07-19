@@ -3,8 +3,15 @@ import { createFeed } from './feed';
 import { setMechanicVersions } from './playables';
 import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
-import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
+import {
+  apiGetChallenge,
+  apiMaterializeThreeLevelProductionEvidence,
+  apiPublicIsland,
+  type ChallengeView,
+  type PublicIslandView,
+} from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
+import { catalogDogfoodAccountEligible } from './catalog-feed-authority.mjs';
 import { loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
@@ -49,6 +56,21 @@ async function boot(): Promise<void> {
     ? await loadVerifiedFeedRosterSessionSnapshot(localStorage)
     : null;
   createFeed(viewport, feedEl, challenge, publicIsland, rosterSnapshot);
+
+  // Temporary exact-user bridge for closing the server-authoritative
+  // three-level production receipt. The backend owns every evidence identity
+  // and verifies fresh TMA auth; replay is byte-identical and idempotent.
+  const initData = getInitData();
+  if (catalogDogfoodAccountEligible((import.meta as any).env, initData)) {
+    void apiMaterializeThreeLevelProductionEvidence().then((result) => {
+      console.info('[catalog-three-level-evidence] materialized', {
+        receiptId: result.receipt.receiptId,
+        receiptDigest: result.receiptDigest,
+      });
+    }).catch((error) => {
+      console.warn('[catalog-three-level-evidence] materialization unavailable', error);
+    });
+  }
 }
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
