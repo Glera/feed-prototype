@@ -284,28 +284,6 @@ export function apiGetCatalogCanaryAuthorityRequired(): Promise<CatalogCanaryAut
   return getRequired<CatalogCanaryAuthorityResultV1>('/api/catalog/canary-authority');
 }
 
-export type CatalogThreeLevelProductionEvidenceReceiptV1 = Readonly<{
-  schema: 'catalog.three-level-production-evidence-receipt.v1';
-  receiptDigest: string;
-  receipt: Readonly<{
-    schema: 'catalog.three-level-production-evidence.v1';
-    receiptId: string;
-  }> & Readonly<Record<string, unknown>>;
-}>;
-
-/**
- * Bodyless, server-owned materialization of the exact three-level production
- * closure. This temporary dogfood bridge supplies only fresh signed Telegram
- * identity; content/ticket/receipt identity cannot be chosen by the client.
- */
-export function apiMaterializeThreeLevelProductionEvidence(): Promise<
-  CatalogThreeLevelProductionEvidenceReceiptV1
-> {
-  return postRequired<CatalogThreeLevelProductionEvidenceReceiptV1>(
-    '/api/catalog/three-level-production-evidence',
-  );
-}
-
 export interface CatalogAllocateAuthorizedRequestV2 {
   schema: 'catalog.allocate-authorized.v2';
   authorizationId: string;
