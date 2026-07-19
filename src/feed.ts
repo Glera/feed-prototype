@@ -35,6 +35,7 @@ import {
   apiCreateOperatorLevelFlagRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
+  apiGetGeneratedOfferRequired,
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
@@ -70,6 +71,7 @@ import {
   CATALOG_AUTHORITY_DELIVERY_TIMEOUT_MS,
   buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
+  buildCatalogGeneratedOfferRequest,
   catalogCanaryAuthorityAllowsBackgroundAllocation,
   catalogCanaryAuthorityAllowsAllocation,
   catalogCanaryDogfoodEnabled,
@@ -89,9 +91,11 @@ import {
   generatedInsertionTarget,
   validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
+  validateCatalogGeneratedOfferResult,
   type CatalogCanaryAuthorityResultV1,
   type CatalogFeedAuthorityRequestV1,
   type CatalogFeedAuthorityResultV1,
+  type CatalogGeneratedOfferRequestV1,
 } from './catalog-feed-authority.mjs';
 import {
   controlPlaneEventReceiptStatus,
@@ -315,11 +319,6 @@ type ControlPlaneExposure = {
     occurredAt: string;
   } | null;
 };
-type GeneratedAuthoritySource = {
-  decisionId: string;
-  decisionEventId: string;
-  binding: BuiltinDecisionBinding;
-};
 type ControlPlaneAttempt = {
   runId: string;
   exposure: ControlPlaneExposure;
@@ -368,8 +367,7 @@ type CatalogFeedSlot = {
   insertionKind: 'source-bound' | 'generated';
 };
 type PreparedGeneratedOffer = {
-  authority: CatalogCanaryAuthorityResultV1
-    | Extract<CatalogFeedAuthorityResultV1, { outcome: 'catalog_authorized' }>;
+  authority: CatalogCanaryAuthorityResultV1 | null;
   allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }>;
   ticketRequest: CatalogRunTicketRequestV2;
   ticket: CatalogRunTicketViewV2 | CatalogRunTicketViewV3;
@@ -582,7 +580,10 @@ export class Feed {
   private generatedOffer: PreparedGeneratedOffer | null = null;
   private generatedTargetIndex: number | null = null;
   private generatedPrefetchScheduled = false;
-  private generatedAuthoritySourceIds = new Set<string>();
+  private generatedOfferRequestId: string | null = null;
+  private generatedOfferTicketRequest: CatalogRunTicketRequestV2 | null = null;
+  private generatedOfferRetryTimer: number | null = null;
+  private generatedOfferRetryAttempt = 0;
   private catalogFrameEpoch = 0;
   private preloaderMountedAt = 0;
   // Preloader waits for BOTH the first mechanic AND the first server seed (capped).
@@ -917,6 +918,19 @@ export class Feed {
     else window.setTimeout(run, 0);
   }
 
+  private scheduleGeneratedOfferRetry(): void {
+    if (!this.catalogDogfoodEnabled || this.generatedOfferRetryTimer !== null) return;
+    const delays = [5_000, 15_000, 60_000];
+    const delay = delays[Math.min(this.generatedOfferRetryAttempt, delays.length - 1)];
+    this.generatedOfferRetryAttempt += 1;
+    this.generatedOfferRetryTimer = window.setTimeout(() => {
+      this.generatedOfferRetryTimer = null;
+      if (!['empty', 'failed'].includes(this.generatedOfferState)) return;
+      this.generatedOfferState = 'idle';
+      this.scheduleGeneratedOfferPrefetch();
+    }, delay);
+  }
+
   private generatedPreviewBaseUrl(): string {
     let base = new URLSearchParams(location.search).get('base') || './';
     if (!base.endsWith('/')) base += '/';
@@ -975,56 +989,14 @@ export class Feed {
     this.scheduleGeneratedOfferPrefetch();
   }
 
-  private generatedAuthoritySource(): GeneratedAuthoritySource | null {
-    const candidates = [
-      this.cpExposure,
-      this.cpPendingExposure,
-      ...this.cpDeferredExposures,
-    ].filter((item): item is ControlPlaneExposure => Boolean(item));
-    const unique = new Map(candidates.map((item) => [item.decisionId, item]));
-    const exposure = [...unique.values()]
-      .filter((item) => item.binding && item.decisionEmitted && item.decisionEventId
-        && !this.generatedAuthoritySourceIds.has(item.decisionId))
-      .sort((left, right) => right.feedPosition - left.feedPosition)[0] ?? null;
-    if (!exposure?.binding || !exposure.decisionEventId) return null;
-    return {
-      decisionId: exposure.decisionId,
-      decisionEventId: exposure.decisionEventId,
-      binding: exposure.binding,
-    };
-  }
-
-  /**
-   * Additive generated insertion is a policy opportunity, not a replacement
-   * for the currently visible built-in.  The reviewed registry can initially
-   * contain fewer mechanics than the local ring (today it contains Sort only),
-   * so waiting for a mapped page would reduce a five-slot policy to one probe
-   * per full loop.  Issue a fresh, durable, impression-less opportunity from
-   * any reviewed binding instead.  The server still owns exact identity and a
-   * fallback remains a no-op: the visible built-in continues untouched.
-   */
-  private generatedAuthorityProbe(): GeneratedAuthoritySource | null {
-    const binding = this.builtinFeedBindings.get('marble-sort-swipe')
-      ?? [...this.builtinFeedBindings.values()][0]
-      ?? null;
-    if (!binding) return null;
-    const decisionId = ticketUid();
-    const decisionEventId = queueControlPlaneEvent('builtin_feed_decision', {
-      decision_id: decisionId,
-      mapping_id: binding.mapping_id,
-      feed_position: this.cpFeedPosition++,
-    }, new Date().toISOString());
-    if (!decisionEventId) return null;
-    return { decisionId, decisionEventId, binding };
-  }
-
   private async prefetchGeneratedOffer(): Promise<void> {
     if (!this.catalogDogfoodEnabled
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedOfferState = 'loading';
     let canaryReplayAttempted = false;
     try {
-      let authority: PreparedGeneratedOffer['authority'] | null = null;
+      let authority: CatalogCanaryAuthorityResultV1 | null = null;
+      let allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }> | null = null;
       let canaryProjectionRequired = false;
 
       if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed) {
@@ -1048,71 +1020,84 @@ export class Feed {
       }
 
       if (!authority) {
-        const source = this.generatedAuthoritySource() ?? this.generatedAuthorityProbe();
-        if (!source) {
-          this.generatedOfferState = 'idle';
-          return;
-        }
-        this.generatedAuthoritySourceIds.add(source.decisionId);
-        const flushed = await flushControlPlane({ force: true });
-        if (!catalogSourceDecisionProjectionReady(
-          Boolean(flushed),
-          controlPlaneEventState(source.decisionEventId),
-          controlPlaneEventReceiptStatus(source.decisionEventId),
-        )) {
-          throw new Error('background generated source decision was not durably projected');
-        }
-        const request = buildCatalogFeedAuthorityRequest(ticketUid(), source.decisionId);
-        const result = validateCatalogFeedAuthorityResult(
-          await apiGetCatalogFeedAuthorityRequired(request),
+        const request: CatalogGeneratedOfferRequestV1 = buildCatalogGeneratedOfferRequest(
+          this.generatedOfferRequestId ?? ticketUid(),
+        );
+        this.generatedOfferRequestId = request.requestId;
+        const result = validateCatalogGeneratedOfferResult(
+          await apiGetGeneratedOfferRequired(request),
           request,
         );
-        if (result.outcome === 'builtin_fallback') {
-          if (!catalogFallbackMatchesBinding(result.fallback, source.binding)) {
-            throw new Error('background generated fallback differs from its source opportunity');
-          }
+        if (result.outcome === 'no_offer') {
+          this.generatedOfferRequestId = null;
+          this.generatedOfferTicketRequest = null;
           this.generatedOfferState = 'empty';
+          this.scheduleGeneratedOfferRetry();
           return;
         }
-        if (Date.parse(result.expiresAt) <= Date.now()) {
-          throw new Error('background generated authority expired before allocation');
-        }
-        authority = result;
+        allocation = result.allocation;
       }
 
-      const authorized = await apiAllocateAuthorizedCatalogRequired({
-        schema: 'catalog.allocate-authorized.v2',
-        authorizationId: authority.authorizationId,
-      });
-      if (authorized.schema !== 'catalog.allocate-authorized-result.v2'
-        || authorized.authorizationId !== authority.authorizationId
-        || authorized.authorizationDigest !== authority.authorizationDigest
-        || authorized.allocation.allocationId !== authority.authorizationId
-        || authorized.allocation.outcome !== 'allocated'
-        || authorized.allocation.runtime.capabilities.catalogRequiredHandshake !== true) {
-        throw new Error('background generated allocation differs from its exact authority');
+      if (authority) {
+        const authorized = await apiAllocateAuthorizedCatalogRequired({
+          schema: 'catalog.allocate-authorized.v2',
+          authorizationId: authority.authorizationId,
+        });
+        if (authorized.schema !== 'catalog.allocate-authorized-result.v2'
+          || authorized.authorizationId !== authority.authorizationId
+          || authorized.authorizationDigest !== authority.authorizationDigest
+          || authorized.allocation.allocationId !== authority.authorizationId
+          || authorized.allocation.outcome !== 'allocated'
+          || authorized.allocation.runtime.capabilities.catalogRequiredHandshake !== true) {
+          throw new Error('background generated allocation differs from its exact authority');
+        }
+        allocation = authorized.allocation;
+      }
+      if (!allocation || allocation.runtime.capabilities.catalogRequiredHandshake !== true) {
+        throw new Error('background generated selector returned no exact allocation');
       }
       if (canaryProjectionRequired && (
-        authorized.allocation.catalog.entryState !== 'canary'
-        || authorized.allocation.slotType !== 'canary-dogfood'
-        || authorized.allocation.policyVersion !== 'catalog-canary-dogfood.v1'
+        allocation.catalog.entryState !== 'canary'
+        || allocation.slotType !== 'canary-dogfood'
+        || allocation.policyVersion !== 'catalog-canary-dogfood.v1'
       )) throw new Error('background canary allocation escaped its bounded invitation');
       if (!canaryProjectionRequired
-        && authorized.allocation.catalog.entryState !== 'published') {
-        throw new Error('background public authority selected non-published content');
+        && (allocation.schema !== 'catalog.allocate-decision-result.v3'
+          || allocation.catalog.entryState !== 'published'
+          || allocation.slotType !== 'generated-offer'
+          || allocation.policyVersion !== 'feed.generated-offer.v1')) {
+        throw new Error('background public selector escaped its generated-offer contract');
       }
       const runIdentity = canaryProjectionRequired
-        ? buildCatalogCanaryRunIdentity(authority.authorizationId)
+        ? buildCatalogCanaryRunIdentity(authority!.authorizationId)
         : null;
-      const ticketRequest: CatalogRunTicketRequestV2 = {
-        schema: 'run.start.v2',
-        ticket_id: runIdentity?.ticketId ?? ticketUid(),
-        run_id: runIdentity?.runId ?? `series-${runUid()}`,
-        mechanic_id: authorized.allocation.runtime.playableId,
-        variant_id: authorized.allocation.runtime.legacyVariantId,
-        kind: 'series',
-        decision_id: authorized.allocation.decisionId,
-      };
+      const ticketRequest: CatalogRunTicketRequestV2 = runIdentity
+        ? {
+          schema: 'run.start.v2',
+          ticket_id: runIdentity.ticketId,
+          run_id: runIdentity.runId,
+          mechanic_id: allocation.runtime.playableId,
+          variant_id: allocation.runtime.legacyVariantId,
+          kind: 'series',
+          decision_id: allocation.decisionId,
+        }
+        : this.generatedOfferTicketRequest ?? {
+          schema: 'run.start.v2',
+          ticket_id: ticketUid(),
+          run_id: `series-${runUid()}`,
+          mechanic_id: allocation.runtime.playableId,
+          variant_id: allocation.runtime.legacyVariantId,
+          kind: 'series',
+          decision_id: allocation.decisionId,
+        };
+      if (!runIdentity) {
+        if (ticketRequest.decision_id !== allocation.decisionId
+          || ticketRequest.mechanic_id !== allocation.runtime.playableId
+          || ticketRequest.variant_id !== allocation.runtime.legacyVariantId) {
+          throw new Error('replayed generated allocation differs from its pending ticket identity');
+        }
+        this.generatedOfferTicketRequest = ticketRequest;
+      }
       const start = await queueRunTicketStart(ticketRequest);
       const ticket = start.latest;
       if (start.status !== 'ok' || start.pending !== 0 || !ticket
@@ -1126,11 +1111,11 @@ export class Feed {
       const bundle = validateCatalogTicketLevelSpecBundle(
         await apiGetCatalogTicketSpecsRequired(ticket.ticket_id),
       );
-      this.assertCatalogDeliveryClosure(authorized.allocation, ticket, bundle);
-      const previewUrls = await this.loadGeneratedPreview(authorized.allocation);
+      this.assertCatalogDeliveryClosure(allocation, ticket, bundle);
+      const previewUrls = await this.loadGeneratedPreview(allocation);
       const offer: PreparedGeneratedOffer = {
         authority,
-        allocation: authorized.allocation,
+        allocation,
         ticketRequest,
         ticket,
         bundle,
@@ -1139,6 +1124,11 @@ export class Feed {
       };
       this.generatedOffer = offer;
       this.generatedOfferState = 'ready';
+      this.generatedOfferRequestId = null;
+      this.generatedOfferTicketRequest = null;
+      this.generatedOfferRetryAttempt = 0;
+      if (this.generatedOfferRetryTimer !== null) window.clearTimeout(this.generatedOfferRetryTimer);
+      this.generatedOfferRetryTimer = null;
       this.planGeneratedInsertion();
       track('generated_offer_prepared', {
         mechanic_id: offer.bundle.runtime.playableId,
@@ -1158,6 +1148,7 @@ export class Feed {
         reason: error instanceof ApiRequestError ? error.code ?? `http_${error.status}` : 'preparation_failure',
       });
       if (canaryReplayAttempted) this.scheduleGeneratedOfferPrefetch();
+      else this.scheduleGeneratedOfferRetry();
     }
   }
 
@@ -1465,7 +1456,6 @@ export class Feed {
       if (!decisionEvent) return;
       exposure.decisionEmitted = true;
       exposure.decisionEventId = decisionEvent;
-      this.scheduleGeneratedOfferPrefetch();
       const slot = this.catalogSlotForExposure(exposure);
       if (slot) this.beginCatalogAuthority(slot);
     }
@@ -1803,7 +1793,7 @@ export class Feed {
       && bundle.levels.every((level, index) => level.ordinal === index + 1
         && level.specHash === ticket.levels[index]?.spec_hash
         && level.specHash === manifestLevels[index]?.specHash)
-      && (allocation.schema === 'catalog.allocate-decision-result.v2'
+      && (allocation.manifest.schema === 'series.manifest.v2'
         ? ticket.schema === 'run.ticket.v3'
           && bundle.schema === 'catalog.ticket-level-spec-bundle.v2'
           && allocation.manifest.skinHash === ticket.skin_hash
@@ -8925,10 +8915,6 @@ export class Feed {
       this.closeControlPlaneExposure('swipe', false);
       const targetPlayableId = this.playables[targetIndex]?.id;
       if (targetPlayableId) this.beginControlPlaneDecision(targetIndex, targetPlayableId);
-      // Every settled navigation is an additive factory opportunity.  This is
-      // intentionally independent of whether the target built-in has already
-      // received its own reviewed control-plane mapping.
-      this.scheduleGeneratedOfferPrefetch();
       if (!this.series) this.removeSeriesRow(true);
       this.clearWarmTimer();
       this.warmIndex = null;

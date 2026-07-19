@@ -42,6 +42,30 @@ export interface CatalogCanaryAuthorityResultV1 {
   replayed: boolean;
 }
 
+export interface CatalogGeneratedOfferRequestV1 {
+  schema: 'feed.generated-offer-request.v1';
+  requestId: string;
+}
+
+export type CatalogGeneratedOfferResultV1 = {
+  schema: 'feed.generated-offer-result.v1';
+  requestId: string;
+} & (
+  | {
+    outcome: 'no_offer';
+    selectionMode: null;
+    selectionReason: null;
+    allocation: null;
+  }
+  | {
+    outcome: 'allocated';
+    selectionMode: 'affinity' | 'fallback_any';
+    selectionReason: 'favorite_eligible' | 'insufficient_affinity' | 'affinity_stale'
+      | 'preferred_runway_empty';
+    allocation: import('./api').CatalogAllocationDecisionResultV3;
+  }
+);
+
 export interface BuiltinBindingLike {
   mapping_id: string;
   playable_id: string;
@@ -149,6 +173,13 @@ export function buildCatalogFeedAuthorityRequest(
   requestId: string,
   sourceDecisionId: string,
 ): CatalogFeedAuthorityRequestV1;
+export function buildCatalogGeneratedOfferRequest(
+  requestId: string,
+): CatalogGeneratedOfferRequestV1;
+export function validateCatalogGeneratedOfferResult(
+  value: unknown,
+  request: CatalogGeneratedOfferRequestV1,
+): Readonly<CatalogGeneratedOfferResultV1>;
 export function validateCatalogFeedAuthorityResult(
   value: unknown,
   request: CatalogFeedAuthorityRequestV1,

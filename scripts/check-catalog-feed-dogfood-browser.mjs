@@ -94,6 +94,7 @@ const runScenario = async (url, { firstFailure, expectLevelRetry = false }) => {
       specResponses: state?.specResponses,
       eventOrderAckPending: state?.eventOrderAckPending,
       eventOrderResultBeforeAck: state?.eventOrderResultBeforeAck,
+      successEvidence: state?.successEvidence,
       diagnostics: state?.diagnostics,
       browserErrors,
     }, null, 2);

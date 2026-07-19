@@ -16,6 +16,8 @@ import type {
   CatalogCanaryAuthorityResultV1,
   CatalogFeedAuthorityRequestV1,
   CatalogFeedAuthorityResultV1,
+  CatalogGeneratedOfferRequestV1,
+  CatalogGeneratedOfferResultV1,
 } from './catalog-feed-authority.mjs';
 import type { FeedRosterSessionV1 } from './feed-roster.mjs';
 import type {
@@ -279,6 +281,17 @@ export function apiGetCatalogFeedAuthorityRequired(
   return postRequired<CatalogFeedAuthorityResultV1>('/api/feed/catalog-authority', payload);
 }
 
+/** Request one server-selected published offer; caller supplies no content identity. */
+export function apiGetGeneratedOfferRequired(
+  payload: CatalogGeneratedOfferRequestV1,
+): Promise<CatalogGeneratedOfferResultV1> {
+  return postRequired<CatalogGeneratedOfferResultV1>(
+    '/api/feed/generated-offer',
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
 /** Read one account-bound invitation; the response contains no content identity. */
 export function apiGetCatalogCanaryAuthorityRequired(): Promise<CatalogCanaryAuthorityResultV1> {
   return getRequired<CatalogCanaryAuthorityResultV1>('/api/catalog/canary-authority');
@@ -353,9 +366,39 @@ export type CatalogAllocationDecisionResultV2 = CatalogAllocationDecisionResultB
   manifest: CatalogAllocationManifestV2;
 };
 
+export interface CatalogGeneratedOfferSelectionV1 {
+  schema: 'feed.generated-offer-selection.v1';
+  mode: 'affinity' | 'fallback_any';
+  reason: 'favorite_eligible' | 'insufficient_affinity' | 'affinity_stale'
+    | 'preferred_runway_empty';
+  asOf: string;
+  affinityConfig: { kind: 'affinity'; version: string; digest: string };
+  slotConfig: { kind: 'slot'; version: string; digest: string };
+  runwayConfig: { kind: 'runway'; version: string; digest: string };
+  affinitySnapshotId: string | null;
+  preferredMechanic: string | null;
+  poolKind: 'unseen' | 'released_repeat';
+  poolDigest: string;
+  tieDigest: string;
+}
+
+export type CatalogAllocationDecisionResultV3 = Omit<
+  CatalogAllocationDecisionResultBaseV1,
+  'schema'
+> & {
+  schema: 'catalog.allocate-decision-result.v3';
+  outcome: 'allocated';
+  holdExpiresAt: string;
+  catalog: CatalogAllocationIdentityV1;
+  runtime: CatalogRuntimeIdentityV1;
+  manifest: CatalogAllocationManifestV1 | CatalogAllocationManifestV2;
+  offerSelection: CatalogGeneratedOfferSelectionV1;
+};
+
 export type CatalogAllocationDecisionResult =
   | CatalogAllocationDecisionResultV1
-  | CatalogAllocationDecisionResultV2;
+  | CatalogAllocationDecisionResultV2
+  | CatalogAllocationDecisionResultV3;
 
 export interface CatalogAllocateAuthorizedResultV2 {
   schema: 'catalog.allocate-authorized-result.v2';

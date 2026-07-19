@@ -7,6 +7,7 @@ import {
   CatalogFeedAuthorityContractError,
   buildCatalogCanaryRunIdentity,
   buildCatalogFeedAuthorityRequest,
+  buildCatalogGeneratedOfferRequest,
   catalogAuthorityFallbackTimerPlan,
   catalogAuthorityStartEligible,
   catalogGeneratedPreviewUrl,
@@ -28,6 +29,7 @@ import {
   generatedInsertionTarget,
   validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
+  validateCatalogGeneratedOfferResult,
 } from '../src/catalog-feed-authority.mjs';
 
 let assertions = 0;
@@ -49,6 +51,7 @@ const ids = {
   variant: '10000000-0000-4000-8000-000000000006',
 };
 const request = buildCatalogFeedAuthorityRequest(ids.request, ids.source);
+const offerRequest = buildCatalogGeneratedOfferRequest(ids.request);
 const dogfoodEnv = {
   VITE_CATALOG_DOGFOOD_USER_ID: '424242',
   VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
@@ -292,6 +295,119 @@ unresolvedDelivery.fire();
 equal(timerPhase, 'disposed', 'dispose keeps stale watchdog callbacks fenced');
 equal(Object.keys(request).join(','), 'schema,requestId,sourceDecisionId');
 equal(Object.isFrozen(request), true);
+equal(Object.keys(offerRequest).join(','), 'schema,requestId',
+  'background selection accepts only a caller-generated replay identity');
+equal(Object.isFrozen(offerRequest), true);
+
+const generatedSelection = {
+  schema: 'feed.generated-offer-selection.v1',
+  mode: 'fallback_any',
+  reason: 'insufficient_affinity',
+  asOf: '2026-07-19T12:00:00.000Z',
+  affinityConfig: { kind: 'affinity', version: 'affinity.pilot.v1', digest: '1'.repeat(64) },
+  slotConfig: { kind: 'slot', version: 'slot.pilot.v2', digest: '2'.repeat(64) },
+  runwayConfig: { kind: 'runway', version: 'runway.pilot.v1', digest: '3'.repeat(64) },
+  affinitySnapshotId: null,
+  preferredMechanic: null,
+  poolKind: 'unseen',
+  poolDigest: '4'.repeat(64),
+  tieDigest: '5'.repeat(64),
+};
+const generatedAllocation = {
+  schema: 'catalog.allocate-decision-result.v3',
+  outcome: 'allocated',
+  decisionId: ids.plan,
+  allocationId: ids.request,
+  requestHash: '6'.repeat(64),
+  requestedCatalogMechanic: 'sort/base',
+  slotType: 'generated-offer',
+  policyVersion: 'feed.generated-offer.v1',
+  holdExpiresAt: '2026-07-19T12:10:00.000Z',
+  catalog: {
+    entryId: ids.auth,
+    entryState: 'published',
+    entryStateVersion: 3,
+    mechanic: 'sort',
+    variant: 'base',
+    seriesId: ids.mapping,
+  },
+  runtime: {
+    releaseId: ids.variant,
+    playableId: 'marble-sort-swipe',
+    legacyVariantId: '20000000-0000-4000-8000-000000000001',
+    runtimeContractDigest: '7'.repeat(64),
+    runtimeArtifactDigest: `sha256:${'8'.repeat(64)}`,
+    indexLocator: 'runtime-releases/marble-sort-swipe/index.html',
+    sidecarLocator: 'runtime-releases/marble-sort-swipe/runtime.json',
+    capabilities: { catalogRequiredHandshake: true },
+  },
+  manifest: {
+    schema: 'series.manifest.v1',
+    contentHash: '9'.repeat(64),
+    seriesFingerprint: 'a'.repeat(64),
+    fingerprintVersion: 'series-fingerprint.v1',
+    levels: [{ ordinal: 1, specHash: 'b'.repeat(64) }],
+  },
+  offerSelection: generatedSelection,
+};
+const generatedOffer = validateCatalogGeneratedOfferResult({
+  schema: 'feed.generated-offer-result.v1',
+  requestId: ids.request,
+  outcome: 'allocated',
+  selectionMode: 'fallback_any',
+  selectionReason: 'insufficient_affinity',
+  allocation: generatedAllocation,
+}, offerRequest);
+equal(generatedOffer.allocation.allocationId, ids.request,
+  'the selector allocation is bound directly to the request replay identity');
+equal(Object.isFrozen(generatedOffer.allocation.offerSelection), true,
+  'nested server-owned selection evidence is immutable after validation');
+const noOffer = validateCatalogGeneratedOfferResult({
+  schema: 'feed.generated-offer-result.v1',
+  requestId: ids.request,
+  outcome: 'no_offer',
+  selectionMode: null,
+  selectionReason: null,
+  allocation: null,
+}, offerRequest);
+equal(noOffer.allocation, null, 'no_offer is a strict side-effect-free union arm');
+throws(
+  () => buildCatalogGeneratedOfferRequest('not-a-uuid'),
+  /canonical UUID/,
+  'generated discovery cannot invent a noncanonical replay identity',
+);
+throws(
+  () => validateCatalogGeneratedOfferResult({ ...generatedOffer, requestId: ids.source }, offerRequest),
+  /differs from its request/,
+  'a selector response cannot cross-bind to another request',
+);
+throws(
+  () => validateCatalogGeneratedOfferResult({
+    ...generatedOffer,
+    allocation: { ...generatedAllocation, slotType: 'anchor' },
+  }, offerRequest),
+  /unsupported shape/,
+  'a generic allocation cannot masquerade as a generated insertion',
+);
+throws(
+  () => validateCatalogGeneratedOfferResult({
+    ...generatedOffer,
+    selectionMode: 'affinity',
+  }, offerRequest),
+  /differs from allocation snapshot/,
+  'outer selection labels must replay the durable allocation snapshot',
+);
+throws(
+  () => validateCatalogGeneratedOfferResult({
+    ...generatedOffer,
+    allocation: {
+      ...generatedAllocation,
+      offerSelection: { ...generatedSelection, poolKind: 'invented' },
+    },
+  }, offerRequest),
+  /selection is invalid/,
+  'the client rejects an unknown selector pool instead of guessing',
+);
 
 const canary = validateCatalogCanaryAuthorityResult({
   schema: 'catalog.canary-authority-result.v1',
