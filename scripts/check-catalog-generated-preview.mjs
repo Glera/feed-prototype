@@ -38,11 +38,34 @@ const loaded = await loadCatalogGeneratedPreview({
 assert.deepEqual(Buffer.from(loaded.mobile.bytes), mobile);
 assert.deepEqual(Buffer.from(loaded.compact.bytes), compact);
 
+const genericLoaded = await loadCatalogGeneratedPreview({
+  baseUrl: 'https://platform.example/', contentHash, runtimeArtifactDigest,
+  fetchImpl: async (url) => url.endsWith('.preview.json')
+    ? response(Buffer.from(JSON.stringify({
+      ...manifest,
+      captureContract: 'catalog.runtime-cover.v1',
+    })), 'application/json')
+    : fetchImpl(url),
+  cryptoImpl: webcrypto,
+});
+assert.deepEqual(Buffer.from(genericLoaded.mobile.bytes), mobile);
+assert.deepEqual(Buffer.from(genericLoaded.compact.bytes), compact);
+
 await assert.rejects(
   loadCatalogGeneratedPreview({
     baseUrl: 'https://platform.example/', contentHash, runtimeArtifactDigest,
     fetchImpl: async (url) => url.endsWith('.preview.json')
       ? response(Buffer.from(JSON.stringify({ ...manifest, contentHash: 'c'.repeat(64) })), 'application/json')
+      : fetchImpl(url),
+    cryptoImpl: webcrypto,
+  }),
+  (error) => error instanceof CatalogGeneratedPreviewError && error.code === 'invalid_preview_manifest',
+);
+await assert.rejects(
+  loadCatalogGeneratedPreview({
+    baseUrl: 'https://platform.example/', contentHash, runtimeArtifactDigest,
+    fetchImpl: async (url) => url.endsWith('.preview.json')
+      ? response(Buffer.from(JSON.stringify({ ...manifest, captureContract: 'caller-authored' })), 'application/json')
       : fetchImpl(url),
     cryptoImpl: webcrypto,
   }),

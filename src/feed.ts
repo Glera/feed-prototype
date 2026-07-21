@@ -1009,7 +1009,7 @@ export class Feed {
     if (!this.catalogDogfoodEnabled
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedOfferState = 'loading';
-    let canaryReplayAttempted = false;
+    let canaryAllocationCommitted = false;
     let terminalCanaryAllocationFailure = false;
     try {
       let authority: CatalogCanaryAuthorityResultV1 | null = null;
@@ -1028,7 +1028,6 @@ export class Feed {
           if (catalogCanaryAuthorityAllowsBackgroundAllocation(canary)) {
             authority = canary;
             canaryProjectionRequired = true;
-            canaryReplayAttempted = canary.replayed;
             this.catalogCanaryClaimed = true;
           }
         } catch (error) {
@@ -1063,6 +1062,7 @@ export class Feed {
             schema: 'catalog.allocate-authorized.v2',
             authorizationId: authority.authorizationId,
           });
+          canaryAllocationCommitted = true;
         } catch (error) {
           terminalCanaryAllocationFailure = error instanceof ApiRequestError
             && catalogCanaryAllocationFailureFallsThrough(error.status);
@@ -1077,6 +1077,11 @@ export class Feed {
           throw new Error('background generated allocation differs from its exact authority');
         }
         allocation = authorized.allocation;
+        // From this boundary onward the immutable canary allocation exists.
+        // If ticket/spec/preview preparation cannot complete, the public lane
+        // must continue on this page; a later reload can still replay the
+        // exact canary. Failures before this point retain the established
+        // retry semantics (notably a transient allocation 503).
       }
       if (!allocation || allocation.runtime.capabilities.catalogRequiredHandshake !== true) {
         throw new Error('background generated selector returned no exact allocation');
@@ -1167,16 +1172,15 @@ export class Feed {
       // If it still cannot produce a fresh zero-progress ticket, retire that
       // canary for this page so the next background opportunity can use normal
       // published content instead of retrying a played/terminal invitation.
-      if (terminalCanaryAllocationFailure || canaryReplayAttempted) {
+      if (terminalCanaryAllocationFailure || canaryAllocationCommitted) {
         this.catalogCanaryTerminallyUnavailable = true;
       }
-      this.catalogCanaryClaimed = canaryReplayAttempted
-        || terminalCanaryAllocationFailure;
+      this.catalogCanaryClaimed = canaryAllocationCommitted || terminalCanaryAllocationFailure;
       console.warn('[generated-feed] background offer unavailable; builtin loop continues', error);
       track('generated_offer_unavailable', {
         reason: error instanceof ApiRequestError ? error.code ?? `http_${error.status}` : 'preparation_failure',
       });
-      if (canaryReplayAttempted || terminalCanaryAllocationFailure) {
+      if (canaryAllocationCommitted || terminalCanaryAllocationFailure) {
         this.generatedOfferState = 'idle';
         this.scheduleGeneratedOfferPrefetch();
       }

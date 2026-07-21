@@ -2,6 +2,10 @@ const HASH = /^[0-9a-f]{64}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_MANIFEST_BYTES = 16 * 1024;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+const CAPTURE_CONTRACTS = new Set([
+  'sort.generated-preview.v1',
+  'catalog.runtime-cover.v1',
+]);
 
 export class CatalogGeneratedPreviewError extends Error {
   constructor(code, message) {
@@ -85,7 +89,7 @@ export async function loadCatalogGeneratedPreview({
   if (!exact(manifest, [
     'schema', 'captureContract', 'contentHash', 'runtimeArtifactDigest', 'covers',
   ]) || manifest.schema !== 'catalog.generated-preview.v1'
-    || manifest.captureContract !== 'sort.generated-preview.v1'
+    || !CAPTURE_CONTRACTS.has(manifest.captureContract)
     || manifest.contentHash !== contentHash
     || manifest.runtimeArtifactDigest !== runtimeArtifactDigest
     || !exact(manifest.covers, ['mobile', 'compact'])) {
