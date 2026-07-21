@@ -17,6 +17,28 @@ export interface SortLevelSpecV1 {
   };
 }
 
+export interface MergeRasterLevelSpecV1 {
+  schema: 'merge.raster-level-spec.v1';
+  specHash: string;
+  runtimeContractDigest: string;
+  seed: 0;
+  params: {
+    artifactClass: 'merge-raster-art-v1';
+    artPackHash: string;
+    sourceRuntimeArtifactDigest: string;
+    sourceHtmlSha256: string;
+    templateContractDigest: string;
+    compilerDigest: string;
+    providerPolicyDigest: string;
+    qaReportDigest: string;
+    sourceQaEvidenceHash: string;
+    gameplayFingerprint: string;
+    presentationFingerprint: string;
+  };
+}
+
+export type CatalogLevelSpec = SortLevelSpecV1 | MergeRasterLevelSpecV1;
+
 export interface CatalogRuntimeIdentityV1 {
   releaseId: string;
   playableId: string;
@@ -37,7 +59,7 @@ export interface CatalogTicketLevelSpecBundleV1 {
   seriesId: string;
   manifestContentHash: string;
   runtime: CatalogRuntimeIdentityV1;
-  levels: Array<{ ordinal: number; specHash: string; spec: SortLevelSpecV1 }>;
+  levels: Array<{ ordinal: number; specHash: string; spec: CatalogLevelSpec }>;
 }
 
 export interface SortSkinSpecV1 {
@@ -70,7 +92,7 @@ export interface CatalogPlayerLevelBinding {
   runtimeArtifactDigest: string;
   indexLocator: string;
   specHash: string;
-  spec: SortLevelSpecV1;
+  spec: CatalogLevelSpec;
   skinHash: string | null;
   skinContractDigest: string | null;
   skin: SortSkinSpecV1 | null;
@@ -120,7 +142,7 @@ export interface CatalogMessageEvent {
 }
 
 export type CatalogPlayerEffect =
-  | { type: 'post_configure_level'; frameEpoch: number; targetOrigin: string; message: { type: 'configure_level'; nonce: string; spec: SortLevelSpecV1; skin?: SortSkinSpecV1 } }
+  | { type: 'post_configure_level'; frameEpoch: number; targetOrigin: string; message: { type: 'configure_level'; nonce: string; spec: CatalogLevelSpec; skin?: SortSkinSpecV1 } }
   | { type: 'catalog_reveal_ready'; frameEpoch: number; ordinal: number; appliedSpecHash: string; appliedSkinHash: string | null }
   | { type: 'catalog_configuration_failure'; frameEpoch: number; payload: CatalogConfigurationFailurePayload };
 

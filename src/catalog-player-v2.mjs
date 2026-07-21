@@ -142,6 +142,37 @@ function validateSortLevelSpec(value) {
   return value;
 }
 
+function validateMergeRasterLevelSpec(value) {
+  if (!exactKeys(value, ['schema', 'specHash', 'runtimeContractDigest', 'seed', 'params'])
+    || value.schema !== 'merge.raster-level-spec.v1' || value.seed !== 0) {
+    fail('invalid_spec', 'LevelSpec envelope must exactly match merge.raster-level-spec.v1');
+  }
+  hash(value.specHash, 'LevelSpec.specHash');
+  hash(value.runtimeContractDigest, 'LevelSpec.runtimeContractDigest');
+  const params = value.params;
+  if (!exactKeys(params, [
+    'artifactClass', 'artPackHash', 'sourceRuntimeArtifactDigest', 'sourceHtmlSha256',
+    'templateContractDigest', 'compilerDigest', 'providerPolicyDigest', 'qaReportDigest',
+    'sourceQaEvidenceHash', 'gameplayFingerprint', 'presentationFingerprint',
+  ]) || params.artifactClass !== 'merge-raster-art-v1') {
+    fail('invalid_spec', 'Merge raster LevelSpec.params has an unsupported shape');
+  }
+  for (const key of [
+    'artPackHash', 'templateContractDigest', 'compilerDigest', 'providerPolicyDigest',
+    'sourceQaEvidenceHash', 'gameplayFingerprint', 'presentationFingerprint',
+  ]) hash(params[key], `LevelSpec.params.${key}`);
+  for (const key of ['sourceRuntimeArtifactDigest', 'sourceHtmlSha256', 'qaReportDigest']) {
+    digest(params[key], `LevelSpec.params.${key}`);
+  }
+  return value;
+}
+
+function validateLevelSpec(value) {
+  return value?.schema === 'merge.raster-level-spec.v1'
+    ? validateMergeRasterLevelSpec(value)
+    : validateSortLevelSpec(value);
+}
+
 function validateSortSkinSpec(value) {
   if (!exactKeys(value, ['schema', 'skinHash', 'skinContractDigest', 'params'])
     || value.schema !== 'sort.skin-spec.v1') {
@@ -231,12 +262,18 @@ export function validateCatalogTicketLevelSpecBundle(value) {
     if (!exactKeys(level, ['ordinal', 'specHash', 'spec'])) fail('invalid_bundle', 'bundle level has extra or missing fields');
     if (level.ordinal !== index + 1) fail('invalid_bundle', 'bundle levels must be contiguous and 1-based');
     hash(level.specHash, `bundle.levels[${index}].specHash`);
-    validateSortLevelSpec(level.spec);
+    validateLevelSpec(level.spec);
     if (level.specHash !== level.spec.specHash) fail('invalid_bundle', 'bundle level hash differs from embedded LevelSpec');
     if (level.spec.runtimeContractDigest !== value.runtime.runtimeContractDigest) {
       fail('invalid_bundle', 'LevelSpec runtime contract differs from the ticket runtime');
     }
   });
+  const mergeRaster = value.levels.some(level => level.spec.schema === 'merge.raster-level-spec.v1');
+  if (mergeRaster && (value.levels.length !== 1
+    || !value.levels.every(level => level.spec.schema === 'merge.raster-level-spec.v1')
+    || value.runtime.capabilities.mergeRasterArtV1 !== true)) {
+    fail('invalid_bundle', 'Merge raster bundle must be one exact level on a capable runtime');
+  }
   return frozenClone(value);
 }
 

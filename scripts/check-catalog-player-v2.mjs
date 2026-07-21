@@ -119,6 +119,35 @@ function skinBundle() {
   return value;
 }
 
+function mergeRasterBundle() {
+  const value = bundle();
+  const rasterSpec = {
+    schema: 'merge.raster-level-spec.v1',
+    specHash: specHash1,
+    runtimeContractDigest: contractDigest,
+    seed: 0,
+    params: {
+      artifactClass: 'merge-raster-art-v1',
+      artPackHash: 'a'.repeat(64),
+      sourceRuntimeArtifactDigest: `sha256:${'b'.repeat(64)}`,
+      sourceHtmlSha256: `sha256:${'c'.repeat(64)}`,
+      templateContractDigest: '4'.repeat(64),
+      compilerDigest: '5'.repeat(64),
+      providerPolicyDigest: '6'.repeat(64),
+      qaReportDigest: `sha256:${'7'.repeat(64)}`,
+      sourceQaEvidenceHash: '8'.repeat(64),
+      gameplayFingerprint: '9'.repeat(64),
+      presentationFingerprint: 'a'.repeat(64),
+    },
+  };
+  value.runtime.playableId = 'merge-locked-v1-swipe';
+  value.runtime.capabilities = { catalogRequiredHandshake: true, mergeRasterArtV1: true };
+  value.runtime.indexLocator = `runtime-releases/merge-locked-v1-swipe/${'d'.repeat(64)}/index.html`;
+  value.runtime.sidecarLocator = `runtime-releases/merge-locked-v1-swipe/${'d'.repeat(64)}/runtime-artifact.json`;
+  value.levels = [{ ordinal: 1, specHash: specHash1, spec: rasterSpec }];
+  return value;
+}
+
 equal(catalogPlayerV2Enabled({}, true, true), false, 'catalog is off by default');
 equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, false, true), false, 'CP is a second gate');
 equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, true, false), false,
@@ -156,6 +185,19 @@ throws(() => validateCatalogTicketLevelSpecBundle(missingSkinCapability), /runti
 const wrongEmbeddedSkinHash = skinBundle();
 wrongEmbeddedSkinHash.skin.skinHash = '7'.repeat(64);
 throws(() => validateCatalogTicketLevelSpecBundle(wrongEmbeddedSkinHash), /runtime-bound identity/);
+
+const frozenRasterBundle = validateCatalogTicketLevelSpecBundle(mergeRasterBundle());
+equal(frozenRasterBundle.levels[0].spec.params.artifactClass, 'merge-raster-art-v1',
+  'generic ticket preserves the exact raster LevelSpec');
+const missingRasterCapability = mergeRasterBundle();
+delete missingRasterCapability.runtime.capabilities.mergeRasterArtV1;
+throws(() => validateCatalogTicketLevelSpecBundle(missingRasterCapability), /one exact level on a capable runtime/);
+const multiRaster = mergeRasterBundle();
+multiRaster.levels.push({ ...multiRaster.levels[0], ordinal: 2 });
+throws(() => validateCatalogTicketLevelSpecBundle(multiRaster), /one exact level/);
+const rasterBinding = buildCatalogPlayerLevelBinding(mergeRasterBundle(), 1, 23);
+equal(rasterBinding.playableId, 'merge-locked-v1-swipe');
+equal(rasterBinding.skinHash, null);
 
 const binding = buildCatalogPlayerLevelBinding(bundle(), 1, 7);
 equal(binding.ordinal, 1);
