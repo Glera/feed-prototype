@@ -40,6 +40,7 @@ import {
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
+  type CatalogAllocateAuthorizedResultV2,
   type CatalogAllocationDecisionResult, type CatalogRunTicketRequestV2,
   type CatalogRunTicketViewV2, type CatalogRunTicketViewV3,
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
@@ -74,6 +75,7 @@ import {
   buildCatalogGeneratedOfferRequest,
   catalogCanaryAuthorityAllowsBackgroundAllocation,
   catalogCanaryAuthorityAllowsAllocation,
+  catalogCanaryAllocationFailureFallsThrough,
   catalogCanaryDogfoodEnabled,
   catalogCanaryInvitationMissing,
   catalogCanaryTicketStartIsSafe,
@@ -87,6 +89,7 @@ import {
   catalogFeedDogfoodEnabled,
   catalogFeedSurface,
   catalogFeedUsesBuiltinImpression,
+  generatedProvenanceLabel,
   catalogRecallRecoveryEffect,
   generatedInsertionTarget,
   validateCatalogCanaryAuthorityResult,
@@ -575,6 +578,7 @@ export class Feed {
   // warm-up decisions overlap. The first eligible source owns it for this page
   // lifetime; every other slot continues through ordinary effectful policy.
   private catalogCanaryClaimed = false;
+  private catalogCanaryTerminallyUnavailable = false;
   private catalogSlots = new Map<number, CatalogFeedSlot>();
   private generatedOfferState: 'idle' | 'loading' | 'ready' | 'reserved' | 'empty' | 'failed' = 'idle';
   private generatedOffer: PreparedGeneratedOffer | null = null;
@@ -941,6 +945,18 @@ export class Feed {
     return this.coverBucket === '.c' ? offer.previewUrls.compact : offer.previewUrls.mobile;
   }
 
+  private renderGeneratedProvenance(i: number, offer: PreparedGeneratedOffer): void {
+    const badge = this.games[i]?.querySelector<HTMLElement>('.game__generated-badge');
+    if (!badge) return;
+    const levelCount = offer.allocation.manifest.levels.length;
+    const label = generatedProvenanceLabel(levelCount);
+    badge.setAttribute(
+      'aria-label',
+      levelCount === 1 ? 'Generated catalog level' : `Generated catalog series with ${levelCount} levels`,
+    );
+    badge.innerHTML = `<span aria-hidden="true">✦</span> ${label}`;
+  }
+
   private async loadGeneratedPreview(
     allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }>,
   ): Promise<Readonly<{ mobile: string; compact: string }>> {
@@ -994,12 +1010,14 @@ export class Feed {
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedOfferState = 'loading';
     let canaryReplayAttempted = false;
+    let terminalCanaryAllocationFailure = false;
     try {
       let authority: CatalogCanaryAuthorityResultV1 | null = null;
       let allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }> | null = null;
       let canaryProjectionRequired = false;
 
-      if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed) {
+      if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
+        && !this.catalogCanaryTerminallyUnavailable) {
         try {
           const canary = validateCatalogCanaryAuthorityResult(
             await apiGetCatalogCanaryAuthorityRequired(),
@@ -1039,10 +1057,17 @@ export class Feed {
       }
 
       if (authority) {
-        const authorized = await apiAllocateAuthorizedCatalogRequired({
-          schema: 'catalog.allocate-authorized.v2',
-          authorizationId: authority.authorizationId,
-        });
+        let authorized: CatalogAllocateAuthorizedResultV2;
+        try {
+          authorized = await apiAllocateAuthorizedCatalogRequired({
+            schema: 'catalog.allocate-authorized.v2',
+            authorizationId: authority.authorizationId,
+          });
+        } catch (error) {
+          terminalCanaryAllocationFailure = error instanceof ApiRequestError
+            && catalogCanaryAllocationFailureFallsThrough(error.status);
+          throw error;
+        }
         if (authorized.schema !== 'catalog.allocate-authorized-result.v2'
           || authorized.authorizationId !== authority.authorizationId
           || authorized.authorizationDigest !== authority.authorizationDigest
@@ -1142,12 +1167,19 @@ export class Feed {
       // If it still cannot produce a fresh zero-progress ticket, retire that
       // canary for this page so the next background opportunity can use normal
       // published content instead of retrying a played/terminal invitation.
-      this.catalogCanaryClaimed = canaryReplayAttempted;
+      if (terminalCanaryAllocationFailure || canaryReplayAttempted) {
+        this.catalogCanaryTerminallyUnavailable = true;
+      }
+      this.catalogCanaryClaimed = canaryReplayAttempted
+        || terminalCanaryAllocationFailure;
       console.warn('[generated-feed] background offer unavailable; builtin loop continues', error);
       track('generated_offer_unavailable', {
         reason: error instanceof ApiRequestError ? error.code ?? `http_${error.status}` : 'preparation_failure',
       });
-      if (canaryReplayAttempted) this.scheduleGeneratedOfferPrefetch();
+      if (canaryReplayAttempted || terminalCanaryAllocationFailure) {
+        this.generatedOfferState = 'idle';
+        this.scheduleGeneratedOfferPrefetch();
+      }
       else this.scheduleGeneratedOfferRetry();
     }
   }
@@ -1164,6 +1196,7 @@ export class Feed {
     const target = generatedInsertionTarget(this.realIndex(), this.N, blocked, 2);
     if (target === null) return;
     this.generatedTargetIndex = target;
+    this.renderGeneratedProvenance(target, this.generatedOffer);
     this.games[target]?.classList.add('game--generated');
     this.coverLoaded.delete(target);
     this.ensureCover(target);
@@ -1403,6 +1436,7 @@ export class Feed {
     this.generatedTargetIndex = null;
     this.generatedOfferState = 'reserved';
     this.catalogCanaryClaimed = prepared.canaryProjectionRequired;
+    this.renderGeneratedProvenance(i, prepared);
     this.games[i]?.classList.add('game--generated', 'game--loading');
     this.games[i]?.classList.remove('game--ready');
   }
@@ -1570,7 +1604,8 @@ export class Feed {
       // entry/spec/runtime identity. Only its opaque authorization enters the
       // existing Player-v2 delivery closure. A precise no-invitation 404 is the
       // sole edge that falls through to ordinary effectful feed policy.
-      if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed) {
+      if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
+        && !this.catalogCanaryTerminallyUnavailable) {
         this.catalogCanaryClaimed = true;
         try {
           for (const [attempt, delay] of retryDelays.entries()) {
@@ -1647,10 +1682,19 @@ export class Feed {
       slot.canaryProjectionRequired = canaryAuthority;
 
       slot.phase = 'delivery_pending';
-      const authorized = await apiAllocateAuthorizedCatalogRequired({
-        schema: 'catalog.allocate-authorized.v2',
-        authorizationId: authority.authorizationId,
-      });
+      let authorized: CatalogAllocateAuthorizedResultV2;
+      try {
+        authorized = await apiAllocateAuthorizedCatalogRequired({
+          schema: 'catalog.allocate-authorized.v2',
+          authorizationId: authority.authorizationId,
+        });
+      } catch (error) {
+        if (canaryAuthority && error instanceof ApiRequestError
+          && catalogCanaryAllocationFailureFallsThrough(error.status)) {
+          this.catalogCanaryTerminallyUnavailable = true;
+        }
+        throw error;
+      }
       if (!this.catalogSlotIsCurrent(slot) || slot.phase !== 'delivery_pending') {
         if (canaryAuthority) this.catalogCanaryClaimed = false;
         return;
@@ -4562,6 +4606,11 @@ export class Feed {
       generatedBadge.setAttribute('aria-label', 'Generated catalog level');
       generatedBadge.innerHTML = '<span aria-hidden="true">✦</span> GENERATED';
       game.appendChild(generatedBadge);
+
+      const generatedFrame = document.createElement('div');
+      generatedFrame.className = 'game__generated-frame';
+      generatedFrame.setAttribute('aria-hidden', 'true');
+      game.appendChild(generatedFrame);
 
       // Full-screen dim over the GAME AREA (inset above the swipe bar) shown only
       // while autoplay runs — a "this is a demo" veil that also captures tap-anywhere

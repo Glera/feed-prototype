@@ -327,6 +327,12 @@ export interface CatalogAllocationManifestV2 extends Omit<CatalogAllocationManif
   presentationFingerprint: string;
 }
 
+export interface CatalogAllocationManifestV3 extends Omit<CatalogAllocationManifestV1, 'schema'> {
+  schema: 'series.manifest.v3';
+  gameplayFingerprint: string;
+  presentationFingerprint: string;
+}
+
 interface CatalogAllocationDecisionResultBaseV1 {
   schema: 'catalog.allocate-decision-result.v1';
   decisionId: string;
@@ -391,14 +397,28 @@ export type CatalogAllocationDecisionResultV3 = Omit<
   holdExpiresAt: string;
   catalog: CatalogAllocationIdentityV1;
   runtime: CatalogRuntimeIdentityV1;
-  manifest: CatalogAllocationManifestV1 | CatalogAllocationManifestV2;
+  manifest: CatalogAllocationManifestV1 | CatalogAllocationManifestV2
+    | CatalogAllocationManifestV3;
   offerSelection: CatalogGeneratedOfferSelectionV1;
+};
+
+export type CatalogAllocationDecisionResultV4 = Omit<
+  CatalogAllocationDecisionResultBaseV1,
+  'schema'
+> & {
+  schema: 'catalog.allocate-decision-result.v4';
+  outcome: 'allocated';
+  holdExpiresAt: string;
+  catalog: CatalogAllocationIdentityV1;
+  runtime: CatalogRuntimeIdentityV1;
+  manifest: CatalogAllocationManifestV3;
 };
 
 export type CatalogAllocationDecisionResult =
   | CatalogAllocationDecisionResultV1
   | CatalogAllocationDecisionResultV2
-  | CatalogAllocationDecisionResultV3;
+  | CatalogAllocationDecisionResultV3
+  | CatalogAllocationDecisionResultV4;
 
 export interface CatalogAllocateAuthorizedResultV2 {
   schema: 'catalog.allocate-authorized-result.v2';

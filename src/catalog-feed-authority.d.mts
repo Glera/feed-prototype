@@ -92,6 +92,8 @@ export function catalogCanaryDogfoodEnabled(
   accountEligible: boolean,
 ): boolean;
 export function catalogCanaryInvitationMissing(status: number, code: string | null): boolean;
+export function catalogCanaryAllocationFailureFallsThrough(status: number): boolean;
+export function generatedProvenanceLabel(levelCount: number): string;
 export function validateCatalogCanaryAuthorityResult(
   value: unknown,
 ): Readonly<CatalogCanaryAuthorityResultV1>;

@@ -156,6 +156,8 @@ const freshState = (scenario, instanceToken) => ({
     rewardSeen: false,
     recoverySeen: false,
     generatedBadgeVisible: false,
+    generatedBadgeText: '',
+    generatedFrameVisible: false,
     preloaderVisible: true,
   },
   lastClientSignature: '',
@@ -683,7 +685,10 @@ addEventListener('DOMContentLoaded',()=>{
     chestSeen ||= Boolean(chest);
     rewardSeen ||= Boolean(document.querySelector('.game__state--earned .reward'));
     recoverySeen ||= (document.body.textContent||'').includes('Серия обновилась');
-    const generatedBadgeVisible=Boolean(current?.classList.contains('game--generated')&&current?.querySelector('.game__generated-badge'));
+    const generatedBadge=current?.querySelector('.game__generated-badge')||null;
+    const generatedBadgeVisible=Boolean(current?.classList.contains('game--generated')&&generatedBadge);
+    const generatedBadgeText=generatedBadge?.textContent?.replace(/\s+/g,' ').trim()||'';
+    const generatedFrameVisible=Boolean(current?.classList.contains('game--generated')&&current?.querySelector('.game__generated-frame'));
     if(harnessScenario==='cross-origin-spoof'&&currentFrame==='catalog'&&!spoofStarted){
       spoofStarted=true;
       const attacker=document.createElement('iframe');
@@ -706,7 +711,7 @@ addEventListener('DOMContentLoaded',()=>{
       setTimeout(()=>chest.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7})),650);
     }
     fetch('/__harness/client?harness_instance='+encodeURIComponent(harnessInstance)+'&scenario='+encodeURIComponent(harnessScenario),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      harnessInstance,harnessScenario,harnessTab,currentFrame,currentIframeCount,currentGameClasses,frameNavigated,frameVisibility,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,generatedBadgeVisible,
+      harnessInstance,harnessScenario,harnessTab,currentFrame,currentIframeCount,currentGameClasses,frameNavigated,frameVisibility,catalogSeen,builtinSeen,chestSeen,rewardSeen,recoverySeen,generatedBadgeVisible,generatedBadgeText,generatedFrameVisible,
       preloaderVisible:Boolean(document.querySelector('.preloader:not(.preloader--hidden)'))
     })}).catch(()=>{});
   };

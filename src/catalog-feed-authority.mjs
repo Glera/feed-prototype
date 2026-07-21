@@ -99,6 +99,20 @@ export function catalogCanaryInvitationMissing(status, code) {
   return status === 404 && code === 'catalog_canary_invitation_not_found';
 }
 
+/** A consumed/stale/rejected exact canary must not suppress the public lane. */
+export function catalogCanaryAllocationFailureFallsThrough(status) {
+  return status === 404 || status === 409 || status === 410;
+}
+
+export function generatedProvenanceLabel(levelCount) {
+  if (!Number.isInteger(levelCount) || levelCount < 1 || levelCount > 6) {
+    fail('invalid_generated_offer', 'generated provenance level count is invalid');
+  }
+  return levelCount === 1
+    ? 'GENERATED LEVEL'
+    : `GENERATED SERIES · ${levelCount} LEVELS`;
+}
+
 /** Validate the opaque invitation without accepting any content identity. */
 export function validateCatalogCanaryAuthorityResult(value) {
   if (!exactKeys(value, [
@@ -377,13 +391,17 @@ function validateGeneratedAllocation(value, request) {
   canonicalUuid(value.runtime.legacyVariantId, 'allocation.runtime.legacyVariantId');
   hash(value.runtime.runtimeContractDigest, 'allocation.runtime.runtimeContractDigest');
   if (!plainObject(value.manifest)
-    || !['series.manifest.v1', 'series.manifest.v2'].includes(value.manifest.schema)) {
+    || !['series.manifest.v1', 'series.manifest.v2', 'series.manifest.v3']
+      .includes(value.manifest.schema)) {
     fail('invalid_generated_offer', 'generated manifest identity is invalid');
   }
   const manifestKeys = value.manifest.schema === 'series.manifest.v2'
     ? ['schema', 'contentHash', 'seriesFingerprint', 'fingerprintVersion', 'levels',
       'skinHash', 'skinContractDigest', 'gameplayFingerprint', 'presentationFingerprint']
-    : ['schema', 'contentHash', 'seriesFingerprint', 'fingerprintVersion', 'levels'];
+    : value.manifest.schema === 'series.manifest.v3'
+      ? ['schema', 'contentHash', 'seriesFingerprint', 'fingerprintVersion', 'levels',
+        'gameplayFingerprint', 'presentationFingerprint']
+      : ['schema', 'contentHash', 'seriesFingerprint', 'fingerprintVersion', 'levels'];
   if (!exactKeys(value.manifest, manifestKeys) || !Array.isArray(value.manifest.levels)
     || value.manifest.levels.length < 1 || value.manifest.levels.length > 6
     || value.manifest.levels.some((item, index) => !exactKeys(item, ['ordinal', 'specHash'])
@@ -393,7 +411,12 @@ function validateGeneratedAllocation(value, request) {
   hash(value.manifest.contentHash, 'allocation.manifest.contentHash');
   hash(value.manifest.seriesFingerprint, 'allocation.manifest.seriesFingerprint');
   if (value.manifest.schema === 'series.manifest.v2') {
-    for (const key of ['skinHash', 'skinContractDigest', 'gameplayFingerprint', 'presentationFingerprint']) {
+    for (const key of ['skinHash', 'skinContractDigest']) {
+      hash(value.manifest[key], `allocation.manifest.${key}`);
+    }
+  }
+  if (['series.manifest.v2', 'series.manifest.v3'].includes(value.manifest.schema)) {
+    for (const key of ['gameplayFingerprint', 'presentationFingerprint']) {
       hash(value.manifest[key], `allocation.manifest.${key}`);
     }
   }

@@ -650,28 +650,42 @@ body {
    does not draw any badge of its own. */
 .game__generated-badge {
   position: absolute;
-  top: 13px;
-  right: 14px;
-  z-index: 8;
+  top: 14px;
+  left: 50%;
+  z-index: 10;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 6px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.38);
+  padding: 8px 13px;
+  border: 2px solid rgba(240, 218, 255, 0.92);
   border-radius: 999px;
-  background: rgba(18, 13, 35, 0.78);
-  color: #f2eaff;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32), 0 0 18px rgba(163, 111, 255, 0.24);
-  font: 800 10px/1 system-ui, sans-serif;
-  letter-spacing: 0.72px;
+  background: rgba(61, 25, 102, 0.94);
+  color: #fff;
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.42), 0 0 24px rgba(190, 122, 255, 0.52);
+  font: 900 11px/1 system-ui, sans-serif;
+  letter-spacing: 0.8px;
+  white-space: nowrap;
   pointer-events: none;
   opacity: 0;
-  transform: translateY(-4px);
+  transform: translate(-50%, -5px);
   transition: opacity 160ms ease-out, transform 160ms ease-out;
 }
-.game__generated-badge > span { color: #c9a7ff; font-size: 13px; line-height: 1; }
-.game--generated .game__generated-badge { opacity: 1; transform: translateY(0); }
-.game--generated.game--manual .game__generated-badge { opacity: 0.72; }
+.game__generated-badge > span { color: #e7c8ff; font-size: 14px; line-height: 1; }
+.game--generated .game__generated-badge { opacity: 1; transform: translate(-50%, 0); }
+.game--generated.game--manual .game__generated-badge { opacity: 0.88; }
+
+.game__generated-frame {
+  position: absolute;
+  inset: 6px 6px calc(var(--bar-reserve) + 6px);
+  z-index: 9;
+  border: 2px solid rgba(209, 157, 255, 0.82);
+  border-radius: 14px;
+  box-shadow: inset 0 0 22px rgba(151, 77, 226, 0.16), 0 0 18px rgba(151, 77, 226, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease-out;
+}
+.game--generated .game__generated-frame { opacity: 1; }
 
 /* Pilot-only operator annotation. The node is mounted only when /session grants
    the exact capability and the current generated catalog level has a causal

@@ -103,6 +103,8 @@ const runScenario = async (url, { firstFailure, expectLevelRetry = false }) => {
     assert.equal(state.client.catalogSeen, true, diagnostic);
     assert.equal(state.client.builtinSeen, true, diagnostic);
     assert.equal(state.client.generatedBadgeVisible, true, diagnostic);
+    assert.match(state.client.generatedBadgeText, /^\u2726 GENERATED (?:LEVEL|SERIES \u00b7 3 LEVELS)$/, diagnostic);
+    assert.equal(state.client.generatedFrameVisible, true, diagnostic);
     assert.equal(state.client.chestSeen, true, diagnostic);
     assert.equal(state.client.rewardSeen, true, diagnostic);
     assert.equal(state.diagnostics.length, 0, diagnostic);

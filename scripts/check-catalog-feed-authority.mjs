@@ -16,6 +16,7 @@ import {
   catalogSourceDecisionProjectionReady,
   catalogCanaryAuthorityAllowsAllocation,
   catalogCanaryAuthorityAllowsBackgroundAllocation,
+  catalogCanaryAllocationFailureFallsThrough,
   catalogCanaryDogfoodEnabled,
   catalogCanaryInvitationMissing,
   catalogCanaryTicketStartIsSafe,
@@ -27,6 +28,7 @@ import {
   catalogFeedUsesBuiltinImpression,
   catalogRecallRecoveryEffect,
   generatedInsertionTarget,
+  generatedProvenanceLabel,
   validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
   validateCatalogGeneratedOfferResult,
@@ -362,6 +364,34 @@ equal(generatedOffer.allocation.allocationId, ids.request,
   'the selector allocation is bound directly to the request replay identity');
 equal(Object.isFrozen(generatedOffer.allocation.offerSelection), true,
   'nested server-owned selection evidence is immutable after validation');
+const rasterOffer = validateCatalogGeneratedOfferResult({
+  schema: 'feed.generated-offer-result.v1',
+  requestId: ids.request,
+  outcome: 'allocated',
+  selectionMode: 'fallback_any',
+  selectionReason: 'insufficient_affinity',
+  allocation: {
+    ...generatedAllocation,
+    requestedCatalogMechanic: 'merge/raster-art-feae1e153540',
+    catalog: {
+      ...generatedAllocation.catalog,
+      mechanic: 'merge',
+      variant: 'raster-art-feae1e153540',
+    },
+    runtime: {
+      ...generatedAllocation.runtime,
+      playableId: 'merge-locked-v1-swipe',
+    },
+    manifest: {
+      ...generatedAllocation.manifest,
+      schema: 'series.manifest.v3',
+      gameplayFingerprint: 'c'.repeat(64),
+      presentationFingerprint: 'd'.repeat(64),
+    },
+  },
+}, offerRequest);
+equal(rasterOffer.allocation.manifest.schema, 'series.manifest.v3',
+  'the public selector accepts an exact generic raster-art manifest');
 const noOffer = validateCatalogGeneratedOfferResult({
   schema: 'feed.generated-offer-result.v1',
   requestId: ids.request,
@@ -537,5 +567,17 @@ throws(
   /canonical UUID/,
   'a malformed invitation cannot create a persisted recovery identity',
 );
+equal(catalogCanaryAllocationFailureFallsThrough(409), true,
+  'a rejected exact canary immediately releases the public generated lane');
+equal(catalogCanaryAllocationFailureFallsThrough(410), true,
+  'an expired exact canary immediately releases the public generated lane');
+equal(catalogCanaryAllocationFailureFallsThrough(503), false,
+  'transient backend failure keeps the exact canary retryable');
+equal(generatedProvenanceLabel(1), 'GENERATED LEVEL',
+  'single generated content is labelled as one level');
+equal(generatedProvenanceLabel(3), 'GENERATED SERIES · 3 LEVELS',
+  'multi-level generated content exposes its series size');
+throws(() => generatedProvenanceLabel(0), /level count is invalid/,
+  'empty generated content cannot render misleading provenance');
 
 console.log(`catalog feed authority: ${assertions} assertions passed`);
