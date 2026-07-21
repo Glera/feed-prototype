@@ -17,6 +17,30 @@ let origin = '';
 let catalogLabAvailable = false;
 let sessionRequests = 0;
 
+const artifactAuthorization = {
+  authorizationId: '6b447be0-f961-482e-aa03-b419d5f1492d',
+  clientName: 'Mechanic Lab raster-art publisher',
+  clientInstanceId: '2435ba2d-34cb-4590-841d-7edbb52ba598',
+  scopes: ['catalog:publish'],
+  state: 'pending',
+  expiresAt: '2026-07-21T19:30:00.000Z',
+  decisionVersion: 0,
+  promotionSummary: {
+    schema: 'catalog.artifact-promotion-summary.v1',
+    publishId: 'be126800-f72e-5479-8e07-55ec8118493b',
+    requestHash: '8'.repeat(64),
+    contentHash: '3'.repeat(64),
+    reviewTargetId: 'merge-art-magical-bakery-feae1e153540-5f3c1f61ead8',
+    title: 'Magical Bakery',
+    description: 'A warm enchanted patisserie.',
+    artPackHash: 'f'.repeat(64),
+    runtimeArtifactDigest: `sha256:${'4'.repeat(64)}`,
+    gameplayFingerprint: 'a'.repeat(64),
+    presentationFingerprint: 'b'.repeat(64),
+    reason: 'Human-good raster-art vertical.',
+  },
+};
+
 const json = (response, value, status = 200) => {
   response.statusCode = status;
   response.setHeader('content-type', 'application/json');
@@ -60,6 +84,10 @@ const server = createServer((request, response) => {
   }
   if (request.method === 'GET' && url.pathname === '/api/admin/lab-tokens') {
     return json(response, { tokens: [] });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/admin/device-auth/lookup') {
+    request.resume();
+    return json(response, artifactAuthorization);
   }
   if (request.method === 'GET' && url.pathname === '/api/challenges') {
     return json(response, { box: 'in', items: [] });
@@ -214,6 +242,19 @@ try {
     `focused Catalog Lab launch fetched feed versions: ${labNavigationRequests.join(', ')}`);
   assert.equal(labNavigationRequests.some((entry) => /\/(?:[^/?]+)\.html(?:\?|$)/.test(entry)), false,
     `focused Catalog Lab launch fetched a playable: ${labNavigationRequests.join(', ')}`);
+
+  // A generic raster-art promotion has its own exact summary shape. The TMA
+  // must render it rather than treating it as a legacy ordered level series.
+  await enabledPage.getByLabel('One-time code').fill('23456-789AB');
+  await enabledPage.getByRole('button', { name: 'Review request' }).click();
+  await enabledPage.locator('[data-testid="catalog-promotion-summary"]').waitFor({ state: 'visible' });
+  const artifactSummary = enabledPage.locator('[data-testid="catalog-promotion-summary"]');
+  assert.match((await artifactSummary.textContent()) || '', /Exact raster-art world/);
+  assert.match((await artifactSummary.textContent()) || '', /Magical Bakery/);
+  assert.match((await artifactSummary.textContent()) || '', new RegExp(`sha256:${'4'.repeat(64)}`));
+  assert.match((await artifactSummary.textContent()) || '', new RegExp('f'.repeat(64)));
+  assert.equal(await enabledPage.getByRole('button', { name: 'Approve exact raster world' }).count(), 1);
+  await enabledPage.getByRole('button', { name: 'Use another code' }).click();
 
   const returnSession = enabledPage.waitForResponse((response) =>
     response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/session');

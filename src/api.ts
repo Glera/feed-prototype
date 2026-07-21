@@ -942,7 +942,25 @@ export interface CatalogPromotionBatchSummary {
   items: CatalogPromotionBatchSummaryItem[];
 }
 
-export type CatalogPromotionSummary = CatalogPromotionSingleSummary | CatalogPromotionBatchSummary;
+export interface CatalogPromotionArtifactSummary {
+  schema: 'catalog.artifact-promotion-summary.v1';
+  publishId: string;
+  requestHash: string;
+  contentHash: string;
+  reviewTargetId: string;
+  title: string;
+  description: string;
+  artPackHash: string;
+  runtimeArtifactDigest: string;
+  gameplayFingerprint: string;
+  presentationFingerprint: string;
+  reason: string;
+}
+
+export type CatalogPromotionSummary =
+  | CatalogPromotionSingleSummary
+  | CatalogPromotionBatchSummary
+  | CatalogPromotionArtifactSummary;
 
 export interface CatalogLabDeviceAuthorization {
   authorizationId: string;

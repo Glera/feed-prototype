@@ -78,18 +78,32 @@ function promotionSummaryView(summary: CatalogPromotionSummary): HTMLElement {
   header.className = 'lab-auth__promotion-header';
   const heading = document.createElement('h3');
   const batch = summary.schema === 'catalog.promotion-summary-batch.v1';
-  heading.textContent = batch ? 'Exact publication batch' : 'Exact series to publish';
+  const artifact = summary.schema === 'catalog.artifact-promotion-summary.v1';
+  heading.textContent = batch
+    ? 'Exact publication batch'
+    : artifact ? 'Exact raster-art world' : 'Exact series to publish';
   const count = document.createElement('span');
   count.className = 'lab-auth__promotion-count';
   count.textContent = batch
     ? `${summary.items.length} visual variants`
-    : `${summary.levels.length} ${summary.levels.length === 1 ? 'level' : 'levels'}`;
+    : artifact
+      ? summary.title
+      : `${summary.levels.length} ${summary.levels.length === 1 ? 'level' : 'levels'}`;
   header.append(heading, count);
 
   const identity = document.createElement('div');
   identity.className = 'lab-auth__promotion-identity';
   identity.append(detail(batch ? 'Batch ID' : 'Publish ID', summary.publishId));
-  if (!batch) {
+  if (artifact) {
+    identity.append(
+      detail('Title', summary.title),
+      detail('Review target', summary.reviewTargetId),
+      detail('Art pack', summary.artPackHash),
+      detail('Runtime artifact', summary.runtimeArtifactDigest),
+      detail('Gameplay fingerprint', summary.gameplayFingerprint),
+      detail('Presentation fingerprint', summary.presentationFingerprint),
+    );
+  } else if (!batch) {
     identity.append(
       detail('Mechanic', summary.mechanic),
       detail('Variant', summary.variant),
@@ -105,7 +119,20 @@ function promotionSummaryView(summary: CatalogPromotionSummary): HTMLElement {
   const levels = document.createElement('ol');
   levels.className = 'lab-auth__promotion-levels';
   levels.setAttribute('aria-label', batch ? 'Ordered publication batch' : 'Ordered series levels');
-  if (batch) {
+  if (artifact) {
+    const item = document.createElement('li');
+    item.className = 'lab-auth__promotion-level';
+    const itemHeading = document.createElement('strong');
+    itemHeading.textContent = summary.title;
+    const itemDetails = document.createElement('div');
+    itemDetails.className = 'lab-auth__promotion-level-details';
+    itemDetails.append(
+      detail('Description', summary.description),
+      detail('Review target', summary.reviewTargetId),
+    );
+    item.append(itemHeading, itemDetails);
+    levels.appendChild(item);
+  } else if (batch) {
     for (const entry of summary.items) {
       const item = document.createElement('li');
       item.className = 'lab-auth__promotion-level';
@@ -380,19 +407,26 @@ export async function mountCatalogLabAuth(): Promise<void> {
   const renderRequest = (authorization: CatalogLabDeviceAuthorization): void => {
     const promotion = authorization.promotionSummary;
     const promotionBatch = promotion?.schema === 'catalog.promotion-summary-batch.v1';
+    const promotionArtifact = promotion?.schema === 'catalog.artifact-promotion-summary.v1';
     title.textContent = promotion
-      ? promotionBatch ? 'Approve an exact batch' : 'Approve an exact series'
+      ? promotionBatch
+        ? 'Approve an exact batch'
+        : promotionArtifact ? 'Approve an exact raster world' : 'Approve an exact series'
       : 'Authorize a Lab computer';
     copy.textContent = promotion
-      ? 'This is a one-time publication decision, not general access. Compare the immutable series identity below with the reviewed morning candidate.'
+      ? promotionArtifact
+        ? 'This is a one-time publication decision, not general access. Compare the immutable art, runtime, and gameplay identities below with the reviewed candidate.'
+        : 'This is a one-time publication decision, not general access. Compare the immutable series identity below with the reviewed morning candidate.'
       : 'Review the device and permission before you approve it.';
     requestEyebrow.textContent = promotion
-      ? promotionBatch ? 'Exact batch publication' : 'Exact series publication'
+      ? promotionBatch
+        ? 'Exact batch publication'
+        : promotionArtifact ? 'Exact raster-world publication' : 'Exact series publication'
       : 'Permission request';
     requestTitle.textContent = promotion
       ? promotionBatch
         ? `${promotion.items.length} approved visual variants`
-        : `${promotion.mechanic} · ${promotion.variant}`
+        : promotionArtifact ? promotion.title : `${promotion.mechanic} · ${promotion.variant}`
       : authorization.clientName;
     requestDetails.replaceChildren(
       detail('Computer', authorization.clientName),
@@ -404,10 +438,14 @@ export async function mountCatalogLabAuth(): Promise<void> {
     requestWarning.textContent = promotion
       ? promotionBatch
         ? 'Approval authorizes only this immutable ordered batch. Each item keeps its own idempotent publish receipt; no item outside the batch can use this authorization.'
-        : 'Approval authorizes this exact immutable series once. Verify the content identity and every ordered level before approving; no other series can use this authorization.'
+        : promotionArtifact
+          ? 'Approval authorizes this exact immutable raster world once. Verify the art pack, runtime, and gameplay fingerprints before approving; no other world can use this authorization.'
+          : 'Approval authorizes this exact immutable series once. Verify the content identity and every ordered level before approving; no other series can use this authorization.'
       : 'Approval lets this computer submit validated evaluation results. It does not grant feed, reset, or model API access.';
     approve.textContent = promotion
-      ? promotionBatch ? 'Approve exact batch' : 'Approve exact publication'
+      ? promotionBatch
+        ? 'Approve exact batch'
+        : promotionArtifact ? 'Approve exact raster world' : 'Approve exact publication'
       : 'Approve';
     const pending = authorization.state === 'pending';
     decisionButtons.hidden = !pending;
