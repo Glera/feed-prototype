@@ -461,6 +461,14 @@ export function apiSession(): Promise<SessionResp | null> {
   return post<SessionResp>('/api/session');
 }
 
+/** Bootstrap variant which preserves an authenticated rejection instead of
+ * silently collapsing it into the ordinary offline fallback. The feed remains
+ * playable on failure, but can now tell the player when Telegram must mint a
+ * fresh WebApp credential before catalog content is reachable. */
+export function apiSessionRequired(): Promise<SessionResp> {
+  return postRequired<SessionResp>('/api/session');
+}
+
 export interface ResultIn {
   schema?: 'catalog.result.v2';
   mechanic_id: string;

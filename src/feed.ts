@@ -31,7 +31,7 @@ import {
   type CollectionCard,
 } from './collections';
 import {
-  apiSession, apiMe, variantIdForMechanic,
+  apiSessionRequired, apiMe, variantIdForMechanic,
   apiCreateOperatorLevelFlagRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
@@ -604,6 +604,8 @@ export class Feed {
   }> | null = null;
   private backendVersion: string | null = null;
   private sessionSyncPromise: Promise<boolean> | null = null;
+  private sessionAuthenticationRejected = false;
+  private sessionAuthBannerEl: HTMLElement | null = null;
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
   private pendingStarRewards = new Set<number>();
@@ -874,6 +876,10 @@ export class Feed {
     for (const d of delays) {
       if (d) await new Promise((r) => setTimeout(r, d));
       if (await this.syncSessionBootstrap()) return;
+      // Retrying the same signed Telegram initData cannot repair a 401. Keep
+      // the baked feed playable and wait for a fresh WebView launch instead of
+      // issuing four more doomed requests behind an apparently healthy UI.
+      if (this.sessionAuthenticationRejected) return;
     }
     // Backend never answered in the window — onForeground() will retry.
   }
@@ -1211,10 +1217,20 @@ export class Feed {
   private syncSessionBootstrap(): Promise<boolean> {
     if (this.sessionSyncPromise) return this.sessionSyncPromise;
     const current = (async () => {
-      const session = await apiSession();
-      if (!session) return false;
-      await this.applySessionBootstrap(session);
-      return true;
+      try {
+        const session = await apiSessionRequired();
+        this.sessionAuthenticationRejected = false;
+        this.clearSessionAuthBanner();
+        await this.applySessionBootstrap(session);
+        return true;
+      } catch (error) {
+        if (getInitData() !== null && error instanceof ApiRequestError && error.status === 401) {
+          this.sessionAuthenticationRejected = true;
+          this.showSessionAuthBanner();
+          track('session_authentication_rejected', { reason: error.code ?? 'http_401' });
+        }
+        return false;
+      }
     })();
     this.sessionSyncPromise = current;
     const clear = () => {
@@ -1222,6 +1238,24 @@ export class Feed {
     };
     void current.then(clear, clear);
     return current;
+  }
+
+  private showSessionAuthBanner(): void {
+    if (this.sessionAuthBannerEl) return;
+    const banner = document.createElement('div');
+    banner.className = 'session-auth-banner';
+    banner.setAttribute('role', 'status');
+    banner.innerHTML = '<span><b>Generated-контент недоступен</b><small>Telegram не подтвердил эту сессию. Закройте мини-апп и откройте её снова из бота.</small></span><button type="button">Закрыть</button>';
+    banner.querySelector('button')?.addEventListener('click', () => {
+      try { (window as any).Telegram?.WebApp?.close?.(); } catch { /* keep the explanation visible */ }
+    });
+    this.viewport.appendChild(banner);
+    this.sessionAuthBannerEl = banner;
+  }
+
+  private clearSessionAuthBanner(): void {
+    this.sessionAuthBannerEl?.remove();
+    this.sessionAuthBannerEl = null;
   }
 
   // ── Durable shadow control plane ─────────────────────────────────────────
@@ -2260,11 +2294,25 @@ export class Feed {
 
   // Foreground: push wins queued while away/offline, then re-read the balance.
   private async onForeground(): Promise<void> {
+    // A signed initData rejection is terminal for this document. Telegram can
+    // only repair it by creating a new WebView with fresh signed bytes; hidden
+    // foreground retries would merely repeat the 401 across every auth route.
+    if (this.sessionAuthenticationRejected) {
+      this.showSessionAuthBanner();
+      return;
+    }
     // A cold backend may have exhausted the initial bounded /session retry
     // window. Foreground is the recovery edge for identity bindings and CP
     // initialization, not merely a balance refresh.
     this.retryDeferredControlPlaneExposures();
     if (await this.syncSessionBootstrap()) return;
+    // Foreground can race the initial bootstrap while its signed /session
+    // request is still pending. Re-check after the shared promise settles so
+    // the same 401 cannot fall through into the remaining authenticated APIs.
+    if (this.sessionAuthenticationRejected) {
+      this.showSessionAuthBanner();
+      return;
+    }
     this.applyConfirmedBalances(await flushResults());
     const m = await apiMe();
     if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);

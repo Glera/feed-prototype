@@ -3133,6 +3133,42 @@ body {
   transition: transform 0.34s cubic-bezier(0.25, 0.9, 0.3, 1), opacity 0.3s ease;
 }
 .activity-toast--show { transform: translate(-50%, 0); opacity: 1; }
+
+.session-auth-banner {
+  position: absolute;
+  z-index: 3450;
+  top: calc(var(--safe-top) + 8px);
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px 10px 13px;
+  border: 1px solid rgba(255, 197, 92, 0.45);
+  border-radius: 13px;
+  background: rgba(27, 23, 18, 0.97);
+  box-shadow: 0 9px 28px rgba(0, 0, 0, 0.42);
+  color: #fff;
+}
+.session-auth-banner span { flex: 1; min-width: 0; }
+.session-auth-banner b,
+.session-auth-banner small { display: block; }
+.session-auth-banner b { font: 800 12px/1.25 system-ui, sans-serif; }
+.session-auth-banner small {
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.7);
+  font: 500 10.5px/1.3 system-ui, sans-serif;
+}
+.session-auth-banner button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 9px;
+  background: #fff;
+  color: #181510;
+  font: 800 11px/1 system-ui, sans-serif;
+}
 /* Reserve room on the right of the rail so scrolling challenge cards never slide
    under the pinned puzzle counter. */
 .stories { padding-right: 78px; }

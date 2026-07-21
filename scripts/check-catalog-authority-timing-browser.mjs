@@ -32,6 +32,13 @@ const stagedBinding = {
 const scenarios = {
   delayed: { startedAt: 0, sessionRequests: 0, generatedOfferRequests: [], cpEvents: [] },
   'no-binding': { startedAt: 0, sessionRequests: 0, generatedOfferRequests: [], cpEvents: [] },
+  unauthorized: {
+    startedAt: 0,
+    sessionRequests: 0,
+    generatedOfferRequests: [],
+    cpEvents: [],
+    postRejectionRequests: [],
+  },
   staged: {
     startedAt: 0,
     sessionRequests: 0,
@@ -83,6 +90,10 @@ const server = createServer(async (request, response) => {
     if (!scenario) return json(response, { code: 'fixture_identity_missing' }, 401);
     const state = scenarios[scenario];
     state.sessionRequests += 1;
+    if (scenario === 'unauthorized') {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      return json(response, { detail: 'initData expired' }, 401);
+    }
     if (scenario === 'delayed' && state.sessionRequests === 1) {
       await new Promise((resolve) => setTimeout(resolve, 4200));
     }
@@ -110,6 +121,13 @@ const server = createServer(async (request, response) => {
         by_playable_id: bindings,
       },
     });
+  }
+  if (scenario === 'unauthorized' && (
+    url.pathname === '/api/me'
+    || url.pathname === '/api/daily/sync'
+    || url.pathname === '/api/challenges/inbox'
+  )) {
+    scenarios.unauthorized.postRejectionRequests.push(url.pathname);
   }
   if (request.method === 'POST' && url.pathname === '/api/cp/events') {
     if (!scenario) return json(response, { code: 'fixture_identity_missing' }, 401);
@@ -214,12 +232,14 @@ try {
     if (virtualClock) await page.clock.install();
     const initData = initDataFor(scenario);
     await page.addInitScript(({ id, data }) => {
+      window.__telegramCloseCount = 0;
       window.Telegram = { WebApp: {
         initData: data,
         initDataUnsafe: { user: { id }, start_param: null },
         platform: 'web',
         ready() {}, expand() {}, disableVerticalSwipes() {}, lockOrientation() {},
         setHeaderColor() {}, setBackgroundColor() {}, onEvent() {},
+        close() { window.__telegramCloseCount += 1; },
       } };
     }, { id: userId, data: initData });
     scenarios[scenario].startedAt = Date.now();
@@ -356,6 +376,48 @@ try {
     'unbound fallback cannot invent a control-plane impression',
   );
   await noBindingPage.close();
+
+  const unauthorizedPage = await openScenario('unauthorized');
+  await unauthorizedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  await waitFor(
+    () => scenarios.unauthorized.sessionRequests === 1,
+    1000,
+    'the rejected Telegram bootstrap request did not start',
+  );
+  // Race foreground with the still-pending /session request. Once that shared
+  // request settles as 401, no other authenticated endpoint may be attempted.
+  await unauthorizedPage.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await unauthorizedPage.waitForSelector('.session-auth-banner', { timeout: 3000 });
+  await new Promise((resolve) => setTimeout(resolve, 2300));
+  await unauthorizedPage.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(scenarios.unauthorized.sessionRequests, 1,
+    'one rejected signed credential must not trigger startup or foreground retry storms');
+  assert.equal(scenarios.unauthorized.generatedOfferRequests.length, 0,
+    'catalog discovery must remain disabled when Telegram authentication failed');
+  assert.deepEqual(scenarios.unauthorized.postRejectionRequests, [],
+    'a foreground race must not fall through into other authenticated APIs after /session rejects');
+  assert.match(await unauthorizedPage.locator('.session-auth-banner').innerText(),
+    /Generated-content|Generated-/,
+    'the fallback feed must explain why generated content is unavailable');
+  const closeButton = unauthorizedPage.locator('.session-auth-banner button');
+  assert.equal(await closeButton.count(), 1, 'the auth notice must expose one recovery action');
+  await unauthorizedPage.evaluate(() => {
+    window.__telegramCloseCount = 0;
+    window.Telegram.WebApp.close = () => { window.__telegramCloseCount += 1; };
+  });
+  await closeButton.click();
+  assert.equal(await unauthorizedPage.evaluate(() => window.__telegramCloseCount), 1,
+    'the recovery action must ask Telegram to close the stale WebView');
+  await unauthorizedPage.close();
+
+  const outsideTelegramPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await outsideTelegramPage.goto(origin, { waitUntil: 'domcontentloaded' });
+  await outsideTelegramPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(await outsideTelegramPage.locator('.session-auth-banner').count(), 0,
+    'an unauthenticated browser/AppLovin fallback must not claim Telegram rejected a signed session');
+  await outsideTelegramPage.close();
 
   console.log('catalog authority timing browser: builtin swipe stays interactive through late binding/projection');
 } finally {
