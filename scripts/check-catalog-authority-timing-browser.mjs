@@ -570,6 +570,33 @@ try {
     'an unauthenticated browser/AppLovin fallback must not claim Telegram rejected a signed session');
   await outsideTelegramPage.close();
 
+  const restoredLaunchUrlPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  const restoredLaunchRequests = [];
+  restoredLaunchUrlPage.on('request', (request) => restoredLaunchRequests.push(new URL(request.url()).pathname));
+  await restoredLaunchUrlPage.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: '',
+  }));
+  await restoredLaunchUrlPage.addInitScript(() => {
+    window.Telegram = { WebApp: {
+      initData: '', initDataUnsafe: {}, platform: 'unknown',
+      ready() {}, expand() {}, disableVerticalSwipes() {}, lockOrientation() {},
+      setHeaderColor() {}, setBackgroundColor() {}, onEvent() {}, close() {},
+    } };
+  });
+  await restoredLaunchUrlPage.goto(
+    `${origin}/?tgWebAppVersion=9.1&tgWebAppPlatform=ios`,
+    { waitUntil: 'domcontentloaded' },
+  );
+  const restoredLaunchBanner = restoredLaunchUrlPage.locator('.session-auth-banner');
+  await restoredLaunchBanner.waitFor({ timeout: 3000 });
+  assert.equal(await restoredLaunchBanner.getAttribute('data-reason'), 'missing_init_data',
+    'Telegram launch parameters must expose a restored shell even when platform projection is lost');
+  assert.equal(restoredLaunchRequests.filter((pathname) => pathname === '/api/session').length, 0,
+    'a launch-URL shell without signed initData must fail before issuing /session');
+  await restoredLaunchUrlPage.close();
+
   const restoredWithoutAuthPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   const restoredRequests = [];
   restoredWithoutAuthPage.on('request', (request) => restoredRequests.push(new URL(request.url()).pathname));

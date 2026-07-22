@@ -48,8 +48,17 @@ export function hasTelegramHostContext(): boolean {
       return true;
     }
     const initParams = (window as any).Telegram?.WebView?.initParams;
-    return Boolean(initParams && typeof initParams === 'object'
-      && Object.keys(initParams).some((key) => key.startsWith('tgWebApp')));
+    if (initParams && typeof initParams === 'object'
+      && Object.keys(initParams).some((key) => key.startsWith('tgWebApp'))) {
+      return true;
+    }
+    // Telegram can restore only the launch URL while its SDK shell has already
+    // lost both signed initData and the native platform projection.  Those
+    // service parameters are still a stronger host signal than the ordinary
+    // browser SDK stub (`platform=unknown`) and let the feed fail visibly
+    // instead of silently pretending that generated content does not exist.
+    const launch = `${location.search}&${location.hash}`;
+    return /(?:^|[?#&])tgWebApp(?:Version|Platform|Data)=/.test(launch);
   } catch {
     return false;
   }
