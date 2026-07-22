@@ -570,6 +570,41 @@ try {
     'an unauthenticated browser/AppLovin fallback must not claim Telegram rejected a signed session');
   await outsideTelegramPage.close();
 
+  const restoredWithoutAuthPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  const restoredRequests = [];
+  restoredWithoutAuthPage.on('request', (request) => restoredRequests.push(new URL(request.url()).pathname));
+  await restoredWithoutAuthPage.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: '',
+  }));
+  await restoredWithoutAuthPage.addInitScript(() => {
+    window.__telegramCloseCount = 0;
+    window.Telegram = { WebApp: {
+      initData: '',
+      initDataUnsafe: {},
+      platform: 'ios',
+      ready() {}, expand() {}, disableVerticalSwipes() {}, lockOrientation() {},
+      setHeaderColor() {}, setBackgroundColor() {}, onEvent() {},
+      close() { window.__telegramCloseCount += 1; },
+    } };
+  });
+  await restoredWithoutAuthPage.goto(origin, { waitUntil: 'domcontentloaded' });
+  const restoredBanner = restoredWithoutAuthPage.locator('.session-auth-banner');
+  await restoredBanner.waitFor({ timeout: 3000 });
+  await restoredWithoutAuthPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  await restoredWithoutAuthPage.waitForSelector('.preloader--hidden', { timeout: 3000 });
+  assert.equal(await restoredBanner.getAttribute('data-reason'), 'missing_init_data',
+    'a restored Telegram shell must explain that signed initData is missing');
+  assert.equal(restoredRequests.filter((pathname) => pathname === '/api/session').length, 0,
+    'a Telegram shell without signed initData must fail before issuing /session');
+  assert.match(await restoredBanner.innerText(), /откройте игру заново/i,
+    'the missing-initData notice must give one concrete recovery action');
+  await restoredBanner.locator('button').click();
+  assert.equal(await restoredWithoutAuthPage.evaluate(() => window.__telegramCloseCount), 1,
+    'the missing-initData recovery action must close the restored WebView');
+  await restoredWithoutAuthPage.close();
+
   console.log('catalog authority timing browser: builtin swipe stays interactive through late binding/projection');
 } finally {
   await browser.close();

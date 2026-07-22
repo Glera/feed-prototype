@@ -35,6 +35,26 @@ export function getInitData(): string | null {
   }
 }
 
+/** True only when the page is hosted by a real Telegram WebView.
+ *
+ * telegram-web-app.js also creates `Telegram.WebApp` in an ordinary browser,
+ * where `platform` is `unknown`. Keeping that case false preserves the baked
+ * browser/AppLovin fallback while allowing the feed to surface a restored
+ * Telegram WebView that has lost its signed initData. */
+export function hasTelegramHostContext(): boolean {
+  try {
+    const platform = (window as any).Telegram?.WebApp?.platform;
+    if (typeof platform === 'string' && platform.length > 0 && platform !== 'unknown') {
+      return true;
+    }
+    const initParams = (window as any).Telegram?.WebView?.initParams;
+    return Boolean(initParams && typeof initParams === 'object'
+      && Object.keys(initParams).some((key) => key.startsWith('tgWebApp')));
+  } catch {
+    return false;
+  }
+}
+
 /** Telegram launch start_param (deep-link payload), e.g. a challenge id.
  *
  * Main Mini App deep links carry the same value in `initDataUnsafe`, raw

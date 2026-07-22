@@ -113,7 +113,7 @@ import { simulateActivity, islandSocialMode, ISLAND_SIM_EVENT, type SimBuildingR
 import { levelStarReward, seriesRewards } from './rewards.mjs';
 import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
-import { getStartParam, shareChallenge, getInitData } from './telegram';
+import { getStartParam, shareChallenge, getInitData, hasTelegramHostContext } from './telegram';
 import {
   catalogLabAuthorizationAvailable,
   catalogLabAuthUrl,
@@ -861,6 +861,18 @@ export class Feed {
   // apiSession returns null → we keep the existing in-memory behaviour).
   private async bootServer(): Promise<void> {
     track('session_start', { entry: getStartParam() ? 'challenge' : 'direct', start_param: getStartParam() });
+    // Telegram can restore a cached WebView shell without restoring signed
+    // initData. Previously that state looked like a healthy baked feed while
+    // every authenticated surface (including generated discovery) silently
+    // stayed off. A fresh launch from the bot is the only recovery operation.
+    if (hasTelegramHostContext() && getInitData() === null) {
+      this.sessionAuthenticationRejected = true;
+      this.invalidateAuthenticatedSessionState();
+      this.showSessionAuthBanner('missing_init_data');
+      track('session_authentication_rejected', { reason: 'missing_init_data' });
+      this.settleServerSeed();
+      return;
+    }
     // Re-sync + flush pending wins whenever the app returns to the foreground
     // (Telegram may resume without a reload; the backend is warm by then).
     document.addEventListener('visibilitychange', () => { if (!document.hidden) void this.onForeground(); });
@@ -1267,7 +1279,7 @@ export class Feed {
         if (getInitData() !== null && error instanceof ApiRequestError && error.status === 401) {
           this.sessionAuthenticationRejected = true;
           this.invalidateAuthenticatedSessionState();
-          this.showSessionAuthBanner();
+          this.showSessionAuthBanner(error.code ?? 'http_401');
           track('session_authentication_rejected', { reason: error.code ?? 'http_401' });
         }
         return false;
@@ -1281,12 +1293,16 @@ export class Feed {
     return current;
   }
 
-  private showSessionAuthBanner(): void {
+  private showSessionAuthBanner(reason = 'telegram_session_rejected'): void {
     if (this.sessionAuthBannerEl) return;
     const banner = document.createElement('div');
     banner.className = 'session-auth-banner';
+    banner.dataset.reason = reason;
     banner.setAttribute('role', 'status');
-    banner.innerHTML = '<span><b>Generated-контент недоступен</b><small>Telegram не подтвердил эту сессию. Закройте мини-апп и откройте её снова из бота.</small></span><button type="button">Закрыть</button>';
+    const detail = reason === 'missing_init_data'
+      ? 'Telegram восстановил старое окно без сессии.'
+      : 'Telegram отклонил или завершил эту сессию.';
+    banner.innerHTML = `<span><b>Generated-контент не загружен</b><small>${detail} Закройте окно и откройте игру заново кнопкой бота.</small></span><button type="button">Закрыть</button>`;
     banner.querySelector('button')?.addEventListener('click', () => {
       try { (window as any).Telegram?.WebApp?.close?.(); } catch { /* keep the explanation visible */ }
     });
