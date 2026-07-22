@@ -605,6 +605,8 @@ export class Feed {
   private backendVersion: string | null = null;
   private sessionSyncPromise: Promise<boolean> | null = null;
   private sessionAuthenticationRejected = false;
+  private authenticatedSessionEpoch = 0;
+  private lastForegroundSyncAt = Number.NEGATIVE_INFINITY;
   private sessionAuthBannerEl: HTMLElement | null = null;
   private earnedThisCycle = new Set<number>();
   private failedThisCycle = new Set<number>();
@@ -914,7 +916,8 @@ export class Feed {
    * browser may spend idle time on this work, but no feed slot waits for it.
    */
   private scheduleGeneratedOfferPrefetch(): void {
-    if (!this.catalogDogfoodEnabled || this.generatedPrefetchScheduled
+    if (!this.catalogDogfoodEnabled || this.sessionAuthenticationRejected
+      || this.generatedPrefetchScheduled
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedPrefetchScheduled = true;
     const run = () => {
@@ -929,7 +932,8 @@ export class Feed {
   }
 
   private scheduleGeneratedOfferRetry(): void {
-    if (!this.catalogDogfoodEnabled || this.generatedOfferRetryTimer !== null) return;
+    if (!this.catalogDogfoodEnabled || this.sessionAuthenticationRejected
+      || this.generatedOfferRetryTimer !== null) return;
     const delays = [5_000, 15_000, 60_000];
     const delay = delays[Math.min(this.generatedOfferRetryAttempt, delays.length - 1)];
     this.generatedOfferRetryAttempt += 1;
@@ -1012,8 +1016,15 @@ export class Feed {
   }
 
   private async prefetchGeneratedOffer(): Promise<void> {
-    if (!this.catalogDogfoodEnabled
+    if (!this.catalogDogfoodEnabled || this.sessionAuthenticationRejected
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
+    const sessionEpoch = this.authenticatedSessionEpoch;
+    const requireCurrentSession = () => {
+      if (this.sessionAuthenticationRejected
+        || sessionEpoch !== this.authenticatedSessionEpoch) {
+        throw new Error('authenticated session changed during generated preparation');
+      }
+    };
     this.generatedOfferState = 'loading';
     let canaryAllocationCommitted = false;
     let terminalCanaryAllocationFailure = false;
@@ -1025,8 +1036,10 @@ export class Feed {
       if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
         && !this.catalogCanaryTerminallyUnavailable) {
         try {
+          const rawCanary = await apiGetCatalogCanaryAuthorityRequired();
+          requireCurrentSession();
           const canary = validateCatalogCanaryAuthorityResult(
-            await apiGetCatalogCanaryAuthorityRequired(),
+            rawCanary,
           );
           if (!catalogCanaryAuthorityAllowsAllocation(canary)) {
             throw new Error('generated canary authority expired before background allocation');
@@ -1037,6 +1050,7 @@ export class Feed {
             this.catalogCanaryClaimed = true;
           }
         } catch (error) {
+          requireCurrentSession();
           if (!(error instanceof ApiRequestError
             && catalogCanaryInvitationMissing(error.status, error.code))) throw error;
         }
@@ -1047,8 +1061,10 @@ export class Feed {
           this.generatedOfferRequestId ?? ticketUid(),
         );
         this.generatedOfferRequestId = request.requestId;
+        const rawResult = await apiGetGeneratedOfferRequired(request);
+        requireCurrentSession();
         const result = validateCatalogGeneratedOfferResult(
-          await apiGetGeneratedOfferRequired(request),
+          rawResult,
           request,
         );
         if (result.outcome === 'no_offer') {
@@ -1064,10 +1080,12 @@ export class Feed {
       if (authority) {
         let authorized: CatalogAllocateAuthorizedResultV2;
         try {
+          requireCurrentSession();
           authorized = await apiAllocateAuthorizedCatalogRequired({
             schema: 'catalog.allocate-authorized.v2',
             authorizationId: authority.authorizationId,
           });
+          requireCurrentSession();
           canaryAllocationCommitted = true;
         } catch (error) {
           terminalCanaryAllocationFailure = error instanceof ApiRequestError
@@ -1134,7 +1152,9 @@ export class Feed {
         }
         this.generatedOfferTicketRequest = ticketRequest;
       }
+      requireCurrentSession();
       const start = await queueRunTicketStart(ticketRequest);
+      requireCurrentSession();
       const ticket = start.latest;
       if (start.status !== 'ok' || start.pending !== 0 || !ticket
         || !('schema' in ticket) || !['run.ticket.v2', 'run.ticket.v3'].includes(ticket.schema)
@@ -1144,11 +1164,17 @@ export class Feed {
         || !catalogCanaryTicketStartIsSafe(ticket)) {
         throw new Error(`background generated ticket did not confirm (${start.status})`);
       }
-      const bundle = validateCatalogTicketLevelSpecBundle(
-        await apiGetCatalogTicketSpecsRequired(ticket.ticket_id),
-      );
+      const rawBundle = await apiGetCatalogTicketSpecsRequired(ticket.ticket_id);
+      requireCurrentSession();
+      const bundle = validateCatalogTicketLevelSpecBundle(rawBundle);
       this.assertCatalogDeliveryClosure(allocation, ticket, bundle);
       const previewUrls = await this.loadGeneratedPreview(allocation);
+      if (this.sessionAuthenticationRejected
+        || sessionEpoch !== this.authenticatedSessionEpoch) {
+        URL.revokeObjectURL(previewUrls.mobile);
+        URL.revokeObjectURL(previewUrls.compact);
+        throw new Error('authenticated session was rejected during generated preparation');
+      }
       const offer: PreparedGeneratedOffer = {
         authority,
         allocation,
@@ -1171,6 +1197,8 @@ export class Feed {
         catalog_entry_id: offer.allocation.catalog.entryId,
       });
     } catch (error) {
+      if (this.sessionAuthenticationRejected
+        || sessionEpoch !== this.authenticatedSessionEpoch) return;
       this.releaseGeneratedPreview(this.generatedOffer);
       this.generatedOffer = null;
       this.generatedOfferState = 'failed';
@@ -1215,6 +1243,7 @@ export class Feed {
   }
 
   private syncSessionBootstrap(): Promise<boolean> {
+    if (this.sessionAuthenticationRejected) return Promise.resolve(false);
     if (this.sessionSyncPromise) return this.sessionSyncPromise;
     const current = (async () => {
       try {
@@ -1226,6 +1255,7 @@ export class Feed {
       } catch (error) {
         if (getInitData() !== null && error instanceof ApiRequestError && error.status === 401) {
           this.sessionAuthenticationRejected = true;
+          this.invalidateAuthenticatedSessionState();
           this.showSessionAuthBanner();
           track('session_authentication_rejected', { reason: error.code ?? 'http_401' });
         }
@@ -1256,6 +1286,43 @@ export class Feed {
   private clearSessionAuthBanner(): void {
     this.sessionAuthBannerEl?.remove();
     this.sessionAuthBannerEl = null;
+  }
+
+  private invalidateAuthenticatedSessionState(): void {
+    this.authenticatedSessionEpoch += 1;
+    for (const slot of this.catalogSlots.values()) slot.exposure.binding = null;
+    this.applyBuiltinFeedBindings(undefined);
+    this.applyCatalogLabAuthorizationCapability(false);
+    this.applyOperatorLevelFlaggingCapability(false);
+    for (const slot of [...this.catalogSlots.values()]) {
+      this.activateCatalogBuiltinFallback(slot, 'session_authentication_rejected');
+      this.disposeCatalogSlot(slot.index);
+    }
+    const target = this.generatedTargetIndex;
+    const prepared = this.generatedOffer;
+    this.generatedOffer = null;
+    this.generatedOfferState = 'failed';
+    this.generatedTargetIndex = null;
+    if (target !== null) {
+      this.games[target]?.classList.remove('game--generated');
+      this.coverLoaded.delete(target);
+      this.ensureCover(target);
+    }
+    this.releaseGeneratedPreview(prepared);
+    this.generatedPrefetchScheduled = false;
+    this.generatedOfferRequestId = null;
+    this.generatedOfferTicketRequest = null;
+    this.generatedOfferRetryAttempt = 0;
+    if (this.generatedOfferRetryTimer !== null) {
+      window.clearTimeout(this.generatedOfferRetryTimer);
+      this.generatedOfferRetryTimer = null;
+    }
+    this.catalogCanaryClaimed = false;
+    this.catalogCanaryTerminallyUnavailable = true;
+    this.backendVersion = null;
+    this.renderVersionLabel();
+    this.incomingIndex = -1;
+    this.updateIncomingPoster();
   }
 
   // ── Durable shadow control plane ─────────────────────────────────────────
@@ -2283,6 +2350,14 @@ export class Feed {
   };
 
   private onControlPlanePageShow = (event: PageTransitionEvent) => {
+    if (event.persisted) {
+      // Telegram may restore the same WebView from BFCache without emitting a
+      // useful visibilitychange edge. Re-bootstrap here as well so a stale
+      // generated/canary preparation cannot survive an apparent close/reopen.
+      // syncSessionBootstrap deduplicates a concurrent foreground request and
+      // keeps a rejected signed credential terminal for this document.
+      void this.onForeground();
+    }
     if (!controlPlaneEnabled()) return;
     this.retryDeferredControlPlaneExposures();
     if (event.persisted) this.applyActiveStates();
@@ -2294,6 +2369,13 @@ export class Feed {
 
   // Foreground: push wins queued while away/offline, then re-read the balance.
   private async onForeground(): Promise<void> {
+    const now = performance.now();
+    // Telegram/BFCache commonly reports one restore twice: first as a visible
+    // visibilitychange and then as pageshow in a later task. Promise sharing is
+    // insufficient when the fast /session response settles between those
+    // tasks, so retain a short restore-edge dedupe window as well.
+    if (now - this.lastForegroundSyncAt < 1_000) return;
+    this.lastForegroundSyncAt = now;
     // A signed initData rejection is terminal for this document. Telegram can
     // only repair it by creating a new WebView with fresh signed bytes; hidden
     // foreground retries would merely repeat the 401 across every auth route.

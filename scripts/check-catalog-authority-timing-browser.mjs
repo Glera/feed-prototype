@@ -31,6 +31,14 @@ const stagedBinding = {
 };
 const scenarios = {
   delayed: { startedAt: 0, sessionRequests: 0, generatedOfferRequests: [], cpEvents: [] },
+  'restore-rejected': {
+    startedAt: 0,
+    sessionRequests: 0,
+    generatedOfferRequests: [],
+    cpEvents: [],
+    canaryPending: false,
+    canaryRelease: null,
+  },
   'no-binding': { startedAt: 0, sessionRequests: 0, generatedOfferRequests: [], cpEvents: [] },
   unauthorized: {
     startedAt: 0,
@@ -38,6 +46,12 @@ const scenarios = {
     generatedOfferRequests: [],
     cpEvents: [],
     postRejectionRequests: [],
+  },
+  'transient-then-rejected': {
+    startedAt: 0,
+    sessionRequests: 0,
+    generatedOfferRequests: [],
+    cpEvents: [],
   },
   staged: {
     startedAt: 0,
@@ -86,6 +100,17 @@ addEventListener('load',()=>send('static_ready'));
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
   const scenario = scenarioOf(request);
+  if (request.method === 'GET' && url.pathname === '/api/catalog/canary-authority') {
+    if (!scenario) return json(response, { code: 'fixture_identity_missing' }, 401);
+    if (scenario === 'restore-rejected') {
+      const state = scenarios['restore-rejected'];
+      state.canaryPending = true;
+      await new Promise((resolve) => { state.canaryRelease = resolve; });
+      state.canaryPending = false;
+      state.canaryRelease = null;
+    }
+    return json(response, { code: 'catalog_canary_invitation_not_found' }, 404);
+  }
   if (request.method === 'POST' && url.pathname === '/api/session') {
     if (!scenario) return json(response, { code: 'fixture_identity_missing' }, 401);
     const state = scenarios[scenario];
@@ -93,6 +118,15 @@ const server = createServer(async (request, response) => {
     if (scenario === 'unauthorized') {
       await new Promise((resolve) => setTimeout(resolve, 350));
       return json(response, { detail: 'initData expired' }, 401);
+    }
+    if (scenario === 'transient-then-rejected') {
+      if (state.sessionRequests === 1) {
+        return json(response, { code: 'fixture_transient_session_failure' }, 503);
+      }
+      return json(response, { detail: 'initData expired after retry' }, 401);
+    }
+    if (scenario === 'restore-rejected' && state.sessionRequests > 1) {
+      return json(response, { detail: 'initData expired after restore' }, 401);
     }
     if (scenario === 'delayed' && state.sessionRequests === 1) {
       await new Promise((resolve) => setTimeout(resolve, 4200));
@@ -103,7 +137,7 @@ const server = createServer(async (request, response) => {
       state.sessionPending = false;
       state.sessionRelease = null;
     }
-    const available = scenario === 'delayed' || scenario === 'staged';
+    const available = ['delayed', 'restore-rejected', 'staged'].includes(scenario);
     const bindings = scenario === 'staged'
       ? { [stagedPlayableId]: stagedBinding }
       : available ? { [playableId]: binding } : {};
@@ -113,7 +147,9 @@ const server = createServer(async (request, response) => {
       balance: 0,
       puzzles: 0,
       is_new: false,
-      backend_version: 'timing-browser',
+      backend_version: scenario === 'delayed' && state.sessionRequests > 1
+        ? 'timing-browser-restored'
+        : 'timing-browser',
       builtin_feed_bindings: {
         schema: 'feed.builtin-bindings.v1',
         available,
@@ -200,7 +236,7 @@ const build = spawnSync('npm', ['run', 'build'], {
     VITE_CONTROL_PLANE_ENABLED: 'true',
     VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
     VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
-    VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'false',
+    VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'true',
     VITE_CATALOG_DOGFOOD_USER_ID: String(userId),
   },
 });
@@ -233,6 +269,11 @@ try {
     const initData = initDataFor(scenario);
     await page.addInitScript(({ id, data }) => {
       window.__telegramCloseCount = 0;
+      window.__fixtureHidden = false;
+      Object.defineProperty(document, 'hidden', {
+        configurable: true,
+        get: () => window.__fixtureHidden,
+      });
       window.Telegram = { WebApp: {
         initData: data,
         initDataUnsafe: { user: { id }, start_param: null },
@@ -285,7 +326,63 @@ try {
     1,
     'the additive selector must not invent a visible built-in impression',
   );
+  const sessionsBeforeBfcacheRestore = scenarios.delayed.sessionRequests;
+  await delayedPage.evaluate(() => {
+    window.__fixtureHidden = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.__fixtureHidden = false;
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await waitFor(
+    () => scenarios.delayed.sessionRequests > sessionsBeforeBfcacheRestore,
+    3000,
+    'a Telegram/BFCache restore did not re-bootstrap the authenticated feed session',
+  );
+  await delayedPage.waitForFunction(
+    () => document.querySelector('.feed-bar__version')?.textContent?.includes('api timing-browser-restored'),
+    null,
+    { timeout: 3000 },
+  );
+  await delayedPage.evaluate(() => window.dispatchEvent(
+    new PageTransitionEvent('pageshow', { persisted: true }),
+  ));
+  await delayedPage.waitForTimeout(200);
+  assert.equal(scenarios.delayed.sessionRequests, sessionsBeforeBfcacheRestore + 1,
+    'one BFCache restore must issue exactly one deduplicated session bootstrap');
   await delayedPage.close();
+
+  const rejectedRestorePage = await openScenario('restore-rejected', true);
+  await rejectedRestorePage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  await waitFor(
+    () => scenarios['restore-rejected'].canaryPending,
+    5000,
+    'initial authenticated session did not reach held canary discovery',
+  );
+  await rejectedRestorePage.evaluate(() => window.dispatchEvent(
+    new PageTransitionEvent('pageshow', { persisted: true }),
+  ));
+  await rejectedRestorePage.waitForSelector('.session-auth-banner', { timeout: 3000 });
+  scenarios['restore-rejected'].canaryRelease();
+  await rejectedRestorePage.clock.fastForward(70_000);
+  assert.equal(scenarios['restore-rejected'].sessionRequests, 2,
+    'a rejected restored credential must not enter a session retry storm');
+  assert.equal(scenarios['restore-rejected'].generatedOfferRequests.length, 0,
+    'a rejected restored credential must not fall through from stale canary discovery');
+  await rejectedRestorePage.close();
+
+  const backoffRejectedPage = await openScenario('transient-then-rejected');
+  await backoffRejectedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  await waitFor(
+    () => scenarios['transient-then-rejected'].sessionRequests === 1,
+    1000,
+    'initial transient session request did not run',
+  );
+  await backoffRejectedPage.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await backoffRejectedPage.waitForSelector('.session-auth-banner', { timeout: 3000 });
+  await backoffRejectedPage.waitForTimeout(2300);
+  assert.equal(scenarios['transient-then-rejected'].sessionRequests, 2,
+    'a terminal foreground 401 must cancel the sleeping initial bootstrap loop');
+  await backoffRejectedPage.close();
 
   // Exercise the real Feed lifecycle beyond both former 15s stage boundaries.
   // Neither a cold session nor a held control-plane projection may withhold the
