@@ -180,10 +180,10 @@ async function putRequired<T>(path: string, body: unknown): Promise<T> {
   return data as T;
 }
 
-async function getRequired<T>(path: string): Promise<T> {
+async function getRequired<T>(path: string, signal?: AbortSignal): Promise<T> {
   let r: Response;
   try {
-    r = await fetch(`${API_BASE}${path}`, { headers: headers() });
+    r = await fetch(`${API_BASE}${path}`, { headers: headers(), signal });
   } catch (e) {
     throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -293,8 +293,10 @@ export function apiGetGeneratedOfferRequired(
 }
 
 /** Read one account-bound invitation; the response contains no content identity. */
-export function apiGetCatalogCanaryAuthorityRequired(): Promise<CatalogCanaryAuthorityResultV1> {
-  return getRequired<CatalogCanaryAuthorityResultV1>('/api/catalog/canary-authority');
+export function apiGetCatalogCanaryAuthorityRequired(
+  signal?: AbortSignal,
+): Promise<CatalogCanaryAuthorityResultV1> {
+  return getRequired<CatalogCanaryAuthorityResultV1>('/api/catalog/canary-authority', signal);
 }
 
 export interface CatalogAllocateAuthorizedRequestV2 {

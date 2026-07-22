@@ -584,6 +584,8 @@ export class Feed {
   private generatedOffer: PreparedGeneratedOffer | null = null;
   private generatedTargetIndex: number | null = null;
   private generatedPrefetchScheduled = false;
+  private generatedPrefetchScheduleEpoch = 0;
+  private generatedOfferAbortController: AbortController | null = null;
   private generatedOfferRequestId: string | null = null;
   private generatedOfferTicketRequest: CatalogRunTicketRequestV2 | null = null;
   private generatedOfferRetryTimer: number | null = null;
@@ -920,15 +922,18 @@ export class Feed {
       || this.generatedPrefetchScheduled
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedPrefetchScheduled = true;
+    const scheduleEpoch = ++this.generatedPrefetchScheduleEpoch;
     const run = () => {
+      if (!this.generatedPrefetchScheduled
+        || scheduleEpoch !== this.generatedPrefetchScheduleEpoch) return;
       this.generatedPrefetchScheduled = false;
       void this.prefetchGeneratedOffer();
     };
-    const idle = (window as typeof window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-    }).requestIdleCallback;
-    if (typeof idle === 'function') idle(run, { timeout: 2_000 });
-    else window.setTimeout(run, 0);
+    // Starting the network request is already asynchronous and cheap.  Do not
+    // entrust liveness to requestIdleCallback: Telegram/WebKit may freeze an
+    // idle callback indefinitely across hide/restore even when its timeout was
+    // supplied. The fetch/preview work remains detached from navigation.
+    window.setTimeout(run, 0);
   }
 
   private scheduleGeneratedOfferRetry(): void {
@@ -1026,6 +1031,8 @@ export class Feed {
       }
     };
     this.generatedOfferState = 'loading';
+    const preparationAbort = new AbortController();
+    this.generatedOfferAbortController = preparationAbort;
     let canaryAllocationCommitted = false;
     let terminalCanaryAllocationFailure = false;
     try {
@@ -1036,7 +1043,7 @@ export class Feed {
       if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
         && !this.catalogCanaryTerminallyUnavailable) {
         try {
-          const rawCanary = await apiGetCatalogCanaryAuthorityRequired();
+          const rawCanary = await apiGetCatalogCanaryAuthorityRequired(preparationAbort.signal);
           requireCurrentSession();
           const canary = validateCatalogCanaryAuthorityResult(
             rawCanary,
@@ -1219,6 +1226,10 @@ export class Feed {
         this.scheduleGeneratedOfferPrefetch();
       }
       else this.scheduleGeneratedOfferRetry();
+    } finally {
+      if (this.generatedOfferAbortController === preparationAbort) {
+        this.generatedOfferAbortController = null;
+      }
     }
   }
 
@@ -2383,6 +2394,23 @@ export class Feed {
       this.showSessionAuthBanner();
       return;
     }
+    // Telegram may freeze requestIdleCallback or an authenticated fetch while
+    // hiding the WebView.  Those callbacks are not a durable scheduler: after
+    // a restore, invalidate only an unfinished background preparation and let
+    // the fresh /session bootstrap replay its exact request/allocation.  A
+    // ready or reserved generated card is preserved, so foregrounding during
+    // play never replaces visible content under the player.
+    if (this.generatedPrefetchScheduled) {
+      this.generatedPrefetchScheduled = false;
+      this.generatedPrefetchScheduleEpoch += 1;
+    }
+    if (this.generatedOfferState === 'loading') {
+      this.authenticatedSessionEpoch += 1;
+      this.generatedOfferState = 'idle';
+      this.catalogCanaryClaimed = false;
+      this.generatedOfferAbortController?.abort();
+      this.generatedOfferAbortController = null;
+    }
     // A cold backend may have exhausted the initial bounded /session retry
     // window. Foreground is the recovery edge for identity bindings and CP
     // initialization, not merely a balance refresh.
@@ -2395,6 +2423,11 @@ export class Feed {
       this.showSessionAuthBanner();
       return;
     }
+    // A transient /session failure did not revoke the already authenticated
+    // document. If foreground invalidated a frozen preparation above, keep the
+    // detached selector live from the previous exact session evidence rather
+    // than waiting for another hide/show edge.
+    this.scheduleGeneratedOfferPrefetch();
     this.applyConfirmedBalances(await flushResults());
     const m = await apiMe();
     if (m && typeof m.balance === 'number') this.applyServerBalance(m.balance);

@@ -39,6 +39,15 @@ const scenarios = {
     canaryPending: false,
     canaryRelease: null,
   },
+  'restore-stalled-generated': {
+    startedAt: 0,
+    sessionRequests: 0,
+    generatedOfferRequests: [],
+    cpEvents: [],
+    canaryRequests: 0,
+    canaryPending: false,
+    canaryRelease: null,
+  },
   'no-binding': { startedAt: 0, sessionRequests: 0, generatedOfferRequests: [], cpEvents: [] },
   unauthorized: {
     startedAt: 0,
@@ -102,6 +111,16 @@ const server = createServer(async (request, response) => {
   const scenario = scenarioOf(request);
   if (request.method === 'GET' && url.pathname === '/api/catalog/canary-authority') {
     if (!scenario) return json(response, { code: 'fixture_identity_missing' }, 401);
+    if (scenario === 'restore-stalled-generated') {
+      const state = scenarios['restore-stalled-generated'];
+      state.canaryRequests += 1;
+      if (state.canaryRequests === 1) {
+        state.canaryPending = true;
+        await new Promise((resolve) => { state.canaryRelease = resolve; });
+        state.canaryPending = false;
+        state.canaryRelease = null;
+      }
+    }
     if (scenario === 'restore-rejected') {
       const state = scenarios['restore-rejected'];
       state.canaryPending = true;
@@ -128,6 +147,9 @@ const server = createServer(async (request, response) => {
     if (scenario === 'restore-rejected' && state.sessionRequests > 1) {
       return json(response, { detail: 'initData expired after restore' }, 401);
     }
+    if (scenario === 'restore-stalled-generated' && state.sessionRequests > 1) {
+      return json(response, { code: 'fixture_transient_session_failure' }, 503);
+    }
     if (scenario === 'delayed' && state.sessionRequests === 1) {
       await new Promise((resolve) => setTimeout(resolve, 4200));
     }
@@ -137,7 +159,9 @@ const server = createServer(async (request, response) => {
       state.sessionPending = false;
       state.sessionRelease = null;
     }
-    const available = ['delayed', 'restore-rejected', 'staged'].includes(scenario);
+    const available = [
+      'delayed', 'restore-rejected', 'restore-stalled-generated', 'staged',
+    ].includes(scenario);
     const bindings = scenario === 'staged'
       ? { [stagedPlayableId]: stagedBinding }
       : available ? { [playableId]: binding } : {};
@@ -369,6 +393,36 @@ try {
   assert.equal(scenarios['restore-rejected'].generatedOfferRequests.length, 0,
     'a rejected restored credential must not fall through from stale canary discovery');
   await rejectedRestorePage.close();
+
+  const stalledGeneratedPage = await openScenario('restore-stalled-generated');
+  await stalledGeneratedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
+  await waitFor(
+    () => scenarios['restore-stalled-generated'].canaryPending,
+    5000,
+    'initial generated discovery did not stall in the canary request',
+  );
+  // Chromium may emit one real visibility foreground edge shortly after page
+  // creation. Let that settle before the explicit BFCache restore under test.
+  await stalledGeneratedPage.waitForTimeout(2200);
+  const sessionsBeforeStalledRestore = scenarios['restore-stalled-generated'].sessionRequests;
+  await stalledGeneratedPage.evaluate(() => window.dispatchEvent(
+    new PageTransitionEvent('pageshow', { persisted: true }),
+  ));
+  await waitFor(
+    () => scenarios['restore-stalled-generated'].sessionRequests
+      > sessionsBeforeStalledRestore,
+    3000,
+    'stalled generated restore did not re-bootstrap the authenticated session',
+  );
+  await waitFor(
+    () => scenarios['restore-stalled-generated'].generatedOfferRequests.length === 1,
+    5000,
+    'foreground restore did not recover a frozen generated prefetch',
+  );
+  assert.equal(scenarios['restore-stalled-generated'].canaryRequests, 2,
+    'foreground recovery must retry the exact canary discovery once before public fallback');
+  scenarios['restore-stalled-generated'].canaryRelease();
+  await stalledGeneratedPage.close();
 
   const backoffRejectedPage = await openScenario('transient-then-rejected');
   await backoffRejectedPage.waitForSelector(`iframe[title="${playableId}"]`, { timeout: 3000 });
