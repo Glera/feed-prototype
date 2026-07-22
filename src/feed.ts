@@ -578,6 +578,10 @@ export class Feed {
   // warm-up decisions overlap. The first eligible source owns it for this page
   // lifetime; every other slot continues through ordinary effectful policy.
   private catalogCanaryClaimed = false;
+  // An attached canary is a one-shot page-lifetime opportunity. Releasing its
+  // slot must open the additive lane for ordinary published generated content,
+  // not ask for the same unfinished canary again on every later feed cycle.
+  private catalogCanaryServedThisPage = false;
   private catalogCanaryTerminallyUnavailable = false;
   private catalogSlots = new Map<number, CatalogFeedSlot>();
   private generatedOfferState: 'idle' | 'loading' | 'ready' | 'reserved' | 'empty' | 'failed' = 'idle';
@@ -1053,6 +1057,7 @@ export class Feed {
       let canaryProjectionRequired = false;
 
       if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
+        && !this.catalogCanaryServedThisPage
         && !this.catalogCanaryTerminallyUnavailable) {
         try {
           const rawCanary = await apiGetCatalogCanaryAuthorityRequired(preparationAbort.signal);
@@ -1568,6 +1573,7 @@ export class Feed {
     this.generatedTargetIndex = null;
     this.generatedOfferState = 'reserved';
     this.catalogCanaryClaimed = prepared.canaryProjectionRequired;
+    if (prepared.canaryProjectionRequired) this.catalogCanaryServedThisPage = true;
     this.renderGeneratedProvenance(i, prepared);
     this.games[i]?.classList.add('game--generated', 'game--loading');
     this.games[i]?.classList.remove('game--ready');
@@ -1737,6 +1743,7 @@ export class Feed {
       // existing Player-v2 delivery closure. A precise no-invitation 404 is the
       // sole edge that falls through to ordinary effectful feed policy.
       if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
+        && !this.catalogCanaryServedThisPage
         && !this.catalogCanaryTerminallyUnavailable) {
         this.catalogCanaryClaimed = true;
         try {
@@ -1918,6 +1925,7 @@ export class Feed {
       slot.ticket = catalogTicket;
       slot.bundle = bundle;
       slot.phase = 'catalog_ready';
+      if (canaryAuthority) this.catalogCanaryServedThisPage = true;
       if (slot.authorityTimer !== null) window.clearTimeout(slot.authorityTimer);
       slot.authorityTimer = null;
       slot.authorityTimerStage = null;

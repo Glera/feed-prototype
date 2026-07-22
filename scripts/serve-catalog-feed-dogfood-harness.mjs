@@ -56,11 +56,13 @@ let canaryDisabledBuildHtml = '';
 const scenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict',
   'level-retry', 'reload-zero-progress', 'event-order', 'cross-origin-spoof',
-  'supersession', 'no-invite', 'replayed-canary', 'wrong-account', 'disabled',
+  'supersession', 'no-invite', 'replayed-canary', 'canary-then-published',
+  'wrong-account', 'disabled',
 ]);
 const canaryScenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'recall', 'replay-conflict', 'level-retry',
   'reload-zero-progress', 'event-order', 'cross-origin-spoof', 'supersession',
+  'canary-then-published',
 ]);
 const successfulCatalogScenarios = new Set([
   'success', 'result-transient', 'result-timeout', 'level-retry', 'reload-zero-progress',
@@ -778,7 +780,7 @@ addEventListener('message',(event)=>{
   setTimeout(()=>{report('host_gesture_sent',{visibility:document.visibilityState});send({source:'playable',type:'host_gesture'})},${operatorLevelFlagsHarness ? 8000 : 900});
   setTimeout(()=>{report('manual_action_sent',{visibility:document.visibilityState});send({source:'playable',type:'manual_action',actionType:'fixture.sort',actionSeq:1,accepted:true,changedState:true})},${operatorLevelFlagsHarness ? 15000 : 1050});
   const outcome=${JSON.stringify(scenario === 'level-retry' && documentRequest === 2 ? 'lost' : 'won')};
-  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState,outcome,documentRequest:${documentRequest}});send({source:'playable',type:'completed',success:outcome==='won',outcome})},${operatorLevelFlagsHarness ? 20000 : scenario === 'supersession' ? 7000 : 1350});
+  setTimeout(()=>{report('completed_sent',{visibility:document.visibilityState,outcome,documentRequest:${documentRequest}});send({source:'playable',type:'completed',success:outcome==='won',outcome})},${operatorLevelFlagsHarness || scenario === 'canary-then-published' ? 20000 : scenario === 'supersession' ? 7000 : 1350});
 });
 addEventListener('load',()=>{report('load',{visibility:document.visibilityState});send({type:'configure_ready',nonce:'a'.repeat(32),runtimeContractDigest:${JSON.stringify(contractDigest)},skinContractDigest:${JSON.stringify(EXACT_THREE_LEVEL_SKIN_CONTRACT_DIGEST)},runtimeArtifactDigest:${JSON.stringify(artifactDigest)}})});
 </script></body></html>`;
@@ -1274,7 +1276,7 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
         },
       });
     }
-    if (!['disabled', 'replayed-canary'].includes(state?.scenario ?? '')) {
+    if (!['disabled', 'replayed-canary', 'canary-then-published'].includes(state?.scenario ?? '')) {
       if (state) {
         state.status = 'fail';
         state.message = `normal authority was called after a canary invitation in ${state.scenario}`;
@@ -1293,7 +1295,7 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
   if (request.method === 'POST' && url.pathname === '/api/feed/generated-offer') {
     const body = await bodyOf(request);
     state?.generatedOfferRequests.push(body);
-    if (!['disabled', 'replayed-canary'].includes(state?.scenario ?? '')) {
+    if (!['disabled', 'replayed-canary', 'canary-then-published'].includes(state?.scenario ?? '')) {
       if (state) {
         state.status = 'fail';
         state.message = `generated selector was called in ${state.scenario}`;
@@ -1623,6 +1625,7 @@ console.log(JSON.stringify({
   supersessionUrl: `${origin}/harness.html?scenario=supersession`,
   noInviteUrl: `${origin}/harness.html?scenario=no-invite`,
   replayedCanaryUrl: `${origin}/harness.html?scenario=replayed-canary`,
+  canaryThenPublishedUrl: `${origin}/harness.html?scenario=canary-then-published`,
   wrongAccountUrl: `${origin}/harness.html?scenario=wrong-account`,
   disabledUrl: `${origin}/harness.html?scenario=disabled`,
   stateUrl: `${origin}/__harness/state`,

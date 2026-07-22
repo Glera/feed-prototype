@@ -47,6 +47,7 @@ const endpoints = await new Promise((resolve, reject) => {
         const parsed = JSON.parse(line);
         if (parsed.successUrl && parsed.reloadUrl && parsed.eventOrderUrl && parsed.crossOriginUrl
           && parsed.retryUrl && parsed.transientResultUrl && parsed.replayedCanaryUrl
+          && parsed.canaryThenPublishedUrl
           && parsed.timeoutResultUrl && parsed.disabledUrl && parsed.supersessionUrl
           && parsed.stateUrl) {
           clearTimeout(timeout);
@@ -406,7 +407,49 @@ const runSupersessionTwoTabScenario = async () => {
   }
 };
 
+const runCanaryThenPublishedScenario = async () => {
+  const page = await browser.newPage();
+  const browserErrors = [];
+  page.on('pageerror', (error) => browserErrors.push(error.stack || error.message));
+  try {
+    await page.goto(endpoints.canaryThenPublishedUrl, { waitUntil: 'domcontentloaded' });
+    const feedFrame = page.frameLocator('iframe[data-testid="feed"]');
+    await feedFrame.locator('.page--in-viewport.game--generated, .page--in-viewport .game--generated')
+      .first().waitFor({ state: 'visible', timeout: 30_000 });
+    const first = await page.evaluate(() => window.__catalogFeedDogfoodHarness);
+    assert.equal(first.canaryRequests.length, 1, JSON.stringify(first, null, 2));
+    assert.equal(first.generatedOfferRequests.length, 0, JSON.stringify(first, null, 2));
+
+    await feedFrame.locator('.page--in-viewport .game__close').click();
+    await page.waitForFunction(() => {
+      const snapshot = window.__catalogFeedDogfoodHarness;
+      return snapshot?.generatedOfferRequests?.length === 1;
+    }, null, { timeout: 30_000 });
+    const second = await page.evaluate(() => window.__catalogFeedDogfoodHarness);
+    const diagnostic = JSON.stringify({
+      canaryRequests: second.canaryRequests,
+      generatedOfferRequests: second.generatedOfferRequests,
+      allocationResponses: second.allocationResponses,
+      browserErrors,
+    }, null, 2);
+    assert.equal(second.canaryRequests.length, 1,
+      `an attached canary must not monopolize later generated slots\n${diagnostic}`);
+    assert.equal(second.generatedOfferRequests.length, 1,
+      `the slot after a dismissed canary must use published generated discovery\n${diagnostic}`);
+    assert.equal(
+      second.allocationResponses.some((item) => item.catalog?.entryState === 'published'
+        && item.slotType === 'generated-offer'),
+      true,
+      diagnostic,
+    );
+    assert.deepEqual(browserErrors, [], diagnostic);
+  } finally {
+    await page.close();
+  }
+};
+
 try {
+  await runCanaryThenPublishedScenario();
   const positive = await runScenario(endpoints.successUrl, { firstFailure: null });
   const reload = await runScenario(endpoints.reloadUrl, { firstFailure: null });
   const eventOrder = await runScenario(endpoints.eventOrderUrl, { firstFailure: null });
