@@ -79,6 +79,7 @@ import {
   catalogCanaryDogfoodEnabled,
   catalogCanaryInvitationMissing,
   catalogCanaryTicketStartIsSafe,
+  catalogCanaryWasPlayed,
   catalogGeneratedPreviewUrl,
   catalogFallbackMatchesBinding,
   catalogAuthorityFallbackTimerPlan,
@@ -92,6 +93,7 @@ import {
   generatedProvenanceLabel,
   catalogRecallRecoveryEffect,
   generatedInsertionTarget,
+  rememberPlayedCatalogCanary,
   validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
   validateCatalogGeneratedOfferResult,
@@ -1065,13 +1067,17 @@ export class Feed {
           const canary = validateCatalogCanaryAuthorityResult(
             rawCanary,
           );
-          if (!catalogCanaryAuthorityAllowsAllocation(canary)) {
-            throw new Error('generated canary authority expired before background allocation');
-          }
-          if (catalogCanaryAuthorityAllowsBackgroundAllocation(canary)) {
-            authority = canary;
-            canaryProjectionRequired = true;
-            this.catalogCanaryClaimed = true;
+          if (catalogCanaryWasPlayed(localStorage, canary.authorizationId)) {
+            this.catalogCanaryServedThisPage = true;
+          } else {
+            if (!catalogCanaryAuthorityAllowsAllocation(canary)) {
+              throw new Error('generated canary authority expired before background allocation');
+            }
+            if (catalogCanaryAuthorityAllowsBackgroundAllocation(canary)) {
+              authority = canary;
+              canaryProjectionRequired = true;
+              this.catalogCanaryClaimed = true;
+            }
           }
         } catch (error) {
           requireCurrentSession();
@@ -1755,7 +1761,13 @@ export class Feed {
             }
             try {
               const raw = await apiGetCatalogCanaryAuthorityRequired();
-              authority = validateCatalogCanaryAuthorityResult(raw);
+              const canary = validateCatalogCanaryAuthorityResult(raw);
+              if (catalogCanaryWasPlayed(localStorage, canary.authorizationId)) {
+                this.catalogCanaryServedThisPage = true;
+                authority = null;
+              } else {
+                authority = canary;
+              }
               break;
             } catch (error) {
               if (error instanceof ApiRequestError
@@ -4801,7 +4813,7 @@ export class Feed {
       const generatedFrame = document.createElement('div');
       generatedFrame.className = 'game__generated-frame';
       generatedFrame.setAttribute('aria-hidden', 'true');
-      game.appendChild(generatedFrame);
+      slot.appendChild(generatedFrame);
 
       // Full-screen dim over the GAME AREA (inset above the swipe bar) shown only
       // while autoplay runs — a "this is a demo" veil that also captures tap-anywhere
@@ -6092,6 +6104,14 @@ export class Feed {
   private enterManualMode(i: number, deferControlPlaneAttempt = false) {
     if (i < 0 || i >= this.N) return;
     if (!this.manualRuns.has(i)) {
+      const catalog = this.catalogSlotForIndex(i);
+      if (catalog?.allocation?.catalog.entryState === 'canary') {
+        // For a canary allocation the opaque authorization is the allocation
+        // identity by contract; CatalogFeedSlot intentionally retains no
+        // separate authority object after delivery.
+        rememberPlayedCatalogCanary(localStorage, catalog.allocation.allocationId);
+        this.catalogCanaryServedThisPage = true;
+      }
       // First transition autoplay → manual for this unit = a takeover.
       track('takeover', {
         mechanic_id: this.effectivePlayableId(i),

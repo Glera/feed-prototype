@@ -676,7 +676,7 @@ body {
 
 .game__generated-frame {
   position: absolute;
-  inset: 6px 6px calc(var(--bar-reserve) + 6px);
+  inset: 6px;
   z-index: 9;
   border: 2px solid rgba(209, 157, 255, 0.82);
   border-radius: 14px;

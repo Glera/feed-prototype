@@ -113,6 +113,14 @@ export function catalogCanaryTicketStartIsSafe(ticket: {
   state: string;
   completed_levels: number;
 } | null | undefined): boolean;
+export function catalogCanaryWasPlayed(
+  storage: Pick<Storage, 'getItem'> | null | undefined,
+  authorizationId: string,
+): boolean;
+export function rememberPlayedCatalogCanary(
+  storage: Pick<Storage, 'getItem' | 'setItem'> | null | undefined,
+  authorizationId: string,
+): readonly string[];
 export function catalogFeedSurface(
   phase: 'authority_pending' | 'delivery_pending' | 'catalog_ready' | 'catalog_mounted'
     | 'builtin_fallback' | 'disposed' | null,

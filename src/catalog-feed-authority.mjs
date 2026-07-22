@@ -3,6 +3,8 @@ const HASH_RE = /^[0-9a-f]{64}$/;
 const PLAYABLE_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const CATALOG_MECHANIC_RE = /^[a-z0-9][a-z0-9._-]{0,30}\/[a-z0-9][a-z0-9._-]{0,30}$/;
 const ISO_MILLIS_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/;
+const PLAYED_CANARY_STORAGE_KEY = 'swipe.catalog.played-canary-authorities.v1';
+const PLAYED_CANARY_LIMIT = 32;
 
 export const CATALOG_AUTHORITY_BOOTSTRAP_TIMEOUT_MS = 65000;
 export const CATALOG_AUTHORITY_PROJECTION_TIMEOUT_MS = 65000;
@@ -173,6 +175,41 @@ export function catalogCanaryTicketStartIsSafe(ticket) {
   return Boolean(ticket
     && ticket.state === 'active'
     && ticket.completed_levels === 0);
+}
+
+function playedCanaryAuthorities(storage) {
+  try {
+    const value = JSON.parse(storage?.getItem?.(PLAYED_CANARY_STORAGE_KEY) || '[]');
+    if (!Array.isArray(value) || value.length > PLAYED_CANARY_LIMIT
+      || value.some((item) => typeof item !== 'string' || !UUID_RE.test(item))
+      || new Set(value).size !== value.length) return [];
+    return value;
+  } catch {
+    return [];
+  }
+}
+
+/** A canary entered manually is no longer a lost-response recovery candidate. */
+export function catalogCanaryWasPlayed(storage, authorizationId) {
+  const exact = canonicalUuid(authorizationId, 'canary.authorizationId');
+  return playedCanaryAuthorities(storage).includes(exact);
+}
+
+/**
+ * Store only the opaque invitation id. A deliberate replacement gets a new id,
+ * while a played/superseded ticket cannot resurface after a Telegram remount.
+ */
+export function rememberPlayedCatalogCanary(storage, authorizationId) {
+  const exact = canonicalUuid(authorizationId, 'canary.authorizationId');
+  const next = playedCanaryAuthorities(storage).filter((item) => item !== exact);
+  next.push(exact);
+  const bounded = next.slice(-PLAYED_CANARY_LIMIT);
+  try {
+    storage?.setItem?.(PLAYED_CANARY_STORAGE_KEY, JSON.stringify(bounded));
+  } catch {
+    // This is recovery/UI state, never catalog authority.
+  }
+  return Object.freeze([...bounded]);
 }
 
 export function catalogFeedSurface(phase) {

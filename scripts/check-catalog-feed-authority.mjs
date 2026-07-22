@@ -20,6 +20,7 @@ import {
   catalogCanaryDogfoodEnabled,
   catalogCanaryInvitationMissing,
   catalogCanaryTicketStartIsSafe,
+  catalogCanaryWasPlayed,
   catalogFallbackMatchesBinding,
   catalogDogfoodAccountEligible,
   catalogFeedDogfoodEnabled,
@@ -29,6 +30,7 @@ import {
   catalogRecallRecoveryEffect,
   generatedInsertionTarget,
   generatedProvenanceLabel,
+  rememberPlayedCatalogCanary,
   validateCatalogCanaryAuthorityResult,
   validateCatalogFeedAuthorityResult,
   validateCatalogGeneratedOfferResult,
@@ -87,6 +89,20 @@ equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'TRUE' 
   'the canary flag cannot widen beyond the exact configured account');
 equal(catalogCanaryDogfoodEnabled({ VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'TRUE' }, true, true), true,
   'the explicit canary flag adds invitation precedence to an eligible bridge');
+
+const canaryMemory = new Map();
+const canaryStorage = {
+  getItem: (key) => canaryMemory.get(key) ?? null,
+  setItem: (key, value) => canaryMemory.set(key, value),
+};
+equal(catalogCanaryWasPlayed(canaryStorage, ids.auth), false,
+  'a fresh canary remains eligible for lost-response recovery');
+rememberPlayedCatalogCanary(canaryStorage, ids.auth);
+equal(catalogCanaryWasPlayed(canaryStorage, ids.auth), true,
+  'manual entry suppresses the same opaque invitation after a shell remount');
+const replacementCanary = '10000000-0000-4000-8000-000000000010';
+equal(catalogCanaryWasPlayed(canaryStorage, replacementCanary), false,
+  'a replacement invitation remains independently eligible');
 equal(catalogCanaryInvitationMissing(404, 'catalog_canary_invitation_not_found'), true,
   'only the exact no-invitation code falls through to normal effectful policy');
 equal(catalogCanaryInvitationMissing(404, 'catalog_canary_not_available'), false,

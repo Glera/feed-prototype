@@ -419,6 +419,13 @@ const runCanaryThenPublishedScenario = async () => {
     const first = await page.evaluate(() => window.__catalogFeedDogfoodHarness);
     assert.equal(first.canaryRequests.length, 1, JSON.stringify(first, null, 2));
     assert.equal(first.generatedOfferRequests.length, 0, JSON.stringify(first, null, 2));
+    assert.equal(
+      await feedFrame.locator('.page--in-viewport .game__generated-frame').evaluate(
+        (frame) => frame.parentElement?.classList.contains('game__slot') === true,
+      ),
+      true,
+      'generated frame must inherit the autoplay-to-manual slot scale transition',
+    );
 
     await feedFrame.locator('.page--in-viewport .game__close').click();
     await page.waitForFunction(() => {
