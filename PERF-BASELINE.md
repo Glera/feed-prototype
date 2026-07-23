@@ -112,9 +112,61 @@ variance.
    regression tripwire and order-of-magnitude baseline, not a statistically
    tight SLA.
 
+## Device-representative (CPU + network throttling)
+
+The baseline above runs on an M1 Pro over loopback — the fastest case. To
+approximate a mid-tier phone on a real network, the same harness re-runs each
+cold context under CDP throttling applied **before navigation** (covers the
+whole cold load, including loopback transfer of our own mechanic payloads):
+
+- **CPU** — `Emulation.setCPUThrottlingRate` at **4×** and **6×** (slowdown vs.
+  this host's CPU).
+- **Network** — `Network.emulateNetworkConditions`, profile **Fast 4G**:
+  60 ms RTT, 9 Mbps down, 1.5 Mbps up.
+
+Reproduce:
+
+```bash
+PERF_CPU_THROTTLE=4 PERF_NET_PROFILE=fast4g node scripts/perf-cold-start.mjs
+PERF_CPU_THROTTLE=6 PERF_NET_PROFILE=fast4g node scripts/perf-cold-start.mjs
+# → perf-cold-start-results.cpu4x-fast4g.json / .cpu6x-fast4g.json
+```
+
+Each profile: N = 20, 20/20 ok, same commit `82498a4`/`360bfd9`, same prod
+layout. All times in ms from navigation start.
+
+| profile | A. FCP p50 | **A. FCP p95** | B. autoplay p50 | **B. autoplay p95** | B min / max |
+|---|---:|---:|---:|---:|---:|
+| baseline (M1 Pro, loopback, no throttle) | 104 | **112** | 790 | **815** | 777 / 1087 |
+| CPU 4× + Fast 4G | 812 | **844** | 4368 | **4478** | 4330 / 4978 |
+| CPU 6× + Fast 4G | 984 | **1016** | 4908 | **5013** | 4601 / 5039 |
+
+(The `perf:feed-first-render` mark tracks FCP within ~20 ms in every profile:
+793/825 at 4×, 959/999 at 6×.)
+
+### Reading it — does the first playing card fit a budget?
+
+- **First painted feed screen (A)** stays sub-second even at 6× + Fast 4G
+  (p95 ≈ **1.0 s**). Time-to-first-pixel is not the constraint.
+- **First card with working autoplay (B)** is the load-bearing number and is
+  strongly CPU-bound: it jumps from ~0.8 s (baseline) to **p95 ≈ 4.5 s at CPU 4×**
+  and **p95 ≈ 5.0 s at CPU 6×** under Fast 4G. Throttling scales A by ~7–9× but
+  B by ~5.5–6×, confirming B is dominated by mechanic iframe boot + payload
+  parse/exec, not by first paint.
+- **Interpretation for the gate:** if the enablement budget for "first playable
+  card is up and autoplaying" is **≥ ~5 s p95**, every profile measured here
+  clears it; if the budget is tighter (say **≤ 3 s p95**), the device-representative
+  profiles do **not** clear it and the first-card path needs optimisation before
+  `levelSeries` rollout. The threshold itself is an operator decision — these are
+  the numbers to hold it against, not a pass/fail verdict.
+- These remain an **approximation**: CDP CPU throttling is a uniform multiplier,
+  not a real Android core; Fast 4G is a fixed profile, not a specific device's
+  radio; and B is still the host-issued `startAutoPlay` moment (caveat 4 above),
+  so a phone's true "sees it moving" is at or slightly after these figures.
+
 ## Next step
 
-Re-run this exact harness under Chromium CPU throttling (Playwright/CDP
-`Emulation.setCPUThrottlingRate`, e.g. 4–6×) plus a throttled network profile,
-to produce a device-representative **B** number before treating any p95 as the
-`levelSeries` gate value.
+Validate one of these throttled profiles against a **single real mid-tier
+Android** cold launch inside the actual Telegram Mini App (same feed build), to
+anchor which CDP multiplier (4× vs 6×) best matches a real device and confirm
+the SDK-load + `/session`-seed segments that this harness deliberately excludes.
