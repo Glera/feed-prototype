@@ -9,6 +9,21 @@ Two worktrees hold the scaffolding (never touch the main checkouts):
 - `swipe-backend-e2e-real` (branch `e2e-real-backend`) — seed, ASGI apps, chain driver.
 - `feed-prototype-e2e-real` (branch `e2e-real-backend`) — Feed build, serve harness, browser driver, this runbook.
 
+## CI (enforced gate)
+
+`swipe-backend/.github/workflows/browser-e2e.yml` runs this whole closure as a
+GitHub Actions job (separate file/job from `postgres-acceptance.yml`): a
+`postgres:16` service → alembic head → seed → uvicorn full app → Feed build (3
+gates) → serve → Playwright driver, asserting the driver's `E2E_VERDICT`
+(`landedOnGeneratedCard`, `chestResultsPosted:1`, a level result) **and** the
+three PostgreSQL facts (`attempt_outcome_facts` win, level `verified_run`
+ordinal=1, chest series-receipt). Cross-repo refs are pinned in the workflow
+`env`: `feed-prototype @ e2e-real-backend`, `swipe-platform @ master` (runtime +
+previews), `swipe-ugc @ master` (the Feed's `vite.config.ts` imports its sort
+recipe). Playwright chromium runs headless — the driver's visibility/unpause pump
+is JS-level, so no Xvfb is needed. All driver waits are env-configurable and set
+generously for the slower runner. First green run: ~2 min.
+
 ## Status
 
 | Stage | Proven | Command → exit |
