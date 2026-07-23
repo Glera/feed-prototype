@@ -253,7 +253,7 @@ log(`catalog frame diag: ${JSON.stringify(diag)}`);
 const distinct = [...new Set(apiHits.map((h) => h.split(' ')[1]))].sort();
 const levelResults = results.filter((r) => r.body?.metric_key !== 'series');
 const chestResults = results.filter((r) => r.body?.metric_key === 'series');
-console.log(JSON.stringify({
+const verdict = {
   schema: 'feed.real-backend-browser-probe.v2',
   feedUrl,
   apiBase,
@@ -265,7 +265,11 @@ console.log(JSON.stringify({
   levelResultsPosted: levelResults.length,
   chestResultsPosted: chestResults.length,
   results: results.map((r) => ({ status: r.status, metric_key: r.body?.metric_key, ordinal: r.body?.ordinal, series_level: r.body?.series_level })),
-}, null, 2));
+};
+console.log(JSON.stringify(verdict, null, 2));
+// Single-line machine-readable verdict for CI (stable to grep; no pretty-print
+// parsing). The prefix is unique so the workflow can extract exactly one line.
+console.log(`E2E_VERDICT ${JSON.stringify(verdict)}`);
 
 await browser.close();
 process.exit(seen('/api/session') ? 0 : 1);
