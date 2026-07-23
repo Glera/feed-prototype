@@ -125,6 +125,20 @@ const server = createServer((request, response) => {
     // from location.search and is therefore both clobber-proof and available at
     // construction time, so controlPlaneEnabled()/catalogDogfoodEnabled latch
     // true. Redirect the bare Feed URL to carry it.
+    // Operator shorthand: ?tg=<telegram id>[&name=<display name>] builds the
+    // unsigned initData for that player and redirects — the stand backend
+    // (e2e_real_full_app) trusts unsigned initData, so this opens the feed AS
+    // that user. Bare URL keeps redirecting to the seeded dogfood player.
+    const tgId = url.searchParams.get('tg');
+    if (tgId && /^\d+$/.test(tgId)) {
+      const name = url.searchParams.get('name') || `Player ${tgId}`;
+      const u = { id: Number(tgId), first_name: name, language_code: 'en' };
+      const custom = `user=${encodeURIComponent(JSON.stringify(u))}&auth_date=0&hash=e2e`;
+      response.statusCode = 302;
+      response.setHeader('location', `${url.pathname}?initData=${encodeURIComponent(custom)}`);
+      response.end();
+      return;
+    }
     if (!url.searchParams.get('initData')) {
       const target = `${url.pathname}?initData=${encodeURIComponent(initData)}`;
       response.statusCode = 302;
