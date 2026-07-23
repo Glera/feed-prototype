@@ -74,9 +74,9 @@ pkill -f "e2e_real_full_app:app" 2>/dev/null; sleep 1
 ( cd "$BACKEND"
   export ENABLE_CATALOG_PLAYER_V2=true ENABLE_FEED_EFFECTFUL_AUTHORITY=true ENABLE_CATALOG_ALLOCATION=false
   export FEED_EFFECTFUL_DOGFOOD_USER_IDS="$DOGFOOD_USER_ID"
-  export FEED_EFFECTFUL_AFFINITY_CONFIG_VERSION="$($VENV/python -c "import json;print(json.load(open('$SEED_MANIFEST'))['affinityConfigVersion'])")"
-  export FEED_EFFECTFUL_SLOT_CONFIG_VERSION="$($VENV/python -c "import json;print(json.load(open('$SEED_MANIFEST'))['slotConfigVersion'])")"
-  export FEED_EFFECTFUL_RUNWAY_CONFIG_VERSION="$($VENV/python -c "import json;print(json.load(open('$SEED_MANIFEST'))['runwayConfigVersion'])")"
+  export FEED_EFFECTFUL_AFFINITY_CONFIG_VERSION="$("$VENV/python" -c "import json;print(json.load(open('$SEED_MANIFEST'))['affinityConfigVersion'])")"
+  export FEED_EFFECTFUL_SLOT_CONFIG_VERSION="$("$VENV/python" -c "import json;print(json.load(open('$SEED_MANIFEST'))['slotConfigVersion'])")"
+  export FEED_EFFECTFUL_RUNWAY_CONFIG_VERSION="$("$VENV/python" -c "import json;print(json.load(open('$SEED_MANIFEST'))['runwayConfigVersion'])")"
   export RUN_TICKET_MIN_RESULT_MS=0
   export RUN_START_HOURLY_LIMIT=100000 RUN_START_DAILY_LIMIT=100000 RESULTS_HOURLY_LIMIT=100000 RESULTS_DAILY_LIMIT=100000
   export E2E_DOGFOOD_USER_ID="$DOGFOOD_USER_ID" PYTHONPATH="$BACKEND"
