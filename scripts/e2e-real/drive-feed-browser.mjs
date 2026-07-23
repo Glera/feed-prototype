@@ -46,9 +46,14 @@ page.on('request', (request) => {
   if (url.startsWith(apiBase)) apiHits.push(`${request.method()} ${url.slice(apiBase.length).split('?')[0]}`);
 });
 page.on('response', async (response) => {
+  const request = response.request();
   const url = response.url();
-  if (url.startsWith(`${apiBase}/api/results`) && response.request().method() === 'POST') {
-    try { results.push({ status: response.status(), body: await response.json() }); } catch { /* noop */ }
+  if (url.startsWith(`${apiBase}/api/results`) && request.method() === 'POST') {
+    // The /results response ack does not echo metric_key; classify from the
+    // REQUEST body (metric_key 'series' = chest, otherwise a level result).
+    let body = null;
+    try { body = JSON.parse(request.postData() ?? '{}'); } catch { /* noop */ }
+    results.push({ status: response.status(), body });
   }
 });
 
@@ -109,14 +114,135 @@ if (landed) {
   log('never landed on the generated card within the swipe budget.');
 }
 
-// 3. Give the autoplaying runtime time to close level(s) + chest. Autoplaying a
-//    real sort level and its follow-ups to the chest takes tens of seconds.
-const playMs = Number(process.env.FEED_PLAY_MS ?? 60_000);
+// 3. Drive the level(s) to a win via the runtime's OWN public host-command API.
+//    The real marble-sort runtime exposes window.__playable.swipe and accepts
+//    { target:'playable-swipe', type:'startAutoPlay'|'setHostPaused' } postMessage
+//    commands (shared/swipe-api.ts); startAutoPlayApi runs its solver oracle to a
+//    win. The feed sends these for built-in autoplay demos but not for catalog
+//    slots, so the driver sends them itself — no runtime change, driver-side only.
+//    Re-kick every tick because the feed restarts the runtime in place for each
+//    series level (a fresh level needs a fresh startAutoPlay). Same-origin lets us
+//    reach the catalog iframe's contentWindow directly.
+// The runtime plays only while it considers itself interactive: for the SWIPE
+// target isInteractive() === (!hostPaused && !document.hidden). The feed's
+// setFramePaused drives BOTH the runtime hostPaused flag AND the iframe
+// document.hidden (redefining the property + dispatching visibilitychange), and
+// re-pauses the catalog slot, so a single kick loses the race. The catalog
+// iframe is same-origin, so we install a tight in-page interval that, every
+// 60ms, forces the frame document visible, clears hostPaused, and starts the
+// runtime's own autoplay solver — out-pacing the feed's re-pause. Runtime code
+// is untouched; we only exercise its public host lifecycle + swipe API.
+const installCatalogAutoplayPump = () => page.evaluate(() => {
+  if (window.__e2eAutoplayPump) return true;
+  const pinned = new WeakSet();
+  const kick = () => {
+    const frame = document.querySelector('iframe[data-catalog-player-v2="1"]');
+    const cw = frame && frame.contentWindow;
+    const doc = cw && cw.document;
+    if (!cw || !doc) return;
+    try {
+      // Pin the frame permanently visible ONCE: a non-configurable getter makes
+      // the feed's own setFramePaused redefine throw (it uses configurable:true),
+      // so our visibility wins the race instead of alternating every rAF.
+      if (!pinned.has(doc)) {
+        try {
+          Object.defineProperty(doc, 'hidden', { configurable: false, get: () => false });
+          Object.defineProperty(doc, 'visibilityState', { configurable: false, get: () => 'visible' });
+          pinned.add(doc);
+        } catch { /* already defined by the feed as configurable — retry next tick */ }
+      }
+      doc.dispatchEvent(new cw.Event('visibilitychange'));
+      const p = cw.__playable;
+      if (p && typeof p.setHostPaused === 'function') p.setHostPaused(false);
+      const swipe = p && p.swipe;
+      if (swipe && typeof swipe.startAutoPlay === 'function' && !swipe.isAutoPlayActive()) {
+        swipe.startAutoPlay();
+      }
+    } catch { /* noop */ }
+  };
+  window.__e2eAutoplayPump = setInterval(kick, 60);
+  kick();
+  return true;
+});
+
+const catalogFrameDiag = () => page.evaluate(() => {
+  const frame = document.querySelector('iframe[data-catalog-player-v2="1"]');
+  if (!frame) return { frame: false };
+  let path = '';
+  try { path = new URL(frame.src).pathname; } catch { /* noop */ }
+  const cw = frame.contentWindow;
+  const p = cw && cw.__playable;
+  const swipe = p && p.swipe;
+  const call = (fn) => { try { return typeof fn === 'function' ? fn() : null; } catch { return 'err'; } };
+  let qa = null;
+  try { qa = p && p.sortQa ? JSON.parse(JSON.stringify(p.sortQa())) : null; } catch { qa = 'err'; }
+  return {
+    frame: true,
+    runtimeRelease: path.includes('/runtime-releases/'),
+    hasPlayableSwipe: !!swipe,
+    isAutoPlayActive: call(swipe && swipe.isAutoPlayActive),
+    runtimeIsPaused: call(p && p.isPaused),
+    runtimeIsStarted: call(p && p.isStarted),
+    docHidden: cw.document ? cw.document.hidden : null,
+    sortQa: qa,
+  };
+});
+
+const playMs = Number(process.env.FEED_PLAY_MS ?? 120_000);
 const deadline = Date.now() + playMs;
+await installCatalogAutoplayPump();
+log('installed tight in-page autoplay pump on the catalog frame.');
+
+// Apply the runtime's OWN solver move-by-move. sortQa.chooseOracleAction()
+// selects the best cell (no vclock needed); applyOracleAction() is vclock-gated
+// so instead we dispatch a real pointer tap at that cell on the same-origin
+// canvas — the exact input a human would make. The pump keeps the frame
+// unpaused so physics settles between taps. Runtime code is untouched.
+const solveStep = () => page.evaluate(() => {
+  const frame = document.querySelector('iframe[data-catalog-player-v2="1"]');
+  const cw = frame && frame.contentWindow;
+  const qa = cw && cw.__playable && cw.__playable.sortQa;
+  const canvas = cw && cw.document && cw.document.querySelector('canvas');
+  if (!qa || !canvas) return 'no-frame';
+  let cellId;
+  try { cellId = qa.chooseOracleAction(); } catch { return 'choose-err'; }
+  if (typeof cellId !== 'number' || cellId < 0) return 'no-move';
+  let snap;
+  try { snap = qa.snapshot(); } catch { return 'snap-err'; }
+  const cell = snap.grid.find((c) => c.id === cellId && !c.released);
+  if (!cell) return 'released';
+  const cols = Math.max(...snap.grid.map((c) => c.col)) + 1; // GRID_COLS
+  const gw = cols * 36 + (cols - 1) * 4;
+  const sx = (390 - gw) / 2;
+  const logicalX = sx + cell.col * 40 + 18;
+  const logicalY = 30 + cell.row * 40 + 18;
+  const rect = canvas.getBoundingClientRect();
+  const scale = rect.width / 390; // uniform aspect
+  const cx = rect.left + logicalX * scale;
+  const cy = rect.top + logicalY * scale;
+  const opts = { clientX: cx, clientY: cy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'touch', isPrimary: true };
+  try {
+    canvas.dispatchEvent(new cw.PointerEvent('pointerdown', opts));
+    canvas.dispatchEvent(new cw.PointerEvent('pointerup', opts));
+    canvas.dispatchEvent(new cw.MouseEvent('mousedown', opts));
+    canvas.dispatchEvent(new cw.MouseEvent('mouseup', opts));
+    return `tapped:${cellId}@${cell.row},${cell.col}`;
+  } catch (e) { return 'dispatch-err:' + e.message; }
+});
+
+let diag = null;
+let lastStep = '';
+let stepCount = 0;
 while (Date.now() < deadline) {
-  await page.waitForTimeout(2_000);
+  const step = await solveStep();
+  if (step && step.startsWith('tapped')) { stepCount += 1; lastStep = step; }
+  else lastStep = step;
+  if (!diag && stepCount === 1) diag = await catalogFrameDiag();
+  await page.waitForTimeout(700);
   if (results.some((r) => r.body?.metric_key === 'series')) break; // chest posted
 }
+log(`solver taps applied: ${stepCount}; last step: ${lastStep}`);
+log(`catalog frame diag: ${JSON.stringify(diag)}`);
 
 const distinct = [...new Set(apiHits.map((h) => h.split(' ')[1]))].sort();
 const levelResults = results.filter((r) => r.body?.metric_key !== 'series');
