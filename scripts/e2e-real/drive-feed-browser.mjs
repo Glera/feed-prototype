@@ -24,7 +24,14 @@
  */
 import { chromium } from 'playwright';
 
-const feedUrl = process.env.FEED_URL ?? 'http://127.0.0.1:8188/feed';
+const feedUrlBase = process.env.FEED_URL ?? 'http://127.0.0.1:8188/feed';
+// Open the stand feed as a specific Telegram id via the serve harness ?tg=
+// shorthand (the stand backend trusts unsigned initData). Defaults to the
+// seeded dogfood player when FEED_TG is unset.
+const feedTg = (process.env.FEED_TG ?? '').trim();
+const feedUrl = feedTg
+  ? `${feedUrlBase}?tg=${encodeURIComponent(feedTg)}&name=${encodeURIComponent(process.env.FEED_TG_NAME ?? `Player ${feedTg}`)}`
+  : feedUrlBase;
 const apiBase = process.env.API_BASE ?? 'http://127.0.0.1:8099';
 const maxSwipes = Number(process.env.FEED_SWIPES ?? 14);
 const headless = process.env.HEADFUL !== '1';
@@ -118,6 +125,7 @@ console.log(JSON.stringify({
   schema: 'feed.real-backend-browser-probe.v2',
   feedUrl,
   apiBase,
+  playerTelegramId: feedTg || '(seeded dogfood default)',
   bootReachedRealBackend: seen('/api/session'),
   landedOnGeneratedCard: landed,
   distinctApiPaths: distinct,
