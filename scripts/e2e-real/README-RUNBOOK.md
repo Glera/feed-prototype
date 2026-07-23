@@ -20,7 +20,10 @@ Two worktrees hold the scaffolding (never touch the main checkouts):
 | **Backend chain over real HTTP+PostgreSQL** | ✅ | `drive_backend_chain.py` → 0 (7/7 steps HTTP 200) |
 | Feed builds with 3 gates vs real backend | ✅ | `npm run build` → 0 |
 | Feed boots in browser vs real backend | ✅ | `drive-feed-browser.mjs` → 0 (`bootReachedRealBackend: true`) |
-| **Effectful catalog lane arms in browser** | ❌ | see "Known remaining gap" |
+| **Effectful catalog lane arms in browser** | ✅ | `drive-feed-browser.mjs` → `effectfulChainArmed: true` (generated-offer + runs/start + specs 200) |
+| Generated catalog card inserted + opened | ✅ | `landedOnGeneratedCard: true` |
+| Real runtime configures seeded spec + starts attempt | ✅ | PG: `catalog_level_impression` + `attempt_start` projected |
+| **Level WIN → /api/results → chest (hands-free)** | ❌ | see "Known remaining gap" (real runtime does not self-complete) |
 
 ## One-command run
 
@@ -114,38 +117,77 @@ export PYTHONUTF8=1 LANG=en_US.UTF-8     # alembic.ini/migrations contain non-AS
      node scripts/serve-feed-real-published-e2e.mjs
    ```
 
-8. **Browser** — `http://127.0.0.1:8188/feed`, or headless:
+8. **Browser** — `http://127.0.0.1:8188/feed` (re-seed a fresh continuity trigger
+   first; do NOT pre-run `drive_backend_chain.py`, it consumes the one-shot
+   trigger), or headless:
 
    ```bash
    FEED_URL=http://127.0.0.1:8188/feed API_BASE=http://127.0.0.1:8099 \
-     node scripts/e2e-real/drive-feed-browser.mjs
+   FEED_PLAY_MS=90000 node scripts/e2e-real/drive-feed-browser.mjs
    ```
+
+## What the browser closure now proves (and the two harness fixes)
+
+Against the real backend + real PostgreSQL + real content-addressed runtime the
+browser now closes:
+
+  boot → `POST /api/feed/generated-offer` (200) → `allocate-authorized` →
+  `runs/start` (200) → `tickets/<id>/specs` (200) → generated catalog card
+  inserted at its ring index → landed & opened → runtime `configure_ready` /
+  `configured` → **`catalog_level_impression` + `attempt_start` projected in PG**.
+
+Two harness bugs had to be fixed to get here (both in
+`scripts/serve-feed-real-published-e2e.mjs`, neither touches frontend logic):
+
+1. **Telegram initData clobber.** The app loads
+   `telegram.org/js/telegram-web-app.js`, which reassigns
+   `window.Telegram.WebApp` with an empty `initData` (`platform:"unknown"`) in a
+   plain browser — *before* the Feed class constructs. `catalogDogfoodEnabled`
+   is a readonly field evaluated at construction (`controlPlaneEnabled()` needs
+   `getInitData() !== null`), so it latched **false** and the whole dogfood
+   prefetch was disabled. Fix: the harness redirects the Feed URL to carry
+   `?initData=` — `getInitData()`'s sanctioned dev fallback, read from
+   `location.search`, is clobber-proof and available at construction.
+2. **Missing generated preview.** The seeded content has no
+   `catalog-previews/<contentHash>.cover.jpg`, so `loadGeneratedPreview()` 404'd
+   and the offer never became `ready`. The preview is only the feed card
+   thumbnail (not part of the spec/runtime gameplay closure), so the harness
+   synthesizes a self-consistent `catalog.generated-preview.v1` manifest + cover
+   bytes for the seeded content hash (gated by `E2E_SYNTH_PREVIEW`, default on).
+
+Also note: the one-shot continuity trigger is consumed per generated-offer, so
+each browser run needs a fresh `seed_published_series.py` and no interleaved
+backend chain-driver run.
 
 ## Known remaining gap (the single next step)
 
-The Feed boots against the real backend and reveals the marble-sort card, but
-the browser never issues `POST /api/feed/generated-offer` (probe:
-`effectfulChainArmed: false`; distinct API paths are only `session`,
-`daily/sync`, `events`). Consequence: the catalog lane never arms, so
-`reveal → intercept → level → results → chest` does not run through the browser.
+`levelResultsPosted: 0` / `chestResultsPosted: 0`. cp events freeze at
+`attempt_start`; no `attempt_outcome_facts`, `level_results`, or chest receipt.
 
-Root cause (traced): the catalog slot only arms in `attachPreparedGeneratedOffer`
-(`src/feed.ts`), which requires `generatedOfferState === 'ready'`. That state is
-produced by `prefetchGeneratedOffer` (`src/feed.ts` ~1042–1270), which
-`POST`s `/api/feed/generated-offer` only after its **target-index discovery**
-selects the sort exposure. The three gates satisfy `catalogFeedDogfoodEnabled`,
-and the seed provides the server-side continuity trigger + affinity snapshot,
-but the client's personal-catalog runway discovery is not selecting a
-near-viewport sort target in this session, so prefetch never starts.
+Root cause (verified two ways): **the real `marble-sort-swipe` runtime does not
+auto-complete a level.**
 
-**Next step:** trace `prefetchGeneratedOffer` / `generatedTargetIndex` discovery
-in `src/feed.ts` (~1042–1270) and satisfy its target-selection condition — the
-personal-catalog runway must resolve the seeded continuity/affinity to a concrete
-near-viewport sort target — or add a deterministic dogfood hook to force the
-target index. Once `POST /api/feed/generated-offer` fires, the already-proven
-backend closure (authority → allocate → ticket/spec → results → chest) delivers
-the exact spec bundle and the iframe runs the real content-addressed
-`marble-sort-swipe` runtime through the chest. Watch for a second-order risk: the
-seeded spec is the synthetic QA fixture (`make_ingested_dependencies(seed=71337)`)
-— confirm the real runtime can play it to completion, or seed real sort content.
+  * Loaded standalone with `?auto=1`, the board is static — no self-play (its
+    autoplay flag `zt = "0"!==get("auto") && "0"!==get("autoplay")` gates a
+    tutor hand, not an oracle that solves the board).
+  * In the catalog slot the level renders and the attempt starts, then idles;
+    the feed's shared AutoCursor autoplay demo does not drive the catalog
+    iframe to a win (tapping only switches it to manual/human play — the driver
+    defaults to NOT tapping, `FEED_TAP=1` to force).
+
+The dogfood browser harness (`check-catalog-feed-dogfood-browser.mjs`) reaches
+green only because it serves a **stub runtime that auto-posts results**; the real
+runtime needs genuine gameplay. The seeded spec itself is a real, playable
+`sort.level-spec.v1` (6×5, 3 colours, real `targetStacks`), so content is not the
+blocker — completion is.
+
+**Next step (one):** make the level actually complete hands-free. The catalog
+iframe is **same-origin** with the Feed (both on `:8188`), so the cleanest path
+is to script the solve in `drive-feed-browser.mjs`: reach into the catalog
+iframe and drive the exact drag sequence that satisfies the seeded `targetStacks`
+(or invoke the runtime's move API), so the real runtime emits its genuine win
+outcome → the Feed forwards `/api/results` (levels) then the chest. Verify in PG:
+`attempt_outcome_facts` (win) + a `metric_key='series'` chest receipt bound to the
+generated ticket/series. (Alternative: add a runtime self-solve/autoplay mode
+invocable under `catalog_required`.)
 ```
