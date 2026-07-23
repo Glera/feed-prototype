@@ -170,6 +170,19 @@ const TAP_SLOP_PX = 8;             // micro movement still counts as a tap
 const MIN_SWIPE_INTENT_PX = 8;     // velocity alone cannot turn a tiny wiggle into a swipe
 const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of distance
 
+// Guided-UGC island (src/island.ts) is an unreleased meta prototype. Its feed-bar
+// entry (the "Мета" tab) stays HIDDEN by default so a friend cohort never stumbles
+// into it; opt in per build with VITE_ISLAND_ENABLED=1 (or =true), matching the
+// existing default-off VITE_* front gates (see control-plane.ts). This gates ONLY
+// the UI entry — direct `?island=<ownerId>` deep-link visits (main.ts →
+// publicIsland → openIslandWorld) are intentionally untouched. The separate
+// Creator District prototype (openMetaWorld, reached via ?metaworld=1) keeps its
+// entry so its own testing path is unaffected.
+const ISLAND_UI_ENABLED = (() => {
+  const raw = String((import.meta as any).env?.VITE_ISLAND_ENABLED ?? '').toLowerCase();
+  return raw === 'true' || raw === '1';
+})();
+
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since
 // warm-paint's timer-drive.
@@ -4890,8 +4903,10 @@ export class Feed {
   private mountFeedBar() {
     const bar = document.createElement('div');
     bar.className = 'feed-bar';
-    // Four fixed sections, left→right: Daily tasks · Meta · Mechanics feed ·
-    // Collections. Tapping one makes it active (a soft pill slides under it).
+    // Fixed sections, left→right: Daily tasks · Meta (gated, see filter below) ·
+    // Mechanics feed · Collections. By default the cohort sees three tabs; the
+    // Meta/island entry only appears under VITE_ISLAND_ENABLED (or ?metaworld=1).
+    // Tapping one makes it active (a soft pill slides under it).
     // "Лента механик" is the default view. Collections opens its own full-screen
     // catalog and remains the visual card-drop target from the chest. Paging is
     // via swipe (attachSwipeSurface below); these buttons don't page.
@@ -4921,7 +4936,17 @@ export class Feed {
         svg: '<path d="M12 3 L21 12 L12 21 L3 12 Z"/>',
         onTap: () => { this.openCollections(); this.hideDailyPanel(); },
       },
-    ];
+    ]
+      // Default-off cohort gate: the "Мета" tab is the only UI entry into the
+      // unreleased Guided-UGC island, so it is dropped unless the build opts in
+      // via VITE_ISLAND_ENABLED. Keep it when ?metaworld=1 is present so the
+      // separate Creator District (openMetaWorld) test path is unaffected. This
+      // hides the entry only — deep-link island visits (main.ts → publicIsland)
+      // never touch this bar and still open.
+      .filter((tab) =>
+        tab.name !== 'meta'
+        || ISLAND_UI_ENABLED
+        || new URLSearchParams(location.search).has('metaworld'));
     const DEFAULT_TAB = 'feed';
     const switcher = document.createElement('div');
     switcher.className = 'feed-bar__switch';
