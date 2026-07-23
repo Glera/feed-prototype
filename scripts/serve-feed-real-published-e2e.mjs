@@ -27,8 +27,9 @@
  *   E2E_DOGFOOD_USER_ID        (required; seeded dogfood user id)
  *   E2E_PLATFORM_ROOT          (default ../swipe-platform)
  */
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -36,11 +37,50 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const platformRoot = path.resolve(root, process.env.E2E_PLATFORM_ROOT ?? '../swipe-platform');
 const dogfoodUserId = (process.env.E2E_DOGFOOD_USER_ID ?? '').trim();
 const port = Number(process.env.SERVE_PORT ?? 0);
+// The seeded runtime artifact digest — every real catalog preview manifest on
+// disk carries this same runtime, so the synthesized manifest must too.
+const runtimeArtifactDigest = process.env.E2E_RUNTIME_ARTIFACT_DIGEST
+  ?? 'sha256:d66b4e440358533410dd505f25b7558187df46ca5d8eea562d8648c62f2f9293';
 
 const fail = (message) => { process.stderr.write(`serve published E2E: ${message}\n`); process.exit(1); };
 if (!/^[0-9]+$/.test(dogfoodUserId)) fail('E2E_DOGFOOD_USER_ID must be the seeded numeric dogfood user id');
 const distIndex = path.join(root, 'dist/index.html');
 if (!existsSync(distIndex)) fail('dist/index.html is missing — build the Feed with the three gates first');
+
+// ---- E2E generated-preview synthesis (cosmetic; default-on for this harness).
+// The backend fixtures seed a real, playable sort LevelSpec but no catalog-
+// preview cover for its content hash, so the Feed's loadGeneratedPreview() would
+// 404 and the generated offer would never become 'ready'. The preview is only
+// the feed card thumbnail — it is NOT part of the spec/runtime gameplay closure
+// (that comes from the ticket spec bundle). We therefore serve a self-consistent
+// preview: a real on-disk cover's JPEG bytes, wrapped in a manifest keyed to the
+// requested content hash and the seeded runtime digest. Set E2E_SYNTH_PREVIEW=0
+// to disable and require a real on-disk preview instead.
+const synthPreviewEnabled = process.env.E2E_SYNTH_PREVIEW !== '0';
+const previewsDir = path.join(platformRoot, 'catalog-previews');
+const pickSourceCover = (compact) => {
+  // Deterministically borrow the bytes of the first real cover of this bucket.
+  const suffix = compact ? '.cover.c.jpg' : '.cover.jpg';
+  const names = existsSync(previewsDir)
+    ? readdirSync(previewsDir).filter((n) => n.endsWith(suffix)).sort()
+    : [];
+  if (!names.length) return null;
+  return readFileSync(path.join(previewsDir, names[0]));
+};
+const sourceMobile = synthPreviewEnabled ? pickSourceCover(false) : null;
+const sourceCompact = synthPreviewEnabled ? pickSourceCover(true) : null;
+const sha256Hex = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')}`;
+const HASH64 = /^[0-9a-f]{64}$/;
+const synthesizedManifest = (contentHash) => JSON.stringify({
+  schema: 'catalog.generated-preview.v1',
+  captureContract: 'sort.generated-preview.v1',
+  contentHash,
+  runtimeArtifactDigest,
+  covers: {
+    mobile: { file: `${contentHash}.cover.jpg`, sha256: sha256Hex(sourceMobile), width: 390, height: 600 },
+    compact: { file: `${contentHash}.cover.c.jpg`, sha256: sha256Hex(sourceCompact), width: 390, height: 488 },
+  },
+});
 
 const scriptJson = (value) => JSON.stringify(value)
   .replaceAll('<', '\\u003c')
@@ -78,6 +118,20 @@ const server = createServer((request, response) => {
   if (request.method !== 'GET') { response.statusCode = 405; response.end('method not allowed'); return; }
 
   if (url.pathname === '/' || url.pathname === '/feed') {
+    // The app loads telegram.org/js/telegram-web-app.js, which reassigns
+    // window.Telegram.WebApp with an empty initData (platform "unknown") in a
+    // plain browser — clobbering our injected bootstrap before the Feed class
+    // constructs. getInitData()'s sanctioned `?initData=` dev fallback is read
+    // from location.search and is therefore both clobber-proof and available at
+    // construction time, so controlPlaneEnabled()/catalogDogfoodEnabled latch
+    // true. Redirect the bare Feed URL to carry it.
+    if (!url.searchParams.get('initData')) {
+      const target = `${url.pathname}?initData=${encodeURIComponent(initData)}`;
+      response.statusCode = 302;
+      response.setHeader('location', target);
+      response.end();
+      return;
+    }
     const source = readFileSync(distIndex, 'utf8');
     response.setHeader('content-type', 'text/html; charset=utf-8');
     response.end(source.replace('<head>', `<head>${telegramBootstrap()}`));
@@ -89,12 +143,30 @@ const server = createServer((request, response) => {
   let relative;
   try { relative = decodeURIComponent(url.pathname.replace(/^\/+/, '')); } catch { relative = ''; }
   if (!relative || relative.includes('..')) { response.statusCode = 404; response.end('not found'); return; }
-  const file = path.join(platformRoot, relative);
-  if (!file.startsWith(`${platformRoot}${path.sep}`) || !existsSync(file) || !statSync(file).isFile()) {
-    response.statusCode = 404; response.end('not found'); return;
+  const onDisk = path.join(platformRoot, relative);
+  const realFile = onDisk.startsWith(`${platformRoot}${path.sep}`)
+    && existsSync(onDisk) && statSync(onDisk).isFile();
+
+  // Synthesize the generated preview for the seeded content when no real cover
+  // exists on disk (see the E2E generated-preview synthesis note above).
+  if (!realFile && synthPreviewEnabled && sourceMobile && sourceCompact) {
+    const manifestMatch = relative.match(/^catalog-previews\/([0-9a-f]{64})\.preview\.json$/);
+    if (manifestMatch) {
+      response.setHeader('content-type', 'application/json; charset=utf-8');
+      response.end(synthesizedManifest(manifestMatch[1]));
+      return;
+    }
+    const coverMatch = relative.match(/^catalog-previews\/([0-9a-f]{64})\.cover(\.c)?\.jpg$/);
+    if (coverMatch && HASH64.test(coverMatch[1])) {
+      response.setHeader('content-type', 'image/jpeg');
+      response.end(coverMatch[2] ? sourceCompact : sourceMobile);
+      return;
+    }
   }
-  response.setHeader('content-type', contentType(file));
-  response.end(readFileSync(file));
+
+  if (!realFile) { response.statusCode = 404; response.end('not found'); return; }
+  response.setHeader('content-type', contentType(onDisk));
+  response.end(readFileSync(onDisk));
 });
 
 server.listen(port, '127.0.0.1', () => {
