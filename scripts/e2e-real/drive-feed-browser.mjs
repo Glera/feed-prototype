@@ -35,6 +35,12 @@ const feedUrl = feedTg
 const apiBase = process.env.API_BASE ?? 'http://127.0.0.1:8099';
 const maxSwipes = Number(process.env.FEED_SWIPES ?? 14);
 const headless = process.env.HEADFUL !== '1';
+// All waits are env-configurable so a slow CI runner can be given generous
+// budgets without editing the driver (no sleep-magic; each is a real gate).
+const offerTimeoutMs = Number(process.env.FEED_OFFER_TIMEOUT_MS ?? 20_000);
+const cardTimeoutMs = Number(process.env.FEED_CARD_TIMEOUT_MS ?? 15_000);
+const swipeWaitMs = Number(process.env.FEED_SWIPE_WAIT_MS ?? 1_400);
+const stepWaitMs = Number(process.env.FEED_STEP_WAIT_MS ?? 700);
 
 const browser = await chromium.launch({ headless });
 const page = await browser.newPage({ viewport: { width: 420, height: 780 } });
@@ -67,10 +73,10 @@ log('waiting for generated-offer closure (generated-offer + runs/start + specs).
 try {
   await page.waitForResponse(
     (r) => r.url().startsWith(`${apiBase}/api/feed/generated-offer`) && r.status() === 200,
-    { timeout: 20_000 },
+    { timeout: offerTimeoutMs },
   );
   await page.waitForFunction(() => document.querySelectorAll('.game--generated').length > 0, null, {
-    timeout: 15_000,
+    timeout: cardTimeoutMs,
   });
   log('generated card inserted into the feed ring.');
 } catch (error) {
@@ -84,7 +90,7 @@ const swipeUp = async () => {
   await page.mouse.down();
   await page.mouse.move(210, 170, { steps: 14 });
   await page.mouse.up();
-  await page.waitForTimeout(1400);
+  await page.waitForTimeout(swipeWaitMs);
 };
 
 const generatedActive = () => page.evaluate(() => {
@@ -238,7 +244,7 @@ while (Date.now() < deadline) {
   if (step && step.startsWith('tapped')) { stepCount += 1; lastStep = step; }
   else lastStep = step;
   if (!diag && stepCount === 1) diag = await catalogFrameDiag();
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(stepWaitMs);
   if (results.some((r) => r.body?.metric_key === 'series')) break; // chest posted
 }
 log(`solver taps applied: ${stepCount}; last step: ${lastStep}`);
