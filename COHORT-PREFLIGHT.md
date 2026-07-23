@@ -74,12 +74,14 @@ Backend (`ENABLE_*` + capabilities) — intended cohort state:
       `ENABLE_CATALOG_OPERATOR_PROMOTION`, `ENABLE_FEED_SHADOW_OPS`, …) are **not**
       exposed to cohort accounts.
 
-> NOTE — decide the catalog-path posture explicitly before launch. Two valid postures:
-> (a) **built-in-feed-only cohort**: all three frontend catalog gates OFF → simplest,
-> but §3 recall has nothing catalog-served to recall; or (b) **catalog-served cohort**:
-> the three frontend gates + their backend counterparts ON so recall is actually
-> exercisable. Pick one, record it here, and set every flag to match. `?diag=1` /
-> `startapp=diag` must stay operator-only either way.
+> **РЕШЕНО оператором 22.07.2026: посture (b) — catalog-served cohort.**
+> Обоснование: «встроенная лента слишком скудная сейчас»; каталожная подача —
+> это и есть смысл levelSeries-гейтов, и только она делает §3 recall-drill
+> содержательным. Следствия: все три фронт-гейта + backend-контрпарты ON к
+> старту; появляется supply-зависимость — до инвайтов в каталоге должно быть
+> достаточно published-серий для «нашёл своё в разнообразии» (кормится целью
+> codex Series Order + Night Factory; анти-голодание — guardrail North Star).
+> `?diag=1` / `startapp=diag` остаются operator-only.
 
 ## 5. Invite link (what a friend's entry looks like)
 
