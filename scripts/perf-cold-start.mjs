@@ -42,6 +42,29 @@ const PER_RUN_TIMEOUT_MS = Number(process.env.PERF_RUN_TIMEOUT_MS || 30000);
 const DO_BUILD = process.env.PERF_NO_BUILD !== '1';
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
+// Device-representative throttling, applied per cold run via a CDP session
+// BEFORE navigation (so it covers the whole cold load).
+//   PERF_CPU_THROTTLE — CDP Emulation.setCPUThrottlingRate rate (e.g. 4, 6);
+//                       ≤1 or unset ⇒ no CPU throttle.
+//   PERF_NET_PROFILE  — 'fast4g' ⇒ CDP Network.emulateNetworkConditions
+//                       (latency 60ms, ↓9Mbps, ↑1.5Mbps); 'none'/unset ⇒ off.
+const CPU_THROTTLE = Math.max(0, Number(process.env.PERF_CPU_THROTTLE || 0));
+const NET_PROFILES = {
+  fast4g: {
+    label: 'Fast 4G',
+    latency: 60,                                 // ms RTT
+    downloadThroughput: Math.round((9 * 1000 * 1000) / 8),   // 9 Mbps → B/s
+    uploadThroughput: Math.round((1.5 * 1000 * 1000) / 8),   // 1.5 Mbps → B/s
+  },
+};
+const NET_KEY = (process.env.PERF_NET_PROFILE || 'none').toLowerCase();
+const NET = NET_PROFILES[NET_KEY] || null;
+// Human/file label for this profile.
+const PROFILE_LABEL = process.env.PERF_LABEL
+  || (CPU_THROTTLE > 1 || NET
+    ? [CPU_THROTTLE > 1 ? `cpu${CPU_THROTTLE}x` : null, NET ? NET_KEY : null].filter(Boolean).join('-')
+    : 'baseline');
+
 const log = (...args) => console.log('[perf]', ...args);
 
 function run(cmd, args, opts = {}) {
@@ -119,6 +142,7 @@ let browser;
 let exitCode = 0;
 try {
   await waitForServer();
+  log(`profile: ${PROFILE_LABEL}  (CPU ${CPU_THROTTLE > 1 ? `${CPU_THROTTLE}×` : 'off'}, net ${NET ? NET.label : 'unthrottled'})`);
   browser = await chromium.launch();          // headless desktop Chromium
   const rows = [];
   for (let i = 1; i <= RUNS; i += 1) {
@@ -132,6 +156,21 @@ try {
       return route.abort();
     });
     const page = await context.newPage();
+    // Apply CPU/network throttling BEFORE navigation so it covers the whole
+    // cold load (incl. loopback transfer of our own mechanic payloads).
+    if (CPU_THROTTLE > 1 || NET) {
+      const cdp = await context.newCDPSession(page);
+      if (NET) {
+        await cdp.send('Network.enable');
+        await cdp.send('Network.emulateNetworkConditions', {
+          offline: false,
+          latency: NET.latency,
+          downloadThroughput: NET.downloadThroughput,
+          uploadThroughput: NET.uploadThroughput,
+        });
+      }
+      if (CPU_THROTTLE > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
+    }
     let measured = null;
     try {
       await page.goto(`${ORIGIN}/?perf=1`, { waitUntil: 'commit', timeout: PER_RUN_TIMEOUT_MS });
@@ -185,6 +224,11 @@ try {
       node: process.version,
       chromium: chromium.name?.() ?? undefined,
     },
+    profile: {
+      label: PROFILE_LABEL,
+      cpuThrottleRate: CPU_THROTTLE > 1 ? CPU_THROTTLE : 1,
+      netProfile: NET ? { key: NET_KEY, ...NET } : null,
+    },
     method: {
       server: 'vite preview (prod dist + mechanic siblings from swipe-platform)',
       browser: 'headless desktop Chromium via Playwright',
@@ -196,10 +240,16 @@ try {
     metrics,
     rows,
   };
-  const outPath = path.join(root, 'perf-cold-start-results.json');
+  const outPath = path.join(
+    root,
+    PROFILE_LABEL === 'baseline' ? 'perf-cold-start-results.json' : `perf-cold-start-results.${PROFILE_LABEL}.json`,
+  );
   writeFileSync(outPath, JSON.stringify(report, null, 2));
 
-  console.log('\n=== COLD-START BASELINE (N=' + RUNS + ', ' + report.okRuns + ' ok) ===');
+  console.log(
+    `\n=== COLD-START [${PROFILE_LABEL}] (N=${RUNS}, ${report.okRuns} ok`
+    + `${CPU_THROTTLE > 1 ? `, CPU ${CPU_THROTTLE}×` : ''}${NET ? `, ${NET.label}` : ''}) ===`,
+  );
   const fmt = (m) => `p50=${m.p50}ms  p95=${m.p95}ms  (min ${m.min} / max ${m.max} / mean ${m.mean}, n=${m.n})`;
   console.log('A) first painted feed screen (FCP)       :', fmt(metrics.fcp));
   console.log('   (cross-check mark perf:feed-first-render):', fmt(metrics.firstRenderMark));
