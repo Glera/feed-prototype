@@ -23,7 +23,8 @@ Two worktrees hold the scaffolding (never touch the main checkouts):
 | **Effectful catalog lane arms in browser** | ✅ | `drive-feed-browser.mjs` → `effectfulChainArmed: true` (generated-offer + runs/start + specs 200) |
 | Generated catalog card inserted + opened | ✅ | `landedOnGeneratedCard: true` |
 | Real runtime configures seeded spec + starts attempt | ✅ | PG: `catalog_level_impression` + `attempt_start` projected |
-| **Level WIN → /api/results → chest (hands-free)** | ❌ | see "Known remaining gap" (real runtime does not self-complete) |
+| **Level WIN → /api/results → chest (hands-free)** | ✅ | `drive-feed-browser.mjs` → `chestResultsPosted: 1`; PG: `attempt_outcome_facts=win`, level `verified_run` (ordinal 1), chest receipt (ordinal NULL, series-bound) |
+| **Multi-id generative feed** (operator question) | ✅ | `E2E_SEED_USER_ID` + `FEED_TG`; each of `9018100101` and `111222333` gets a `generated-offer` `feed_decision` bound to its own `user_id`, and closes level+chest |
 
 ## One-command run
 
@@ -159,35 +160,38 @@ Also note: the one-shot continuity trigger is consumed per generated-offer, so
 each browser run needs a fresh `seed_published_series.py` and no interleaved
 backend chain-driver run.
 
-## Known remaining gap (the single next step)
+## Hands-free completion — how the driver wins the real level
 
-`levelResultsPosted: 0` / `chestResultsPosted: 0`. cp events freeze at
-`attempt_start`; no `attempt_outcome_facts`, `level_results`, or chest receipt.
+The real `marble-sort-swipe` runtime does not self-play on its own: it plays only
+while it considers itself *interactive* (SWIPE target:
+`isInteractive() === (!hostPaused && !document.hidden)`), and the feed
+host-pauses catalog slots. The driver therefore:
 
-Root cause (verified two ways): **the real `marble-sort-swipe` runtime does not
-auto-complete a level.**
+1. **Keeps the frame live** — a tight same-origin in-page pump (60 ms) forces the
+   catalog iframe's `document.hidden=false` and calls `__playable.setHostPaused(
+   false)`, out-pacing the feed's re-pause (the runtime's `paused` gate blocks the
+   physics/scheduler advance otherwise).
+2. **Uses the runtime's own solver** — `__playable.sortQa.chooseOracleAction()`
+   returns the best cell to release (no `?vclock=1` needed; `applyOracleAction`
+   is vclock-gated so it is not usable in the normal catalog frame). The driver
+   reads `sortQa.snapshot()` for that cell's `row/col`, computes its canvas
+   position (`x=95+col*40, y=48+row*40` for the seeded 6-wide grid, uniform
+   scale), and dispatches a **real pointer tap** on the same-origin canvas — the
+   exact input a human makes. Runtime code is never modified.
 
-  * Loaded standalone with `?auto=1`, the board is static — no self-play (its
-    autoplay flag `zt = "0"!==get("auto") && "0"!==get("autoplay")` gates a
-    tutor hand, not an oracle that solves the board).
-  * In the catalog slot the level renders and the attempt starts, then idles;
-    the feed's shared AutoCursor autoplay demo does not drive the catalog
-    iframe to a win (tapping only switches it to manual/human play — the driver
-    defaults to NOT tapping, `FEED_TAP=1` to force).
+The runtime then emits its genuine win outcome → the Feed forwards
+`/api/results` (level) then the chest. Proven in PG for both the default and the
+second player:
 
-The dogfood browser harness (`check-catalog-feed-dogfood-browser.mjs`) reaches
-green only because it serves a **stub runtime that auto-posts results**; the real
-runtime needs genuine gameplay. The seeded spec itself is a real, playable
-`sort.level-spec.v1` (6×5, 3 colours, real `targetStacks`), so content is not the
-blocker — completion is.
+```
+attempt_outcome_facts : win
+verified_runs         : ordinal=1, series=<sid>, applied_spec_hash=<seeded spec>   (level result)
+verified_runs         : ordinal=NULL, series=<sid>, run=series-…                    (chest receipt)
+```
 
-**Next step (one):** make the level actually complete hands-free. The catalog
-iframe is **same-origin** with the Feed (both on `:8188`), so the cleanest path
-is to script the solve in `drive-feed-browser.mjs`: reach into the catalog
-iframe and drive the exact drag sequence that satisfies the seeded `targetStacks`
-(or invoke the runtime's move API), so the real runtime emits its genuine win
-outcome → the Feed forwards `/api/results` (levels) then the chest. Verify in PG:
-`attempt_outcome_facts` (win) + a `metric_key='series'` chest receipt bound to the
-generated ticket/series. (Alternative: add a runtime self-solve/autoplay mode
-invocable under `catalog_required`.)
+Notes: the seeded series is **single-level** (`series_levels = 1`) + chest; the
+driver's `chestResultsPosted` classifies from the `/api/results` **request** body
+(the ack does not echo `metric_key`). `LOGICAL_ORACLE`/`VIRTUAL_CLOCK` both need
+extra query params (`?oracle=1`, `?vclock=1`) the catalog frame cannot carry, so
+the tap-solver is the driver-side path.
 ```
