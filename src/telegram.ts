@@ -100,6 +100,12 @@ export function islandOwnerFromParam(p: string | null): number | null {
   return Number.isSafeInteger(value) ? value : null;
 }
 
+/** Friend-invite deep links use `f_<code>` (base32 code, ТЗ §2.1/§5.4). */
+export function islandFriendCodeFromParam(p: string | null): string | null {
+  const match = p?.match(/^f_([A-Za-z0-9]{4,32})$/);
+  return match ? match[1] : null;
+}
+
 /** Open the Telegram share sheet for a deep link. Inside Telegram uses
  *  openTelegramLink (native chooser); falls back to a new tab elsewhere. */
 export function shareTelegramLink(shareUrl: string, deepLink: string, text: string): void {

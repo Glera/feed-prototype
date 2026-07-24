@@ -808,6 +808,18 @@ export interface IslandBuildingState {
   jobId?: string;
   rel?: string;
   url?: string;
+  // ── Island Social Core (P1) server-derived fields ──────────────────────────
+  // All optional and read-only: the backend adds them to /island/state (owner)
+  // and /island/public (guest). The client only renders them; they are never
+  // authored locally. `stage` = min(foreign_claims, 10). `bot_claims` is the
+  // "system neighbour" (bot) portion of foreign_claims, shown separately (F006).
+  stage?: number;
+  foreign_claims?: number;
+  bot_claims?: number;
+  pending_gifts?: number;        // owner /island/state — uncollected gifts (0..9)
+  gift_available_today?: boolean; // guest /island/public — a gift is offered today
+  is_public?: boolean;            // published UGC artifact (visible to guests)
+  takedown?: boolean;             // moderation-removed (P3); hidden from guests
 }
 
 export interface IslandPersistedState {
@@ -836,7 +848,13 @@ export function apiSaveIslandState(state: IslandPersistedState, expectedRevision
 }
 
 export interface PublicIslandView {
-  owner: { id: number; first_name: string | null; username: string | null };
+  owner: {
+    id: number;
+    first_name: string | null;
+    username: string | null;
+    photo_url?: string | null; // Island Social Core: from TMA initData (§2.2)
+    is_bot?: boolean;          // Island Social Core: bot island → "бот" badge (§4.3)
+  };
   buildings: IslandBuildingState[];
   aiPacks?: Record<string, IslandStoredPack> | null;
   deep_link: string;
@@ -881,6 +899,113 @@ export function apiSetIslandLike(buildingId: string, ownerId: number, liked: boo
     owner_id: ownerId,
     liked,
   });
+}
+
+// ── Island Social Core (P1) — gifts, collect, friends ───────────────────────
+// Backend routes are gated by ENABLE_ISLAND_SOCIAL server-side; forms track ТЗ
+// v1.3 §2.2 exactly. Every function degrades through the ApiRequestError path so
+// the client can show an honest toast without breaking the visit/play flow.
+
+/** Guest completion-claim disposition (ТЗ §2.2 result response). */
+export type IslandGiftDisposition =
+  | 'granted' | 'repeat_day' | 'daily_cap' | 'rewards_disabled' | 'zero_policy';
+
+/** Owner-collect receipt disposition (ТЗ §2.2 collect response). */
+export type IslandCollectDisposition =
+  | 'granted' | 'empty' | 'daily_cap' | 'rewards_disabled';
+
+/** Response of POST /island/visits/{visit_id}/result — a projection of the
+ *  immutable completion-outcome receipt (ТЗ §2.2). */
+export interface IslandVisitResult {
+  claim_recorded: boolean;
+  stage: number;
+  foreign_claims: number;
+  disposition: IslandGiftDisposition;
+  gift: { puzzles: number } | null;
+}
+
+/** Guest claims a completed visit; the server gates min-time, cooldown, caps and
+ *  the reward kill-switch, and always writes a terminal receipt (ТЗ §2.2). */
+export function apiIslandVisitResult(
+  visitId: string,
+  durationMs: number,
+): Promise<IslandVisitResult> {
+  return postRequired<IslandVisitResult>(
+    `/api/island/visits/${encodeURIComponent(visitId)}/result`,
+    { outcome: 'completed', duration_ms: Math.max(0, Math.round(durationMs)) },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** Response of POST /island/buildings/{building_id}/collect — a projection of the
+ *  append-only collect receipt (ТЗ §2.2). `pending_gifts` is the materialised
+ *  counter after the collect so the client can repaint the badge. */
+export interface IslandCollectResult {
+  disposition: IslandCollectDisposition;
+  gifts: number;
+  puzzles: number;
+  pending_gifts?: number;
+}
+
+/** Owner collects piled gifts. `claimId` MUST be persisted before the request and
+ *  reused on retry so the append-only receipt is idempotent (ТЗ §2.2). */
+export function apiIslandCollect(
+  buildingId: string,
+  claimId: string,
+): Promise<IslandCollectResult> {
+  return postRequired<IslandCollectResult>(
+    `/api/island/buildings/${encodeURIComponent(buildingId)}/collect`,
+    { claim_id: claimId },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export interface IslandFriend {
+  user_id: number;
+  first_name: string | null;
+  username: string | null;
+  photo_url: string | null;
+  is_bot: boolean;
+  has_island: boolean;
+  published_buildings: number;
+}
+
+/** POST /island/friends/code → a durable invite code + deep-link (ТЗ §2.2). */
+export interface IslandFriendCodeResult {
+  code: string;
+  link: string;
+}
+
+export function apiIslandFriendCode(): Promise<IslandFriendCodeResult> {
+  return postRequired<IslandFriendCodeResult>(
+    '/api/island/friends/code',
+    undefined,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** POST /island/friends/accept {code}. The response body is not fully pinned in
+ *  ТЗ §2.2 (только коды ошибок 400/404/409, 200 no-op); we read the new friend's
+ *  profile best-effort for the toast and never depend on a specific field. */
+export interface IslandFriendAcceptResult {
+  status?: string;
+  friend?: Partial<IslandFriend> | null;
+}
+
+export function apiIslandFriendAccept(code: string): Promise<IslandFriendAcceptResult> {
+  return postRequired<IslandFriendAcceptResult>(
+    '/api/island/friends/accept',
+    { code },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** GET /island/friends → active friendships (ТЗ §2.2). Accepts either a bare
+ *  array or a `{friends:[...]}` envelope so the client is resilient to either. */
+export async function apiIslandFriends(): Promise<IslandFriend[]> {
+  const r = await getRequired<IslandFriend[] | { friends?: IslandFriend[] }>('/api/island/friends');
+  if (Array.isArray(r)) return r;
+  return r?.friends ?? [];
 }
 
 export function apiIslandTheme(payload: {

@@ -17,7 +17,9 @@ import {
   apiCompleteIslandVisit,
   apiIslandBake,
   apiIslandBakeJob,
+  apiIslandCollect,
   apiIslandTheme,
+  apiIslandVisitResult,
   apiPublicIsland,
   apiSetIslandLike,
   apiStartIslandVisit,
@@ -29,6 +31,7 @@ import {
   type IslandSocialView,
   type IslandStoredPack,
   type IslandTemplateId,
+  type IslandVisitResult,
   type PublicIslandView,
 } from './api';
 import { IslandStateSync, cacheIslandState, loadIslandState, replaceIslandState } from './island-state';
@@ -731,6 +734,77 @@ function luminance(hex: string): number {
   return (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
 }
 
+// ── Island Social Core: house stages (§4.1) ─────────────────────────────────
+// Server-owned stage 0..10 = min(foreign_claims, 10). If the backend has not yet
+// attached `stage` we derive it from `foreign_claims`, else 0 — always defensive.
+function stageOf(b: IslandBuildingState): number {
+  const raw = typeof b.stage === 'number'
+    ? b.stage
+    : typeof b.foreign_claims === 'number' ? b.foreign_claims : 0;
+  return Math.max(0, Math.min(10, Math.floor(raw)));
+}
+// Blueprint colour code per stage: amber → violet → blue → green → gold (MAX).
+function stageColor(stage: number): string {
+  if (stage >= 10) return '#FFCE54';
+  if (stage >= 8) return '#4CC38A';
+  if (stage >= 5) return '#58A6FF';
+  if (stage >= 2) return '#C4A7E7';
+  return '#EF9F27';
+}
+// Sector fill density: 10 steps of ground-tint opacity so a grown house reads as a
+// denser, more saturated patch (0.34 at stage 0 → ~1.0 at stage 10).
+function stageFillOpacity(stage: number): number {
+  return Math.round((0.34 + stage * 0.066) * 100) / 100;
+}
+function polarPoint(cx: number, cy: number, r: number, deg: number): { x: number; y: number } {
+  const rad = (deg * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+// 10 concentric step-arcs around the slot rim; `stage` of them are lit in the
+// stage colour, the rest are faint. This is the visual "10 ступеней домика".
+function stageRingsSvg(cx: number, cy: number, stage: number): string {
+  const R = 47, segs = 10, step = 360 / segs, gap = 7, span = step - gap;
+  const color = stageColor(stage);
+  let out = '';
+  for (let i = 0; i < segs; i++) {
+    const lit = i < stage;
+    const a0 = -90 + i * step + gap / 2;
+    const p0 = polarPoint(cx, cy, R, a0);
+    const p1 = polarPoint(cx, cy, R, a0 + span);
+    out += `<path d="M${p0.x.toFixed(1)} ${p0.y.toFixed(1)} A${R} ${R} 0 0 1 ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}" fill="none" stroke="${lit ? color : 'rgba(255,255,255,.14)'}" stroke-width="${lit ? 3.2 : 1.8}" stroke-linecap="round"/>`;
+  }
+  return out;
+}
+// "MAX" pill for a stage-10 building — placed below the name/plays label so it
+// never collides with the top gift puck. (A maxed house is always hosted, so the
+// "не виден гостям" hint is mutually exclusive here.)
+function maxBadgeSvg(cx: number, cy: number): string {
+  const x = cx, y = cy + 96;
+  return `<g class="isl-max"><rect x="${x - 18}" y="${y - 9}" width="36" height="16" rx="8" fill="#FFCE54" stroke="rgba(13,17,24,.9)" stroke-width="1.5"/>` +
+    `<text x="${x}" y="${y + 3.5}" text-anchor="middle" font-size="10" font-weight="900" fill="#3A2C05">MAX</text></g>`;
+}
+
+// ── Island Social Core: idempotent owner-collect claim ids (§4.2) ───────────
+// A collect claim_id is minted before the request and persisted per building so a
+// retry after a lost response reuses the same id (append-only receipt is
+// idempotent). Cleared only after the server acknowledges the collect.
+const COLLECT_CLAIM_KEY = 'island-collect-claims-v1';
+function loadCollectClaims(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(COLLECT_CLAIM_KEY) || '{}') || {}; } catch { return {}; }
+}
+function saveCollectClaims(map: Record<string, string>): void {
+  try { localStorage.setItem(COLLECT_CLAIM_KEY, JSON.stringify(map)); } catch { /* private mode */ }
+}
+function ensureCollectClaim(buildingId: string): string {
+  const map = loadCollectClaims();
+  if (!map[buildingId]) { map[buildingId] = newJobId(); saveCollectClaims(map); }
+  return map[buildingId];
+}
+function clearCollectClaim(buildingId: string): void {
+  const map = loadCollectClaims();
+  if (map[buildingId]) { delete map[buildingId]; saveCollectClaims(map); }
+}
+
 // Compact preview driven by the same persisted variant config as the live fork.
 function board(tpl: TplId, pk: Pack): string {
   const dark = parseInt(pk.boardBg.slice(1, 3), 16) < 100;
@@ -801,6 +875,7 @@ const CSS = `
 .isl-namebar{position:relative;flex:0 0 auto;display:flex;justify-content:center;padding:9px 54px 3px}
 .isl-namebar__pill{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(0,0,0,.38);border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:5px 15px;font-size:12.5px;font-weight:700;color:rgba(255,255,255,.84)}
 .isl-share{position:absolute;right:14px;top:6px;width:32px;height:32px;border:1px solid rgba(255,255,255,.14);border-radius:50%;background:rgba(0,0,0,.32);color:#fff;font:700 18px/1 system-ui;display:grid;place-items:center}
+.isl-botbadge{margin-left:8px;background:rgba(88,166,255,.16);border:1px solid rgba(88,166,255,.42);border-radius:999px;padding:4px 10px;font-size:11px;font-weight:800;color:#9DC3FF;white-space:nowrap}
 .isl-share:disabled{opacity:.45}
 .isl-ava{width:38px;height:38px;border-radius:50%;background:#2E6E86;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;flex:0 0 38px}
 .isl-who{flex:1;min-width:0}
@@ -906,6 +981,7 @@ const CSS = `
   background:rgba(7,9,15,.88);text-align:center;padding:24px}
 .isl-win__t{font-size:20px;font-weight:800}
 .isl-win__m{font-size:13px;color:rgba(255,255,255,.6)}
+.isl-gift{font-size:15px;font-weight:800;color:#FFD98A;background:rgba(255,206,84,.12);border:1px solid rgba(255,206,84,.34);border-radius:12px;padding:9px 16px}
 .isl-like{border:2px solid #E8603C;background:transparent;color:#fff;border-radius:999px;padding:11px 22px;font:inherit;font-size:14.5px}
 .isl-like--on{background:#E8603C;font-weight:800}
 .isl-win__home{background:#fff;color:#10222C;border:none;border-radius:13px;padding:12px 30px;font:inherit;font-size:14.5px;font-weight:800}
@@ -1270,7 +1346,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   ov.innerHTML =
     // The top HUD (level + puzzle counter) and the bottom nav bar are the feed's —
     // they stay put across views. The island only labels itself on a small backing.
-    `<div class="isl-namebar"><span class="isl-namebar__pill">🏝️ ${esc(islandLabel)}</span>${guest ? '' : '<button class="isl-share" type="button" data-share-island aria-label="Share island" title="Share island">↗</button>'}</div>` +
+    // Bot islands are always labelled as such (§4.3): a guest must be able to
+    // tell a "system neighbour" island from a real player's.
+    `<div class="isl-namebar"><span class="isl-namebar__pill">🏝️ ${esc(islandLabel)}</span>${guest && publicIsland?.owner.is_bot ? '<span class="isl-botbadge" title="Системный сосед">🤖 бот</span>' : ''}${guest ? '' : '<button class="isl-share" type="button" data-share-island aria-label="Share island" title="Share island">↗</button>'}</div>` +
     '<div class="isl-worldbox"><svg viewBox="0 0 390 540" preserveAspectRatio="xMidYMid slice"></svg><div class="isl-legend" data-legend></div></div>' +
     `<button class="isl-cta" type="button" data-guest-cta${guest ? '' : ' hidden'}>Play a series here</button>` +
     '<div class="isl-scrim" data-scrim></div>' +
@@ -1453,10 +1531,15 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
             <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="18" font-weight="700" fill="rgba(255,255,255,.9)">${TPL[draft.tpl].label.charAt(0)}</text>
             <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.75)">theme ready</text></g>`;
         } else if (!guest) {
-          s += `<g class="isl-sector" data-slot="${i}">
-            <circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.35)" stroke-width="1.4" stroke-dasharray="6 6"/>
-            <text x="${p.x}" y="${p.y + 9}" text-anchor="middle" font-size="26" font-weight="600" fill="rgba(255,255,255,.7)" class="isl-plus">+</text>
-            <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.45)">build</text></g>`;
+          // Foundation CTA (§4.6): an empty owner slot reads as a laid foundation
+          // — a brighter dashed plot with a solid inner ring and an explicit
+          // "Создай механику" call-to-action, louder than the old faint dotted "+".
+          s += `<g class="isl-sector isl-foundation" data-slot="${i}">
+            <circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(143,216,194,.06)" stroke="rgba(143,216,194,.55)" stroke-width="1.8" stroke-dasharray="7 6"/>
+            <circle cx="${p.x}" cy="${p.y}" r="27" fill="none" stroke="rgba(143,216,194,.4)" stroke-width="1.2"/>
+            <text x="${p.x}" y="${p.y + 10}" text-anchor="middle" font-size="30" font-weight="700" fill="#8FD8C2" class="isl-plus">+</text>
+            <rect x="${p.x - 52}" y="${p.y + 48}" width="104" height="18" rx="9" fill="#8FD8C2"/>
+            <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="800" fill="#0C2019">Создай механику</text></g>`;
         } else {
           s += `<circle cx="${p.x}" cy="${p.y}" r="40" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="1.2" stroke-dasharray="6 6"/>`;
         }
@@ -1468,28 +1551,49 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       // blocked in the building card until it finishes.
       const busy = Boolean(b.publishing) || pollingSlots.has(i) || pendingSlots.has(i);
       const letterFill = luminance(pk.ground) > 0.55 ? '#1F1E1B' : '#FFFFFF';
+      // Stage 0..10 (§4.1): concentric step-arcs around the rim + a stage-scaled
+      // ground-fill density; a "MAX" badge at stage 10. Server-derived; defensive
+      // if the backend has not yet attached `stage`.
+      const stage = stageOf(b);
       s += `<g class="isl-sector${b.fresh ? ' isl-sector--new' : ''}" data-b="${i}">
-        <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
+        ${stageRingsSvg(p.x, p.y, stage)}
+        <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" fill-opacity="${stageFillOpacity(stage)}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
         <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="19" font-weight="700" fill="${letterFill}">${TPL[b.tpl].label.charAt(0)}</text>`;
       const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : isLocalExperiment(b) ? '#58A6FF' : hostedUrl(b) ? '#4CC38A' : null;
       if (dot) {
         s += `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`;
       }
+      if (stage >= 10) s += maxBadgeSvg(p.x, p.y);
       s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
         <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text>
-        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays + (fake ? (sim.plays[i] || 0) : 0))}   ♥ ${fmtNum(b.likes + (fake ? (sim.likes[i] || 0) : 0))}</text></g>`;
-      // Uncollected puzzles earned from simulated plays — a gently bobbing token over
-      // the mechanic; tap to collect (scatter → fly into the counter). Fake mode only.
-      // A per-slot negative animation-delay desyncs the bob so they don't move in unison.
-      const rew = fake ? (sim.reward[i] || 0) : 0;
-      if (rew > 0) {
-        const px = p.x, py = p.y - 52;
-        const delay = -((i * 0.67) % 2.4).toFixed(2);   // desync the bob per slot (period = 2.4s, see .isl-puz)
-        s += `<g class="isl-puz" data-collect="${i}" style="animation-delay:${delay}s">` +
-          `<circle cx="${px}" cy="${py}" r="15.5" fill="rgba(58,42,102,.97)" stroke="#fff" stroke-width="1.6"/>` +
-          `<text x="${px}" y="${py + 5.5}" text-anchor="middle" font-size="16">🧩</text>` +
-          `<circle cx="${px + 13}" cy="${py - 11}" r="8" fill="#4CC38A" stroke="rgba(13,17,24,.9)" stroke-width="1.5"/>` +
-          `<text x="${px + 13}" y="${py - 7.6}" text-anchor="middle" font-size="9.5" font-weight="800" fill="#08210F">${rew}</text>` +
+        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays + (fake ? (sim.plays[i] || 0) : 0))}   ♥ ${fmtNum(b.likes + (fake ? (sim.likes[i] || 0) : 0))}</text>`;
+      // Owner (§4.6): an unpublished mechanic is invisible to guests — mark it.
+      if (!guest && !busy && !hostedUrl(b) && !isLocalExperiment(b)) {
+        s += `<text x="${p.x}" y="${p.y + 95}" text-anchor="middle" font-size="9" font-weight="700" fill="#EF9F27">не виден гостям</text>`;
+      }
+      s += '</g>';
+      // Gifts over a building:
+      //  • Owner (§4.2): uncollected gifts pile up (real `pending_gifts` from the
+      //    backend, or the local simulation in 'fake' mode) — a bobbing puzzle
+      //    token; tap to collect (scatter → fly into the shared counter).
+      //  • Guest (§4.3): a public building offering a gift today shows a wrapped
+      //    "подарочек" hint; tapping the building plays it, which claims the gift.
+      const px = p.x, py = p.y - 52;
+      const delay = -((i * 0.67) % 2.4).toFixed(2);   // desync the bob per slot (period = 2.4s, see .isl-puz)
+      if (!guest) {
+        const rew = fake ? (sim.reward[i] || 0) : (b.pending_gifts || 0);
+        if (rew > 0) {
+          s += `<g class="isl-puz" data-collect="${i}" style="animation-delay:${delay}s">` +
+            `<circle cx="${px}" cy="${py}" r="15.5" fill="rgba(58,42,102,.97)" stroke="#fff" stroke-width="1.6"/>` +
+            `<text x="${px}" y="${py + 5.5}" text-anchor="middle" font-size="16">🧩</text>` +
+            `<circle cx="${px + 13}" cy="${py - 11}" r="8" fill="#4CC38A" stroke="rgba(13,17,24,.9)" stroke-width="1.5"/>` +
+            `<text x="${px + 13}" y="${py - 7.6}" text-anchor="middle" font-size="9.5" font-weight="800" fill="#08210F">${rew}</text>` +
+            '</g>';
+        }
+      } else if (b.gift_available_today) {
+        s += `<g class="isl-puz" data-visit-gift="${i}" style="animation-delay:${delay}s">` +
+          `<circle cx="${px}" cy="${py}" r="15.5" fill="rgba(232,96,60,.97)" stroke="#fff" stroke-width="1.6"/>` +
+          `<text x="${px}" y="${py + 5.5}" text-anchor="middle" font-size="16">🎁</text>` +
           '</g>';
       }
       if (b.fresh) {
@@ -1514,7 +1618,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     svg.querySelectorAll<SVGElement>('[data-lock]').forEach((g) =>
       g.addEventListener('click', () => { if (!panMoved) toast('Слот откроется позже'); }));
     svg.querySelectorAll<SVGElement>('[data-collect]').forEach((g) =>
-      g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) collectReward(Number(g.dataset.collect), g); }));
+      g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) void collectReward(Number(g.dataset.collect), g); }));
+    // Guest gift hint: tapping it just plays the building (which claims the gift).
+    svg.querySelectorAll<SVGElement>('[data-visit-gift]').forEach((g) =>
+      g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) openBuilding(Number(g.dataset.visitGift)); }));
     const likes = buildings.reduce((a, b) => a + b.likes + (fake ? (sim.likes[b.slot] || 0) : 0), 0);
     const statEl = ov.querySelector('[data-stat]');
     if (statEl) statEl.textContent = `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;
@@ -1524,18 +1631,46 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (persist) save();
   }
 
-  // Collect the puzzles bobbing over a mechanic: clear the local reward, then hand
-  // the amount + tap point to the feed, which flies the pucks into the ONE shared
-  // HUD counter (scatter → arc into it).
-  function collectReward(slot: number, el: SVGElement): void {
+  // Collect the gifts bobbing over a mechanic (§4.2). In 'fake' mode this stays a
+  // pure local presentation (clear the sim reward, fly the pucks). In 'real' mode
+  // it POSTs a persisted, idempotent collect claim and applies the server's exact
+  // disposition (granted flies puzzles; daily_cap / rewards_disabled show honest
+  // toasts; empty is a no-op). A lost response keeps the claim id for retry.
+  async function collectReward(slot: number, el: SVGElement): Promise<void> {
     if (guest) return;
-    const amount = sim.reward[slot] || 0;
-    if (amount <= 0) return;
-    sim.reward[slot] = 0;
-    saveIslandSim(sim);
-    const r = el.getBoundingClientRect();
-    ctx.addPuzzles?.(amount, { x: r.left + r.width / 2, y: r.top + r.height / 2 });
-    refreshIsland();
+    const rect = el.getBoundingClientRect();
+    const from = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    if (islandSocialMode() === 'fake') {
+      const amount = sim.reward[slot] || 0;
+      if (amount <= 0) return;
+      sim.reward[slot] = 0;
+      saveIslandSim(sim);
+      ctx.addPuzzles?.(amount, from);
+      refreshIsland();
+      return;
+    }
+    const b = S.buildings.find((x) => x.slot === slot);
+    if (!b || !b.buildingId || (b.pending_gifts || 0) <= 0) return;
+    const buildingId = b.buildingId;
+    const claimId = ensureCollectClaim(buildingId);
+    try {
+      const res = await apiIslandCollect(buildingId, claimId);
+      clearCollectClaim(buildingId);
+      const now = S.buildings.find((x) => x.buildingId === buildingId);
+      if (now) now.pending_gifts = res.pending_gifts ?? 0;
+      if (res.disposition === 'granted' && res.puzzles > 0) {
+        ctx.addPuzzles?.(res.puzzles, from);
+        toast(`Собрано ${res.puzzles} 🧩`);
+      } else if (res.disposition === 'daily_cap') {
+        toast('Дневной лимит островных пазлов достигнут — соберите завтра');
+      } else if (res.disposition === 'rewards_disabled') {
+        toast('Награды временно на паузе');
+      }
+      refreshIsland();
+    } catch (error) {
+      // Keep the claim id so the next tap retries idempotently.
+      toast(`Не удалось собрать · ${errorText(error)}`);
+    }
   }
 
   // ── creation flow ──────────────────────────────────────────────────────────
@@ -2987,14 +3122,31 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const revisionProgress = editableExperiment && pendingSlots.has(slot)
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-revision-progress>View revision progress</button>'
       : '';
+    // Stage line (§4.1): "Стадия N/10 · гости прошли: K", with the human vs
+    // "system neighbour" (bot) split shown separately (F006) when the backend
+    // reports the bot portion.
+    const stage = stageOf(b);
+    const foreignClaims = typeof b.foreign_claims === 'number' ? b.foreign_claims : 0;
+    const botClaims = typeof b.bot_claims === 'number' ? Math.min(b.bot_claims, foreignClaims) : null;
+    const peopleClaims = botClaims != null ? Math.max(0, foreignClaims - botClaims) : null;
+    const stageLine = `<div class="isl-sub" style="margin-top:-8px">Стадия ${stage}/10${stage >= 10 ? ' · <b style="color:#FFCE54">MAX</b>' : ''} · гости прошли: ${foreignClaims}${
+      botClaims != null ? ` <span style="opacity:.75">(люди ${peopleClaims} + соседи ${botClaims})</span>` : ''
+    }</div>`;
+    // Not-published hint (§4.6): a mechanic without a hosted artifact is invisible
+    // to guests until published.
+    const publishHint = !hostedUrl(b) && !isLocalExperiment(b) && !busy
+      ? '<div class="isl-pk" style="margin-top:8px;color:#EF9F27">Не виден гостям — опубликуй, чтобы к тебе приходили</div>'
+      : '';
     openSheet(`<h3>${esc(b.name)}</h3>
       <div class="isl-sub">${TPL[b.tpl].label} · Lv ${levelOf(b)} · ${b.plays} plays · ♥ ${b.likes} ${badge}</div>
+      ${stageLine}
       ${buildingPreview}
       <button class="isl-btn isl-btn--pri" type="button" data-play>▶ Play the series</button>
       ${revisionProgress}
       ${refineLab}
       ${publishLab}
       ${retry}
+      ${publishHint}
       <button class="isl-btn isl-btn--ghost" type="button" data-rebuild${busy ? ' disabled' : ''}>Rebuild slot · replace this mechanic</button>
       <button class="isl-btn isl-btn--ghost" type="button" data-delete${busy ? ' disabled' : ''}>Delete mechanic</button>
       <div class="isl-pk" style="margin-top:10px">${busy
@@ -3122,6 +3274,25 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     };
     let winShown = false;
     let visitCompleted = false;
+    // Disposition-aware guest gift modal (§4.3): honest text for every outcome.
+    const showGiftOutcome = (win: HTMLElement, result: IslandVisitResult): void => {
+      const el = win.querySelector('[data-gift]') as HTMLElement | null;
+      if (!el) return;
+      let text: string;
+      if (result.disposition === 'granted' && result.gift && result.gift.puzzles > 0) {
+        text = `🎁 Подарок: +${result.gift.puzzles} 🧩`;
+      } else if (result.disposition === 'repeat_day') {
+        text = '🎁 Сегодня подарок уже получен — приходи завтра';
+      } else if (result.disposition === 'daily_cap') {
+        text = 'Дневной лимит островных пазлов достигнут';
+      } else if (result.disposition === 'rewards_disabled' || result.disposition === 'zero_policy') {
+        text = 'Спасибо за визит!';
+      } else {
+        text = 'Спасибо за визит!';
+      }
+      el.textContent = text;
+      el.hidden = false;
+    };
     const showWin = () => {
       if (winShown) return;
       winShown = true;
@@ -3131,6 +3302,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         '<div class="isl-win__t">Round won! 🎉</div>' +
         (guest ? '<div class="isl-win__m" data-visit-status>Verifying this visit…</div>'
                : '<div class="isl-win__m">Your own build — no tokens for self-plays</div>') +
+        (guest ? '<div class="isl-gift" data-gift hidden></div>' : '') +
         (guest ? `<button class="isl-like${b.liked ? ' isl-like--on' : ''}" type="button" data-like disabled>${b.liked ? '♥ Liked' : '♡ Like this mechanic'}</button>` : '') +
         '<button class="isl-win__home" type="button" data-home>Back to island</button>';
       play.appendChild(win);
@@ -3184,6 +3356,19 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           paintLike();
         }
         if (ov.isConnected) refreshIsland(false);
+        // Island Social Core (§4.3): record the completion claim and resolve the
+        // gift, then show a disposition-aware gift modal. Fail-quiet: the like
+        // prompt above is preserved regardless of the gift outcome.
+        void (async () => {
+          if (!visitId) return;
+          try {
+            const result = await apiIslandVisitResult(visitId, performance.now() - visitStartedAt);
+            dbg(`gift claim: ${result.disposition} stage=${result.stage}`);
+            if (play.isConnected) showGiftOutcome(win, result);
+          } catch (error) {
+            dbg(`gift claim failed: ${errorText(error)}`);
+          }
+        })();
       })().catch((error) => {
         dbg(`visit completion failed: ${errorText(error)}`);
         if (!play.isConnected) return;

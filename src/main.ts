@@ -1,7 +1,7 @@
 import './styles.css';
 import { createFeed } from './feed';
 import { setMechanicVersions } from './playables';
-import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, isChallengeParam } from './telegram';
+import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
@@ -42,13 +42,16 @@ async function boot(): Promise<void> {
   if (ownerId != null) {
     try { publicIsland = await apiPublicIsland(ownerId); } catch { /* unavailable/private → normal feed */ }
   }
+  // Friend-invite deep link (startapp=f_<code>): the feed accepts it after mount
+  // (it owns the toast + the friend HUD), mirroring the i_<owner> pattern.
+  const friendAcceptCode = islandFriendCodeFromParam(sp);
   // Read exactly once. /session may stage a newer activation later, but a live
   // ring is immutable under the user's finger; that activation starts on the
   // next page/session load.
   const rosterSnapshot = getInitData()
     ? await loadVerifiedFeedRosterSessionSnapshot(localStorage)
     : null;
-  createFeed(viewport, feedEl, challenge, publicIsland, rosterSnapshot);
+  createFeed(viewport, feedEl, challenge, publicIsland, rosterSnapshot, friendAcceptCode);
 }
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
