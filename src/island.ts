@@ -3305,9 +3305,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   function playSeries(b: Building): void {
     const play = document.createElement('div');
     play.className = 'isl-play';
+    // A guest may report another player's UGC building (not a bot builtin). The
+    // ⚑ control lives in the play header so it is reachable after a WIN or a LOSS
+    // alike (§4.3), not only from the win modal.
+    const canReport = Boolean(guest && b.buildingId && publicIsland && !publicIsland.owner.is_bot);
     play.innerHTML =
       '<div class="isl-play__head">' +
         `<div class="isl-play__nm">${esc(b.name)} <span style="opacity:.55;font-weight:600">· ${TPL[b.tpl].label}</span></div>` +
+        (canReport ? '<button class="isl-dbg" type="button" data-report-head title="Пожаловаться">⚑</button>' : '') +
         '<button class="isl-dbg" type="button" data-dbg>boot…</button>' +
         '<button class="isl-close" type="button" aria-label="Back" data-back>✕</button>' +
       '</div>';
@@ -3370,6 +3375,54 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       play.remove();
     };
 
+    // Shared guest report panel (§4.3): a small floating sheet over the play view,
+    // reachable from the header ⚑ and the win modal. The server pins the exact
+    // artifact revision, dedups by (building, reporter) and rate-limits per day.
+    const openGuestReportPanel = (): void => {
+      if (!canReport || !b.buildingId) return;
+      if (reportedBuildings.has(b.buildingId)) { toast('Жалоба уже отправлена'); return; }
+      if (play.querySelector('[data-report-panel]')) return;  // already open
+      const panel = document.createElement('div');
+      panel.dataset.reportPanel = '1';
+      panel.style.cssText =
+        'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:12;width:min(320px,86%);' +
+        'background:#141926;border:1px solid #2a3448;border-radius:12px;padding:14px;box-shadow:0 12px 40px rgba(0,0,0,.5);' +
+        'display:flex;flex-direction:column;gap:8px;color:#cdd3df;font:500 13px/1.4 system-ui,sans-serif;';
+      panel.innerHTML =
+        '<div style="font-weight:700;color:#eef">Пожаловаться на домик</div>' +
+        REPORT_REASON_LABELS.map((r, i) =>
+          `<label style="display:flex;gap:8px;align-items:center"><input type="radio" name="isl-report-reason" value="${r.id}"${i === 0 ? ' checked' : ''}> ${esc(r.label)}</label>`,
+        ).join('') +
+        '<textarea data-report-text maxlength="500" rows="2" placeholder="Комментарий (необязательно)" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,.3);color:#eef;border:1px solid #345;border-radius:8px;padding:7px;font:inherit;resize:vertical"></textarea>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+        '<button type="button" data-report-cancel style="padding:8px 12px;background:#1b2230;color:#cfe;border:1px solid #345;border-radius:8px;font:600 12px inherit">Отмена</button>' +
+        '<button type="button" data-report-send style="padding:8px 12px;background:#b23b3b;color:#fff;border:0;border-radius:8px;font:600 12px inherit">Отправить</button>' +
+        '</div>';
+      play.appendChild(panel);
+      panel.querySelector('[data-report-cancel]')?.addEventListener('click', () => panel.remove());
+      panel.querySelector('[data-report-send]')?.addEventListener('click', async () => {
+        const send = panel.querySelector('[data-report-send]') as HTMLButtonElement;
+        const reason = (panel.querySelector('input[name="isl-report-reason"]:checked') as HTMLInputElement | null)?.value as IslandReportReason | undefined;
+        const text = (panel.querySelector('[data-report-text]') as HTMLTextAreaElement | null)?.value ?? '';
+        if (!reason || !b.buildingId) return;
+        send.disabled = true;
+        try {
+          await apiIslandReport(b.buildingId, reason, text);
+          reportedBuildings.add(b.buildingId);
+          panel.remove();
+          toast('Спасибо! Жалоба отправлена');
+        } catch (error) {
+          if (error instanceof ApiRequestError && error.status === 429) {
+            toast('Слишком много жалоб сегодня — попробуй завтра');
+          } else {
+            toast(`Не удалось отправить · ${errorText(error)}`);
+          }
+          send.disabled = false;
+        }
+      });
+    };
+    (play.querySelector('[data-report-head]') as HTMLElement | null)?.addEventListener('click', openGuestReportPanel);
+
     if (runtime.kind === 'unavailable') {
       dbg(`runtime unavailable: ${runtime.reason}`);
       setChip('UNAVAILABLE');
@@ -3422,60 +3475,18 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         (guest ? '<div class="isl-gift" data-gift hidden></div>' : '') +
         (guest ? `<button class="isl-like${b.liked ? ' isl-like--on' : ''}" type="button" data-like disabled>${b.liked ? '♥ Liked' : '♡ Like this mechanic'}</button>` : '') +
         // Guest report affordance (§4.3): only on another player's UGC building
-        // (a bot builtin has no artifact to moderate). The sheet opens on tap.
-        ((guest && b.buildingId && publicIsland && !publicIsland.owner.is_bot)
-          ? `<button class="isl-report" type="button" data-report style="background:none;border:0;color:#8892a6;font:600 12px inherit;text-decoration:underline;margin-top:6px;cursor:pointer">⚑ Пожаловаться</button><div data-report-form hidden></div>`
+        // (a bot builtin has no artifact to moderate).
+        (canReport
+          ? '<button class="isl-report" type="button" data-report style="background:none;border:0;color:#8892a6;font:600 12px inherit;text-decoration:underline;margin-top:6px;cursor:pointer">⚑ Пожаловаться</button>'
           : '') +
         '<button class="isl-win__home" type="button" data-home>Back to island</button>';
       play.appendChild(win);
       const reportButton = win.querySelector('[data-report]') as HTMLButtonElement | null;
-      const reportForm = win.querySelector('[data-report-form]') as HTMLElement | null;
-      const paintReported = () => {
-        if (!reportButton || !b.buildingId) return;
-        if (reportedBuildings.has(b.buildingId)) {
-          reportButton.textContent = '⚑ Жалоба отправлена';
-          reportButton.disabled = true;
-        }
-      };
-      paintReported();
-      reportButton?.addEventListener('click', () => {
-        if (!reportForm || !b.buildingId) return;
-        if (reportedBuildings.has(b.buildingId)) { toast('Жалоба уже отправлена'); return; }
-        if (!reportForm.hidden) { reportForm.hidden = true; return; }
-        reportForm.hidden = false;
-        reportForm.innerHTML =
-          '<div style="margin-top:8px;text-align:left;background:rgba(255,255,255,.06);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:6px">' +
-          REPORT_REASON_LABELS.map((r, i) =>
-            `<label style="display:flex;gap:6px;align-items:center;font:500 13px inherit;color:#cdd3df"><input type="radio" name="isl-report-reason" value="${r.id}"${i === 0 ? ' checked' : ''}> ${esc(r.label)}</label>`,
-          ).join('') +
-          '<textarea data-report-text maxlength="500" rows="2" placeholder="Комментарий (необязательно)" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,.3);color:#eef;border:1px solid #345;border-radius:8px;padding:6px;font:inherit;resize:vertical"></textarea>' +
-          '<div style="display:flex;gap:8px;justify-content:flex-end">' +
-          '<button type="button" data-report-cancel style="padding:7px 11px;background:#1b2230;color:#cfe;border:1px solid #345;border-radius:7px;font:600 12px inherit">Отмена</button>' +
-          '<button type="button" data-report-send style="padding:7px 11px;background:#b23b3b;color:#fff;border:0;border-radius:7px;font:600 12px inherit">Отправить</button>' +
-          '</div></div>';
-        reportForm.querySelector('[data-report-cancel]')?.addEventListener('click', () => { reportForm.hidden = true; });
-        reportForm.querySelector('[data-report-send]')?.addEventListener('click', async () => {
-          const send = reportForm.querySelector('[data-report-send]') as HTMLButtonElement;
-          const reason = (reportForm.querySelector('input[name="isl-report-reason"]:checked') as HTMLInputElement | null)?.value as IslandReportReason | undefined;
-          const text = (reportForm.querySelector('[data-report-text]') as HTMLTextAreaElement | null)?.value ?? '';
-          if (!reason || !b.buildingId) return;
-          send.disabled = true;
-          try {
-            await apiIslandReport(b.buildingId, reason, text);
-            reportedBuildings.add(b.buildingId);
-            reportForm.hidden = true;
-            paintReported();
-            toast('Спасибо! Жалоба отправлена');
-          } catch (error) {
-            if (error instanceof ApiRequestError && error.status === 429) {
-              toast('Слишком много жалоб сегодня — попробуй завтра');
-            } else {
-              toast(`Не удалось отправить · ${errorText(error)}`);
-            }
-            send.disabled = false;
-          }
-        });
-      });
+      if (reportButton && b.buildingId && reportedBuildings.has(b.buildingId)) {
+        reportButton.textContent = '⚑ Жалоба отправлена';
+        reportButton.disabled = true;
+      }
+      reportButton?.addEventListener('click', () => openGuestReportPanel());
       const likeButton = win.querySelector('[data-like]') as HTMLButtonElement | null;
       const paintLike = () => {
         if (!likeButton) return;
