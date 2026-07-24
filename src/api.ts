@@ -120,14 +120,19 @@ function backendErrorCode(data: unknown): string | null {
   return typeof code === 'string' ? code : null;
 }
 
-async function postRequired<T>(path: string, body?: unknown, timeoutMs?: number): Promise<T> {
+async function postRequired<T>(
+  path: string,
+  body?: unknown,
+  timeoutMs?: number,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   let r: Response;
   let text: string;
   try {
     ({ response: r, text } = await withRequestTimeout(async (signal) => {
       const response = await fetch(`${API_BASE}${path}`, {
         method: 'POST',
-        headers: headers(),
+        headers: extraHeaders ? { ...headers(), ...extraHeaders } : headers(),
         body: body != null ? JSON.stringify(body) : undefined,
         signal,
       });
@@ -1008,13 +1013,41 @@ export async function apiIslandFriends(): Promise<IslandFriend[]> {
   return r?.friends ?? [];
 }
 
+/** Async `/island/theme` job (backend §5.1). The endpoint is dual-mode in a
+ *  single release: it returns a 200 pack (legacy) OR a 202 {job_id} we poll to a
+ *  terminal `ready` (with the pack) / `failed`. Sending the opt-in header lets
+ *  the client drive the async path before the server flips the config default. */
+export interface IslandThemeJob {
+  job_id: string;
+  status: 'queued' | 'generating' | 'ready' | 'failed';
+  pack?: IslandThemePack;
+  error?: string;
+}
+
+export function isIslandThemeJob(value: IslandThemePack | IslandThemeJob): value is IslandThemeJob {
+  // A job carries `job_id` and never the pack's `items`; a legacy pack has neither.
+  return typeof (value as IslandThemeJob).job_id === 'string'
+    && !Array.isArray((value as IslandThemePack).items);
+}
+
 export function apiIslandTheme(payload: {
   prompt: string;
   avoid?: string;
   difficulty?: IslandDifficultyPreference;
   motion?: IslandMotionPreference;
-}): Promise<IslandThemePack> {
-  return postRequired<IslandThemePack>('/api/island/theme', payload);
+}): Promise<IslandThemePack | IslandThemeJob> {
+  // Opt into the durable job path per-request; a legacy backend simply ignores
+  // the header and answers 200 with a pack, which isIslandThemeJob() detects.
+  return postRequired<IslandThemePack | IslandThemeJob>(
+    '/api/island/theme',
+    payload,
+    undefined,
+    { 'X-Island-Theme-Async': '1' },
+  );
+}
+
+export function apiIslandThemeJob(jobId: string): Promise<IslandThemeJob> {
+  return getRequired<IslandThemeJob>(`/api/island/theme/${encodeURIComponent(jobId)}`);
 }
 
 export interface IslandBakeJob {

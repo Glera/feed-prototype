@@ -19,11 +19,15 @@ import {
   apiIslandBakeJob,
   apiIslandCollect,
   apiIslandTheme,
+  apiIslandThemeJob,
   apiIslandVisitResult,
   apiPublicIsland,
   apiSetIslandLike,
   apiStartIslandVisit,
+  isIslandThemeJob,
   type IslandBakeJob,
+  type IslandThemeJob,
+  type IslandThemePack,
   type IslandBuildingState,
   type IslandDifficultyPreference,
   type IslandMotionPreference,
@@ -484,7 +488,11 @@ async function aiTheme(
   motion: IslandMotionPreference = 'surprise',
 ): Promise<Pack | null> {
   try {
-    const apiPack = await apiIslandTheme({ prompt, avoid, difficulty, motion });
+    // Dual-mode backend: a 200 pack (legacy) OR a 202 {job_id} we poll to a
+    // terminal pack. UX is unchanged — the slot still shows "theme ready ✨"
+    // once this resolves.
+    const res = await apiIslandTheme({ prompt, avoid, difficulty, motion });
+    const apiPack = isIslandThemeJob(res) ? await pollThemeJob(res) : res;
     console.log('[island] backend theme:', apiPack.name, apiPack.items.join(' '));
     return normalizePack({
       id: apiPack.id ?? '', name: apiPack.name.slice(0, 24), kw: apiPack.kw ?? [],
@@ -500,6 +508,31 @@ async function aiTheme(
     console.log('[island] bounded API theme unavailable:', errorText(e));
     throw e;
   }
+}
+
+/** Poll a durable async theme job (backend §5.1) to its terminal pack. Mirrors
+ *  the bake poll: transient GET errors are tolerated so a warm/slow model run
+ *  still resolves. A reload mid-generation drops the in-memory draft as before,
+ *  but the backend's request-digest dedup makes a re-submit of the same prompt
+ *  return this same job rather than double-charging quota. */
+async function pollThemeJob(initial: IslandThemeJob): Promise<IslandThemePack> {
+  let job = initial;
+  let pollErrors = 0;
+  for (let attempt = 0; job.status !== 'ready' && job.status !== 'failed'; attempt++) {
+    if (attempt >= 180) throw new Error('theme generation is taking too long');
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    try {
+      job = await apiIslandThemeJob(job.job_id);
+      pollErrors = 0;
+    } catch (e) {
+      if (++pollErrors < 4) continue;
+      throw e;
+    }
+  }
+  if (job.status === 'failed' || !job.pack) {
+    throw new Error(job.error || 'theme generation failed');
+  }
+  return job.pack;
 }
 
 type LocalGeneratorState = 'queued' | 'starting' | 'running' | 'ready' | 'failed' | 'cancelled';
