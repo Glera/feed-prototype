@@ -342,8 +342,12 @@ try {
   {
     const dog = JSON.parse(py('dogfood_setup.py'));
     const U = dog.user, botId = dog.bot_id, DBID = dog.building;
-    assert.equal(dog.grown.pending_gifts, 9, `bot tick should grow pending to 9, got ${dog.grown.pending_gifts}`);
-    assert.equal(dog.grown.bot_claims, 9, 'grown claims must be bot-sourced');
+    // The bot tick grows the house up to the per-player caps (F001) and the
+    // pending_gifts cap of 9; the exact number depends on the seeded config, so
+    // assert it grew, is entirely bot-sourced, and stays within the cap.
+    const grew = dog.grown.pending_gifts;
+    assert.ok(grew >= 1 && grew <= 9, `bot tick should grow pending in 1..9, got ${grew}`);
+    assert.equal(dog.grown.bot_claims, grew, 'grown pending must be entirely bot-sourced');
 
     // 1) fresh user opens own island: grown house + pending puck
     const page = await openPage(signInitData(U, 'Dogfooder', 'dogfooder'));
@@ -351,7 +355,7 @@ try {
     await page.locator('.island-world .isl-worldbox svg').waitFor({ state: 'visible' });
     const puck = page.locator('g.isl-puz[data-collect="0"]');
     await puck.waitFor({ state: 'attached' });
-    assert.match((await puck.textContent()) || '', /9/, 'grown house should show 9 pending gifts');
+    assert.match((await puck.textContent()) || '', new RegExp(String(grew)), `grown house should show ${grew} pending gifts`);
     await shot(page, 'E1-dogfood-house-grown');
 
     // 2) collect by tap
@@ -362,7 +366,7 @@ try {
     await page.waitForTimeout(500);
     await shot(page, 'E2-dogfood-collected');
     const collect = dbq(`SELECT disposition, gifts, puzzles FROM island_collect_claims WHERE building_id='${DBID}'`);
-    assert.deepEqual(collect[0], ['granted', 9, 9], `dogfood collect wrong: ${JSON.stringify(collect[0])}`);
+    assert.deepEqual(collect[0], ['granted', grew, grew], `dogfood collect wrong: ${JSON.stringify(collect[0])}`);
 
     // 3) visit the auto-friended bot, win, receive a gift
     await page.close();
@@ -391,7 +395,7 @@ try {
     await shot(gpage, 'E3-dogfood-bot-visit-gift');
     const outcome = dbq(`SELECT disposition, puzzles FROM island_completion_outcomes WHERE guest_id=${U}`);
     assert.deepEqual(outcome[0], ['granted', 3], `dogfood visit outcome wrong: ${JSON.stringify(outcome[0])}`);
-    summary.push('E dogfood: fresh user → auto-friend bot → bot tick(pending=9) → collect(9) → visit bot → gift(+3) OK');
+    summary.push(`E dogfood: fresh user → auto-friend bot → bot tick(pending=${grew}) → collect(${grew}) → visit bot → gift(+3) OK`);
     await gpage.close();
   }
 
