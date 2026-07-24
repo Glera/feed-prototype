@@ -79,23 +79,61 @@ export async function mountIslandModerationConsole(): Promise<void> {
   };
 
   let reportsFilter: string | undefined;
+  // Accumulated pages + keyset cursors (P3-3c): "Показать ещё" sends `before` and
+  // appends, so an operator sees the FULL feed, not just the first window.
+  let pubItems: IslandModerationPublication[] = [];
+  let pubNextBefore: string | null = null;
+  let reportItems: IslandModerationReport[] = [];
+  let reportNextBefore: string | null = null;
 
-  async function render(): Promise<void> {
+  async function reload(): Promise<void> {
     body.innerHTML = '<div style="color:#678">загрузка…</div>';
-    let pubs: IslandModerationPublication[] = [];
-    let reports: IslandModerationReport[] = [];
     try {
-      [pubs, reports] = await Promise.all([
-        apiIslandModerationPublications().then((r) => r.publications),
-        apiIslandModerationReports(reportsFilter).then((r) => r.reports),
+      const [pubs, reports] = await Promise.all([
+        apiIslandModerationPublications(),
+        apiIslandModerationReports({ status: reportsFilter }),
       ]);
+      pubItems = pubs.publications;
+      pubNextBefore = pubs.next_before;
+      reportItems = reports.reports;
+      reportNextBefore = reports.next_before;
     } catch (error) {
       body.innerHTML = `<div style="color:#f66">не удалось загрузить: ${esc(errText(error))}</div>`;
       return;
     }
-    body.innerHTML = '';
-    body.append(renderPublications(pubs), renderReports(reports));
+    paint();
   }
+
+  async function loadMorePubs(): Promise<void> {
+    if (!pubNextBefore) return;
+    try {
+      const r = await apiIslandModerationPublications({ before: pubNextBefore });
+      pubItems = pubItems.concat(r.publications);
+      pubNextBefore = r.next_before;
+      paint();
+    } catch (error) { toast(`ещё: ${errText(error)}`); }
+  }
+
+  async function loadMoreReports(): Promise<void> {
+    if (!reportNextBefore) return;
+    try {
+      const r = await apiIslandModerationReports({ status: reportsFilter, before: reportNextBefore });
+      reportItems = reportItems.concat(r.reports);
+      reportNextBefore = r.next_before;
+      paint();
+    } catch (error) { toast(`ещё: ${errText(error)}`); }
+  }
+
+  function paint(): void {
+    body.innerHTML = '';
+    body.append(renderPublications(pubItems), renderReports(reportItems));
+  }
+
+  const moreBtn = (label: string, fn: () => Promise<void>): HTMLButtonElement => {
+    const b = mkBtn(label, async () => { b.disabled = true; await fn(); });
+    b.style.marginTop = '6px';
+    return b;
+  };
 
   function card(): HTMLElement {
     const el = document.createElement('div');
@@ -139,19 +177,20 @@ export async function mountIslandModerationConsole(): Promise<void> {
       }
       if (p.taken_down) {
         row.appendChild(mkBtn('Restore', (b) => armThen(b, 'ещё раз = вернуть', async () => {
-          try { await apiIslandModerationRestore(p.building_id, 'operator restore'); toast('возвращено'); await render(); }
+          try { await apiIslandModerationRestore(p.building_id, 'operator restore'); toast('возвращено'); await reload(); }
           catch (error) { toast(`restore: ${errText(error)}`); }
         })));
       } else {
         row.appendChild(mkBtn('Takedown', (b) => armThen(b, 'ещё раз = снять', async () => {
           if (!p.rel) { toast('нет artifact_rel'); return; }
-          try { await apiIslandModerationTakedown(p.building_id, p.rel, 'operator takedown'); toast('снято'); await render(); }
+          try { await apiIslandModerationTakedown(p.building_id, p.rel, 'operator takedown'); toast('снято'); await reload(); }
           catch (error) { toast(`takedown: ${errText(error)}`); }
         }), true));
       }
       el.appendChild(row);
       section.appendChild(el);
     }
+    if (pubNextBefore) section.appendChild(moreBtn('▾ Показать ещё', loadMorePubs));
     return section;
   }
 
@@ -162,7 +201,7 @@ export async function mountIslandModerationConsole(): Promise<void> {
     h.appendChild(Object.assign(document.createElement('span'), { textContent: `Жалобы (${reports.length})` }));
     for (const f of [undefined, 'open', 'reviewed', 'dismissed', 'escalated'] as const) {
       const label = f ?? 'все';
-      const b = mkBtn(reportsFilter === f ? `[${label}]` : label, async () => { reportsFilter = f; await render(); });
+      const b = mkBtn(reportsFilter === f ? `[${label}]` : label, async () => { reportsFilter = f; await reload(); });
       b.style.padding = '3px 7px';
       h.appendChild(b);
     }
@@ -186,23 +225,24 @@ export async function mountIslandModerationConsole(): Promise<void> {
       row.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
       for (const status of ['reviewed', 'dismissed', 'escalated'] as const) {
         row.appendChild(mkBtn(status, async () => {
-          try { await apiIslandModerationResolveReport(r.report_id, status, `operator ${status}`); toast(`отмечено: ${status}`); await render(); }
+          try { await apiIslandModerationResolveReport(r.report_id, status, `operator ${status}`); toast(`отмечено: ${status}`); await reload(); }
           catch (error) { toast(`resolve: ${errText(error)}`); }
         }));
       }
       el.appendChild(row);
       section.appendChild(el);
     }
+    if (reportNextBefore) section.appendChild(moreBtn('▾ Показать ещё', loadMoreReports));
     return section;
   }
 
   head.append(
     title,
-    mkBtn('↻ Обновить', () => { void render(); }),
+    mkBtn('↻ Обновить', () => { void reload(); }),
     mkBtn('✕ Закрыть', () => wrap.remove()),
     toastEl,
   );
   wrap.append(head, body);
   document.body.appendChild(wrap);
-  await render();
+  await reload();
 }

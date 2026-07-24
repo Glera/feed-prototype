@@ -1113,16 +1113,21 @@ export interface IslandTakedownResult {
 }
 
 export function apiIslandModerationPublications(
-  limit = 50,
+  opts: { limit?: number; before?: string | null } = {},
 ): Promise<{ publications: IslandModerationPublication[]; next_before: string | null }> {
-  return getRequired(`/api/island/moderation/publications?limit=${encodeURIComponent(limit)}`);
+  const params = new URLSearchParams({ limit: String(opts.limit ?? 50) });
+  if (opts.before) params.set('before', opts.before);
+  return getRequired(`/api/island/moderation/publications?${params.toString()}`);
 }
 
 export function apiIslandModerationReports(
-  status?: string,
+  opts: { status?: string; before?: string | null } = {},
 ): Promise<{ reports: IslandModerationReport[]; next_before: string | null }> {
-  const q = status ? `?status=${encodeURIComponent(status)}` : '';
-  return getRequired(`/api/island/moderation/reports${q}`);
+  const params = new URLSearchParams();
+  if (opts.status) params.set('status', opts.status);
+  if (opts.before) params.set('before', opts.before);
+  const q = params.toString();
+  return getRequired(`/api/island/moderation/reports${q ? `?${q}` : ''}`);
 }
 
 /** POST /island/moderation/takedown — the exact artifact_rel reviewed must match
