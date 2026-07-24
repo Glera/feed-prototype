@@ -39,7 +39,7 @@ import {
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
-  apiIslandFriends, apiIslandFriendCode, apiPublicIsland,
+  apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept, apiPublicIsland,
   type IslandFriend,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
   type CatalogAllocateAuthorizedResultV2,
@@ -175,15 +175,22 @@ const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of dis
 // Guided-UGC island (src/island.ts) is an unreleased meta prototype. Its feed-bar
 // entry (the "Мета" tab) stays HIDDEN by default so a friend cohort never stumbles
 // into it; opt in per build with VITE_ISLAND_ENABLED=1 (or =true), matching the
-// existing default-off VITE_* front gates (see control-plane.ts). This gates ONLY
-// the UI entry — direct `?island=<ownerId>` deep-link visits (main.ts →
-// publicIsland → openIslandWorld) are intentionally untouched. The separate
-// Creator District prototype (openMetaWorld, reached via ?metaworld=1) keeps its
-// entry so its own testing path is unaffected.
+// existing default-off VITE_* front gates (see control-plane.ts). Operator decision
+// (F005, supersedes the earlier COHORT-PREFLIGHT stance for the social surface):
+// the flag gates the ENTIRE social surface — with it OFF, direct-entry deep links
+// (`i_<owner>` / `?island=` / `f_<code>`) do NOT resolve a public island, do NOT
+// mount the island world and do NOT accept invites; the deep link is silently
+// ignored (see main.ts). The separate Creator District prototype (openMetaWorld,
+// reached via ?metaworld=1) keeps its entry so its own testing path is unaffected.
 const ISLAND_UI_ENABLED = (() => {
   const raw = String((import.meta as any).env?.VITE_ISLAND_ENABLED ?? '').toLowerCase();
   return raw === 'true' || raw === '1';
 })();
+// Pending friend-invite accept persists across boots until a definitive outcome,
+// so a new user whose FK row is created by the FIRST /session still lands the
+// accept on that session (F004). Bounded by an attempt cap.
+const ISLAND_PENDING_ACCEPT_KEY = 'island-pending-friend-accept-v1';
+const ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS = 5;
 
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since
@@ -835,11 +842,11 @@ export class Feed {
     // has the 'fake' toggle on (default until real players exist); 'real' turns it off
     // so genuine backend likes/shares can be tested. Toggle lives in the debug panel.
     if (islandSocialMode() === 'fake') this.startIslandActivity();
-    // Island Social Core (§4.4): a friend deep-link (startapp=f_<code>) accepts
-    // the invite, toasts, and refreshes the friend HUD. Gated by the same flag.
-    if (ISLAND_UI_ENABLED && this.friendAcceptCode) {
-      window.setTimeout(() => { void this.acceptFriendCode(this.friendAcceptCode!); }, 0);
-    }
+    // Island Social Core (§4.4/F004): a friend deep-link (startapp=f_<code>) is
+    // only PERSISTED here; the actual accept + HUD refresh run after the first
+    // successful /session bootstrap (applySessionBootstrap), because a fresh
+    // user's FK row does not exist until then.
+    if (ISLAND_UI_ENABLED && this.friendAcceptCode) this.persistPendingFriendAccept(this.friendAcceptCode);
     if (this.publicIsland) window.setTimeout(() => this.openIslandWorld(), 0);
 
     // After a slide settles: normalise the ring position, resume the arrived
@@ -955,6 +962,12 @@ export class Feed {
     this.applyConfirmedBalances(await flushResults());
     await this.syncDaily(false);
     void this.refreshChallengeRail();
+    // Island Social Core (F004): the user row is now committed, so it is safe to
+    // load the friend HUD and land any pending friend-invite accept.
+    if (ISLAND_UI_ENABLED) {
+      void this.refreshIslandFriends();
+      void this.processPendingFriendAccept();
+    }
     this.scheduleGeneratedOfferPrefetch();
   }
 
@@ -5280,8 +5293,7 @@ export class Feed {
       if (me && me.nextSibling) stories.insertBefore(cluster, me.nextSibling);
       else stories.appendChild(cluster);
       this.friendsHudEl = cluster;
-      this.renderFriendsHud();
-      void this.refreshIslandFriends();
+      this.renderFriendsHud();   // empty cells now; the network refresh runs post-/session
     }
   }
 
@@ -6763,14 +6775,16 @@ export class Feed {
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
     const islandLevel = this.levelForStars(this.totalStars);
-    const ownIsland = !this.publicIsland;
     void import('./island').then((m) => m.renderIslandWorld(ov, {
       close: () => this.closeOverlay(),
       level: islandLevel,
       puzzles: () => this.totalPuzzles,
       publicIsland: this.publicIsland ?? undefined,
-      // Collecting puzzles credits the shared counter — only on the player's OWN island.
-      addPuzzles: ownIsland ? (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from) : undefined,
+      // The counter always belongs to the CURRENT user, so credit it on both
+      // islands: owner collect on their own island, and a granted guest gift on
+      // someone else's — both are the current user's puzzle balance (F009). Owner
+      // accrual stays gated to the own island inside collectReward.
+      addPuzzles: (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from),
     }));
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
@@ -6838,24 +6852,51 @@ export class Feed {
     }
   }
 
-  private async acceptFriendCode(code: string): Promise<void> {
-    if (!getInitData()) return;
+  private persistPendingFriendAccept(code: string): void {
+    try { localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code, attempts: 0 })); } catch { /* private mode */ }
+  }
+  private clearPendingFriendAccept(): void {
+    try { localStorage.removeItem(ISLAND_PENDING_ACCEPT_KEY); } catch { /* private mode */ }
+  }
+
+  // Land a pending friend-invite accept AFTER /session (F004). Runs at most once
+  // per bootstrap; a transient failure keeps the code for the next bootstrap,
+  // bounded by an attempt cap; a definitive outcome (or cap) clears it.
+  private async processPendingFriendAccept(): Promise<void> {
+    if (!ISLAND_UI_ENABLED || !getInitData()) return;
+    let pending: { code: string; attempts: number } | null = null;
     try {
-      const { apiIslandFriendAccept } = await import('./api');
-      const res = await apiIslandFriendAccept(code);
+      const raw = localStorage.getItem(ISLAND_PENDING_ACCEPT_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed.code === 'string') {
+        pending = { code: parsed.code, attempts: Number(parsed.attempts) || 0 };
+      }
+    } catch { pending = null; }
+    if (!pending) return;
+    if (pending.attempts >= ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS) { this.clearPendingFriendAccept(); return; }
+    // Record this attempt up-front so a crash mid-flight cannot loop forever.
+    try {
+      localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code: pending.code, attempts: pending.attempts + 1 }));
+    } catch { /* private mode */ }
+    try {
+      const res = await apiIslandFriendAccept(pending.code);
       const name = res.friend?.first_name || res.friend?.username || 'другом';
+      this.clearPendingFriendAccept();
       this.showActivityNotifier(
         res.status === 'already' ? `Вы уже друзья с ${name}` : `Вы теперь друзья с ${name}`,
       );
       void this.refreshIslandFriends();
     } catch (e) {
-      // Honest toast without leaking block existence (§4.4 / §2.2).
-      if (e instanceof ApiRequestError && e.status === 409) {
-        this.showActivityNotifier('Достигнут лимит друзей');
-      } else if (e instanceof ApiRequestError && e.status === 400) {
-        this.showActivityNotifier('Это ваш собственный код');
-      } else {
-        this.showActivityNotifier('Приглашение недоступно');
+      // Permanent outcomes stop the retry with an honest toast (no block leak,
+      // §4.4/§2.2). Transient errors (network / 5xx / not-yet-committed row) keep
+      // the code so the next successful /session bootstrap retries it.
+      if (e instanceof ApiRequestError && (e.status === 400 || e.status === 404 || e.status === 409)) {
+        this.clearPendingFriendAccept();
+        this.showActivityNotifier(
+          e.status === 409 ? 'Достигнут лимит друзей'
+            : e.status === 400 ? 'Это ваш собственный код'
+              : 'Приглашение недоступно',
+        );
       }
     }
   }

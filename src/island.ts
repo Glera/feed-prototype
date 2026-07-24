@@ -36,7 +36,7 @@ import {
 } from './api';
 import { IslandStateSync, cacheIslandState, loadIslandState, replaceIslandState } from './island-state';
 import { ISLAND_SIM_EVENT, islandSocialMode, loadIslandSim, saveIslandSim } from './island-sim';
-import { coverUrl, playableUrl } from './playables';
+import { coverUrl, playableUrl, PLAYABLES } from './playables';
 import { shareTelegramLink, showConfirm } from './telegram';
 
 declare const __ISLAND_SORT_RECIPE__: {
@@ -290,6 +290,78 @@ function errorText(error: unknown): string {
 function hostedUrl(building: Building): string | null {
   if (building.rel) return IS_DEV ? `/ugc/${building.rel}` : `${UGC_BASE_URL}/${building.rel}`;
   return building.url ?? null;
+}
+
+// ── Island Social Core: builtin binding runtime resolution (F002/F007) ──────
+// For a bot builtin building the runtime is resolved ONLY from its immutable
+// binding, never from the mutable `tpl`. `mechanicId` may be a catalog mechanic
+// (a TPL key like "sort") or a direct first-party playable id; either must map
+// to a known platform playable, otherwise we fail closed (no tpl fallback).
+function resolveBuiltinPlayableId(mechanicId: string): string | null {
+  if (Object.prototype.hasOwnProperty.call(TPL, mechanicId)) return TPL[mechanicId as TplId].playableId;
+  if (PLAYABLES.some((p) => p.id === mechanicId)) return mechanicId;
+  return null;
+}
+type BuildingRuntime =
+  | { kind: 'hosted' | 'stock'; src: string; label: string }
+  | { kind: 'builtin'; src: string; label: string; mechanicId: string }
+  | { kind: 'unavailable'; reason: string };
+function resolveBuildingRuntime(b: Building, packName: string): BuildingRuntime {
+  const hosted = hostedUrl(b);
+  if (hosted) {
+    return {
+      kind: 'hosted',
+      src: `${hosted}${hosted.includes('?') ? '&' : '?'}auto=0`,
+      label: `${isLocalExperiment(b) ? 'LOCAL LAB' : 'HOSTED'} · ${packName}`,
+    };
+  }
+  const builtin = b.builtin;
+  if (builtin) {
+    const id = resolveBuiltinPlayableId(builtin.mechanicId);
+    // Binding is the sole authority: an unresolvable mechanic fails closed.
+    if (!id || !PLAYABLES.some((p) => p.id === id)) {
+      return { kind: 'unavailable', reason: `builtin mechanic "${builtin.mechanicId}" does not resolve to a known runtime` };
+    }
+    // A loaded deploy manifest (versions.json) must know the resolved playable;
+    // an EMPTY manifest (dev / harness) means "not yet declared" and does not
+    // gate first-party playables. NOTE: the backend's `versionsDigest` is a hash
+    // of the whole roster manifest, which the client cannot reconstruct from its
+    // per-mechanic content hashes — so it is recorded/logged but NOT hard-compared
+    // (no synthetic fallback-digest to compare against). Digest enforcement is a
+    // stand/backend concern until a comparable client-side manifest digest exists.
+    return {
+      kind: 'builtin',
+      src: playableUrl(id, { auto: false }),
+      label: `BUILTIN · ${builtin.mechanicId}`,
+      mechanicId: builtin.mechanicId,
+    };
+  }
+  // Non-builtin: the canonical first-party stock build (owner drafts / fallback).
+  return { kind: 'stock', src: playableUrl(TPL[b.tpl].playableId, { auto: false }), label: `STOCK · ${b.tpl}` };
+}
+
+// ── Island Social Core: guest completion-claim with bounded retry (F003) ────
+// A win earlier than island_play_min_win_ms makes /result return 425; without a
+// retry the claim is lost forever. Reuse the SAME visit_id and retry (bounded)
+// after Retry-After (or until the min-win window has plausibly elapsed). Transient
+// network / 5xx also get a bounded retry. Idempotent server → exactly one claim.
+async function claimVisitResult(visitId: string, startedAt: number): Promise<IslandVisitResult> {
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await apiIslandVisitResult(visitId, performance.now() - startedAt);
+    } catch (error) {
+      const retriable = error instanceof ApiRequestError
+        && (error.status === 425 || error.status === 0 || error.status >= 500);
+      if (!retriable || attempt >= MAX_ATTEMPTS) throw error;
+      let waitMs = 1200;
+      if (error instanceof ApiRequestError && error.status === 425) {
+        const elapsed = performance.now() - startedAt;
+        waitMs = error.retryAfterMs ?? Math.max(1200, 8200 - elapsed);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+    }
+  }
 }
 function sortVariant(pack: Pack): Record<string, unknown> {
   return {
@@ -3244,7 +3316,20 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     });
     dbg(`launch: "${b.name}" tpl=${b.tpl} pack=${b.pack} guest=${guest}`);
 
-    const visitId = guest && publicIsland && b.buildingId ? newJobId() : null;
+    // Resolve the runtime BEFORE anything else: a builtin (bot) building is bound
+    // by its immutable binding, never by the mutable `tpl` (F002). An unresolvable
+    // binding fails closed — no visit, no iframe, no tpl fallback.
+    const pk = resolvePack(b.pack);
+    const runtime = resolveBuildingRuntime(b, pk.name);
+    if (b.builtin) {
+      dbg(`builtin binding: mechanicId=${b.builtin.mechanicId}`
+        + (b.builtin.versionsDigest
+          ? ` versionsDigest=${b.builtin.versionsDigest} (recorded; not client-comparable)`
+          : ''));
+    }
+    const unavailable = runtime.kind === 'unavailable';
+
+    const visitId = !unavailable && guest && publicIsland && b.buildingId ? newJobId() : null;
     const visitStartedAt = performance.now();
     const visitStart = visitId && publicIsland && b.buildingId
       ? apiStartIslandVisit({
@@ -3260,28 +3345,31 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       }).catch((error) => dbg(`visit start failed: ${errorText(error)}`));
     }
 
-    // The canonical playable is never transformed in the client. Generated
-    // mechanics exist only as tested hosted/local-lab artifacts.
-    const stockSrc = playableUrl(TPL[b.tpl].playableId, { auto: false });
-    const pk = resolvePack(b.pack);
-    void (async () => {
-      const hosted = hostedUrl(b);
-      if (hosted) {
-        dbg(`loading hosted build: ${hosted}`);
-        setChip(`${isLocalExperiment(b) ? 'LOCAL LAB' : 'HOSTED'} · ${pk.name}`);
-        frame.src = `${hosted}${hosted.includes('?') ? '&' : '?'}auto=0`;
-        return;
-      }
-      dbg(`loading canonical stock: ${stockSrc}`);
-      setChip(`STOCK · ${b.tpl}`);
-      frame.src = stockSrc;
-    })();
-
     const cleanup = () => {
       window.removeEventListener('message', onMsg);
       try { frame.src = 'about:blank'; } catch { /* noop */ }
       play.remove();
     };
+
+    if (runtime.kind === 'unavailable') {
+      dbg(`runtime unavailable: ${runtime.reason}`);
+      setChip('UNAVAILABLE');
+      frame.remove();
+      const msg = document.createElement('div');
+      msg.className = 'isl-win';
+      msg.innerHTML =
+        '<div class="isl-win__t">Механика недоступна</div>' +
+        '<div class="isl-win__m">Эта постройка сейчас не запускается</div>' +
+        '<button class="isl-win__home" type="button" data-home>Back to island</button>';
+      play.appendChild(msg);
+      (msg.querySelector('[data-home]') as HTMLElement).addEventListener('click', () => { cleanup(); refreshIsland(); });
+      toast('Механика недоступна');
+    } else {
+      dbg(`loading ${runtime.kind}: ${runtime.src}`);
+      setChip(runtime.label);
+      frame.src = runtime.src;
+    }
+
     let winShown = false;
     let visitCompleted = false;
     // Disposition-aware guest gift modal (§4.3): honest text for every outcome.
@@ -3372,9 +3460,24 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         void (async () => {
           if (!visitId) return;
           try {
-            const result = await apiIslandVisitResult(visitId, performance.now() - visitStartedAt);
-            dbg(`gift claim: ${result.disposition} stage=${result.stage}`);
+            const result = await claimVisitResult(visitId, visitStartedAt);
+            dbg(`gift claim: ${result.disposition} stage=${result.stage} foreign=${result.foreign_claims}`);
+            // F010: adopt the authoritative stage/counters and stop re-offering a
+            // consumed gift, so a re-entry shows the new stage — not a stale puck.
+            b.stage = result.stage;
+            b.foreign_claims = result.foreign_claims;
+            if (result.disposition === 'granted' || result.disposition === 'repeat_day') {
+              b.gift_available_today = false;
+            }
             if (play.isConnected) showGiftOutcome(win, result);
+            // F009: a granted gift credits the GUEST's own puzzle balance — fly the
+            // pucks into the shared HUD counter exactly like an owner reward.
+            if (result.disposition === 'granted' && result.gift && result.gift.puzzles > 0) {
+              const giftEl = win.querySelector('[data-gift]') as HTMLElement | null;
+              const rect = (giftEl ?? win).getBoundingClientRect();
+              ctx.addPuzzles?.(result.gift.puzzles, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+            }
+            if (ov.isConnected) refreshIsland(false);
           } catch (error) {
             dbg(`gift claim failed: ${errorText(error)}`);
           }

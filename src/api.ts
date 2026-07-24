@@ -54,10 +54,23 @@ export class ApiRequestError extends Error {
     public readonly status: number,
     message: string,
     public readonly code: string | null = null,
+    // Parsed `Retry-After` (ms) when the server sent one — used by bounded
+    // retry loops (e.g. the island 425 "played too early" claim path).
+    public readonly retryAfterMs: number | null = null,
   ) {
     super(message);
     this.name = 'ApiRequestError';
   }
+}
+
+/** Parse an HTTP `Retry-After` header (delta-seconds or HTTP-date) into ms. */
+function parseRetryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const when = Date.parse(header);
+  if (Number.isFinite(when)) return Math.max(0, when - Date.now());
+  return null;
 }
 
 const configuredOutboxRequestTimeoutMs = Number(
@@ -145,6 +158,7 @@ async function postRequired<T>(path: string, body?: unknown, timeoutMs?: number)
       r.status,
       `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
       backendErrorCode(data),
+      parseRetryAfterMs(r.headers.get('Retry-After')),
     );
   }
   if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
@@ -820,6 +834,16 @@ export interface IslandBuildingState {
   gift_available_today?: boolean; // guest /island/public — a gift is offered today
   is_public?: boolean;            // published UGC artifact (visible to guests)
   takedown?: boolean;             // moderation-removed (P3); hidden from guests
+  // Immutable builtin binding (ТЗ §3.1, F007): for a bot builtin building the
+  // runtime is resolved by this binding, NEVER by the mutable `tpl`. Present only
+  // on builtin (bot) buildings in /island/public; absent for player UGC.
+  builtin?: IslandBuiltinBinding;
+}
+
+export interface IslandBuiltinBinding {
+  mechanicId: string;
+  rosterRevision?: string;
+  versionsDigest?: string;
 }
 
 export interface IslandPersistedState {

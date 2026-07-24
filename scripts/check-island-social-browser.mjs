@@ -167,7 +167,10 @@ const summary = [];
 let browser = null;
 try {
   browser = await chromium.launch();
-  const openPage = async (initData, extraQuery = {}) => {
+  // `beforeNav(page)` runs AFTER routes are set up but BEFORE navigation, so a
+  // caller can register response waiters that must not miss a response fired on
+  // boot / right after /session (see CASE D — F011: the waiter must precede nav).
+  const openPage = async (initData, extraQuery = {}, beforeNav) => {
     const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
     page.on('console', (m) => { if (m.type() === 'error') console.log('  [page error]', m.text()); });
     await page.route('https://telegram.org/js/telegram-web-app.js', (r) => r.fulfill({
@@ -176,6 +179,7 @@ try {
     const q = new URLSearchParams({ initData, ...extraQuery });
     const sessionSeen = page.waitForResponse((r) =>
       new URL(r.url()).pathname === '/api/session' && r.request().method() === 'POST').catch(() => null);
+    if (beforeNav) beforeNav(page);
     await page.goto(`${STATIC_ORIGIN}/?${q.toString()}`, { waitUntil: 'domcontentloaded' });
     await sessionSeen;
     return page;
@@ -303,14 +307,26 @@ try {
 
   // ══ CASE D — friend accept via f_<code> deeplink, HUD cell + DB ══
   {
-    const page = await openPage(signInitData(ACCEPTER, 'FriendAccepter', 'accepter', `f_${FRIEND_CODE}`),
-      { tgWebAppStartParam: `f_${FRIEND_CODE}` });
-    // auto-accept fires on boot (VITE_ISLAND_ENABLED + friendAcceptCode)
-    const acceptResp = page.waitForResponse((r) =>
-      new URL(r.url()).pathname === '/api/island/friends/accept', { timeout: 15_000 });
+    // F011: register the accept waiter BEFORE navigation — the accept now fires
+    // right after the first /session bootstrap (F004), so a waiter set after
+    // openPage() returns could miss it and pass falsely.
+    let acceptResp;
+    const page = await openPage(
+      signInitData(ACCEPTER, 'FriendAccepter', 'accepter', `f_${FRIEND_CODE}`),
+      { tgWebAppStartParam: `f_${FRIEND_CODE}` },
+      (p) => {
+        acceptResp = p.waitForResponse((r) =>
+          new URL(r.url()).pathname === '/api/island/friends/accept', { timeout: 15_000 });
+      },
+    );
     await acceptResp;
-    // friends HUD refreshes with the inviter cell
-    await page.locator(`.isln-friends [data-friend-visit="${INVITER}"]`).waitFor({ state: 'attached', timeout: 10_000 });
+    // Wait until the initial preloader has faded before asserting the HUD, then
+    // require a VISIBLE, clickable inviter cell (not merely attached).
+    await page.locator('.preloader--hidden').waitFor({ state: 'attached', timeout: 15_000 }).catch(() => {});
+    const cell = page.locator(`.isln-friends [data-friend-visit="${INVITER}"]`);
+    await cell.waitFor({ state: 'visible', timeout: 10_000 });
+    await cell.scrollIntoViewIfNeeded();
+    assert.ok(await cell.isEnabled(), 'inviter friend cell must be visible and clickable');
     await shot(page, 'D1-friend-accepted-hud');
     const fr = dbq(`SELECT user_lo, user_hi, source, removed_at IS NULL FROM island_friendships`);
     const lo = Math.min(ACCEPTER, INVITER), hi = Math.max(ACCEPTER, INVITER);

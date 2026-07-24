@@ -37,14 +37,24 @@ async function boot(): Promise<void> {
   if (isChallengeParam(sp)) {
     challenge = await apiGetChallenge(sp!);   // null if offline / not found → boots normally
   }
+  // Operator decision (F005): VITE_ISLAND_ENABLED gates the ENTIRE social surface,
+  // direct-entry deep links included. With the flag OFF, `i_<owner>`/`?island=`
+  // does not resolve a public island (island world never mounts) and `f_<code>`
+  // is not accepted — the deep link is silently ignored.
+  const islandEnabled = (() => {
+    const raw = String((import.meta as any).env?.VITE_ISLAND_ENABLED ?? '').toLowerCase();
+    return raw === 'true' || raw === '1';
+  })();
   const queryOwner = Number(new URLSearchParams(location.search).get('island'));
-  const ownerId = islandOwnerFromParam(sp) || (Number.isSafeInteger(queryOwner) && queryOwner > 0 ? queryOwner : null);
+  const ownerId = islandEnabled
+    ? (islandOwnerFromParam(sp) || (Number.isSafeInteger(queryOwner) && queryOwner > 0 ? queryOwner : null))
+    : null;
   if (ownerId != null) {
     try { publicIsland = await apiPublicIsland(ownerId); } catch { /* unavailable/private → normal feed */ }
   }
-  // Friend-invite deep link (startapp=f_<code>): the feed accepts it after mount
-  // (it owns the toast + the friend HUD), mirroring the i_<owner> pattern.
-  const friendAcceptCode = islandFriendCodeFromParam(sp);
+  // Friend-invite deep link (startapp=f_<code>): the feed accepts it after the
+  // first /session (it owns the toast + the friend HUD), mirroring i_<owner>.
+  const friendAcceptCode = islandEnabled ? islandFriendCodeFromParam(sp) : null;
   // Read exactly once. /session may stage a newer activation later, but a live
   // ring is immutable under the user's finger; that activation starts on the
   // next page/session load.
