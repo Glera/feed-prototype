@@ -1058,6 +1058,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   let progressTimer = 0;
   let generationSeq = 0;
   const generationBySlot = new Map<number, number>();
+  // Buildings with a real collect POST in flight: a second tap is ignored until
+  // the request settles, so ctx.addPuzzles never double-fires for one claim.
+  const collectingBuildings = new Set<string>();
   const readyDrafts = new Map<number, CreationDraft>();
   const pollingSlots = new Set<number>();
   const pendingPhaseBySlot = new Map<number, string>();
@@ -1652,6 +1655,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const b = S.buildings.find((x) => x.slot === slot);
     if (!b || !b.buildingId || (b.pending_gifts || 0) <= 0) return;
     const buildingId = b.buildingId;
+    // In-flight guard: ignore repeat taps until this collect settles so one claim
+    // never fires ctx.addPuzzles twice (double-counting the local puzzle counter
+    // before the next re-sync). The claim id itself stays idempotent for retry.
+    if (collectingBuildings.has(buildingId)) return;
+    collectingBuildings.add(buildingId);
     const claimId = ensureCollectClaim(buildingId);
     try {
       const res = await apiIslandCollect(buildingId, claimId);
@@ -1670,6 +1678,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     } catch (error) {
       // Keep the claim id so the next tap retries idempotently.
       toast(`Не удалось собрать · ${errorText(error)}`);
+    } finally {
+      collectingBuildings.delete(buildingId);
     }
   }
 

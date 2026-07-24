@@ -6845,7 +6845,7 @@ export class Feed {
       const res = await apiIslandFriendAccept(code);
       const name = res.friend?.first_name || res.friend?.username || 'другом';
       this.showActivityNotifier(
-        res.status === 'already_friends' ? `Вы уже друзья с ${name}` : `Вы теперь друзья с ${name}`,
+        res.status === 'already' ? `Вы уже друзья с ${name}` : `Вы теперь друзья с ${name}`,
       );
       void this.refreshIslandFriends();
     } catch (e) {
