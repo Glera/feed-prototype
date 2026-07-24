@@ -6,6 +6,7 @@
  */
 import { apiDiagnose, apiReset, apiResetDaily, apiSeedChallenge } from './api';
 import { getEventLog } from './telemetry';
+import { mountIslandModerationConsole } from './island-moderation-console';
 import { islandSocialMode, setIslandSocialMode } from './island-sim';
 import { pendingCount, pendingStars, starsEverQueued, flushResults, clearOutbox } from './outbox';
 
@@ -117,9 +118,15 @@ export async function mountDebugPanel(): Promise<void> {
     setTimeout(() => { b.textContent = '⚡ Seed test challenge'; }, 2000);
   });
 
+  // Island Moderation (P3): navigation to the operator console. NOT an auth
+  // boundary — the server gates every moderation call by island_moderator_ids
+  // (F015), so a non-moderator here just gets 403 toasts.
+  const moderationBtn = mkBtn('🏝️ Island Moderation', () => { void mountIslandModerationConsole(); });
+
   btns.append(
     mkBtn('↻ Refresh', () => { void refreshHead(); refreshLog(); }),
     socialBtn,
+    moderationBtn,
     copyBtn,
     seedBtn,
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),
