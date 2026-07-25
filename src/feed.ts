@@ -112,8 +112,6 @@ import {
   initControlPlane,
   queueControlPlaneEvent,
 } from './control-plane';
-import { loadIslandState } from './island-state';
-import { simulateActivity, islandSocialMode, ISLAND_SIM_EVENT, type SimBuildingRef } from './island-sim';
 import { levelStarReward, seriesRewards } from './rewards.mjs';
 import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
@@ -838,10 +836,6 @@ export class Feed {
     this.updateMechanicStates();
     this.updateHud(false);
     this.mountPreloader();
-    // Fake island social data (plays/likes/notifier/pucks) runs whenever the owner
-    // has the 'fake' toggle on (default until real players exist); 'real' turns it off
-    // so genuine backend likes/shares can be tested. Toggle lives in the debug panel.
-    if (islandSocialMode() === 'fake') this.startIslandActivity();
     // Island Social Core (§4.4/F004): a friend deep-link (startapp=f_<code>) is
     // only PERSISTED here; the actual accept + HUD refresh run after the first
     // successful /session bootstrap (applySessionBootstrap), because a fresh
@@ -4210,29 +4204,6 @@ export class Feed {
     ], { duration: REWARD_SHOT_MS, fill: 'forwards' });
     const impactTimer = window.setTimeout(land, Math.max(0, REWARD_SHOT_MS - 8));
     flight.addEventListener('finish', () => { window.clearTimeout(impactTimer); land(); }, { once: true });
-  }
-
-  // ── "Someone played your mechanic" — global activity sim ─────────────────────
-  // Dev-only presentation demo. Runs on every local tab, independent of
-  // the island overlay. Each tick simulates a visit (plays/likes), slides a notifier
-  // above the top panel. Production never starts this loop; real island plays
-  // and likes are counted by the backend visit API.
-  private startIslandActivity(): void {
-    const buildings = (): SimBuildingRef[] =>
-      loadIslandState().buildings.map((b) => ({ slot: b.slot, name: b.name }));
-    const tick = () => {
-      const ev = simulateActivity(buildings());
-      if (ev) {
-        this.showActivityNotifier(
-          ev.visitors > 1
-            ? `${ev.who} и ещё ${ev.visitors - 1} играли в «${ev.name}»`
-            : `${ev.who} играл в «${ev.name}»`,
-        );
-        window.dispatchEvent(new CustomEvent(ISLAND_SIM_EVENT));
-      }
-      window.setTimeout(tick, 6000 + Math.random() * 5000);   // ~6–11s
-    };
-    window.setTimeout(tick, 3400 + Math.random() * 2200);     // first soon after boot
   }
 
   private showActivityNotifier(text: string): void {

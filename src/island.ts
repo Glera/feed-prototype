@@ -41,7 +41,6 @@ import {
   type PublicIslandView,
 } from './api';
 import { IslandStateSync, cacheIslandState, loadIslandState, replaceIslandState } from './island-state';
-import { ISLAND_SIM_EVENT, islandSocialMode, loadIslandSim, saveIslandSim } from './island-sim';
 import { coverUrl, playableUrl, PLAYABLES } from './playables';
 import { shareTelegramLink, showConfirm } from './telegram';
 
@@ -259,8 +258,8 @@ const UNLOCKED_SLOTS = 4;
 // The pannable world extent (max slot reach + margin), and the visible window.
 const WORLD_W = 540, WORLD_H = 830, VIEW_W = 390, VIEW_H = 540;
 
-// Local activity simulation is a dev-only feed presentation. Island counters
-// always render the backend-owned values from the persisted/public snapshot.
+// Island counters always render backend-owned values from the
+// persisted/public snapshot.
 function fmtNum(n: number): string { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
 const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
@@ -1259,15 +1258,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       }
     : loadIslandState();
   if (!guest && ctx.puzzles) S.tokens = Math.max(0, ctx.puzzles());
-  // Local presentation sim (owner island only): puzzles pile up over the player's
-  // own mechanics from simulated plays. The FEED drives the loop; here we just read
-  // it to render + collect, and refresh when it fires. Guest/public islands ignore it.
-  let sim = loadIslandSim();
-  const onSimTick = () => {
-    if (!ov.isConnected) { window.removeEventListener(ISLAND_SIM_EVENT, onSimTick); return; }
-    if (!guest) refreshIsland();
-  };
-  if (!guest) window.addEventListener(ISLAND_SIM_EVENT, onSimTick);
   const localExperiments: LocalExperimentState = guest
     ? { buildings: [], packs: {}, threads: {} }
     : loadLocalExperiments();
@@ -1724,10 +1714,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   scrim.addEventListener('click', closeSheet);
 
   function refreshIsland(persist = false): void {
-    if (!guest) sim = loadIslandSim();   // the feed loop may have accrued new puzzle pucks since last render
-    // Fake social data (simulated plays/likes overlay + collectible pucks) shows only
-    // on the owner's own island with the 'fake' toggle on; 'real' shows pure backend data.
-    const fake = !guest && islandSocialMode() === 'fake';
     // Blueprint scheme (design variant B): dot grid, thin island outline,
     // central hub with connectors, slots as theme-filled circles with the
     // template initial. Status lives in rim DOTS (legend at the bottom);
@@ -1809,22 +1795,22 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (stage >= 10) s += maxBadgeSvg(p.x, p.y);
       s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
         <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text>
-        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays + (fake ? (sim.plays[i] || 0) : 0))}   ♥ ${fmtNum(b.likes + (fake ? (sim.likes[i] || 0) : 0))}</text>`;
+        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays)}   ♥ ${fmtNum(b.likes)}</text>`;
       // Owner (§4.6): an unpublished mechanic is invisible to guests — mark it.
       if (!guest && !busy && !hostedUrl(b) && !isLocalExperiment(b)) {
         s += `<text x="${p.x}" y="${p.y + 95}" text-anchor="middle" font-size="9" font-weight="700" fill="#EF9F27">не виден гостям</text>`;
       }
       s += '</g>';
       // Gifts over a building:
-      //  • Owner (§4.2): uncollected gifts pile up (real `pending_gifts` from the
-      //    backend, or the local simulation in 'fake' mode) — a bobbing puzzle
-      //    token; tap to collect (scatter → fly into the shared counter).
+      //  • Owner (§4.2): uncollected gifts pile up from backend-owned
+      //    `pending_gifts` — a bobbing puzzle token; tap to collect
+      //    (scatter → fly into the shared counter).
       //  • Guest (§4.3): a public building offering a gift today shows a wrapped
       //    "подарочек" hint; tapping the building plays it, which claims the gift.
       const px = p.x, py = p.y - 52;
       const delay = -((i * 0.67) % 2.4).toFixed(2);   // desync the bob per slot (period = 2.4s, see .isl-puz)
       if (!guest) {
-        const rew = fake ? (sim.reward[i] || 0) : (b.pending_gifts || 0);
+        const rew = b.pending_gifts || 0;
         if (rew > 0) {
           s += `<g class="isl-puz" data-collect="${i}" style="animation-delay:${delay}s">` +
             `<circle cx="${px}" cy="${py}" r="15.5" fill="rgba(58,42,102,.97)" stroke="#fff" stroke-width="1.6"/>` +
@@ -1865,7 +1851,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     // Guest gift hint: tapping it just plays the building (which claims the gift).
     svg.querySelectorAll<SVGElement>('[data-visit-gift]').forEach((g) =>
       g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) openBuilding(Number(g.dataset.visitGift)); }));
-    const likes = buildings.reduce((a, b) => a + b.likes + (fake ? (sim.likes[b.slot] || 0) : 0), 0);
+    const likes = buildings.reduce((a, b) => a + b.likes, 0);
     const statEl = ov.querySelector('[data-stat]');
     if (statEl) statEl.textContent = `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;
     const tokEl = ov.querySelector('[data-tok]');
@@ -1874,24 +1860,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (persist) save();
   }
 
-  // Collect the gifts bobbing over a mechanic (§4.2). In 'fake' mode this stays a
-  // pure local presentation (clear the sim reward, fly the pucks). In 'real' mode
-  // it POSTs a persisted, idempotent collect claim and applies the server's exact
+  // Collect the gifts bobbing over a mechanic (§4.2). It POSTs a persisted,
+  // idempotent collect claim and applies the server's exact
   // disposition (granted flies puzzles; daily_cap / rewards_disabled show honest
   // toasts; empty is a no-op). A lost response keeps the claim id for retry.
   async function collectReward(slot: number, el: SVGElement): Promise<void> {
     if (guest) return;
     const rect = el.getBoundingClientRect();
     const from = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    if (islandSocialMode() === 'fake') {
-      const amount = sim.reward[slot] || 0;
-      if (amount <= 0) return;
-      sim.reward[slot] = 0;
-      saveIslandSim(sim);
-      ctx.addPuzzles?.(amount, from);
-      refreshIsland();
-      return;
-    }
     const b = S.buildings.find((x) => x.slot === slot);
     if (!b || !b.buildingId || (b.pending_gifts || 0) <= 0) return;
     const buildingId = b.buildingId;
