@@ -130,7 +130,14 @@ export async function mountIslandModerationConsole(): Promise<void> {
   }
 
   const moreBtn = (label: string, fn: () => Promise<void>): HTMLButtonElement => {
-    const b = mkBtn(label, async () => { b.disabled = true; await fn(); });
+    // Re-enable in a finally so a failed page fetch does not leave the button
+    // stuck disabled: on success paint() rebuilds it; on error it stays in the
+    // DOM, re-enabled and clickable, and the next_before cursor is unchanged (it
+    // only advances after a successful fetch), so a retry repeats the same page.
+    const b = mkBtn(label, async () => {
+      b.disabled = true;
+      try { await fn(); } finally { b.disabled = false; }
+    });
     b.style.marginTop = '6px';
     return b;
   };
