@@ -24,6 +24,8 @@ import type {
   OperatorLevelFlagRequestV1,
   OperatorLevelFlagResponseV1,
 } from './operator-level-flags.mjs';
+import { validateChallengeLevelBundle } from './challenge-player.mjs';
+import type { ChallengeLevelSpecBundleV1 } from './challenge-player.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -225,10 +227,17 @@ async function deleteRequired<T>(path: string): Promise<T> {
   return data as T;
 }
 
-async function getRequired<T>(path: string, signal?: AbortSignal): Promise<T> {
+async function getRequired<T>(
+  path: string,
+  signal?: AbortSignal,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   let r: Response;
   try {
-    r = await fetch(`${API_BASE}${path}`, { headers: headers(), signal });
+    r = await fetch(`${API_BASE}${path}`, {
+      headers: extraHeaders ? { ...headers(), ...extraHeaders } : headers(),
+      signal,
+    });
   } catch (e) {
     throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -532,6 +541,11 @@ export interface ResultIn {
   ordinal?: number;
   applied_spec_hash?: string;
   applied_skin_hash?: string;
+  // Share/Challenge v1: recipient's applied content-addressed challenge WRAPPER
+  // digest, verified server-side against the pre-play ticket binding on /results
+  // (P1-1). Distinct from applied_spec_hash (the per-level catalog LevelSpec hash);
+  // a challenge ticket carries no catalog binding. Omitted for non-challenge runs.
+  applied_spec_digest?: string;
   complete_challenge_id?: string; // durable post-result action; never sent to /results
   server_confirmed?: boolean; // local outbox state; never sent
   tz_offset_minutes?: number;
@@ -1393,6 +1407,178 @@ export interface ChallengeInboxItem {
 export async function apiChallengeInbox(): Promise<ChallengeInboxItem[]> {
   const r = await get<{ box: string; items: ChallengeInboxItem[] }>('/api/challenges?box=in');
   return r?.items ?? [];
+}
+
+// ── Share / Challenge v1 (content-addressed level identity) ──────────────────
+// Spec-bound routes require the wire header (missing/unsupported → 426). All v1
+// functions use the `*Required` transports so a typed error (426/404/409/410) is
+// preserved for the caller instead of collapsing into the silent-degrade path
+// that the legacy functions above intentionally use. Everything here is gated on
+// the client by VITE_CHALLENGE_V1_ENABLED (see challenge-config).
+
+export const CHALLENGE_WIRE_HEADER = 'X-P4G-Challenge-Wire-Version';
+export const CHALLENGE_WIRE_VERSION = 1;
+function challengeWireHeaders(): Record<string, string> {
+  return { [CHALLENGE_WIRE_HEADER]: String(CHALLENGE_WIRE_VERSION) };
+}
+
+/** Spec-bound recipient view of a v1 challenge (GET /challenges/{id} + wire). */
+export interface ChallengeSpecBoundView extends ChallengeView {
+  spec_digest: string;
+  wire_version: number;
+  params: Record<string, unknown> | null;
+  playable_id: string | null;
+  adapter_version: number | null;
+  runtime_url: string | null;
+  expired: boolean;
+}
+
+/** Challenge source spec (run.start.challenge.v1). Recipient run.start never
+ *  sends this — the server derives the recipient spec from challenge.spec_digest. */
+export interface ChallengeSourceSpecV1 {
+  playableId: string;
+  adapterVersion: number;
+  schemaVersion: number;
+  params: Record<string, unknown>;
+}
+
+/** run.start.challenge.v1 source request (challenger freezes a spec BEFORE play). */
+export interface ChallengeSourceRunRequest {
+  schema: 'run.start.challenge.v1';
+  purpose: 'challenge_source';
+  ticket_id: string;
+  run_id: string;
+  mechanic_id: string;
+  variant_id: string;
+  kind: 'single';
+  challengeSpec: ChallengeSourceSpecV1;
+}
+
+/** Recipient run.start request (challenge_id only; NO challengeSpec/schema). */
+export interface ChallengeRecipientRunRequest {
+  ticket_id: string;
+  run_id: string;
+  mechanic_id: string;
+  variant_id: string;
+  kind: 'single';
+  challenge_id: string;
+}
+
+/**
+ * Create a v1 challenge from an immutable, spec-bound verified source run. The
+ * caller MUST persist `request_id` (a uuid) before the call and reuse it on retry
+ * so the append-only create event is idempotent (D7). `request_digest` is
+ * OPTIONAL on the wire — the server recomputes it; when supplied it must agree.
+ */
+export function apiCreateChallengeV1Required(payload: {
+  mechanic_id: string;
+  variant_id: string;
+  source_run_id: string;
+  request_id: string;
+  request_digest?: string;
+}): Promise<ChallengeCreated> {
+  return postRequired<ChallengeCreated>(
+    '/api/challenges',
+    { metric_key: 'time_ms', ...payload },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** Read a spec-bound v1 challenge to play it (deep-link landing). */
+export function apiGetChallengeSpecBoundRequired(id: string): Promise<ChallengeSpecBoundView> {
+  return getRequired<ChallengeSpecBoundView>(
+    `/api/challenges/${encodeURIComponent(id)}`,
+    undefined,
+    challengeWireHeaders(),
+  );
+}
+
+/**
+ * Fetch the challenge-scoped level-delivery bundle for a ticket the caller owns
+ * (the exact level + content-addressed runtime, no catalog identity). The bundle
+ * is validated with the same strict contract the sibling player enforces.
+ */
+export async function apiGetChallengeLevelBundleRequired(
+  ticketId: string,
+): Promise<ChallengeLevelSpecBundleV1> {
+  const raw = await getRequired<unknown>(
+    `/api/challenges/tickets/${encodeURIComponent(ticketId)}/level-bundle`,
+    undefined,
+    challengeWireHeaders(),
+  );
+  return validateChallengeLevelBundle(raw);
+}
+
+/** Recipient opens a spec-bound challenge (attempt + first-writer receipt). */
+export function apiAcceptChallengeV1Required(id: string): Promise<ChallengeSpecBoundView> {
+  return postRequired<ChallengeSpecBoundView>(
+    `/api/challenges/${encodeURIComponent(id)}/accept`,
+    undefined,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+    challengeWireHeaders(),
+  );
+}
+
+/** Challenger's own run.start that FREEZES a content-addressed spec (D1/D3). */
+export function apiStartChallengeSourceRunRequired(
+  payload: ChallengeSourceRunRequest,
+): Promise<LegacyRunTicketView> {
+  return postRequired<LegacyRunTicketView>(
+    '/api/runs/start',
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+    challengeWireHeaders(),
+  );
+}
+
+/** Recipient run.start: server derives the spec, binds the ticket pre-play,
+ *  writes the first-writer friendship receipt + accept event (D3/D8/D11). */
+export function apiStartChallengeRecipientRunRequired(
+  payload: ChallengeRecipientRunRequest,
+): Promise<LegacyRunTicketView> {
+  return postRequired<LegacyRunTicketView>(
+    '/api/runs/start',
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+    challengeWireHeaders(),
+  );
+}
+
+/** Post a recipient challenge level result carrying the applied wrapper digest;
+ *  the server verifies it against the pre-play ticket binding (P1-1). */
+export function apiPostChallengeResultRequired(payload: {
+  mechanic_id: string;
+  variant_id: string;
+  run_id: string;
+  ticket_id: string;
+  metric_value: number;
+  applied_spec_digest: string;
+  tz_offset_minutes?: number;
+}): Promise<ResultResp> {
+  return postRequired<ResultResp>(
+    '/api/results',
+    { metric_key: 'time_ms', ...payload },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** Complete a v1 challenge from its challenge-bound verified run, echoing the
+ *  applied wrapper digest (verified against challenge.spec_digest). No wire
+ *  header on /complete (per §4). */
+export function apiCompleteChallengeV1Required(payload: {
+  id: string;
+  source_run_id: string;
+  applied_spec_digest: string;
+}): Promise<ChallengeComplete> {
+  return postRequired<ChallengeComplete>(
+    `/api/challenges/${encodeURIComponent(payload.id)}/complete`,
+    {
+      source_run_id: payload.source_run_id,
+      applied_spec_digest: payload.applied_spec_digest,
+      tz_offset_minutes: tzOffsetMinutes(),
+    },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
 }
 
 // ── Catalog Lab device authorization (dev users only) ──────────────────────

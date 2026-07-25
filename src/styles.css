@@ -3143,6 +3143,20 @@ body {
    initial shows through (fallback bound in renderFriendsHud). */
 .isln-friend__initial { position: relative; z-index: 0; }
 .isln-friend--bot { border-color: rgba(88, 166, 255, 0.5); box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.28) inset; }
+/* Share/Challenge v1 (display-only): a friend with an active incoming challenge.
+   Sits at the bottom-centre of the round avatar (the corners are clipped by the
+   circle's overflow), so it stays visible. Purely additive decoration. */
+.isln-friend__challenge-badge {
+  position: absolute;
+  bottom: 1px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  line-height: 1;
+  z-index: 2;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
+}
 .isln-friend--empty,
 .isln-friend--invite {
   color: rgba(255, 255, 255, 0.55);

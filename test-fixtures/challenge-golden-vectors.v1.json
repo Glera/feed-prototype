@@ -1,0 +1,45 @@
+{
+  "schema": "challenge.golden-vectors.v1",
+  "note": "Authoritative digests produced by the swipe-backend challenge-v1 branch (@3d9280c) via app.content_identity/app.challenge_core RFC 8785 JCS + SHA-256. The browser challenge-identity.mjs MUST reproduce every digest byte-for-byte (D8 golden-vectors DoD). Regenerate with the backend .venv if the JCS contract ever changes.",
+  "vectors": [
+    {
+      "kind": "spec_digest",
+      "input": {
+        "schemaVersion": 1,
+        "playableId": "marble-sort-swipe",
+        "adapterVersion": 1,
+        "params": { "board": { "cells": 9, "seed": 7 }, "goal": "clear" },
+        "runtimeContractDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "runtimeArtifactDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "digest": "334813528a38213403f444d9f92310be102076a3737252c6bbaccbedc5b9ecc2"
+    },
+    {
+      "kind": "level_spec_hash",
+      "input": {
+        "schema": "sort.level-spec.v1",
+        "runtimeContractDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "seed": 0,
+        "params": { "board": { "cells": 9, "seed": 7 }, "goal": "clear" }
+      },
+      "digest": "6a8b536a25263196a0d3ef748e094cd81007b091da0054b22128f0d398f4e7e8"
+    },
+    {
+      "kind": "jcs_sha256",
+      "input": {
+        "schemaVersion": 2,
+        "playableId": "marble-sort-swipe",
+        "adapterVersion": 1,
+        "params": { "z": "zed", "a": [3, 2, 1], "nested": { "flag": true, "none": null, "emoji": "ключé" } },
+        "runtimeContractDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "runtimeArtifactDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "digest": "5fe2bf4ccd603588327019dc24ede0c5465819bc7155fac02b44c9affd54ecf4"
+    },
+    {
+      "kind": "jcs_sha256",
+      "input": { "b": 1, "a": 2, "A": 3, "é": 4 },
+      "digest": "ca9f168d69998811210ad50587b77e5c9395f10faa78e2083bb79d8012b8f8d3"
+    }
+  ]
+}

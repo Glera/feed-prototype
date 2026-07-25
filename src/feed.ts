@@ -51,6 +51,12 @@ import {
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
   type SessionResp,
 } from './api';
+import { challengeV1Enabled } from './challenge-config';
+import {
+  renderChallengeInboxRail,
+  friendsWithActiveChallenge,
+  applyChallengeBadges,
+} from './challenge-rail';
 import {
   queueResult,
   queueResultWithReceipt,
@@ -3319,28 +3325,26 @@ export class Feed {
   private renderChallengeRail(): void {
     const rail = this.storiesEl;
     if (!rail) return;
-    rail.querySelectorAll('.story[data-challenge]').forEach((el) => el.remove());
     const me = rail.querySelector('.story--me');
-    const frag = document.createDocumentFragment();
-    for (const ch of this.inboxChallenges) {
-      const name = ch.challenger.first_name || ch.challenger.username || 'Друг';
-      const initial = (name.trim()[0] || '?').toUpperCase();
-      const el = document.createElement('div');
-      el.className = 'story';
-      el.dataset.challenge = ch.id;
-      el.innerHTML =
-        `<div class="story__avatar story__avatar--challenge${ch.played ? ' story__avatar--viewed' : ''}">` +
-          `<span>${this.esc(initial)}</span><i class="story__bolt" aria-hidden="true">⚡</i></div>` +
-        `<div class="story__name">${this.esc(name)}</div>`;
-      frag.appendChild(el);
-    }
-    // Insert after the friends cluster (§4.4) when it is present, so the running
-    // order stays [You/level] [friends] [challenges…]; otherwise right after You.
+    // Unified top row [You/level] [friends] [challenges…]: insert challenge cards
+    // after the friends cluster (§4.4) when present, else right after You. The
+    // inbox rendering is migrated to challenge-rail.ts; DOM stays byte-identical
+    // and taps keep flowing through the existing `.story[data-challenge]`
+    // delegation.
     const anchor = (this.friendsHudEl && this.friendsHudEl.parentElement === rail)
       ? this.friendsHudEl
       : me;
-    if (anchor && anchor.nextSibling) rail.insertBefore(frag, anchor.nextSibling);
-    else rail.appendChild(frag);
+    renderChallengeInboxRail(rail, {
+      inbox: this.inboxChallenges,
+      esc: (s) => this.esc(s),
+      anchor,
+    });
+    // v1 (gated): a friend who has an active incoming challenge gets a ⚡ badge on
+    // their island friends-HUD avatar (display-only; the friendship and challenge
+    // graphs are never merged in data). Additive/reversible decoration.
+    if (challengeV1Enabled()) {
+      applyChallengeBadges(this.friendsHudEl, friendsWithActiveChallenge(this.inboxChallenges));
+    }
     this.hudEl?.classList.toggle('hud--stories-can-right', rail.scrollWidth > rail.clientWidth + 1);
   }
 
