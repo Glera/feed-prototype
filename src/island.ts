@@ -19,11 +19,15 @@ import {
   apiIslandBakeJob,
   apiIslandCollect,
   apiIslandTheme,
+  apiIslandThemeJob,
   apiIslandVisitResult,
   apiPublicIsland,
   apiSetIslandLike,
   apiStartIslandVisit,
+  isIslandThemeJob,
   type IslandBakeJob,
+  type IslandThemeJob,
+  type IslandThemePack,
   type IslandBuildingState,
   type IslandDifficultyPreference,
   type IslandMotionPreference,
@@ -552,14 +556,54 @@ function newJobId(): string {
 
 // Guided generation is always the bounded backend/API path. Subscription
 // agents belong exclusively to the local wild experiment service.
+interface AiThemeOptions {
+  /** A durable job id from a prior submit whose in-memory handle was lost (e.g.
+   *  reload). When set, aiTheme resumes it instead of re-submitting. */
+  resumeJobId?: string;
+  /** Called with a durable job id as soon as one is issued, so the caller can
+   *  persist it for resume-after-reload. */
+  onJob?: (jobId: string) => void;
+}
+
+async function requestTheme(
+  payload: { prompt: string; avoid?: string; difficulty: IslandDifficultyPreference; motion: IslandMotionPreference },
+  opts: AiThemeOptions,
+): Promise<IslandThemePack> {
+  const res = await apiIslandTheme(payload);
+  if (!isIslandThemeJob(res)) return res;   // legacy 200 pack
+  opts.onJob?.(res.job_id);
+  return pollThemeJob(res);
+}
+
 async function aiTheme(
   prompt: string,
   avoid?: string,
   difficulty: IslandDifficultyPreference = 'surprise',
   motion: IslandMotionPreference = 'surprise',
+  opts: AiThemeOptions = {},
 ): Promise<Pack | null> {
   try {
-    const apiPack = await apiIslandTheme({ prompt, avoid, difficulty, motion });
+    // Dual-mode backend: a 200 pack (legacy) OR a 202 {job_id} we poll to a
+    // terminal pack. UX is unchanged — the slot still shows "theme ready ✨"
+    // once this resolves.
+    let apiPack: IslandThemePack;
+    if (opts.resumeJobId) {
+      // Resume a prior job (read it) rather than re-POST: recovers a completed
+      // pack and avoids a second quota charge. Only a 404 (job gone/expired)
+      // falls back to a fresh request; a terminal `failed` propagates as-is.
+      try {
+        const resumed = await apiIslandThemeJob(opts.resumeJobId);
+        apiPack = await pollThemeJob(resumed);
+      } catch (resumeError) {
+        if (resumeError instanceof ApiRequestError && resumeError.status === 404) {
+          apiPack = await requestTheme({ prompt, avoid, difficulty, motion }, opts);
+        } else {
+          throw resumeError;
+        }
+      }
+    } else {
+      apiPack = await requestTheme({ prompt, avoid, difficulty, motion }, opts);
+    }
     console.log('[island] backend theme:', apiPack.name, apiPack.items.join(' '));
     return normalizePack({
       id: apiPack.id ?? '', name: apiPack.name.slice(0, 24), kw: apiPack.kw ?? [],
@@ -575,6 +619,31 @@ async function aiTheme(
     console.log('[island] bounded API theme unavailable:', errorText(e));
     throw e;
   }
+}
+
+/** Poll a durable async theme job (backend §5.1) to its terminal pack. Mirrors
+ *  the bake poll: transient GET errors are tolerated so a warm/slow model run
+ *  still resolves. A reload mid-generation drops the in-memory draft as before,
+ *  but the backend's request-digest dedup makes a re-submit of the same prompt
+ *  return this same job rather than double-charging quota. */
+async function pollThemeJob(initial: IslandThemeJob): Promise<IslandThemePack> {
+  let job = initial;
+  let pollErrors = 0;
+  for (let attempt = 0; job.status !== 'ready' && job.status !== 'failed'; attempt++) {
+    if (attempt >= 180) throw new Error('theme generation is taking too long');
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    try {
+      job = await apiIslandThemeJob(job.job_id);
+      pollErrors = 0;
+    } catch (e) {
+      if (++pollErrors < 4) continue;
+      throw e;
+    }
+  }
+  if (job.status === 'failed' || !job.pack) {
+    throw new Error(job.error || 'theme generation failed');
+  }
+  return job.pack;
 }
 
 type LocalGeneratorState = 'queued' | 'starting' | 'running' | 'ready' | 'failed' | 'cancelled';
@@ -863,6 +932,56 @@ function maxBadgeSvg(cx: number, cy: number): string {
 // A collect claim_id is minted before the request and persisted per building so a
 // retry after a lost response reuses the same id (append-only receipt is
 // idempotent). Cleared only after the server acknowledges the collect.
+// Durable handle for an in-flight async theme job, keyed by creation slot. A
+// reload drops the in-memory draft, so on re-generation we resume this job (read
+// it) instead of POSTing again — recovering a completed pack and, crucially, not
+// charging quota a second time (the server only dedups while non-terminal).
+//
+// The handle is bound to the FULL normalized request identity, not just the
+// prompt: the server digest is sha256(JCS({user, prompt, preferences:{avoid,
+// difficulty, motion}})), so changing avoid/difficulty/motion at the same prompt
+// yields a different server job. Comparing only slot+prompt (F002) would resume
+// the STALE job/pack after such a change; we compare the full identity instead so
+// any digest-affecting change is treated as a fresh request. Mirrors the bake
+// jobId-in-state resume pattern.
+const THEME_JOB_KEY = 'island-theme-jobs-v1';
+interface ThemeJobHandle { jobId: string; identity: string; }
+
+/** Canonical client-side request identity over exactly the fields that feed the
+ *  server digest (the user id is constant per client, so it is omitted). Written
+ *  with a fixed key order so it is a stable comparison key on both sides of a
+ *  reload. Normalization (trim, empty-avoid→null) matches the backend. */
+function themeRequestIdentity(
+  prompt: string,
+  avoid: string | undefined,
+  difficulty: IslandDifficultyPreference,
+  motion: IslandMotionPreference,
+): string {
+  const normPrompt = (prompt ?? '').trim();
+  const normAvoid = avoid && avoid.trim() ? avoid.trim() : null;
+  return JSON.stringify({ prompt: normPrompt, preferences: { avoid: normAvoid, difficulty, motion } });
+}
+
+function readThemeJobHandles(): Record<string, ThemeJobHandle> {
+  try { return JSON.parse(localStorage.getItem(THEME_JOB_KEY) || '{}') || {}; } catch { return {}; }
+}
+function writeThemeJobHandles(map: Record<string, ThemeJobHandle>): void {
+  try { localStorage.setItem(THEME_JOB_KEY, JSON.stringify(map)); } catch { /* private mode */ }
+}
+function rememberThemeJob(slot: number, jobId: string, identity: string): void {
+  const map = readThemeJobHandles();
+  map[String(slot)] = { jobId, identity };
+  writeThemeJobHandles(map);
+}
+function forgetThemeJob(slot: number): void {
+  const map = readThemeJobHandles();
+  if (map[String(slot)]) { delete map[String(slot)]; writeThemeJobHandles(map); }
+}
+function resumeThemeJobId(slot: number, identity: string): string | undefined {
+  const handle = readThemeJobHandles()[String(slot)];
+  return handle && handle.identity === identity ? handle.jobId : undefined;
+}
+
 const COLLECT_CLAIM_KEY = 'island-collect-claims-v1';
 function loadCollectClaims(): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(COLLECT_CLAIM_KEY) || '{}') || {}; } catch { return {}; }
@@ -2362,8 +2481,17 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     })() : null;
 
     const guided = candidateFor(req, 'guided')!;
+    // Resume an in-flight job from a prior (pre-reload) submit with the SAME full
+    // request identity (prompt + avoid + difficulty + motion) instead of
+    // re-POSTing; persist the job id as soon as one is issued. A change to any
+    // digest-affecting field makes the identity mismatch → a fresh request.
+    const requestIdentity = themeRequestIdentity(req.prompt, req.avoid, req.difficulty, req.motion);
+    const resumeJobId = resumeThemeJobId(req.slot, requestIdentity);
     try {
-      const pack = await aiTheme(req.prompt, req.avoid, req.difficulty, req.motion);
+      const pack = await aiTheme(req.prompt, req.avoid, req.difficulty, req.motion, {
+        resumeJobId,
+        onJob: (jobId) => rememberThemeJob(req.slot, jobId, requestIdentity),
+      });
       if (generationBySlot.get(req.slot) !== generationId) return;
       if (!pack) throw new Error('API model is unavailable');
       pack.id = `ai-${newJobId()}`;
@@ -2374,6 +2502,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       guided.state = 'failed';
       guided.error = errorText(error);
       guided.phase = 'FAILED';
+    } finally {
+      // Clear the handle once this generation settles, but never stomp a newer
+      // generation that reused the slot while this one was polling.
+      if (generationBySlot.get(req.slot) === generationId) forgetThemeJob(req.slot);
     }
     repaintCandidates(req);
 
