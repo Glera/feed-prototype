@@ -14,11 +14,14 @@ These Python helpers run against the stand DB with the backend venv (they
 - `reset_e2e.py` — deterministic per-run rewind (append-only journals via
   `session_replication_role=replica`; disposable DB only).
 - `dogfood_setup.py` — fresh user → island → auto-friend bot → bot tick grows house.
+- `seed_p2_e2e.py` — exact append-only ticket-bound series chest reused by the
+  P2 production-card → visit → gift → owner-collect vertical.
 - `dbq.py` — one-off SQL → JSON, used for DB-fact assertions.
 
 ## Prereqs (set by the P1-D runner, not by this harness)
 
 Backend on `API_ORIGIN` with `ENABLE_ISLAND_SOCIAL=1`, `ENABLE_ISLAND_BOTS=1`,
+`ENABLE_ISLAND_VISIT_AWARDS=1` (for P2 case F; use chance 100%, holdout 0),
 a known `BOT_TOKEN`, `INITDATA_MAX_AGE=0`, a small `ISLAND_PLAY_MIN_WIN_MS`
 (e.g. 1000), `ISLAND_BOT_TICK_SEC` large (manual ticks), and `ALLOWED_ORIGINS`
 including the harness static origin. Bots seeded (`python -m app.island_bots seed

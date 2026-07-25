@@ -141,6 +141,31 @@ export function showConfirm(message: string): Promise<boolean> {
   return Promise.resolve(window.confirm(message));
 }
 
+/** Ask Telegram for permission for the bot to send private messages. `null`
+ * means the host does not support the API; false is an explicit denial. */
+export function requestTelegramWriteAccess(): Promise<boolean | null> {
+  const tg: AnyTG | undefined = (window as any).Telegram?.WebApp;
+  if (!tg || typeof tg.requestWriteAccess !== 'function') {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (allowed: unknown) => {
+      if (settled) return;
+      settled = true;
+      resolve(Boolean(allowed));
+    };
+    try {
+      const result = tg.requestWriteAccess(done);
+      if (result && typeof result.then === 'function') {
+        result.then(done, () => done(false));
+      }
+    } catch {
+      done(false);
+    }
+  });
+}
+
 function setVars(top: number, bottom: number, left: number, right: number): void {
   const root = document.documentElement;
   const px = (n: number) => `${Math.max(0, Math.round(n || 0))}px`;
