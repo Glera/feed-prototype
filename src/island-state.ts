@@ -65,7 +65,7 @@ export function defaultIslandState(): IslandPersistedState {
   return {
     tokens: 120,
     buildings: [
-      { slot: 1, tpl: 'sort', pack: 'neon', name: 'Neon sort', plays: 2431, likes: 128, liked: false },
+      { slot: 1, tpl: 'sort', pack: 'neon', name: 'Neon sort', plays: 0, likes: 0, liked: false },
     ],
   };
 }
