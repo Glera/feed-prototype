@@ -293,10 +293,14 @@ function hostedUrl(building: Building): string | null {
 }
 
 // ── Island Social Core: builtin binding runtime resolution (F002/F007) ──────
-// For a bot builtin building the runtime is resolved ONLY from its immutable
-// binding, never from the mutable `tpl`. `mechanicId` may be a catalog mechanic
-// (a TPL key like "sort") or a direct first-party playable id; either must map
-// to a known platform playable, otherwise we fail closed (no tpl fallback).
+// Per ТЗ v1.4 §3.1 the binding is the IDENTITY authority: `mechanicId` is the sole
+// runtime authority (never the mutable `tpl`) and `rosterRevision`/`versionsDigest`
+// are a rotation/audit record — NOT a content digest the client can verify. The
+// platform has no versioned/content-addressed delivery for builtin mechanics, so
+// runtime DELIVERY is the current deploy (honest, per v1.4). `mechanicId` may be a
+// catalog mechanic (a TPL key like "sort") or a direct first-party playable id;
+// either must map to a known platform playable, otherwise we fail closed (no tpl
+// fallback).
 function resolveBuiltinPlayableId(mechanicId: string): string | null {
   if (Object.prototype.hasOwnProperty.call(TPL, mechanicId)) return TPL[mechanicId as TplId].playableId;
   if (PLAYABLES.some((p) => p.id === mechanicId)) return mechanicId;
@@ -318,17 +322,16 @@ function resolveBuildingRuntime(b: Building, packName: string): BuildingRuntime 
   const builtin = b.builtin;
   if (builtin) {
     const id = resolveBuiltinPlayableId(builtin.mechanicId);
-    // Binding is the sole authority: an unresolvable mechanic fails closed.
+    // mechanicId is the runtime authority: an unresolvable mechanic (e.g. one that
+    // has disappeared from the platform playable set) fails closed.
     if (!id || !PLAYABLES.some((p) => p.id === id)) {
       return { kind: 'unavailable', reason: `builtin mechanic "${builtin.mechanicId}" does not resolve to a known runtime` };
     }
-    // A loaded deploy manifest (versions.json) must know the resolved playable;
-    // an EMPTY manifest (dev / harness) means "not yet declared" and does not
-    // gate first-party playables. NOTE: the backend's `versionsDigest` is a hash
-    // of the whole roster manifest, which the client cannot reconstruct from its
-    // per-mechanic content hashes — so it is recorded/logged but NOT hard-compared
-    // (no synthetic fallback-digest to compare against). Digest enforcement is a
-    // stand/backend concern until a comparable client-side manifest digest exists.
+    // Delivery = the CURRENT deploy for this mechanic (v1.4 §3.1): there is no
+    // versioned/content-addressed builtin delivery, so a deploy that rotates the
+    // mechanic's bytes under an unchanged binding is expected to keep working. The
+    // binding's `versionsDigest`/`rosterRevision` are an identity/audit record, not
+    // a client-verifiable content digest — no byte-level digest comparison here.
     return {
       kind: 'builtin',
       src: playableUrl(id, { auto: false }),
@@ -3316,15 +3319,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     });
     dbg(`launch: "${b.name}" tpl=${b.tpl} pack=${b.pack} guest=${guest}`);
 
-    // Resolve the runtime BEFORE anything else: a builtin (bot) building is bound
-    // by its immutable binding, never by the mutable `tpl` (F002). An unresolvable
-    // binding fails closed — no visit, no iframe, no tpl fallback.
+    // Resolve the runtime BEFORE anything else: a builtin (bot) building takes its
+    // runtime from the binding's `mechanicId` (identity authority, v1.4 §3.1),
+    // never from the mutable `tpl` (F002). An unresolvable mechanic fails closed —
+    // no visit, no iframe, no tpl fallback. Delivery is the current deploy.
     const pk = resolvePack(b.pack);
     const runtime = resolveBuildingRuntime(b, pk.name);
     if (b.builtin) {
       dbg(`builtin binding: mechanicId=${b.builtin.mechanicId}`
         + (b.builtin.versionsDigest
-          ? ` versionsDigest=${b.builtin.versionsDigest} (recorded; not client-comparable)`
+          ? ` versionsDigest=${b.builtin.versionsDigest} (rotation/audit record; delivery = current deploy)`
           : ''));
     }
     const unavailable = runtime.kind === 'unavailable';

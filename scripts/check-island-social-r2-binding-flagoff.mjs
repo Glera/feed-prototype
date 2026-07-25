@@ -1,5 +1,9 @@
 // Island Social Core — Codex R2 diff-only evidence: F002 builtin binding
 // authority + fail-closed (point 4) and F005 flag-off inert surface (point 3).
+// v1.4 §3.1 addendum (Codex R3): point 4c proves the documented semantics —
+// rotating the mechanic's DEPLOY bytes under an UNCHANGED binding keeps the house
+// working on the current deploy (no digest pin / no byte-compare); a mechanicId
+// gone from the platform set fails closed (4b).
 // Real client builds ↔ real backend ↔ real PG (same pattern as
 // check-island-social-browser.mjs). Env: BOT_TOKEN, API_ORIGIN, VENV_PY,
 // BACKEND_ROOT, DATABASE_URL, ARTIFACT_DIR, PY_SCRATCH.
@@ -56,6 +60,14 @@ const fakePlayable = `<!doctype html><html><body><script>
 const send=(m)=>parent.postMessage(Object.assign({source:'playable'},m),'*');
 addEventListener('load',()=>{send({type:'static_ready'});setTimeout(()=>send({type:'completed',success:true}),1600);});
 </script></body></html>`;
+// A "deploy" of the mechanic — same behaviour, but a `data-deploy` marker so the
+// test can prove which build the house actually loaded. `mechanicDeployBody` is
+// the CURRENT deploy served to the mechanic iframes; point 4c rotates it.
+const deployBody = (tag) => `<!doctype html><html><body data-deploy="${tag}"><script>
+const send=(m)=>parent.postMessage(Object.assign({source:'playable'},m),'*');
+addEventListener('load',()=>{send({type:'static_ready'});setTimeout(()=>send({type:'completed',success:true}),1600);});
+</script></body></html>`;
+let mechanicDeployBody = deployBody('v1');
 const telegramSdkFixture = `window.Telegram={WebApp:{initData:'',initDataUnsafe:{},platform:'web',ready(){},expand(){},disableVerticalSwipes(){},enableClosingConfirmation(){},setHeaderColor(){},setBackgroundColor(){},lockOrientation(){},onEvent(){},offEvent(){},HapticFeedback:{impactOccurred(){},notificationOccurred(){},selectionChanged(){}},close(){}}};`;
 
 function buildInto(dir, islandEnabled, staticOrigin) {
@@ -96,7 +108,7 @@ try {
   const newPage = async () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
     await page.route('https://telegram.org/js/telegram-web-app.js', (r) => r.fulfill({ status: 200, contentType: 'application/javascript', body: telegramSdkFixture }));
-    await page.route('**/*.html', (r) => (new URL(r.request().url()).pathname === '/' ? r.continue() : r.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: fakePlayable })));
+    await page.route('**/*.html', (r) => (new URL(r.request().url()).pathname === '/' ? r.continue() : r.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: mechanicDeployBody })));
     return page;
   };
   // Open a page and await the /session bootstrap (the ?island= world + deeplink
@@ -168,6 +180,44 @@ try {
     assert.equal(Number(claims), 0, `fail-closed must create NO claim, found ${claims}`);
     summary.push('POINT 4b (F002): unknown mechanicId → "Механика недоступна", no visit/claim OK');
     await page.close();
+  }
+
+  // ══ POINT 4c — deploy rotation under an UNCHANGED binding (v1.4 §3.1) ══
+  // Delivery = current deploy: rotating the mechanic's served bytes with the
+  // binding unchanged must keep the house working (no digest pin / byte-compare).
+  {
+    const A = b.bot_a;
+    const visitAndAssert = async (expectDeployTag) => {
+      const page = await newPage();
+      await gotoAwaitingSession(page, ON_ORIGIN, { initData: signInitData(GUEST, 'IslandGuest', 'guest'), island: String(A.bot) });
+      await page.locator('.island-world').waitFor({ state: 'visible', timeout: 15_000 });
+      await page.locator(`g.isl-sector[data-b="${A.slot}"]`).waitFor({ state: 'attached', timeout: 10_000 });
+      await page.locator(`g.isl-sector[data-b="${A.slot}"]`).dispatchEvent('click');
+      // Runtime still resolves from the (unchanged) binding mechanicId.
+      await page.waitForFunction((sel) => {
+        const el = document.querySelector(sel); return el && /BUILTIN/.test(el.textContent || '');
+      }, '.isl-play [data-dbg]', { timeout: 10_000 });
+      const label = (await page.locator('.isl-play [data-dbg]').textContent()) || '';
+      assert.match(label, new RegExp(`BUILTIN · ${A.mechanicId}`), `binding must still resolve, chip="${label}"`);
+      // The house boots + reaches its win screen on the CURRENT deploy.
+      await page.locator('.isl-win').waitFor({ state: 'visible', timeout: 20_000 });
+      // Prove the loaded iframe IS the current deploy (rotated) build.
+      const tag = await page.evaluate(() => {
+        const f = document.querySelector('.isl-play iframe');
+        try { return f && f.contentDocument ? f.contentDocument.body.getAttribute('data-deploy') : null; }
+        catch { return 'cross-origin'; }
+      });
+      assert.equal(tag, expectDeployTag, `expected the ${expectDeployTag} deploy to load, got "${tag}"`);
+      return page;
+    };
+    const before = await visitAndAssert('v1');
+    await shot(before, 'R2-F002-rotation-before-v1');
+    await before.close();
+    mechanicDeployBody = deployBody('v2'); // rotate the deploy; binding is untouched
+    const after = await visitAndAssert('v2');
+    await shot(after, 'R2-F002-rotation-after-v2');
+    await after.close();
+    summary.push('POINT 4c (F002/v1.4): deploy bytes rotated under unchanged binding → house still resolves BUILTIN and runs on the current deploy OK');
   }
 
   console.log('\nISLAND SOCIAL R2 EVIDENCE (binding + flag-off) — passed:');

@@ -6853,7 +6853,19 @@ export class Feed {
   }
 
   private persistPendingFriendAccept(code: string): void {
-    try { localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code, attempts: 0 })); } catch { /* private mode */ }
+    // The f_<code> start param survives app reopen, so this runs on every boot.
+    // Preserve the accumulated attempt count for the SAME code (R2-F002) — only a
+    // NEW code resets it to 0 — otherwise a reopen would reset the cap and a stuck
+    // 5xx would retry forever. Definitive outcomes clear the key entirely.
+    try {
+      let attempts = 0;
+      const raw = localStorage.getItem(ISLAND_PENDING_ACCEPT_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.code === code) attempts = Number(parsed.attempts) || 0;
+      }
+      localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code, attempts }));
+    } catch { /* private mode */ }
   }
   private clearPendingFriendAccept(): void {
     try { localStorage.removeItem(ISLAND_PENDING_ACCEPT_KEY); } catch { /* private mode */ }

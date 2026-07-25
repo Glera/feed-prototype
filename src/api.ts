@@ -834,14 +834,18 @@ export interface IslandBuildingState {
   gift_available_today?: boolean; // guest /island/public — a gift is offered today
   is_public?: boolean;            // published UGC artifact (visible to guests)
   takedown?: boolean;             // moderation-removed (P3); hidden from guests
-  // Immutable builtin binding (ТЗ §3.1, F007): for a bot builtin building the
-  // runtime is resolved by this binding, NEVER by the mutable `tpl`. Present only
-  // on builtin (bot) buildings in /island/public; absent for player UGC.
+  // Builtin binding (ТЗ v1.4 §3.1, F007): for a bot builtin building the runtime is
+  // resolved from `mechanicId` (the identity/runtime authority), NEVER from the
+  // mutable `tpl`. Present only on builtin (bot) buildings in /island/public;
+  // absent for player UGC.
   builtin?: IslandBuiltinBinding;
 }
 
 export interface IslandBuiltinBinding {
+  // Runtime authority — resolves to a first-party playable; fail-closed if unknown.
   mechanicId: string;
+  // Rotation/audit record only (identity, not a client-verifiable content digest).
+  // The platform has no versioned builtin delivery — delivery is the current deploy.
   rosterRevision?: string;
   versionsDigest?: string;
 }
