@@ -83,7 +83,10 @@ function serve(dir, port) {
     const url = new URL(req.url || '/', origin);
     if (url.pathname === '/versions.json') { res.setHeader('content-type', 'application/json'); return res.end('{}'); }
     if (url.pathname === '/' || url.pathname === '/index.html') { res.setHeader('content-type', 'text/html; charset=utf-8'); return res.end(readFileSync(path.join(dir, 'index.html'))); }
-    if (url.pathname.endsWith('.html')) { res.setHeader('content-type', 'text/html; charset=utf-8'); return res.end(fakePlayable); }
+    // Serve the CURRENT deploy body (rotated by point 4c) — playable iframes load
+    // `<id>.html?auto=0`, whose query makes them fall through the page.route glob
+    // to this static server, so it must reflect the current deploy too.
+    if (url.pathname.endsWith('.html')) { res.setHeader('content-type', 'text/html; charset=utf-8'); return res.end(mechanicDeployBody); }
     if (url.pathname.endsWith('.payload.js')) { res.setHeader('content-type', 'application/javascript'); return res.end(''); }
     res.statusCode = 404; res.end();
   });
@@ -108,7 +111,9 @@ try {
   const newPage = async () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
     await page.route('https://telegram.org/js/telegram-web-app.js', (r) => r.fulfill({ status: 200, contentType: 'application/javascript', body: telegramSdkFixture }));
-    await page.route('**/*.html', (r) => (new URL(r.request().url()).pathname === '/' ? r.continue() : r.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: mechanicDeployBody })));
+    // Match `.html` even with a query (`?auto=0`) so the deploy body is served
+    // for playable iframes as well; the root document (pathname '/') is left alone.
+    await page.route(/\.html(\?|$)/, (r) => (new URL(r.request().url()).pathname === '/' ? r.continue() : r.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: mechanicDeployBody })));
     return page;
   };
   // Open a page and await the /session bootstrap (the ?island= world + deeplink

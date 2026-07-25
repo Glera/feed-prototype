@@ -39,8 +39,10 @@ def main() -> None:
         ra = db.get(IslandStateRecord, BOT_A)
         da = copy.deepcopy(ra.data)
         ba = min(da["buildings"], key=lambda x: x["slot"])
-        ba["tpl"] = "merge" if ba.get("builtin", {}).get("mechanicId") == "sort" else "sort"
+        # Force tpl != mechanicId so 4a genuinely proves the runtime is bound by
+        # the binding (mechanicId), never the mutable tpl.
         ba["builtin"]["mechanicId"] = "sort"
+        ba["tpl"] = "merge"
         ra.data = da
         flag_modified(ra, "data")
         out["bot_a"] = {"bot": BOT_A, "buildingId": ba["buildingId"], "slot": ba["slot"],
