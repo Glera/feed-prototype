@@ -1058,7 +1058,155 @@ export function isIslandThemeJob(value: IslandThemePack | IslandThemeJob): value
     && !Array.isArray((value as IslandThemePack).items);
 }
 
+// ── Island Social Core (P3) — guest report + operator moderation ────────────
+// Report is a guest route (gated server-side by ENABLE_ISLAND_SOCIAL). The
+// moderation routes are ADDITIONALLY gated by the server-enforced
+// `island_moderator_ids` allowlist on every request (ТЗ §2.2, F015): the client
+// ?diag=1 moderation page is navigation only, NOT an authorization boundary —
+// a non-moderator caller simply gets 403 from the server.
+
+export type IslandReportReason = 'inappropriate' | 'broken' | 'other';
+
+export interface IslandReportResult {
+  report_id: string;
+  building_id: string;
+  reason: string;
+  status: string;
+  created_at: string | null;
+}
+
+/** POST /island/buildings/{id}/report — a guest reports a published building.
+ *  The server pins the exact artifact revision at report time, dedups by
+ *  (building, reporter) — a repeat returns the saved row (200) — and rate-limits
+ *  per UTC day (ТЗ §2.2, F011). */
+export function apiIslandReport(
+  buildingId: string,
+  reason: IslandReportReason,
+  text?: string,
+): Promise<IslandReportResult> {
+  const trimmed = text && text.trim() ? text.trim().slice(0, 500) : null;
+  return postRequired<IslandReportResult>(
+    `/api/island/buildings/${encodeURIComponent(buildingId)}/report`,
+    { reason, text: trimmed },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export interface IslandModerationOwner {
+  id: number;
+  first_name: string | null;
+  username: string | null;
+  is_bot?: boolean;
+}
+
+export interface IslandModerationPublication {
+  building_id: string;
+  owner: IslandModerationOwner;
+  name: string;
+  prompt: string | null;
+  rel: string | null;
+  url: string | null;
+  counts: {
+    plays: number;
+    likes: number;
+    bot_likes: number;
+    foreign_claims: number;
+    bot_claims: number;
+    pending_gifts: number;
+  };
+  reports: { open: number; total: number };
+  taken_down: boolean;
+  created_at: string | null;
+}
+
+export interface IslandModerationReport {
+  report_id: string;
+  building_id: string;
+  owner: IslandModerationOwner | null;
+  reporter_id: number;
+  reason: string;
+  text: string | null;
+  status: string;
+  artifact_rel: string | null;
+  taken_down: boolean;
+  created_at: string | null;
+}
+
+export interface IslandTakedownResult {
+  building_id: string;
+  taken_down: boolean;
+  artifact_rel: string | null;
+}
+
+export function apiIslandModerationPublications(
+  opts: { limit?: number; before?: string | null } = {},
+): Promise<{ publications: IslandModerationPublication[]; next_before: string | null }> {
+  const params = new URLSearchParams({ limit: String(opts.limit ?? 50) });
+  if (opts.before) params.set('before', opts.before);
+  return withRequestTimeout(
+    (signal) => getRequired(
+      `/api/island/moderation/publications?${params.toString()}`,
+      signal,
+    ),
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandModerationReports(
+  opts: { status?: string; before?: string | null } = {},
+): Promise<{ reports: IslandModerationReport[]; next_before: string | null }> {
+  const params = new URLSearchParams();
+  if (opts.status) params.set('status', opts.status);
+  if (opts.before) params.set('before', opts.before);
+  const q = params.toString();
+  return withRequestTimeout(
+    (signal) => getRequired(
+      `/api/island/moderation/reports${q ? `?${q}` : ''}`,
+      signal,
+    ),
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** POST /island/moderation/takedown — the exact artifact_rel reviewed must match
+ *  the building's current revision or the server returns 409 (F011). */
+export function apiIslandModerationTakedown(
+  buildingId: string,
+  artifactRel: string,
+  reason?: string,
+): Promise<IslandTakedownResult> {
+  return postRequired<IslandTakedownResult>(
+    '/api/island/moderation/takedown',
+    { building_id: buildingId, artifact_rel: artifactRel, reason: reason ?? null },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandModerationRestore(
+  buildingId: string,
+  reason?: string,
+): Promise<IslandTakedownResult> {
+  return postRequired<IslandTakedownResult>(
+    '/api/island/moderation/restore',
+    { building_id: buildingId, reason: reason ?? null },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandModerationResolveReport(
+  reportId: string,
+  status: 'reviewed' | 'dismissed' | 'escalated',
+  reason?: string,
+): Promise<IslandModerationReport> {
+  return postRequired<IslandModerationReport>(
+    `/api/island/moderation/reports/${encodeURIComponent(reportId)}/resolve`,
+    { status, reason: reason ?? null },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
 export function apiIslandTheme(payload: {
+  request_id?: string;
   prompt: string;
   avoid?: string;
   difficulty?: IslandDifficultyPreference;
@@ -1069,13 +1217,22 @@ export function apiIslandTheme(payload: {
   return postRequired<IslandThemePack | IslandThemeJob>(
     '/api/island/theme',
     payload,
-    undefined,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
     { 'X-Island-Theme-Async': '1' },
   );
 }
 
-export function apiIslandThemeJob(jobId: string): Promise<IslandThemeJob> {
-  return getRequired<IslandThemeJob>(`/api/island/theme/${encodeURIComponent(jobId)}`);
+export function apiIslandThemeJob(
+  jobId: string,
+  timeoutMs: number = OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+): Promise<IslandThemeJob> {
+  return withRequestTimeout(
+    (signal) => getRequired<IslandThemeJob>(
+      `/api/island/theme/${encodeURIComponent(jobId)}`,
+      signal,
+    ),
+    Math.min(OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS, Math.max(1, timeoutMs)),
+  );
 }
 
 export interface IslandBakeJob {
