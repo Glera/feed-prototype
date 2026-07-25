@@ -234,6 +234,10 @@ tests рецепта/hardening, hash generator-base и Chromium preview autoplay
 - Visit-card отдельно гейтится `VITE_ISLAND_VISIT_AWARDS_ENABLED` +
   `ENABLE_ISLAND_VISIT_AWARDS`. Уведомления отдельно гейтятся
   `VITE_ISLAND_NOTIFICATIONS_ENABLED` + `ENABLE_ISLAND_NOTIFICATIONS`.
+- Оба независимых гейта явно утверждены оператором и включены в production
+  25.07.2026. Shipped release profile обязан быть exact
+  `Island/cards/notifications = true/true/true`; code/deploy defaults остаются
+  `false` для независимого rollback каждого P2-контура.
 - `requestWriteAccess()` вызывается однократно на осмысленном friend-действии;
   результат сохраняется на backend. Без `allows_write_pm=true` outbox не
   создаётся/не доставляется.
