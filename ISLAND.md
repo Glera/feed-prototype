@@ -57,10 +57,12 @@ seed, сложность, motion/physics, материал и маркеры ш�
 геометрия конвейера, фон. Ни backend, ни Claude/Codex не вызываются. Повторная
 настройка остаётся бесплатной и также не вызывает модель.
 
-**Guided / LOW COST.** Только `POST /api/island/theme` на backend: ограниченная
-схема v2, explicit prompt/preferences, pydantic/recipe validation, adherence для
-`dark/black/...`, различимость цветов и один корректирующий retry. Локальный
-subscription fallback из клиента удалён: это именно API-режим, доступный в TMA.
+**Guided / LOW COST.** `POST /api/island/theme` создаёт durable job (202), клиент
+поллит его до validated pack: ограниченная схема v2, explicit
+prompt/preferences, pydantic/recipe validation, adherence для `dark/black/...`,
+различимость цветов и один корректирующий retry. Model I/O не выполняется внутри
+пользовательского HTTP-запроса. Локальный subscription fallback из клиента
+удалён: это именно API-режим, доступный в TMA.
 Комментарий `Ask AI to revise` создаёт новый валидированный guided pack, не
 патчит исходную механику.
 
