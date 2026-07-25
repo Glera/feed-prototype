@@ -78,6 +78,14 @@ function normaliseState(value: IslandPersistedState): IslandPersistedState {
     .filter((building) => building && Number.isInteger(building.slot) && building.slot >= 0 && building.slot <= 9)
     .slice(0, 10);
   state.buildings.forEach((building) => {
+    // Social activity has no honest client-only representation. This also
+    // migrates old prototype caches that carried demo plays/likes before the
+    // server-authoritative social ledger existed.
+    if (!building.buildingId) {
+      building.plays = 0;
+      building.likes = 0;
+      building.liked = false;
+    }
     if (building.publishing && !building.jobId) {
       building.publishing = false;
       building.publishError = 'Publish status was interrupted; retry to confirm hosting';
