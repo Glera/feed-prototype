@@ -1130,21 +1130,13 @@ export function apiIslandWriteAccess(
   );
 }
 
-/** Async `/island/theme` job (backend §5.1). The endpoint is dual-mode in a
- *  single release: it returns a 200 pack (legacy) OR a 202 {job_id} we poll to a
- *  terminal `ready` (with the pack) / `failed`. Sending the opt-in header lets
- *  the client drive the async path before the server flips the config default. */
+/** Durable `/island/theme` job (backend §5.1). POST returns 202 {job_id}; the
+ *  client polls it to terminal `ready` (with the pack) or `failed`. */
 export interface IslandThemeJob {
   job_id: string;
   status: 'queued' | 'generating' | 'ready' | 'failed';
   pack?: IslandThemePack;
   error?: string;
-}
-
-export function isIslandThemeJob(value: IslandThemePack | IslandThemeJob): value is IslandThemeJob {
-  // A job carries `job_id` and never the pack's `items`; a legacy pack has neither.
-  return typeof (value as IslandThemeJob).job_id === 'string'
-    && !Array.isArray((value as IslandThemePack).items);
 }
 
 // ── Island Social Core (P3) — guest report + operator moderation ────────────
@@ -1300,14 +1292,11 @@ export function apiIslandTheme(payload: {
   avoid?: string;
   difficulty?: IslandDifficultyPreference;
   motion?: IslandMotionPreference;
-}): Promise<IslandThemePack | IslandThemeJob> {
-  // Opt into the durable job path per-request; a legacy backend simply ignores
-  // the header and answers 200 with a pack, which isIslandThemeJob() detects.
-  return postRequired<IslandThemePack | IslandThemeJob>(
+}): Promise<IslandThemeJob> {
+  return postRequired<IslandThemeJob>(
     '/api/island/theme',
     payload,
     OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
-    { 'X-Island-Theme-Async': '1' },
   );
 }
 

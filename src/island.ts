@@ -25,7 +25,6 @@ import {
   apiPublicIsland,
   apiSetIslandLike,
   apiStartIslandVisit,
-  isIslandThemeJob,
   type IslandReportReason,
   type IslandBakeJob,
   type IslandThemeJob,
@@ -585,10 +584,9 @@ async function requestTheme(
   payload: { prompt: string; avoid?: string; difficulty: IslandDifficultyPreference; motion: IslandMotionPreference },
   opts: AiThemeOptions,
 ): Promise<IslandThemePack> {
-  const res = await apiIslandTheme({ ...payload, request_id: opts.requestId });
-  if (!isIslandThemeJob(res)) return res;   // legacy 200 pack
-  opts.onJob?.(res.job_id);
-  return pollThemeJob(res);
+  const job = await apiIslandTheme({ ...payload, request_id: opts.requestId });
+  opts.onJob?.(job.job_id);
+  return pollThemeJob(job);
 }
 
 async function aiTheme(
@@ -599,9 +597,8 @@ async function aiTheme(
   opts: AiThemeOptions = {},
 ): Promise<Pack | null> {
   try {
-    // Dual-mode backend: a 200 pack (legacy) OR a 202 {job_id} we poll to a
-    // terminal pack. UX is unchanged — the slot still shows "theme ready ✨"
-    // once this resolves.
+    // The backend always returns a durable job that we poll to a terminal pack.
+    // UX is unchanged — the slot still shows "theme ready ✨" once this resolves.
     let apiPack: IslandThemePack;
     if (opts.resumeJobId) {
       // Resume a prior job (read it) rather than re-POST: recovers a completed
