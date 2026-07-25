@@ -16,14 +16,16 @@ export interface IslandSim {
 const ISLAND_SIM_KEY = 'p4g-island-sim-v1';
 export const REWARD_CAP = 9;   // puzzles waiting over one building before it stops accruing
 
-// Island social data source, toggled by the owner (debug panel). Until there are
-// real players, 'fake' shows the simulated plays/likes/notifier/pucks; 'real' turns
-// the sim off entirely so genuine backend likes + shares can be tested clean.
-// Defaults to 'fake' (anything but the literal 'real').
+// Island social data source, toggled by the owner (debug panel). 'fake' shows the
+// simulated plays/likes/notifier/pucks; 'real' turns the sim off entirely so
+// genuine backend gifts/likes/shares drive the island.
+// DEFAULT 'real' (Island Social Core §4.2): with the bot bootstrap loop the island
+// grows from real backend claims, so the local simulation is off unless the owner
+// explicitly opts into 'fake' from the debug panel.
 export type IslandSocialMode = 'fake' | 'real';
 const SOCIAL_MODE_KEY = 'p4g-island-social-mode';
 export function islandSocialMode(): IslandSocialMode {
-  try { return localStorage.getItem(SOCIAL_MODE_KEY) === 'real' ? 'real' : 'fake'; } catch { return 'fake'; }
+  try { return localStorage.getItem(SOCIAL_MODE_KEY) === 'fake' ? 'fake' : 'real'; } catch { return 'real'; }
 }
 export function setIslandSocialMode(m: IslandSocialMode): void {
   try { localStorage.setItem(SOCIAL_MODE_KEY, m); } catch { /* noop */ }

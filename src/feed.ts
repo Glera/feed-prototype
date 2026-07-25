@@ -39,6 +39,8 @@ import {
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
+  apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept, apiPublicIsland,
+  type IslandFriend,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
   type CatalogAllocateAuthorizedResultV2,
   type CatalogAllocationDecisionResult, type CatalogRunTicketRequestV2,
@@ -115,7 +117,7 @@ import { simulateActivity, islandSocialMode, ISLAND_SIM_EVENT, type SimBuildingR
 import { levelStarReward, seriesRewards } from './rewards.mjs';
 import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
-import { getStartParam, shareChallenge, getInitData, hasTelegramHostContext } from './telegram';
+import { getStartParam, shareChallenge, shareTelegramLink, getInitData, hasTelegramHostContext } from './telegram';
 import {
   catalogLabAuthorizationAvailable,
   catalogLabAuthUrl,
@@ -173,15 +175,22 @@ const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of dis
 // Guided-UGC island (src/island.ts) is an unreleased meta prototype. Its feed-bar
 // entry (the "Мета" tab) stays HIDDEN by default so a friend cohort never stumbles
 // into it; opt in per build with VITE_ISLAND_ENABLED=1 (or =true), matching the
-// existing default-off VITE_* front gates (see control-plane.ts). This gates ONLY
-// the UI entry — direct `?island=<ownerId>` deep-link visits (main.ts →
-// publicIsland → openIslandWorld) are intentionally untouched. The separate
-// Creator District prototype (openMetaWorld, reached via ?metaworld=1) keeps its
-// entry so its own testing path is unaffected.
+// existing default-off VITE_* front gates (see control-plane.ts). Operator decision
+// (F005, supersedes the earlier COHORT-PREFLIGHT stance for the social surface):
+// the flag gates the ENTIRE social surface — with it OFF, direct-entry deep links
+// (`i_<owner>` / `?island=` / `f_<code>`) do NOT resolve a public island, do NOT
+// mount the island world and do NOT accept invites; the deep link is silently
+// ignored (see main.ts). The separate Creator District prototype (openMetaWorld,
+// reached via ?metaworld=1) keeps its entry so its own testing path is unaffected.
 const ISLAND_UI_ENABLED = (() => {
   const raw = String((import.meta as any).env?.VITE_ISLAND_ENABLED ?? '').toLowerCase();
   return raw === 'true' || raw === '1';
 })();
+// Pending friend-invite accept persists across boots until a definitive outcome,
+// so a new user whose FK row is created by the FIRST /session still lands the
+// accept on that session (F004). Bounded by an attempt cap.
+const ISLAND_PENDING_ACCEPT_KEY = 'island-pending-friend-accept-v1';
+const ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS = 5;
 
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since
@@ -635,6 +644,11 @@ export class Feed {
   private claimedStarRewards = new Set<number>();
   private hudEl: HTMLElement | null = null;
   private storiesEl: HTMLElement | null = null;
+  // Island Social Core (§4.4): friend HUD cells. Only mounted/loaded under
+  // VITE_ISLAND_ENABLED; visible across every view because the HUD is.
+  private islandFriends: IslandFriend[] = [];
+  private friendsHudEl: HTMLElement | null = null;
+  private friendAcceptCode: string | null = null;
   private storiesMomentumFrame: number | null = null;
   private levelBadgeEl: HTMLElement | null = null;
   private levelBadgeSquash: Animation | null = null;   // in-flight counter squash (star-arrival reaction)
@@ -798,6 +812,7 @@ export class Feed {
     publicIsland: PublicIslandView | null = null,
     rosterEntries: ReadonlyArray<FeedRosterSessionEntryV1 | null> = [],
     rosterActivationId: string | null = null,
+    friendAcceptCode: string | null = null,
   ) {
     this.viewport = viewport;
     this.feedEl = feedEl;
@@ -807,6 +822,7 @@ export class Feed {
     this.feedRosterActivationId = rosterActivationId;
     this.activeChallenge = challenge;
     this.publicIsland = publicIsland;
+    this.friendAcceptCode = friendAcceptCode;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     const initialPlayableId = this.playables[this.realIndex()]?.id;
@@ -826,6 +842,11 @@ export class Feed {
     // has the 'fake' toggle on (default until real players exist); 'real' turns it off
     // so genuine backend likes/shares can be tested. Toggle lives in the debug panel.
     if (islandSocialMode() === 'fake') this.startIslandActivity();
+    // Island Social Core (§4.4/F004): a friend deep-link (startapp=f_<code>) is
+    // only PERSISTED here; the actual accept + HUD refresh run after the first
+    // successful /session bootstrap (applySessionBootstrap), because a fresh
+    // user's FK row does not exist until then.
+    if (ISLAND_UI_ENABLED && this.friendAcceptCode) this.persistPendingFriendAccept(this.friendAcceptCode);
     if (this.publicIsland) window.setTimeout(() => this.openIslandWorld(), 0);
 
     // After a slide settles: normalise the ring position, resume the arrived
@@ -941,6 +962,12 @@ export class Feed {
     this.applyConfirmedBalances(await flushResults());
     await this.syncDaily(false);
     void this.refreshChallengeRail();
+    // Island Social Core (F004): the user row is now committed, so it is safe to
+    // load the friend HUD and land any pending friend-invite accept.
+    if (ISLAND_UI_ENABLED) {
+      void this.refreshIslandFriends();
+      void this.processPendingFriendAccept();
+    }
     this.scheduleGeneratedOfferPrefetch();
   }
 
@@ -3276,7 +3303,12 @@ export class Feed {
         `<div class="story__name">${this.esc(name)}</div>`;
       frag.appendChild(el);
     }
-    if (me && me.nextSibling) rail.insertBefore(frag, me.nextSibling);
+    // Insert after the friends cluster (§4.4) when it is present, so the running
+    // order stays [You/level] [friends] [challenges…]; otherwise right after You.
+    const anchor = (this.friendsHudEl && this.friendsHudEl.parentElement === rail)
+      ? this.friendsHudEl
+      : me;
+    if (anchor && anchor.nextSibling) rail.insertBefore(frag, anchor.nextSibling);
     else rail.appendChild(frag);
     this.hudEl?.classList.toggle('hud--stories-can-right', rail.scrollWidth > rail.clientWidth + 1);
   }
@@ -5252,6 +5284,17 @@ export class Feed {
     const stories = hud.querySelector<HTMLElement>('.stories');
     this.storiesEl = stories;
     if (stories) this.attachStoryScroller(stories);
+    // Island Social Core (§4.4): friend cells sit right of the avatar/level, in
+    // the same scroller, gated by VITE_ISLAND_ENABLED. Loaded lazily after auth.
+    if (ISLAND_UI_ENABLED && stories) {
+      const me = stories.querySelector('.story--me');
+      const cluster = document.createElement('div');
+      cluster.className = 'isln-friends';
+      if (me && me.nextSibling) stories.insertBefore(cluster, me.nextSibling);
+      else stories.appendChild(cluster);
+      this.friendsHudEl = cluster;
+      this.renderFriendsHud();   // empty cells now; the network refresh runs post-/session
+    }
   }
 
 
@@ -6732,17 +6775,185 @@ export class Feed {
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
     const islandLevel = this.levelForStars(this.totalStars);
-    const ownIsland = !this.publicIsland;
     void import('./island').then((m) => m.renderIslandWorld(ov, {
       close: () => this.closeOverlay(),
       level: islandLevel,
       puzzles: () => this.totalPuzzles,
       publicIsland: this.publicIsland ?? undefined,
-      // Collecting puzzles credits the shared counter — only on the player's OWN island.
-      addPuzzles: ownIsland ? (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from) : undefined,
+      // The counter always belongs to the CURRENT user, so credit it on both
+      // islands: owner collect on their own island, and a granted guest gift on
+      // someone else's — both are the current user's puzzle balance (F009). Owner
+      // accrual stays gated to the own island inside collectReward.
+      addPuzzles: (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from),
     }));
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
+  }
+
+  // ── Island Social Core (§4.4): friend HUD cells ───────────────────────────
+  // A row of 3 friend cells + an invite "+" sits right of the avatar/level, in
+  // the HUD scroller (so it is visible on every view). Empty cells are dimmed;
+  // filled cells show a photo/initial and open that friend's island; an overflow
+  // "+N" cell opens the full list. All gated by VITE_ISLAND_ENABLED.
+  private async refreshIslandFriends(): Promise<void> {
+    if (!ISLAND_UI_ENABLED || !getInitData()) return;
+    try {
+      this.islandFriends = await apiIslandFriends();
+    } catch {
+      /* keep the last good list; the HUD stays usable */
+    }
+    this.renderFriendsHud();
+  }
+
+  private renderFriendsHud(): void {
+    const el = this.friendsHudEl;
+    if (!el) return;
+    const friends = this.islandFriends;
+    const shown = friends.slice(0, 3);
+    const overflow = Math.max(0, friends.length - 3);
+    let cells = '';
+    for (const f of shown) {
+      const name = f.first_name || f.username || 'Друг';
+      const initial = (name.trim()[0] || '?').toUpperCase();
+      const inner = f.photo_url
+        ? `<img src="${this.esc(f.photo_url)}" alt="" draggable="false"><span class="isln-friend__initial">${this.esc(initial)}</span>`
+        : `<span>${this.esc(initial)}</span>`;
+      cells += `<button type="button" class="isln-friend${f.is_bot ? ' isln-friend--bot' : ''}" data-friend-visit="${f.user_id}" title="${this.esc(name)}">${inner}</button>`;
+    }
+    // Fill remaining slots (up to 3 total) with dimmed empty cells that also invite.
+    const emptyCount = overflow > 0 ? 0 : Math.max(0, 3 - shown.length);
+    for (let i = 0; i < emptyCount; i++) {
+      cells += '<button type="button" class="isln-friend isln-friend--empty" data-friend-invite aria-label="Пригласить друга">+</button>';
+    }
+    if (overflow > 0) {
+      cells += `<button type="button" class="isln-friend isln-friend--more" data-friends-list>+${overflow}</button>`;
+    }
+    // The invite "+" is always present.
+    cells += '<button type="button" class="isln-friend isln-friend--invite" data-friend-invite aria-label="Пригласить друга">+</button>';
+    el.innerHTML = cells;
+    // Photo fallback: on load error drop the <img> so the initial shows through.
+    el.querySelectorAll<HTMLImageElement>('.isln-friend img').forEach((img) =>
+      img.addEventListener('error', () => img.remove(), { once: true }));
+    el.querySelectorAll<HTMLElement>('[data-friend-visit]').forEach((b) =>
+      b.addEventListener('click', () => this.openFriendIsland(Number(b.dataset.friendVisit))));
+    el.querySelectorAll<HTMLElement>('[data-friend-invite]').forEach((b) =>
+      b.addEventListener('click', () => { void this.inviteFriend(); }));
+    el.querySelectorAll<HTMLElement>('[data-friends-list]').forEach((b) =>
+      b.addEventListener('click', () => this.openFriendsList()));
+  }
+
+  private async inviteFriend(): Promise<void> {
+    if (!getInitData()) { this.showActivityNotifier('Открой в Telegram, чтобы приглашать друзей'); return; }
+    try {
+      const res = await apiIslandFriendCode();
+      shareTelegramLink(res.link, res.link, 'Заходи ко мне на остров!');
+    } catch (e) {
+      this.showActivityNotifier(`Не удалось создать приглашение · ${e instanceof ApiRequestError ? e.message : 'ошибка'}`);
+    }
+  }
+
+  private persistPendingFriendAccept(code: string): void {
+    // The f_<code> start param survives app reopen, so this runs on every boot.
+    // Preserve the accumulated attempt count for the SAME code (R2-F002) — only a
+    // NEW code resets it to 0 — otherwise a reopen would reset the cap and a stuck
+    // 5xx would retry forever. Definitive outcomes clear the key entirely.
+    try {
+      let attempts = 0;
+      const raw = localStorage.getItem(ISLAND_PENDING_ACCEPT_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.code === code) attempts = Number(parsed.attempts) || 0;
+      }
+      localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code, attempts }));
+    } catch { /* private mode */ }
+  }
+  private clearPendingFriendAccept(): void {
+    try { localStorage.removeItem(ISLAND_PENDING_ACCEPT_KEY); } catch { /* private mode */ }
+  }
+
+  // Land a pending friend-invite accept AFTER /session (F004). Runs at most once
+  // per bootstrap; a transient failure keeps the code for the next bootstrap,
+  // bounded by an attempt cap; a definitive outcome (or cap) clears it.
+  private async processPendingFriendAccept(): Promise<void> {
+    if (!ISLAND_UI_ENABLED || !getInitData()) return;
+    let pending: { code: string; attempts: number } | null = null;
+    try {
+      const raw = localStorage.getItem(ISLAND_PENDING_ACCEPT_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed.code === 'string') {
+        pending = { code: parsed.code, attempts: Number(parsed.attempts) || 0 };
+      }
+    } catch { pending = null; }
+    if (!pending) return;
+    if (pending.attempts >= ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS) { this.clearPendingFriendAccept(); return; }
+    // Record this attempt up-front so a crash mid-flight cannot loop forever.
+    try {
+      localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code: pending.code, attempts: pending.attempts + 1 }));
+    } catch { /* private mode */ }
+    try {
+      const res = await apiIslandFriendAccept(pending.code);
+      const name = res.friend?.first_name || res.friend?.username || 'другом';
+      this.clearPendingFriendAccept();
+      this.showActivityNotifier(
+        res.status === 'already' ? `Вы уже друзья с ${name}` : `Вы теперь друзья с ${name}`,
+      );
+      void this.refreshIslandFriends();
+    } catch (e) {
+      // Permanent outcomes stop the retry with an honest toast (no block leak,
+      // §4.4/§2.2). Transient errors (network / 5xx / not-yet-committed row) keep
+      // the code so the next successful /session bootstrap retries it.
+      if (e instanceof ApiRequestError && (e.status === 400 || e.status === 404 || e.status === 409)) {
+        this.clearPendingFriendAccept();
+        this.showActivityNotifier(
+          e.status === 409 ? 'Достигнут лимит друзей'
+            : e.status === 400 ? 'Это ваш собственный код'
+              : 'Приглашение недоступно',
+        );
+      }
+    }
+  }
+
+  private openFriendsList(): void {
+    // A lightweight list overlay: name + "в гости". P2 adds remove/block here.
+    const existing = this.viewport.querySelector('.isln-flist');
+    if (existing) { existing.remove(); return; }
+    const panel = document.createElement('div');
+    panel.className = 'isln-flist';
+    const rows = this.islandFriends.map((f) => {
+      const name = f.first_name || f.username || 'Друг';
+      const initial = (name.trim()[0] || '?').toUpperCase();
+      const avatar = f.photo_url
+        ? `<img src="${this.esc(f.photo_url)}" alt="">`
+        : `<span>${this.esc(initial)}</span>`;
+      return `<div class="isln-frow">` +
+        `<span class="isln-frow__ava${f.is_bot ? ' isln-frow__ava--bot' : ''}">${avatar}</span>` +
+        `<span class="isln-frow__nm">${this.esc(name)}${f.is_bot ? ' 🤖' : ''}</span>` +
+        `<button type="button" class="isln-frow__go" data-visit="${f.user_id}"${f.has_island ? '' : ' disabled'}>в гости</button>` +
+        `</div>`;
+    }).join('') || '<div class="isln-frow isln-frow--empty">Пока нет друзей — пригласи кого-нибудь</div>';
+    panel.innerHTML =
+      '<div class="isln-flist__scrim" data-close></div>' +
+      `<div class="isln-flist__card"><div class="isln-flist__h">Друзья</div>${rows}` +
+      '<button type="button" class="isln-flist__close" data-close>Закрыть</button></div>';
+    this.viewport.appendChild(panel);
+    panel.querySelectorAll<HTMLElement>('[data-close]').forEach((b) =>
+      b.addEventListener('click', () => panel.remove()));
+    panel.querySelectorAll<HTMLElement>('[data-visit]').forEach((b) =>
+      b.addEventListener('click', () => { panel.remove(); this.openFriendIsland(Number(b.dataset.visit)); }));
+  }
+
+  private openFriendIsland(ownerId: number): void {
+    if (!Number.isSafeInteger(ownerId) || ownerId <= 0) return;
+    if (this.overlayOpen) return;
+    void (async () => {
+      try {
+        const view = await apiPublicIsland(ownerId);
+        this.publicIsland = view;
+        this.openIslandWorld();
+      } catch (e) {
+        this.showActivityNotifier(`Остров недоступен · ${e instanceof ApiRequestError ? e.message : 'ошибка'}`);
+      }
+    })();
   }
 
   private metaTemplates(): MetaTemplate[] {
@@ -7204,6 +7415,9 @@ export class Feed {
     if (!this.overlayOpen) return;
     this.overlayOpen = false;
     const ov = this.overlayEl;
+    // After leaving a visited (guest) island, the meta tab reopens the OWNER's own
+    // island — a runtime friend visit / deep-link must not stick (§4.4).
+    if (ov?.classList.contains('island-world')) this.publicIsland = null;
     const storyFrame = this.storyFrame;
     if (storyFrame) {
       this.pauseStoryFrame(true);
@@ -9286,6 +9500,7 @@ export function createFeed(
   challenge: ChallengeView | null = null,
   publicIsland: PublicIslandView | null = null,
   rosterSnapshot: FeedRosterSessionV1 | null = null,
+  friendAcceptCode: string | null = null,
 ) {
   const resolution: FeedRosterResolutionV1 = resolveFeedRosterSession(
     rosterSnapshot,
@@ -9346,5 +9561,6 @@ export function createFeed(
     publicIsland,
     rosterEntries,
     resolution.source === 'roster' ? resolution.activationId : null,
+    friendAcceptCode,
   );
 }
