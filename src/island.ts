@@ -860,29 +860,51 @@ function maxBadgeSvg(cx: number, cy: number): string {
 // Durable handle for an in-flight async theme job, keyed by creation slot. A
 // reload drops the in-memory draft, so on re-generation we resume this job (read
 // it) instead of POSTing again — recovering a completed pack and, crucially, not
-// charging quota a second time (the server only dedups while non-terminal). Bound
-// to the prompt so a changed prompt is treated as a fresh request. Mirrors the
-// bake jobId-in-state resume pattern.
+// charging quota a second time (the server only dedups while non-terminal).
+//
+// The handle is bound to the FULL normalized request identity, not just the
+// prompt: the server digest is sha256(JCS({user, prompt, preferences:{avoid,
+// difficulty, motion}})), so changing avoid/difficulty/motion at the same prompt
+// yields a different server job. Comparing only slot+prompt (F002) would resume
+// the STALE job/pack after such a change; we compare the full identity instead so
+// any digest-affecting change is treated as a fresh request. Mirrors the bake
+// jobId-in-state resume pattern.
 const THEME_JOB_KEY = 'island-theme-jobs-v1';
-interface ThemeJobHandle { jobId: string; prompt: string; }
+interface ThemeJobHandle { jobId: string; identity: string; }
+
+/** Canonical client-side request identity over exactly the fields that feed the
+ *  server digest (the user id is constant per client, so it is omitted). Written
+ *  with a fixed key order so it is a stable comparison key on both sides of a
+ *  reload. Normalization (trim, empty-avoid→null) matches the backend. */
+function themeRequestIdentity(
+  prompt: string,
+  avoid: string | undefined,
+  difficulty: IslandDifficultyPreference,
+  motion: IslandMotionPreference,
+): string {
+  const normPrompt = (prompt ?? '').trim();
+  const normAvoid = avoid && avoid.trim() ? avoid.trim() : null;
+  return JSON.stringify({ prompt: normPrompt, preferences: { avoid: normAvoid, difficulty, motion } });
+}
+
 function readThemeJobHandles(): Record<string, ThemeJobHandle> {
   try { return JSON.parse(localStorage.getItem(THEME_JOB_KEY) || '{}') || {}; } catch { return {}; }
 }
 function writeThemeJobHandles(map: Record<string, ThemeJobHandle>): void {
   try { localStorage.setItem(THEME_JOB_KEY, JSON.stringify(map)); } catch { /* private mode */ }
 }
-function rememberThemeJob(slot: number, jobId: string, prompt: string): void {
+function rememberThemeJob(slot: number, jobId: string, identity: string): void {
   const map = readThemeJobHandles();
-  map[String(slot)] = { jobId, prompt };
+  map[String(slot)] = { jobId, identity };
   writeThemeJobHandles(map);
 }
 function forgetThemeJob(slot: number): void {
   const map = readThemeJobHandles();
   if (map[String(slot)]) { delete map[String(slot)]; writeThemeJobHandles(map); }
 }
-function resumeThemeJobId(slot: number, prompt: string): string | undefined {
+function resumeThemeJobId(slot: number, identity: string): string | undefined {
   const handle = readThemeJobHandles()[String(slot)];
-  return handle && handle.prompt === prompt ? handle.jobId : undefined;
+  return handle && handle.identity === identity ? handle.jobId : undefined;
 }
 
 const COLLECT_CLAIM_KEY = 'island-collect-claims-v1';
@@ -2384,13 +2406,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     })() : null;
 
     const guided = candidateFor(req, 'guided')!;
-    // Resume an in-flight job from a prior (pre-reload) submit of this same prompt
-    // instead of re-POSTing; persist the job id as soon as one is issued.
-    const resumeJobId = resumeThemeJobId(req.slot, req.prompt);
+    // Resume an in-flight job from a prior (pre-reload) submit with the SAME full
+    // request identity (prompt + avoid + difficulty + motion) instead of
+    // re-POSTing; persist the job id as soon as one is issued. A change to any
+    // digest-affecting field makes the identity mismatch → a fresh request.
+    const requestIdentity = themeRequestIdentity(req.prompt, req.avoid, req.difficulty, req.motion);
+    const resumeJobId = resumeThemeJobId(req.slot, requestIdentity);
     try {
       const pack = await aiTheme(req.prompt, req.avoid, req.difficulty, req.motion, {
         resumeJobId,
-        onJob: (jobId) => rememberThemeJob(req.slot, jobId, req.prompt),
+        onJob: (jobId) => rememberThemeJob(req.slot, jobId, requestIdentity),
       });
       if (generationBySlot.get(req.slot) !== generationId) return;
       if (!pack) throw new Error('API model is unavailable');
