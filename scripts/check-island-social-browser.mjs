@@ -105,12 +105,87 @@ addEventListener('load', () => {
   setTimeout(() => send({ type: 'completed', success: true }), 1600);
 });
 </script></body></html>`;
+const p2CardHtml = `<!doctype html><html><body><main class="reward"></main><script type="module">
+import { mountIslandVisitAwardCard } from '/island-p2-card.mjs';
+const query = new URLSearchParams(location.search);
+const guestInitData = query.get('initData') || '';
+const ownerInitData = query.get('ownerInitData') || '';
+const auth = (initData) => ({ Authorization: 'tma ' + initData, 'Content-Type': 'application/json' });
+const call = async (path, initData, method = 'GET', body) => {
+  const response = await fetch(${JSON.stringify(API_ORIGIN)} + path, {
+    method, headers: auth(initData), body: body == null ? undefined : JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(response.status + ':' + JSON.stringify(data));
+  return data;
+};
+window.p2 = { award: null, publicView: null, result: null, collect: null };
+const award = await call(
+  '/api/island/visit-award/from-chest',
+  guestInitData,
+  'POST',
+  { run_id: 'island-p2-browser-chest' },
+);
+window.p2.award = award;
+mountIslandVisitAwardCard({
+  parent: document.querySelector('.reward'),
+  award,
+  escapeHtml: (value) => String(value)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
+  onAccept: async () => {
+    await call('/api/island/visit-award/' + encodeURIComponent(award.roll_id) + '/accept', guestInitData, 'POST');
+    window.p2.publicView = await call('/api/island/public/' + award.target.owner_id, guestInitData);
+    document.body.dataset.accepted = '1';
+  },
+  onDecline: async () => {
+    await call('/api/island/visit-award/' + encodeURIComponent(award.roll_id) + '/decline', guestInitData, 'POST');
+  },
+  onError: (error) => { window.p2.error = String(error); },
+});
+window.completeP2Visit = async () => {
+  const building = window.p2.publicView.buildings[0];
+  const visitId = crypto.randomUUID();
+  await call('/api/island/visits/start', guestInitData, 'POST', {
+    visit_id: visitId,
+    owner_id: window.p2.award.target.owner_id,
+    building_id: building.buildingId,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1600));
+  window.p2.result = await call('/api/island/visits/' + visitId + '/result', guestInitData, 'POST', {
+    outcome: 'completed',
+    duration_ms: 1600,
+  });
+  document.body.dataset.visited = '1';
+  return window.p2.result;
+};
+window.collectP2Gift = async () => {
+  const building = window.p2.publicView.buildings[0];
+  window.p2.collect = await call(
+    '/api/island/buildings/' + building.buildingId + '/collect',
+    ownerInitData,
+    'POST',
+    { claim_id: crypto.randomUUID() },
+  );
+  document.body.dataset.collected = '1';
+  return window.p2.collect;
+};
+</script></body></html>`;
 
 const server = createServer((request, response) => {
   const url = new URL(request.url || '/', STATIC_ORIGIN);
   if (url.pathname === '/versions.json') {
     response.setHeader('content-type', 'application/json');
     response.end('{}');
+    return;
+  }
+  if (url.pathname === '/p2-card.html') {
+    response.setHeader('content-type', 'text/html; charset=utf-8');
+    response.end(p2CardHtml);
+    return;
+  }
+  if (url.pathname === '/island-p2-card.mjs') {
+    response.setHeader('content-type', 'application/javascript; charset=utf-8');
+    response.end(readFileSync(path.join(root, 'src', 'island-p2-card.mjs')));
     return;
   }
   if (url.pathname === '/' || url.pathname === '/index.html') {
@@ -144,6 +219,7 @@ const build = spawnSync('npx', ['--no-install', 'vite', 'build', '--outDir', bui
     ...process.env,
     VITE_API_BASE: API_ORIGIN,
     VITE_ISLAND_ENABLED: '1',
+    VITE_ISLAND_VISIT_AWARDS_ENABLED: '1',
     VITE_UGC_BASE_URL: STATIC_ORIGIN, // guest playable iframes load from our fake origin
   },
   timeout: 180_000,
@@ -397,6 +473,57 @@ try {
     assert.deepEqual(outcome[0], ['granted', 3], `dogfood visit outcome wrong: ${JSON.stringify(outcome[0])}`);
     summary.push(`E dogfood: fresh user → auto-friend bot → bot tick(pending=${grew}) → collect(${grew}) → visit bot → gift(+3) OK`);
     await gpage.close();
+  }
+
+  // ══ CASE F — P2 real vertical: exact chest → production card → public
+  //    transition → real visit result → owner collect, all against PostgreSQL ══
+  resetDb();
+  py('seed_p2_e2e.py');
+  {
+    const guestInitData = signInitData(GUEST, 'IslandGuest', 'guest');
+    const ownerInitData = signInitData(OWNER, 'IslandOwner', 'owner');
+    const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
+    const q = new URLSearchParams({ initData: guestInitData, ownerInitData });
+    await page.goto(`${STATIC_ORIGIN}/p2-card.html?${q.toString()}`, {
+      waitUntil: 'domcontentloaded',
+    });
+    const card = page.locator('.isln-award');
+    await card.waitFor({ state: 'visible', timeout: 15_000 });
+    const award = await page.evaluate(() => window.p2.award);
+    assert.equal(award.won, true, 'exact chest must win under the stand config');
+    assert.equal(award.holdout, false, 'stand config disables holdout');
+    assert.equal(award.target.owner_id, OWNER, 'human public owner must beat bot fallback');
+    assert.match((await card.textContent()) || '', /\+3/, 'card gift preview missing');
+    await shot(page, 'F1-p2-exact-chest-card');
+
+    await page.locator('.isln-award__go').click();
+    await page.locator('body[data-accepted="1"]').waitFor({ state: 'attached' });
+    const publicView = await page.evaluate(() => window.p2.publicView);
+    assert.equal(publicView.owner.id, OWNER, 'card did not transition to the awarded island');
+    assert.ok(publicView.buildings.length > 0, 'awarded island has no public building');
+
+    const result = await page.evaluate(() => window.completeP2Visit());
+    assert.equal(result.disposition, 'granted', `P2 visit result wrong: ${JSON.stringify(result)}`);
+    assert.equal(result.gift?.puzzles, 3, 'guest gift must use the server P1 grant');
+    const collect = await page.evaluate(() => window.collectP2Gift());
+    assert.equal(collect.disposition, 'granted', `P2 collect wrong: ${JSON.stringify(collect)}`);
+    assert.equal(collect.gifts, 1, 'owner must collect the one real P2 visit gift');
+    await shot(page, 'F2-p2-visited-and-collected');
+
+    const awardFacts = dbq(
+      `SELECT state, target_owner_id, won, holdout FROM island_visit_awards WHERE run_id='island-p2-browser-chest'`,
+    );
+    assert.deepEqual(awardFacts, [['accepted', OWNER, true, false]]);
+    const outcomeFacts = dbq(
+      `SELECT disposition, puzzles FROM island_completion_outcomes WHERE guest_id=${GUEST}`,
+    );
+    assert.deepEqual(outcomeFacts, [['granted', 3]]);
+    const collectFacts = dbq(
+      `SELECT disposition, gifts, puzzles FROM island_collect_claims WHERE owner_id=${OWNER}`,
+    );
+    assert.deepEqual(collectFacts, [['granted', 1, 1]]);
+    summary.push('F P2: exact chest → real card → island → visit(+3) → owner collect(1), DB facts OK');
+    await page.close();
   }
 
   console.log('\nISLAND SOCIAL BROWSER E2E — all cases passed:');

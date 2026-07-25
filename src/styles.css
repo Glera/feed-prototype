@@ -3182,9 +3182,51 @@ body {
 .isln-frow__ava img { width: 100%; height: 100%; object-fit: cover; }
 .isln-frow__ava--bot { background: #274a72; }
 .isln-frow__nm { flex: 1; min-width: 0; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.isln-frow__go { flex: 0 0 auto; border: 1px solid rgba(143, 216, 194, 0.5); background: rgba(76, 195, 138, 0.14); color: #8FD8C2; border-radius: 999px; padding: 7px 14px; font: 800 12px/1 system-ui, sans-serif; }
+.isln-frow__go { flex: 0 0 auto; border: 1px solid rgba(143, 216, 194, 0.5); background: rgba(76, 195, 138, 0.14); color: #8FD8C2; border-radius: 999px; padding: 7px 10px; font: 800 11px/1 system-ui, sans-serif; }
 .isln-frow__go:disabled { opacity: 0.4; }
+.isln-frow__remove,
+.isln-frow__block { flex: 0 0 auto; border: 0; background: transparent; padding: 6px 2px; font: 700 10px/1 system-ui, sans-serif; }
+.isln-frow__remove { color: rgba(255, 255, 255, 0.62); }
+.isln-frow__block { color: #ff8f91; }
 .isln-flist__close { width: 100%; margin-top: 12px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.08); color: #fff; border-radius: 12px; padding: 11px; font: 800 14px/1 system-ui, sans-serif; }
+
+/* P2 chest-bound visit card. It occupies the one post-chest prompt slot and
+   therefore replaces (rather than stacks with) the challenge pill. */
+.isln-award {
+  width: min(360px, calc(100vw - 36px));
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 10px 12px;
+  margin: 0 auto 12px;
+  padding: 13px;
+  border: 1px solid rgba(143, 216, 194, 0.42);
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(27, 73, 67, 0.95), rgba(18, 31, 47, 0.97));
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
+  color: #fff;
+  text-align: left;
+  pointer-events: auto;
+}
+.isln-award__avatar {
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #2E6E86;
+  font: 900 18px/1 system-ui, sans-serif;
+}
+.isln-award__avatar--bot { background: #274a72; }
+.isln-award__avatar img { width: 100%; height: 100%; object-fit: cover; }
+.isln-award__copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.isln-award__copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 850 15px/1.2 system-ui, sans-serif; }
+.isln-award__copy span { color: rgba(255, 255, 255, 0.72); font: 600 12px/1.35 system-ui, sans-serif; }
+.isln-award__actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1.25fr; gap: 8px; }
+.isln-award__actions button { border-radius: 12px; padding: 10px; font: 850 13px/1 system-ui, sans-serif; }
+.isln-award__later { border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.08); color: rgba(255,255,255,.76); }
+.isln-award__go { border: 1px solid rgba(143,216,194,.52); background: #4CC38A; color: #08251b; }
+.isln-award__actions button:disabled { opacity: .5; }
 
 /* "Someone played your mechanic" — a global notifier that slides down from the very
    top, ABOVE the HUD/top panel, on every view (feed included). Transient and

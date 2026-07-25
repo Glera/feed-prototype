@@ -39,8 +39,11 @@ import {
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
-  apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept, apiPublicIsland,
-  type IslandFriend,
+  apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept,
+  apiIslandFriendRemove, apiIslandFriendBlock,
+  apiIslandVisitAwardFromChest, apiIslandVisitAwardResolve,
+  apiIslandWriteAccess, apiPublicIsland,
+  type IslandFriend, type IslandVisitAward,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
   type CatalogAllocateAuthorizedResultV2,
   type CatalogAllocationDecisionResult, type CatalogRunTicketRequestV2,
@@ -115,7 +118,16 @@ import {
 import { levelStarReward, seriesRewards } from './rewards.mjs';
 import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
-import { getStartParam, shareChallenge, shareTelegramLink, getInitData, hasTelegramHostContext } from './telegram';
+import { mountIslandVisitAwardCard } from './island-p2-card.mjs';
+import {
+  getStartParam,
+  shareChallenge,
+  shareTelegramLink,
+  getInitData,
+  hasTelegramHostContext,
+  requestTelegramWriteAccess,
+  showConfirm,
+} from './telegram';
 import {
   catalogLabAuthorizationAvailable,
   catalogLabAuthUrl,
@@ -184,11 +196,21 @@ const ISLAND_UI_ENABLED = (() => {
   const raw = String((import.meta as any).env?.VITE_ISLAND_ENABLED ?? '').toLowerCase();
   return raw === 'true' || raw === '1';
 })();
+const ISLAND_VISIT_AWARD_UI_ENABLED = ISLAND_UI_ENABLED && (() => {
+  const raw = String((import.meta as any).env?.VITE_ISLAND_VISIT_AWARDS_ENABLED ?? '').toLowerCase();
+  return raw === 'true' || raw === '1';
+})();
+const ISLAND_NOTIFICATIONS_UI_ENABLED = ISLAND_UI_ENABLED && (() => {
+  const raw = String((import.meta as any).env?.VITE_ISLAND_NOTIFICATIONS_ENABLED ?? '').toLowerCase();
+  return raw === 'true' || raw === '1';
+})();
 // Pending friend-invite accept persists across boots until a definitive outcome,
 // so a new user whose FK row is created by the FIRST /session still lands the
 // accept on that session (F004). Bounded by an attempt cap.
 const ISLAND_PENDING_ACCEPT_KEY = 'island-pending-friend-accept-v1';
 const ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS = 5;
+const ISLAND_WRITE_ACCESS_ASKED_KEY = 'island-write-access-asked-v1';
+const ISLAND_WRITE_ACCESS_PENDING_KEY = 'island-write-access-pending-v1';
 
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since
@@ -666,6 +688,7 @@ export class Feed {
   private runTickets = new Map<string, RunTicketRequest>();
   private activeChallenge: ChallengeView | null = null;
   private publicIsland: PublicIslandView | null = null;
+  private authenticatedUserId: number | null = null;
   private inboxChallenges: ChallengeInboxItem[] = [];   // top-rail: friends' challenges to play
   private challengeCompleted = false;
   private challengeOverlayOpen = false;
@@ -692,6 +715,7 @@ export class Feed {
   private seriesTransitionEl: HTMLElement | null = null;
   private chestSparkTimer: number | null = null;
   private seriesWinShown = new Set<number>();   // series-end win screen is up on this unit
+  private islandVisitAwardPromise: Promise<IslandVisitAward | null> | null = null;
   private seriesLevelUpPending: number | null = null;   // level to celebrate on the first swipe off the series win screen (null = no level-up)
   private lastSolveMs = 0;                        // most recent manual solve time (result readout + challenge)
   private pendingSeriesParams = new Map<number, string>();   // encoded ?series= for the next mount of index i
@@ -939,6 +963,7 @@ export class Feed {
     // created/refreshed the user row. This avoids a first-run FK race while
     // still flushing any events persisted by an earlier app launch.
     initControlPlane();
+    this.authenticatedUserId = Number(session.user.id);
     const rosterStage = await stageFeedRosterForNextSession(localStorage, session.feedRoster);
     if (rosterStage.status === 'rejected') {
       track('roster_snapshot_rejected', { reason: rosterStage.reason });
@@ -4308,7 +4333,7 @@ export class Feed {
     if (series && reward > 0 && mechanicId) {
       const catalog = series.catalog;
       if (catalog && series.catalogChestQueued) return;
-      void queueResult({
+      const payload = {
         mechanic_id: catalog?.bundle?.runtime.playableId ?? mechanicId,
         variant_id: series.ticket.variant_id,
         run_id: series.payoutRunId, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
@@ -4316,6 +4341,10 @@ export class Feed {
         run_ticket: series.ticket,
         series_id: catalog?.bundle?.seriesId,
         tz_offset_minutes: currentTzOffsetMinutes(),
+      };
+      this.islandVisitAwardPromise = queueResultWithReceipt(payload).then((receipt) => {
+        if (receipt.status !== 'confirmed') return null;
+        return this.requestIslandVisitAward(series.payoutRunId);
       });
       this.bumpDailyProgress('stars_50', reward);
     }
@@ -4343,7 +4372,10 @@ export class Feed {
       tz_offset_minutes: currentTzOffsetMinutes(),
     }).then((receipt) => {
       if (receipt.status === 'confirmed'
-        && catalogResultAllowsProgress(receipt, series.payoutRunId)) return true;
+        && catalogResultAllowsProgress(receipt, series.payoutRunId)) {
+        this.islandVisitAwardPromise = this.requestIslandVisitAward(series.payoutRunId);
+        return true;
+      }
       // Terminal rejection is normally handled synchronously by the shared
       // listener. Storage failure has no server edge, so close it here too.
       if (this.catalogSlotIsCurrent(catalog)) {
@@ -4421,10 +4453,90 @@ export class Feed {
     // action) — same style/placement as the post-win pill, so it reads as a
     // distinct call-to-action. Persistent while the win screen is up; cleared
     // when the player leaves the unit (markUnitShown → dismissChallengePill).
-    const lastRunId = this.series?.lastRunId;
-    if (lastRunId && !this.series?.catalog) {
-      this.showChallengePill(mechanicId, this.lastSolveMs || 5000, lastRunId, true);
+    const payoutRunId = this.series?.payoutRunId ?? null;
+    const lastRunId = this.series?.lastRunId ?? null;
+    const catalogSeries = Boolean(this.series?.catalog);
+    const showFallbackPrompt = () => {
+      if (
+        lastRunId
+        && !catalogSeries
+        && payoutRunId
+        && this.series?.payoutRunId === payoutRunId
+        && this.seriesWinShown.has(i)
+      ) {
+        this.showChallengePill(mechanicId, this.lastSolveMs || 5000, lastRunId, true);
+      }
+    };
+    const awardPromise = this.islandVisitAwardPromise;
+    if (awardPromise && payoutRunId) {
+      void awardPromise.then((award) => {
+        if (
+          this.series?.payoutRunId !== payoutRunId
+          || !this.seriesWinShown.has(i)
+        ) return;
+        if (award?.won && !award.holdout && award.target) {
+          this.showIslandVisitAwardCard(i, award);
+        } else {
+          showFallbackPrompt();
+        }
+      });
+    } else {
+      showFallbackPrompt();
     }
+  }
+
+  private async requestIslandVisitAward(runId: string): Promise<IslandVisitAward | null> {
+    if (!ISLAND_VISIT_AWARD_UI_ENABLED || !getInitData()) return null;
+    try {
+      return await apiIslandVisitAwardFromChest(runId);
+    } catch {
+      // P2 is deliberately fail-quiet: a disabled backend flag, cold start, or
+      // target exhaustion must never delay/replace the confirmed chest.
+      return null;
+    }
+  }
+
+  private showIslandVisitAwardCard(i: number, award: IslandVisitAward): void {
+    const state = this.stateEls[i];
+    const reward = state?.querySelector<HTMLElement>('.reward');
+    const target = award.target;
+    if (!reward || !target || reward.querySelector('.isln-award')) return;
+    this.dismissChallengePill();
+    mountIslandVisitAwardCard({
+      parent: reward,
+      award,
+      escapeHtml: (value) => this.esc(value),
+      onShown: () => {
+        track('island_visit_award_shown', {
+          roll_id: award.roll_id,
+          target_is_bot: target.is_bot,
+        });
+      },
+      onDecline: async () => {
+        try {
+          await apiIslandVisitAwardResolve(award.roll_id, 'decline');
+          track('island_visit_award_declined', { roll_id: award.roll_id });
+        } catch {
+          track('island_visit_award_resolution_failed', {
+            roll_id: award.roll_id,
+            action: 'decline',
+          });
+        }
+      },
+      onAccept: async () => {
+        await apiIslandVisitAwardResolve(award.roll_id, 'accept');
+        const view = await apiPublicIsland(target.owner_id);
+        track('island_visit_award_accepted', {
+          roll_id: award.roll_id,
+          target_is_bot: target.is_bot,
+        });
+        this.publicIsland = view;
+        this.openIslandWorld();
+      },
+      onError: () => {
+        this.showActivityNotifier('Остров сейчас недоступен');
+      },
+    });
   }
 
   // × (or any exit) mid-series: break it, no reward.
@@ -4440,6 +4552,7 @@ export class Feed {
     this.seriesLevelUpPending = null;
     this.pulsePendingSlot = -1;
     this.dismissChallengePill();
+    this.islandVisitAwardPromise = null;
     this.hudEl?.classList.remove('hud--chest-lift');
     this.feedBarEl?.classList.remove('feed-bar--chest-lift');
     // Restore normal arrival-poster behaviour (a future feed arrival at this unit
@@ -6815,11 +6928,52 @@ export class Feed {
 
   private async inviteFriend(): Promise<void> {
     if (!getInitData()) { this.showActivityNotifier('Открой в Telegram, чтобы приглашать друзей'); return; }
+    void this.maybeRequestIslandWriteAccess();
     try {
       const res = await apiIslandFriendCode();
       shareTelegramLink(res.link, res.link, 'Заходи ко мне на остров!');
     } catch (e) {
       this.showActivityNotifier(`Не удалось создать приглашение · ${e instanceof ApiRequestError ? e.message : 'ошибка'}`);
+    }
+  }
+
+  private async maybeRequestIslandWriteAccess(): Promise<void> {
+    if (
+      !ISLAND_NOTIFICATIONS_UI_ENABLED
+      || !getInitData()
+      || !Number.isSafeInteger(this.authenticatedUserId)
+    ) return;
+    const askedKey = `${ISLAND_WRITE_ACCESS_ASKED_KEY}:${this.authenticatedUserId}`;
+    const pendingKey = `${ISLAND_WRITE_ACCESS_PENDING_KEY}:${this.authenticatedUserId}`;
+    let pending: boolean | null = null;
+    try {
+      const rawPending = localStorage.getItem(pendingKey);
+      if (rawPending === 'true' || rawPending === 'false') {
+        pending = rawPending === 'true';
+      } else if (localStorage.getItem(askedKey) === '1') {
+        return;
+      }
+      // Persist before opening the native prompt so a WebView close cannot prompt
+      // repeatedly on every meaningful action.
+      if (pending == null) localStorage.setItem(askedKey, '1');
+    } catch { /* private mode: Telegram itself still remembers the permission */ }
+    const allowed = pending ?? await requestTelegramWriteAccess();
+    if (allowed == null) return;
+    try {
+      // Preserve the native answer until backend acknowledgement. A transient
+      // API failure is retried on the next meaningful action without prompting
+      // Telegram a second time.
+      localStorage.setItem(pendingKey, String(allowed));
+    } catch { /* private mode */ }
+    try {
+      await apiIslandWriteAccess(allowed);
+      try { localStorage.removeItem(pendingKey); } catch { /* private mode */ }
+      this.showActivityNotifier(
+        allowed ? 'Уведомления об острове включены' : 'Уведомления не включены',
+      );
+    } catch {
+      // The native permission remains authoritative; the pending value above is
+      // resubmitted on the next friend action.
     }
   }
 
@@ -6900,6 +7054,8 @@ export class Feed {
         `<span class="isln-frow__ava${f.is_bot ? ' isln-frow__ava--bot' : ''}">${avatar}</span>` +
         `<span class="isln-frow__nm">${this.esc(name)}${f.is_bot ? ' 🤖' : ''}</span>` +
         `<button type="button" class="isln-frow__go" data-visit="${f.user_id}"${f.has_island ? '' : ' disabled'}>в гости</button>` +
+        `<button type="button" class="isln-frow__remove" data-remove="${f.user_id}">удалить</button>` +
+        `<button type="button" class="isln-frow__block" data-block="${f.user_id}">блок</button>` +
         `</div>`;
     }).join('') || '<div class="isln-frow isln-frow--empty">Пока нет друзей — пригласи кого-нибудь</div>';
     panel.innerHTML =
@@ -6911,6 +7067,42 @@ export class Feed {
       b.addEventListener('click', () => panel.remove()));
     panel.querySelectorAll<HTMLElement>('[data-visit]').forEach((b) =>
       b.addEventListener('click', () => { panel.remove(); this.openFriendIsland(Number(b.dataset.visit)); }));
+    panel.querySelectorAll<HTMLButtonElement>('[data-remove]').forEach((button) =>
+      button.addEventListener('click', () => {
+        void this.removeOrBlockIslandFriend(Number(button.dataset.remove), false, panel);
+      }));
+    panel.querySelectorAll<HTMLButtonElement>('[data-block]').forEach((button) =>
+      button.addEventListener('click', () => {
+        void this.removeOrBlockIslandFriend(Number(button.dataset.block), true, panel);
+      }));
+  }
+
+  private async removeOrBlockIslandFriend(
+    userId: number,
+    block: boolean,
+    panel: HTMLElement,
+  ): Promise<void> {
+    const friend = this.islandFriends.find((candidate) => candidate.user_id === userId);
+    if (!friend) return;
+    const name = friend.first_name || friend.username || 'этого пользователя';
+    const confirmed = await showConfirm(
+      block
+        ? `Заблокировать ${name}? Вы больше не увидите острова друг друга.`
+        : `Удалить ${name} из друзей?`,
+    );
+    if (!confirmed) return;
+    try {
+      if (block) await apiIslandFriendBlock(userId, true);
+      else await apiIslandFriendRemove(userId);
+      this.islandFriends = this.islandFriends.filter((candidate) => candidate.user_id !== userId);
+      panel.remove();
+      this.renderFriendsHud();
+      this.showActivityNotifier(block ? `${name} заблокирован` : `${name} удалён из друзей`);
+    } catch (error) {
+      this.showActivityNotifier(
+        `Не удалось изменить список · ${error instanceof ApiRequestError ? error.message : 'ошибка'}`,
+      );
+    }
   }
 
   private openFriendIsland(ownerId: number): void {

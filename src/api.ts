@@ -199,6 +199,32 @@ async function putRequired<T>(path: string, body: unknown): Promise<T> {
   return data as T;
 }
 
+async function deleteRequired<T>(path: string): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}${path}`, {
+      method: 'DELETE',
+      headers: headers(),
+      keepalive: true,
+    });
+  } catch (e) {
+    throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const text = await r.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
+  if (!r.ok) {
+    const detail = data?.detail ?? data?.error ?? text ?? r.statusText;
+    throw new ApiRequestError(
+      r.status,
+      `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+      backendErrorCode(data),
+    );
+  }
+  if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
+  return data as T;
+}
+
 async function getRequired<T>(path: string, signal?: AbortSignal): Promise<T> {
   let r: Response;
   try {
@@ -1039,6 +1065,69 @@ export async function apiIslandFriends(): Promise<IslandFriend[]> {
   const r = await getRequired<IslandFriend[] | { friends?: IslandFriend[] }>('/api/island/friends');
   if (Array.isArray(r)) return r;
   return r?.friends ?? [];
+}
+
+export function apiIslandFriendRemove(userId: number): Promise<{ removed: boolean }> {
+  return deleteRequired<{ removed: boolean }>(
+    `/api/island/friends/${encodeURIComponent(String(userId))}`,
+  );
+}
+
+export function apiIslandFriendBlock(
+  userId: number,
+  blocked: boolean,
+): Promise<{ blocked: boolean; friendship_removed: boolean }> {
+  return putRequired<{ blocked: boolean; friendship_removed: boolean }>(
+    `/api/island/friends/${encodeURIComponent(String(userId))}/block`,
+    { blocked },
+  );
+}
+
+export interface IslandVisitAwardTarget {
+  owner_id: number;
+  first_name: string | null;
+  username: string | null;
+  photo_url: string | null;
+  is_bot: boolean;
+  deep_link: string;
+}
+
+export interface IslandVisitAward {
+  run_id: string;
+  roll_id: string;
+  won: boolean;
+  holdout: boolean;
+  state: 'offered' | 'accepted' | 'declined';
+  target: IslandVisitAwardTarget | null;
+  gift_preview: { puzzles: number } | null;
+}
+
+export function apiIslandVisitAwardFromChest(runId: string): Promise<IslandVisitAward> {
+  return postRequired<IslandVisitAward>(
+    '/api/island/visit-award/from-chest',
+    { run_id: runId },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandVisitAwardResolve(
+  rollId: string,
+  action: 'accept' | 'decline',
+): Promise<IslandVisitAward> {
+  return postRequired<IslandVisitAward>(
+    `/api/island/visit-award/${encodeURIComponent(rollId)}/${action}`,
+    undefined,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandWriteAccess(
+  allowsWritePm: boolean,
+): Promise<{ allows_write_pm: boolean }> {
+  return putRequired<{ allows_write_pm: boolean }>(
+    '/api/island/notifications/write-access',
+    { allows_write_pm: allowsWritePm },
+  );
 }
 
 /** Async `/island/theme` job (backend §5.1). The endpoint is dual-mode in a

@@ -223,6 +223,23 @@ tests рецепта/hardening, hash generator-base и Chromium preview autoplay
 Порог, за которым переезд нужен и по нагрузке: сотни генераций в день
 (git-as-storage распухает, деплой-очередь Render).
 
+## Social P2
+
+- Список друзей поддерживает реальные `DELETE` и block/unblock; блок сразу
+  разрывает дружбу и серверно исключает обе стороны из островов, визитов,
+  наград и уведомлений.
+- После подтверждённого server ticket-bound series chest клиент может получить
+  одну visit-card. Карточка вызывается только после exact `/results` receipt,
+  не конкурирует с другим post-chest CTA, а ошибка не меняет chest/feed flow.
+- Visit-card отдельно гейтится `VITE_ISLAND_VISIT_AWARDS_ENABLED` +
+  `ENABLE_ISLAND_VISIT_AWARDS`. Уведомления отдельно гейтятся
+  `VITE_ISLAND_NOTIFICATIONS_ENABLED` + `ENABLE_ISLAND_NOTIFICATIONS`.
+- `requestWriteAccess()` вызывается однократно на осмысленном friend-действии;
+  результат сохраняется на backend. Без `allows_write_pm=true` outbox не
+  создаётся/не доставляется.
+- Локальные симулированные визиты и demo counters удалены. Карта показывает
+  только server-owned факты реальных игроков и зарегистрированных ботов.
+
 ## TODO
 
 1. **Экономика package order.** Реального списания пока нет: FREE/LOW/HIGH —
@@ -239,14 +256,12 @@ tests рецепта/hardening, hash generator-base и Chromium preview autoplay
    незапушенный коммит (безопасно — URL не выдан, но артефакт исчезает);
    логировать факт отбрасывания.
 6. **Закрытый CDN для UGC** — см. «Хостинг и приватность» выше.
-7. **Диплинк `startapp=island`** в main.ts + `requestWriteAccess()` при первой
-   генерации (право бота писать игроку).
-8. Относительный hosted-URL из dev (`ugc/...`) не переключается на
+7. Относительный hosted-URL из dev (`ugc/...`) не переключается на
    `UGC_BASE_URL` задним числом — мигрировать или хранить `rel` вместо URL.
-9. **Level-series jobs.** Очередь и provider adapters уже общие, но отдельные
+8. **Level-series jobs.** Очередь и provider adapters уже общие, но отдельные
    baseline/schema/gate для генерации уровней pins/merge ещё не заведены.
-10. **Рецепты для merge/pins** — арт в атласах, не в константах; это шаг к
+9. **Рецепты для merge/pins** — арт в атласах, не в константах; это шаг к
     настоящим арт-пакам (image-gen: фон + спрайт-лист).
-11. **Разница Safe/Guided.** Следующий слой — externalized image-gen art packs,
+10. **Разница Safe/Guided.** Следующий слой — externalized image-gen art packs,
     иначе средний tier всё ещё в основном продаёт палитру + enum-комбинацию.
-12. После стабилизации распилить `island.ts` на map/create/experiment/api.
+11. После стабилизации распилить `island.ts` на map/create/experiment/api.
