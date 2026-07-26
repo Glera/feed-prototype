@@ -66,6 +66,7 @@ import {
 } from './api';
 import { verifyChallengeBundleIdentity } from './challenge-player.mjs';
 import { playRecipientChallenge, playSourceChallenge, type ChallengePlayDeps } from './challenge-play.mjs';
+import { openRecipientEnvelope, openSourceEnvelope } from './challenge-envelope.mjs';
 import { mountChallengeLevel } from './challenge-play-overlay';
 import {
   queueResult,
@@ -3231,15 +3232,16 @@ export class Feed {
       createChallenge: (payload) => apiCreateChallengeV1Required(payload),
       verifyBundleIdentity: (bundle) => verifyChallengeBundleIdentity(bundle),
       mountLevel: (ctx) => mountChallengeLevel(ctx, { baseUrl: location.href }),
-      newUuid: () => crypto.randomUUID(),
       tzOffsetMinutes: () => currentTzOffsetMinutes(),
     };
   }
 
   /** Recipient v1 flow: view → accept → run.start → bundle (+identity gate) →
-   *  overlay → result → complete → existing win UX. */
+   *  overlay → result → complete → existing win UX. Durable envelope (P1-3):
+   *  ids minted once, reused on retry/reload. */
   private async runV1RecipientPlay(view: ChallengeSpecBoundView): Promise<void> {
     if (!getInitData()) return;
+    const env = openRecipientEnvelope(localStorage, view.id, () => crypto.randomUUID());
     this.challengePlayOpen = true;
     this.applyActiveStates();   // freeze + mute the feed behind the overlay
     try {
@@ -3248,14 +3250,18 @@ export class Feed {
         challengeId: view.id,
         mechanicId: view.mechanic_id,
         variantId: view.variant_id,
-      });
+      }, env);
+      env.clear();   // terminal success — the durable slot is done.
       this.challengeCompleted = true;
-      if (typeof out.result.balance === 'number') this.applyServerBalance(out.result.balance);
-      if (out.result.stars_awarded) this.bumpDailyProgress('stars_50', out.result.stars_awarded);
-      track('challenge_complete', { challenge_id: view.id, time_ms: out.metricValue, beat: out.result.beat });
-      this.showChallengeResult(view, out.metricValue, out.runId, out.result.beat, out.result.stars_awarded);
+      const result = out.result;
+      if (result && typeof result.balance === 'number') this.applyServerBalance(result.balance);
+      if (result?.stars_awarded) this.bumpDailyProgress('stars_50', result.stars_awarded);
+      track('challenge_complete', { challenge_id: view.id, time_ms: out.metricValue ?? 0, beat: result?.beat ?? null });
+      this.showChallengeResult(view, out.metricValue ?? 0, out.runId, result?.beat ?? false, result?.stars_awarded ?? 0);
     } catch (e) {
-      // Honest exit: an abandoned/broken/mismatched play reports nothing.
+      // Terminal contract violation / explicit abandon → drop the durable slot so
+      // it isn't wrongly resumed; a transient network error keeps it for retry.
+      if (this.challengeEnvelopeShouldClear(e)) env.clear();
       track('challenge_play_aborted', { challenge_id: view.id, reason: this.challengeAbortReason(e) });
     } finally {
       this.challengePlayOpen = false;
@@ -3264,21 +3270,24 @@ export class Feed {
   }
 
   /** Source v1 flow: server-issued level → run.start source → bundle (+identity
-   *  gate) → overlay → result → create → share sheet. */
+   *  gate) → overlay → result → create → share sheet. Durable envelope (P1-3):
+   *  request_id/ticket/run minted once, a retry continues the SAME operation. */
   private async runV1SourcePlay(): Promise<boolean> {
     if (!getInitData()) return false;
     const mechanicId = 'marble-sort-swipe';
     const variantId = this.variantIdForPlayable(mechanicId);
-    const requestId = crypto.randomUUID();
+    const env = openSourceEnvelope(localStorage, () => crypto.randomUUID());
     this.challengePlayOpen = true;
     this.applyActiveStates();
     try {
-      const out = await playSourceChallenge(this.buildChallengePlayDeps(), { mechanicId, variantId, requestId });
-      track('share_tap', { mechanic_id: mechanicId, time_ms: out.metricValue, ok: true, source: 'v1' });
-      const secs = (out.metricValue / 1000).toFixed(1);
-      shareChallenge(out.created.share_url, out.created.deep_link, `Обгонишь меня? Я прошёл за ${secs}s ⚡`);
+      const out = await playSourceChallenge(this.buildChallengePlayDeps(), { mechanicId, variantId }, env);
+      env.clear();   // terminal success — the durable slot is done.
+      track('share_tap', { mechanic_id: mechanicId, time_ms: out.metricValue ?? 0, ok: true, source: 'v1' });
+      const secs = ((out.metricValue ?? 0) / 1000).toFixed(1);
+      if (out.created) shareChallenge(out.created.share_url, out.created.deep_link, `Обгонишь меня? Я прошёл за ${secs}s ⚡`);
       return true;
     } catch (e) {
+      if (this.challengeEnvelopeShouldClear(e)) env.clear();
       track('challenge_play_aborted', { source: 'v1_source', reason: this.challengeAbortReason(e) });
       return false;
     } finally {
@@ -3291,6 +3300,19 @@ export class Feed {
     const code = (e as { code?: unknown; reason?: unknown } | null)?.code
       ?? (e as { reason?: unknown } | null)?.reason;
     return typeof code === 'string' ? code : 'error';
+  }
+
+  /** Drop the durable envelope only for TERMINAL outcomes — a contract violation
+   *  (identity mismatch, not-spec-bound, digest drift, malformed offer) or the
+   *  player explicitly closing the overlay. A transient network error is kept so
+   *  "повторить"/reload resumes the same op with the same ids (P1-3). */
+  private challengeEnvelopeShouldClear(e: unknown): boolean {
+    const reason = this.challengeAbortReason(e);
+    return reason === 'closed'
+      || reason.startsWith('challenge_identity')
+      || reason === 'challenge_not_spec_bound'
+      || reason === 'challenge_source_digest_drift'
+      || reason === 'challenge_source_offer_invalid';
   }
 
   private dismissChallengePill(): void {

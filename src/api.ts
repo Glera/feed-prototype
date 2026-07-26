@@ -1442,7 +1442,12 @@ export interface ChallengeSourceSpecV1 {
   params: Record<string, unknown>;
 }
 
-/** run.start.challenge.v1 source request (challenger freezes a spec BEFORE play). */
+/** run.start.challenge.v1 source request (challenger plays a server-issued level).
+ *  `sourceOfferRequestId` (v1.4.2 R2 P1-1) is the request_id of the committed
+ *  source-level offer this run replays: the server resolves the spec AND its
+ *  historical runtime release from that exact offer row (resolve_active_release
+ *  no longer participates), and the four echoed challengeSpec fields must match
+ *  the offered spec exactly or it is 409 challenge_source_not_offered. */
 export interface ChallengeSourceRunRequest {
   schema: 'run.start.challenge.v1';
   purpose: 'challenge_source';
@@ -1451,6 +1456,7 @@ export interface ChallengeSourceRunRequest {
   mechanic_id: string;
   variant_id: string;
   kind: 'single';
+  sourceOfferRequestId: string;
   challengeSpec: ChallengeSourceSpecV1;
 }
 

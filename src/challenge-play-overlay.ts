@@ -19,6 +19,7 @@
  */
 import { ChallengePlayerSession } from './challenge-player.mjs';
 import type { ChallengeLevelSpecBundleV1 } from './challenge-player.mjs';
+import { gameplayMessageAccepted } from './challenge-overlay-guard.mjs';
 
 let stylesInjected = false;
 function injectStyles(): void {
@@ -124,6 +125,11 @@ export function mountChallengeLevel(
     let solveStart = 0;
     let settled = false;
     let timeoutTimer: number | null = null;
+    // P1-4: once the exact level is configured+revealed, ANY further iframe load is
+    // a re-navigation (the legit runtime never reloads itself to win) — it revokes
+    // the configured epoch so no post-navigation gameplay signal is honored.
+    let revoked = false;
+    frame.addEventListener('load', () => { if (solveStart > 0) revoked = true; });
 
     const cleanup = () => {
       if (timeoutTimer !== null) { window.clearTimeout(timeoutTimer); timeoutTimer = null; }
@@ -185,8 +191,18 @@ export function mountChallengeLevel(
         }
         return;
       }
-      // Gameplay signals are only honored once the exact level is configured.
-      if (session.snapshot().phase !== 'configured' || solveStart === 0) return;
+      // Gameplay signals (P1-4): honored ONLY with exact frame identity AND the
+      // exact content-addressed origin the handshake was pinned to AND a live,
+      // un-revoked configured epoch. A post-navigation foreign-origin 'completed'
+      // fails the origin check (and the load listener has already revoked), so a
+      // navigated-away page can never win the challenge.
+      if (!gameplayMessageAccepted(event, {
+        frameSource: frame.contentWindow,
+        expectedOrigin: session.navigation.expectedOrigin,
+        phase: session.snapshot().phase,
+        solveStarted: solveStart > 0,
+        revoked,
+      })) return;
       const outcome = outcomeOf(event.data);
       if (outcome === 'won') finishWin(performance.now() - solveStart);
       // 'lost' → let the runtime restart in place; the player retries or closes.

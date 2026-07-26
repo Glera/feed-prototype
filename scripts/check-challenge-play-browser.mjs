@@ -125,6 +125,13 @@ try {
   const resetTx = () => py(`from sqlalchemy import text;from app.db import SessionLocal
 db=SessionLocal();db.execute(text("SET session_replication_role=replica"));db.execute(text("TRUNCATE TABLE ${T} RESTART IDENTITY CASCADE"));db.commit()`);
 
+  // Seed the source-level prerequisites ONCE (idempotent on a fresh migrated DB):
+  // an ACTIVE marble-sort-swipe release pinned to the REAL hosted content hex + a
+  // pool of PUBLISHED sort levels. Reproducible for CI — the recipient seed and
+  // the SOURCE case both rely on POST /challenges/source-level, which needs this.
+  const prereq = pyscript('challenge_source_prereq.py');
+  assert.ok(prereq.pool_size >= 1, `source-level published pool seeded (got ${prereq.pool_size})`);
+
   // ══ RECIPIENT (case 2) — server-seeded challenge, DOM accept → overlay → complete ══
   resetTx();
   const seed = pyscript('challenge_create_v142.py', '700000301', '700000302');
@@ -179,31 +186,29 @@ db=SessionLocal();db.execute(text("SET session_replication_role=replica"));db.ex
     const page = await newPage();
     await openFeed(page, A);
     await page.locator('#viewport').waitFor({ state: 'visible', timeout: 15_000 });
-    try {
-      // The feed fixture emits host_gesture (manual takeover) then a manual win → CTA pill.
-      const pill = page.locator('button.challenge-pill');
-      await pill.waitFor({ state: 'visible', timeout: 15_000 });
-      assert.match((await pill.textContent()) || '', /Бросить вызов/, 'source CTA pill');
-      await shot(page, 'play-A1-cta-pill');
-      const createResp = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/challenges' && r.request().method() === 'POST', { timeout: 30_000 });
-      await pill.click();
-      await page.locator('.chpl-world.chpl-world--in').waitFor({ state: 'visible', timeout: 15_000 });
-      const srcA = await page.locator('iframe.chpl-frame').getAttribute('src');
-      assert.match(srcA, /\/runtime-releases\/marble-sort-swipe\/[0-9a-f]{64}\/index\.html\?level_config=catalog_required&expected_spec_hash=[0-9a-f]{64}/, `source chpl src: ${srcA}`);
-      await page.locator('iframe.chpl-frame.chpl-frame--ready').waitFor({ state: 'attached', timeout: 15_000 });
-      await shot(page, 'play-A2-source-overlay');
-      await createResp;
-      await page.waitForTimeout(600);
-      const links = await page.evaluate(() => window.__tgLinks || []);
-      assert.ok(links.some((u) => /t\.me\/share\/url\?url=.*startapp=/.test(u)), `share deep-link opened: ${JSON.stringify(links)}`);
-      const offers = Number(dbq(`SELECT count(*) FROM challenge_source_offers WHERE user_id=${A}`)[0][0]);
-      const chs = dbq(`SELECT id::text FROM challenges WHERE challenger_id=${A}`);
-      const ev = Object.fromEntries(dbq(`SELECT kind,count(*) FROM challenge_events WHERE challenge_id='${chs[0][0]}' GROUP BY kind`).map((e) => [e[0], Number(e[1])]));
-      assert.ok(offers >= 1 && chs.length === 1 && ev.create === 1);
-      summary.push(`SOURCE: normal win → CTA → overlay → win → create → share(openTelegramLink); DB offers=${offers} challenge=1 create=1`);
-    } catch (e) {
-      summary.push(`SOURCE: [best-effort] overlay+create validated via shared overlay (recipient) + server-side offer→create; feed normal-win CTA not driven by fixture — ${String(e.message).split('\\n')[0].slice(0, 90)}`);
-    }
+    // FAIL HARD (no try/catch): the source DOM path must be proven, not green-washed.
+    // The feed fixture emits host_gesture (manual takeover) then a NON-SERIES manual
+    // win → the "Бросить вызов" CTA pill; clicking it drives the real source flow.
+    const pill = page.locator('button.challenge-pill');
+    await pill.waitFor({ state: 'visible', timeout: 15_000 });
+    assert.match((await pill.textContent()) || '', /Бросить вызов/, 'source CTA pill');
+    await shot(page, 'play-A1-cta-pill');
+    const createResp = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/challenges' && r.request().method() === 'POST', { timeout: 30_000 });
+    await pill.click();
+    await page.locator('.chpl-world.chpl-world--in').waitFor({ state: 'visible', timeout: 15_000 });
+    const srcA = await page.locator('iframe.chpl-frame').getAttribute('src');
+    assert.match(srcA, /\/runtime-releases\/marble-sort-swipe\/[0-9a-f]{64}\/index\.html\?level_config=catalog_required&expected_spec_hash=[0-9a-f]{64}/, `source chpl src: ${srcA}`);
+    await page.locator('iframe.chpl-frame.chpl-frame--ready').waitFor({ state: 'attached', timeout: 15_000 });
+    await shot(page, 'play-A2-source-overlay');
+    await createResp;
+    await page.waitForTimeout(600);
+    const links = await page.evaluate(() => window.__tgLinks || []);
+    assert.ok(links.some((u) => /t\.me\/share\/url\?url=.*startapp=/.test(u)), `share deep-link opened: ${JSON.stringify(links)}`);
+    const offers = Number(dbq(`SELECT count(*) FROM challenge_source_offers WHERE user_id=${A}`)[0][0]);
+    const chs = dbq(`SELECT id::text FROM challenges WHERE challenger_id=${A}`);
+    const ev = Object.fromEntries(dbq(`SELECT kind,count(*) FROM challenge_events WHERE challenge_id='${chs[0][0]}' GROUP BY kind`).map((e) => [e[0], Number(e[1])]));
+    assert.ok(offers >= 1 && chs.length === 1 && ev.create === 1, `source DB offers=${offers} challenges=${chs.length} events=${JSON.stringify(ev)}`);
+    summary.push(`SOURCE: normal non-series win → CTA → overlay(exact content-addressed URL) → win → create → share(openTelegramLink); DB offers=${offers} challenge=1 create=1`);
     await page.close();
   }
 

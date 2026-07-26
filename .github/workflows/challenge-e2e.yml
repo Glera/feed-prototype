@@ -1,0 +1,116 @@
+name: challenge-e2e
+
+# Share/Challenge v1 DOM E2E — the mandatory challenge browser checks run against a
+# REAL backend stand (Postgres + swipe-backend @challenge-source-level + uvicorn) and
+# a REAL content-addressed runtime path, producing a GitHub check-run on the client
+# head. These need a database + the private backend, so they CANNOT live in the base
+# `verify` lint (which only launches chromium against local fixtures).
+#
+# Gated on workflow_dispatch while the backend `challenge-source-level` head is still
+# moving (pass the exact backend sha as `backend_ref`). Promote to `pull_request`
+# once that head is frozen and SWIPE_BACKEND_DEPLOY_KEY is provisioned.
+"on":
+  workflow_dispatch:
+    inputs:
+      backend_ref:
+        description: "swipe-backend ref (challenge-source-level head sha)"
+        required: true
+        default: "challenge-source-level"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feed-prototype-challenge-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  challenge-e2e:
+    name: challenge DOM E2E (426 + recipient + rail + play)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: challenge_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/challenge_e2e
+      API_ORIGIN: http://127.0.0.1:5221
+      BOT_TOKEN: dev-challenge-token
+      ENABLE_CHALLENGE_V1: "true"
+    steps:
+      - name: Checkout feed-prototype
+        uses: actions/checkout@v4
+        with:
+          path: feed-prototype
+          persist-credentials: false
+
+      - name: Checkout pinned private swipe-ugc sibling
+        uses: actions/checkout@v4
+        with:
+          repository: Glera/swipe-ugc
+          ref: 65f1d52bca68afc976b0ea9e0a4d0a1e7685016b
+          path: swipe-ugc
+          persist-credentials: false
+          ssh-key: ${{ secrets.SWIPE_UGC_DEPLOY_KEY }}
+
+      - name: Checkout swipe-backend (challenge-source-level)
+        uses: actions/checkout@v4
+        with:
+          repository: Glera/swipe-backend
+          ref: ${{ inputs.backend_ref }}
+          path: swipe-backend
+          persist-credentials: false
+          ssh-key: ${{ secrets.SWIPE_BACKEND_DEPLOY_KEY }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install backend + migrate + start uvicorn
+        working-directory: swipe-backend
+        run: |
+          python -m venv .venv
+          ./.venv/bin/pip install -r requirements.txt
+          ./.venv/bin/alembic upgrade head
+          ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 5221 &
+          for i in $(seq 1 30); do curl -fsS "$API_ORIGIN/api/health" && break || sleep 1; done
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: feed-prototype/package-lock.json
+
+      - name: Install exact dependencies
+        working-directory: feed-prototype
+        run: npm ci
+
+      - name: Install Playwright chromium
+        working-directory: feed-prototype
+        run: npx playwright install --with-deps chromium
+
+      - name: Challenge DOM E2E (fail-hard, no green-wash)
+        working-directory: feed-prototype
+        env:
+          VENV_PY: ${{ github.workspace }}/swipe-backend/.venv/bin/python
+          BACKEND_ROOT: ${{ github.workspace }}/swipe-backend
+        run: npm run ci:challenge-browser
+
+      - name: Upload E2E screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenge-e2e-artifacts
+          path: feed-prototype/e2e-artifacts/challenge/
+          if-no-files-found: ignore

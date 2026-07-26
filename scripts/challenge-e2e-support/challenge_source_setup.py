@@ -51,13 +51,16 @@ def main():
         vid = uuid.uuid4()
         db.add(Variant(id=vid, parent_mechanic="marble-sort-swipe", schema_version=1, params={"a": 1}, source="manual"))
         db.flush()
-        offer = create_source_level(body=SourceLevelIn(request_id=f"req-{uuid.uuid4().hex}"), caller=_tma(CHALLENGER), db=db, challenge_wire="1")
+        rid = f"req-{uuid.uuid4().hex}"
+        offer = create_source_level(body=SourceLevelIn(request_id=rid), caller=_tma(CHALLENGER), db=db, challenge_wire="1")
         spec = offer["challengeSpec"]
         ticket_id, run_id = uuid.uuid4(), f"chs-{uuid.uuid4().hex}"
         start_run(body=RunStartIn.model_validate({
             "schema": cc.CHALLENGE_SOURCE_SCHEMA, "purpose": "challenge_source",
             "ticket_id": str(ticket_id), "run_id": run_id, "mechanic_id": "marble-sort-swipe",
             "variant_id": str(vid), "kind": "single",
+            # v1.4.2 R2 P1-1: address the exact committed offer this run replays.
+            "sourceOfferRequestId": rid,
             "challengeSpec": {"playableId": spec["playableId"], "adapterVersion": spec["adapterVersion"],
                               "schemaVersion": spec["schemaVersion"], "params": spec["params"]},
         }), caller=_tma(CHALLENGER), db=db, challenge_wire="1")
