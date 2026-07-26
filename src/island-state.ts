@@ -76,6 +76,17 @@ function normaliseState(value: IslandPersistedState): IslandPersistedState {
   if (!Array.isArray(state.buildings)) state.buildings = [];
   state.buildings = state.buildings
     .filter((building) => building && Number.isInteger(building.slot) && building.slot >= 0 && building.slot <= 9)
+    // Closed delivery cannot safely resolve a pre-P5 public URL/rel without its
+    // immutable digest. The server migration removes those legacy buildings,
+    // but a device may still have them in a dirty local three-way-merge base.
+    // Drop only incomplete hosted pointers; an unhosted in-flight bake (jobId
+    // with no rel/url/digest yet) remains resumable, and rel+digest without a
+    // buildingId remains recoverable through the normal state PUT round-trip.
+    .filter((building) => {
+      const hasHostedPointer = Boolean(building.rel || building.contentDigest || building.url);
+      const hasImmutableIdentity = Boolean(building.rel && building.contentDigest);
+      return !hasHostedPointer || hasImmutableIdentity;
+    })
     .slice(0, 10);
   state.buildings.forEach((building) => {
     // Social activity has no honest client-only representation. This also
