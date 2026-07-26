@@ -58,6 +58,16 @@ import {
   applyChallengeBadges,
 } from './challenge-rail';
 import {
+  apiGetChallengeSpecBoundRequired, apiAcceptChallengeV1Required,
+  apiStartChallengeRecipientRunRequired, apiStartChallengeSourceRunRequired,
+  apiGetChallengeLevelBundleRequired, apiCreateSourceLevelRequired,
+  apiPostChallengeResultRequired, apiCompleteChallengeV1Required,
+  apiCreateChallengeV1Required, type ChallengeSpecBoundView,
+} from './api';
+import { verifyChallengeBundleIdentity } from './challenge-player.mjs';
+import { playRecipientChallenge, playSourceChallenge, type ChallengePlayDeps } from './challenge-play.mjs';
+import { mountChallengeLevel } from './challenge-play-overlay';
+import {
   queueResult,
   queueResultWithReceipt,
   queueRunTicketStart,
@@ -587,6 +597,10 @@ export class Feed {
   // while daily is up. Cleared synchronously in hideDailyPanel so the frame can
   // resume the instant we return to the feed (before the panel's fade-out ends).
   private dailyOpen = false;
+  // Share/Challenge v1: a self-contained content-addressed play overlay is up
+  // (challenge-play-overlay.ts). Like dailyOpen, this lets shouldPauseFrame()
+  // freeze + mute the feed mechanic behind it. Set/cleared around the v1 play.
+  private challengePlayOpen = false;
   // Global real Island activity notifier (runs on every tab after authenticated
   // bootstrap; facts come only from server-owned completion claims).
   private activityNotifierEl: HTMLElement | null = null;
@@ -3139,7 +3153,12 @@ export class Feed {
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return;
     const ch = this.activeChallenge;
-    if (ch && !this.challengeCompleted && ch.mechanic_id === mechanicId) {
+    // A spec-bound v1 challenge is completed by playing its EXACT content-addressed
+    // level in the overlay (runV1RecipientPlay), never by a built-in win — so a
+    // built-in win here must not legacy-complete it. It falls through to the
+    // sender pill instead (offer to throw a challenge back).
+    const v1Recipient = ch != null && challengeV1Enabled() && this.challengeSpecDigestOf(ch) != null;
+    if (ch && !v1Recipient && !this.challengeCompleted && ch.mechanic_id === mechanicId) {
       this.challengeCompleted = true;
       void this.completeActiveChallenge(solveMs, runId, resultPromise);
       return;
@@ -3168,6 +3187,10 @@ export class Feed {
   }
 
   private async doCreateChallenge(mechanicId: string, solveMs: number, runId: string): Promise<boolean> {
+    // v1 (gated): "Бросить вызов" plays a SERVER-ISSUED published sort level in
+    // the overlay (the built-in feed run is non-declarative and cannot be an exact
+    // source — v1.4.2 D12), then creates the challenge from that verified run.
+    if (challengeV1Enabled()) return this.runV1SourcePlay();
     await flushResults();
     const res = await apiCreateChallenge({
       mechanic_id: mechanicId,
@@ -3180,6 +3203,94 @@ export class Feed {
     const secs = (solveMs / 1000).toFixed(1);
     shareChallenge(res.share_url, res.deep_link, `Обгонишь меня? Я прошёл за ${secs}s ⚡`);
     return true;
+  }
+
+  // ── Share/Challenge v1 exact-level play (content-addressed overlay) ────────
+  // The v1 flows below reuse the sibling player through a SELF-CONTAINED overlay
+  // (challenge-play-overlay.ts), entirely outside the feed ring/slot/catalog
+  // machinery — mirroring how the island world mounts its own surface.
+
+  /** The spec_digest of a spec-bound v1 challenge view, or null for legacy. */
+  private challengeSpecDigestOf(ch: ChallengeView): string | null {
+    const digest = (ch as Partial<ChallengeSpecBoundView>).spec_digest;
+    return typeof digest === 'string' && digest.length > 0 ? digest : null;
+  }
+
+  /** Build the play-orchestration deps: real api wire + the on-client identity
+   *  recompute (P3-2) + the overlay mount + id/tz sources. */
+  private buildChallengePlayDeps(): ChallengePlayDeps {
+    return {
+      getSpecBoundView: (id) => apiGetChallengeSpecBoundRequired(id),
+      acceptChallenge: (id) => apiAcceptChallengeV1Required(id),
+      startRecipientRun: (req) => apiStartChallengeRecipientRunRequired(req),
+      startSourceRun: (req) => apiStartChallengeSourceRunRequired(req),
+      getLevelBundle: (ticketId) => apiGetChallengeLevelBundleRequired(ticketId),
+      createSourceLevel: (requestId) => apiCreateSourceLevelRequired(requestId),
+      postResult: (payload) => apiPostChallengeResultRequired(payload),
+      complete: (payload) => apiCompleteChallengeV1Required(payload),
+      createChallenge: (payload) => apiCreateChallengeV1Required(payload),
+      verifyBundleIdentity: (bundle) => verifyChallengeBundleIdentity(bundle),
+      mountLevel: (ctx) => mountChallengeLevel(ctx, { baseUrl: location.href }),
+      newUuid: () => crypto.randomUUID(),
+      tzOffsetMinutes: () => currentTzOffsetMinutes(),
+    };
+  }
+
+  /** Recipient v1 flow: view → accept → run.start → bundle (+identity gate) →
+   *  overlay → result → complete → existing win UX. */
+  private async runV1RecipientPlay(view: ChallengeSpecBoundView): Promise<void> {
+    if (!getInitData()) return;
+    this.challengePlayOpen = true;
+    this.applyActiveStates();   // freeze + mute the feed behind the overlay
+    try {
+      track('challenge_open', { challenge_id: view.id, mechanic_id: view.mechanic_id, source: 'v1' });
+      const out = await playRecipientChallenge(this.buildChallengePlayDeps(), {
+        challengeId: view.id,
+        mechanicId: view.mechanic_id,
+        variantId: view.variant_id,
+      });
+      this.challengeCompleted = true;
+      if (typeof out.result.balance === 'number') this.applyServerBalance(out.result.balance);
+      if (out.result.stars_awarded) this.bumpDailyProgress('stars_50', out.result.stars_awarded);
+      track('challenge_complete', { challenge_id: view.id, time_ms: out.metricValue, beat: out.result.beat });
+      this.showChallengeResult(view, out.metricValue, out.runId, out.result.beat, out.result.stars_awarded);
+    } catch (e) {
+      // Honest exit: an abandoned/broken/mismatched play reports nothing.
+      track('challenge_play_aborted', { challenge_id: view.id, reason: this.challengeAbortReason(e) });
+    } finally {
+      this.challengePlayOpen = false;
+      this.applyActiveStates();
+    }
+  }
+
+  /** Source v1 flow: server-issued level → run.start source → bundle (+identity
+   *  gate) → overlay → result → create → share sheet. */
+  private async runV1SourcePlay(): Promise<boolean> {
+    if (!getInitData()) return false;
+    const mechanicId = 'marble-sort-swipe';
+    const variantId = this.variantIdForPlayable(mechanicId);
+    const requestId = crypto.randomUUID();
+    this.challengePlayOpen = true;
+    this.applyActiveStates();
+    try {
+      const out = await playSourceChallenge(this.buildChallengePlayDeps(), { mechanicId, variantId, requestId });
+      track('share_tap', { mechanic_id: mechanicId, time_ms: out.metricValue, ok: true, source: 'v1' });
+      const secs = (out.metricValue / 1000).toFixed(1);
+      shareChallenge(out.created.share_url, out.created.deep_link, `Обгонишь меня? Я прошёл за ${secs}s ⚡`);
+      return true;
+    } catch (e) {
+      track('challenge_play_aborted', { source: 'v1_source', reason: this.challengeAbortReason(e) });
+      return false;
+    } finally {
+      this.challengePlayOpen = false;
+      this.applyActiveStates();
+    }
+  }
+
+  private challengeAbortReason(e: unknown): string {
+    const code = (e as { code?: unknown; reason?: unknown } | null)?.code
+      ?? (e as { reason?: unknown } | null)?.reason;
+    return typeof code === 'string' ? code : 'error';
   }
 
   private dismissChallengePill(): void {
@@ -3225,8 +3336,6 @@ export class Feed {
     const ch = this.activeChallenge;
     if (!ch || this.challengeIntroShown) return;
     this.challengeIntroShown = true;
-    track('challenge_open', { challenge_id: ch.id, mechanic_id: ch.mechanic_id });
-    void apiAcceptChallenge(ch.id);   // register the attempt + friend edge (best-effort)
 
     const name = ch.challenger.first_name || ch.challenger.username || 'Друг';
     const secs = (ch.challenger_value / 1000).toFixed(1);
@@ -3235,6 +3344,23 @@ export class Feed {
       `<div class="challenge-ov__emoji">⚡</div>` +
       `<div class="challenge-ov__title">${this.esc(name)} бросает вызов</div>` +
       `<div class="challenge-ov__sub">Пройди быстрее <b>${secs}s</b></div>`;
+
+    // v1 (gated): a spec-bound challenge is accepted + played as its EXACT
+    // content-addressed level in the overlay — accept/run.start happen inside the
+    // v1 flow (with the wire header), so no legacy apiAcceptChallenge here.
+    const specBound = challengeV1Enabled() ? this.challengeSpecDigestOf(ch) : null;
+    if (specBound) {
+      const go = this.overlayButton('Принять', () => {
+        card.close();
+        void this.runV1RecipientPlay(ch as ChallengeSpecBoundView);
+      });
+      card.actions.appendChild(go);
+      card.show();
+      return;
+    }
+
+    track('challenge_open', { challenge_id: ch.id, mechanic_id: ch.mechanic_id });
+    void apiAcceptChallenge(ch.id);   // register the attempt + friend edge (best-effort)
     const go = this.overlayButton('Принять', () => card.close());
     card.actions.appendChild(go);
     card.show();
@@ -6544,6 +6670,7 @@ export class Feed {
     if (document.hidden) return true;
     if (this.overlayOpen) return true;   // a story / editor is up — freeze the whole feed
     if (this.dailyOpen) return true;     // daily central view is up — freeze + mute like any other non-feed tab
+    if (this.challengePlayOpen) return true;   // v1 challenge play overlay is up — freeze + mute the feed behind it
     if (this.collectingRewardIndex !== null) return true;   // star credit in flight — freeze EVERY frame behind the cover so nothing competes for the main thread
     if (this.catalogSlotForIndex(i)?.canaryProjectionRequired) return true;
     if (this.frameUsesStagedReady.has(i) && !this.frameReady.has(i)) return true;

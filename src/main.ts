@@ -81,14 +81,11 @@ async function boot(): Promise<void> {
 async function resolveDeepLinkChallenge(id: string): Promise<ChallengeView | null> {
   if (challengeV1Enabled()) {
     try {
-      const view = await apiGetChallengeSpecBoundRequired(id);
-      if (view.spec_digest) {
-        // TODO(V1-B wiring): when the content-addressed play surface lands, hand
-        // this spec-bound view to playRecipientChallenge instead of the toast.
-        showUpgradeRequiredToast();
-        return null;
-      }
-      return view; // legacy challenge — the wire header is ignored server-side.
+      // Fetch WITH the wire header. A spec-bound view (spec_digest present) is a v1
+      // challenge — the feed plays its EXACT content-addressed level in the overlay
+      // (Feed.maybeShowChallengeIntro → runV1RecipientPlay). A legacy challenge
+      // (spec_digest null) flows through the legacy path unchanged.
+      return await apiGetChallengeSpecBoundRequired(id);
     } catch (e) {
       if (isUpgradeRequired(e)) { showUpgradeRequiredToast(); return null; }
       return apiGetChallenge(id); // 404/offline → silent legacy fallback (unchanged).

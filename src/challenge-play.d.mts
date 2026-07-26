@@ -10,7 +10,7 @@ export interface ChallengePlayMountContext {
 }
 
 export interface ChallengePlayDeps {
-  getSpecBoundView(id: string): Promise<{ spec_digest?: string | null } & Record<string, unknown>>;
+  getSpecBoundView(id: string): Promise<{ spec_digest?: string | null }>;
   acceptChallenge(id: string): Promise<unknown>;
   startRecipientRun(req: {
     ticket_id: string; run_id: string; mechanic_id: string; variant_id: string;
