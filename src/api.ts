@@ -852,6 +852,9 @@ export interface IslandBuildingState {
   publishError?: string;
   jobId?: string;
   rel?: string;
+  contentDigest?: string;
+  // Development/rolling-compatibility only. Production closed delivery never
+  // receives or persists an artifact URL in island state.
   url?: string;
   // ── Island Social Core (P1) server-derived fields ──────────────────────────
   // All optional and read-only: the backend adds them to /island/state (owner)
@@ -1317,7 +1320,8 @@ export interface IslandBakeJob {
   job_id: string;
   status: 'queued' | 'baking' | 'deploying' | 'ready' | 'published' | 'failed';
   rel: string;
-  url: string;
+  content_digest?: string;
+  url?: string;
   error: string;
   ready: boolean;
 }
@@ -1328,6 +1332,20 @@ export function apiIslandBake(payload: { request_id: string; pack: IslandThemePa
 
 export function apiIslandBakeJob(jobId: string): Promise<IslandBakeJob> {
   return getRequired<IslandBakeJob>(`/api/island/bake/${encodeURIComponent(jobId)}`);
+}
+
+export interface IslandArtifactUrl {
+  building_id: string;
+  rel: string;
+  contentDigest: string;
+  url: string;
+  expires_at: string;
+}
+
+export function apiIslandArtifactUrl(buildingId: string): Promise<IslandArtifactUrl> {
+  return getRequired<IslandArtifactUrl>(
+    `/api/island/artifact-url?building_id=${encodeURIComponent(buildingId)}`,
+  );
 }
 
 export interface ChallengeInboxItem {

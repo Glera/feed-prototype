@@ -6,6 +6,55 @@ import Anthropic from '@anthropic-ai/sdk';
 import { execFile, spawn } from 'child_process';
 import { finalizePack, recipe as sortRecipe, renderThemePrompt, resolvePreferences, validatePack, validatePromptAdherence, validateRerollDifference } from '../swipe-ugc/recipes/sort/recipe.mjs';
 
+// The pre-publish candidate preview is a first-party platform asset, not
+// player UGC. Bundle its frozen generator payload into one local HTML file so
+// privatizing the old swipe-ugc static origin cannot break the creation flow.
+function islandCandidatePreview(): Plugin {
+  return {
+    name: 'island-candidate-preview',
+    apply: 'build',
+    generateBundle() {
+      const ugcRoot = path.resolve(__dirname, '../swipe-ugc');
+      const previewPath = path.join(ugcRoot, 'preview', 'sort-v2.html');
+      const payloadPath = path.join(ugcRoot, 'bases', 'sort-v2', 'payload.js');
+      let html = fs.readFileSync(previewPath, 'utf8');
+      const payload = fs.readFileSync(payloadPath, 'utf8').replace(/<\/script/gi, '<\\/script');
+      const loader = /<script\s+type=["']module["']>\s*if\s*\(!window\.__UGC_PREVIEW_ERROR__\)\s*import\(['"]\.\.\/bases\/sort-v2\/payload\.js['"]\);\s*<\/script>/i;
+      if (!loader.test(html)) throw new Error('Island candidate preview loader drifted');
+      html = html.replace(
+        loader,
+        `<script type="module">\nif (!window.__UGC_PREVIEW_ERROR__) {\n${payload}\n}\n</script>`,
+      );
+      const csp = [
+        "default-src 'none'",
+        "script-src 'unsafe-inline' blob:",
+        "style-src 'unsafe-inline'",
+        'img-src data: blob:',
+        'media-src data: blob:',
+        'font-src data:',
+        "connect-src 'none'",
+        "worker-src 'none'",
+        "frame-src 'none'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+      ].join('; ');
+      html = html.replace(
+        /<head(\s[^>]*)?>/i,
+        (head) => `${head}\n<meta http-equiv="Content-Security-Policy" content="${csp}">`,
+      );
+      if (/<script\b[^>]*\bsrc\s*=/i.test(html) || !html.includes("connect-src 'none'")) {
+        throw new Error('Island candidate preview is not self-contained and network-denied');
+      }
+      this.emitFile({
+        type: 'asset',
+        fileName: 'island-preview-sort-v2.html',
+        source: html,
+      });
+    },
+  };
+}
+
 // Local-only process supervisor. Starting the SWIPE dev platform also starts
 // the persistent subscription-backed generator, while an already-running
 // standalone instance is reused. Detached job runners outlive either HTTP
@@ -406,7 +455,13 @@ function islandThemeApi(): Plugin {
 // (one file, no external requests, openable on a phone via the deploy URL).
 export default defineConfig({
   base: './',
-  plugins: [localGeneratorLifecycle(), servePlayables(), islandThemeApi(), viteSingleFile()],
+  plugins: [
+    localGeneratorLifecycle(),
+    servePlayables(),
+    islandThemeApi(),
+    viteSingleFile(),
+    islandCandidatePreview(),
+  ],
   define: {
     // Build stamp shown bottom-left on the feed bar so it's clear which platform
     // build is live. deploy-swipe.sh passes PLATFORM_VERSION="<time> · <commit>" so the
