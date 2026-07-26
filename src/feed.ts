@@ -7078,6 +7078,12 @@ export class Feed {
       b.addEventListener('click', () => { void this.inviteFriend(); }));
     el.querySelectorAll<HTMLElement>('[data-friends-list]').forEach((b) =>
       b.addEventListener('click', () => this.openFriendsList()));
+    // P3-3: renderFriendsHud rebuilds the cluster (wiping any badges), and friends
+    // populate ASYNCHRONOUSLY after boot — so re-apply the ⚡ challenge badges here
+    // from the current inbox (gated; display-only, graphs stay separate).
+    if (challengeV1Enabled()) {
+      applyChallengeBadges(el, friendsWithActiveChallenge(this.inboxChallenges));
+    }
   }
 
   private async inviteFriend(): Promise<void> {

@@ -1484,6 +1484,38 @@ export function apiCreateChallengeV1Required(payload: {
   );
 }
 
+/**
+ * Server-issued challenge SOURCE level (v1.4.2 D12). The client cannot author a
+ * source level (built-in sort levels are non-declarative on the client; catalog
+ * runs are forbidden by D4), so the server picks an operator-approved published
+ * sort level, freezes it into the challenge contour and returns the full
+ * challengeSpec + spec_digest. The caller MUST persist `request_id` before the
+ * call and reuse it on retry (idempotent: a repeat returns the same offer). The
+ * returned `challengeSpec` carries the runtime digests for reference; run.start
+ * accepts only the four authored fields (see apiStartChallengeSourceRunRequired).
+ */
+export interface ChallengeSourceLevelOffer {
+  request_id: string;
+  spec_digest: string;
+  challengeSpec: {
+    playableId: string;
+    adapterVersion: number;
+    schemaVersion: number;
+    params: Record<string, unknown>;
+    runtimeContractDigest: string;
+    runtimeArtifactDigest: string;
+  };
+}
+
+export function apiCreateSourceLevelRequired(requestId: string): Promise<ChallengeSourceLevelOffer> {
+  return postRequired<ChallengeSourceLevelOffer>(
+    '/api/challenges/source-level',
+    { request_id: requestId },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+    challengeWireHeaders(),
+  );
+}
+
 /** Read a spec-bound v1 challenge to play it (deep-link landing). */
 export function apiGetChallengeSpecBoundRequired(id: string): Promise<ChallengeSpecBoundView> {
   return getRequired<ChallengeSpecBoundView>(
@@ -1507,6 +1539,17 @@ export async function apiGetChallengeLevelBundleRequired(
     challengeWireHeaders(),
   );
   return validateChallengeLevelBundle(raw);
+}
+
+/**
+ * Read a challenge WITHOUT the wire header, surfacing the HTTP status. A legacy
+ * challenge returns its view (200); a spec-bound v1 challenge returns a typed 426
+ * `challenge_client_upgrade_required`. Used at flag OFF to honestly distinguish a
+ * v1 deep-link (→ "please update" toast) from a genuinely missing/offline one,
+ * instead of the silent-null the legacy getter collapses everything into.
+ */
+export function apiGetChallengeRawRequired(id: string): Promise<ChallengeView> {
+  return getRequired<ChallengeView>(`/api/challenges/${encodeURIComponent(id)}`);
 }
 
 /** Recipient opens a spec-bound challenge (attempt + first-writer receipt). */

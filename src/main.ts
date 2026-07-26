@@ -3,7 +3,12 @@ import { createFeed } from './feed';
 import { setMechanicVersions } from './playables';
 import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
-import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
+import {
+  apiGetChallenge, apiGetChallengeRawRequired, apiGetChallengeSpecBoundRequired,
+  ApiRequestError, type ChallengeView, type PublicIslandView,
+} from './api';
+import { apiPublicIsland } from './api';
+import { challengeV1Enabled } from './challenge-config';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 import { loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 
@@ -35,7 +40,7 @@ async function boot(): Promise<void> {
   // reloads — reusing the same landing path).
   const sp = getStartParam() || new URLSearchParams(location.search).get('c');
   if (isChallengeParam(sp)) {
-    challenge = await apiGetChallenge(sp!);   // null if offline / not found → boots normally
+    challenge = await resolveDeepLinkChallenge(sp!);
   }
   // Operator decision (F005): VITE_ISLAND_ENABLED gates the ENTIRE social surface,
   // direct-entry deep links included. With the flag OFF, `i_<owner>`/`?island=`
@@ -62,6 +67,67 @@ async function boot(): Promise<void> {
     ? await loadVerifiedFeedRosterSessionSnapshot(localStorage)
     : null;
   createFeed(viewport, feedEl, challenge, publicIsland, rosterSnapshot, friendAcceptCode);
+}
+
+/**
+ * Classify a challenge deep-link. A legacy (non-spec-bound) challenge boots
+ * exactly as before. A spec-bound v1 challenge carries content-addressed level
+ * identity that this build's exact-level play surface does not yet mount — so we
+ * NEVER hand it to the legacy path (which would silently play the wrong built-in
+ * level): instead we show an honest "please update" toast and boot the normal
+ * feed. This holds in BOTH flag states (flag OFF has no wire header at all; flag
+ * ON detects spec_digest). Missing/offline still degrades silently as before.
+ */
+async function resolveDeepLinkChallenge(id: string): Promise<ChallengeView | null> {
+  if (challengeV1Enabled()) {
+    try {
+      const view = await apiGetChallengeSpecBoundRequired(id);
+      if (view.spec_digest) {
+        // TODO(V1-B wiring): when the content-addressed play surface lands, hand
+        // this spec-bound view to playRecipientChallenge instead of the toast.
+        showUpgradeRequiredToast();
+        return null;
+      }
+      return view; // legacy challenge — the wire header is ignored server-side.
+    } catch (e) {
+      if (isUpgradeRequired(e)) { showUpgradeRequiredToast(); return null; }
+      return apiGetChallenge(id); // 404/offline → silent legacy fallback (unchanged).
+    }
+  }
+  // Flag OFF: probe WITHOUT the wire header so a v1 challenge answers 426 and we
+  // can honestly say "update", rather than the legacy getter's silent null.
+  try {
+    return await apiGetChallengeRawRequired(id);
+  } catch (e) {
+    if (isUpgradeRequired(e)) { showUpgradeRequiredToast(); return null; }
+    return null; // not found / offline → boot normally (byte-identical to before).
+  }
+}
+
+function isUpgradeRequired(e: unknown): boolean {
+  return e instanceof ApiRequestError
+    && (e.status === 426 || e.code === 'challenge_client_upgrade_required');
+}
+
+let upgradeToastShown = false;
+function showUpgradeRequiredToast(): void {
+  if (upgradeToastShown) return;
+  upgradeToastShown = true;
+  const tg = (window as unknown as { Telegram?: { WebApp?: { showAlert?: (m: string) => void } } }).Telegram?.WebApp;
+  const message = 'Обнови приложение, чтобы сыграть этот вызов ⚡';
+  if (tg && typeof tg.showAlert === 'function') { try { tg.showAlert(message); return; } catch { /* fall through */ } }
+  const toast = document.createElement('div');
+  toast.textContent = message;
+  toast.setAttribute('role', 'status');
+  toast.style.cssText = [
+    'position:fixed', 'left:50%', 'top:calc(env(safe-area-inset-top,0px) + 16px)',
+    'transform:translateX(-50%)', 'z-index:2147483647', 'max-width:82%',
+    'padding:10px 14px', 'border-radius:12px', 'background:rgba(20,22,28,0.94)',
+    'color:#fff', 'font:600 13px/1.3 system-ui,sans-serif', 'text-align:center',
+    'box-shadow:0 6px 24px rgba(0,0,0,0.4)', 'pointer-events:none',
+  ].join(';');
+  document.body.appendChild(toast);
+  window.setTimeout(() => toast.remove(), 5000);
 }
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
