@@ -50,7 +50,7 @@ await new Promise((resolve, reject) => {
 
 const telegramSdk = `
 window.Telegram={WebApp:{
-  initData:'',initDataUnsafe:{},platform:'web',
+  initData:'signed',initDataUnsafe:{user:{id:42}},platform:'web',
   ready(){},expand(){},disableVerticalSwipes(){},enableClosingConfirmation(){},
   setHeaderColor(){},setBackgroundColor(){},lockOrientation(){},onEvent(){},offEvent(){},
   HapticFeedback:{impactOccurred(){},notificationOccurred(){},selectionChanged(){}},
@@ -82,6 +82,22 @@ const publicView = {
   deep_link: '',
   share_url: '',
 };
+const ownerState = {
+  tokens: 120,
+  buildings: [{
+    buildingId,
+    slot: 0,
+    tpl: 'sort',
+    pack: 'neon',
+    name: 'Closed mechanic',
+    plays: 0,
+    likes: 0,
+    liked: false,
+    jobId: 'b1000000-0000-4000-8000-000000000000',
+    rel,
+    contentDigest: digest,
+  }],
+};
 
 let browser;
 try {
@@ -90,6 +106,7 @@ try {
   const calls = [];
   let mismatched = false;
   let privateLoads = 0;
+  let bakeStatusCalls = 0;
   const consoleLines = [];
   await context.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
     status: 200,
@@ -112,12 +129,32 @@ try {
     });
     if (url.pathname === '/api/session') {
       return json({
-        user: { id: 77, ref_code: 'p5', first_name: 'Guest' },
+        user: { id: 42, ref_code: 'p5', first_name: 'Owner' },
         ref_code: 'p5',
         balance: 0,
         puzzles: 0,
         is_new: false,
       });
+    }
+    if (url.pathname === '/api/island/state' && method === 'GET') {
+      return json({
+        state: ownerState,
+        revision: 5,
+        schema_version: 5,
+        updated_at: '2026-07-26T08:10:04Z',
+      });
+    }
+    if (url.pathname === '/api/island/state' && method === 'PUT') {
+      return json({
+        state: ownerState,
+        revision: 6,
+        schema_version: 5,
+        updated_at: '2026-07-26T08:10:05Z',
+      });
+    }
+    if (url.pathname.startsWith('/api/island/bake/')) {
+      bakeStatusCalls += 1;
+      return json({ detail: 'legacy bake must not be resumed' }, 500);
     }
     if (url.pathname === '/api/island/public/42') return json(publicView);
     if (url.pathname === '/api/island/artifact-url') {
@@ -195,7 +232,64 @@ try {
   assert.equal(privateLoads, 1, 'identity mismatch loaded a second private object');
   await mismatchPage.close();
 
-  console.log('island P5 browser: exact resolver identity, bearer containment and fail-closed mismatch verified');
+  const staleState = {
+    tokens: 120,
+    buildings: [
+      ownerState.buildings[0],
+      {
+        slot: 1,
+        tpl: 'sort',
+        pack: 'legacy-a',
+        name: 'Pre-P5 ash',
+        plays: 0,
+        likes: 0,
+        liked: false,
+        jobId: 'b2000000-0000-4000-8000-000000000000',
+        rel: 'u/42/pre-p5-ash-a31e1cc0.html',
+      },
+      {
+        slot: 2,
+        tpl: 'sort',
+        pack: 'legacy-b',
+        name: 'Pre-P5 basalt',
+        plays: 0,
+        likes: 0,
+        liked: false,
+        jobId: 'b3000000-0000-4000-8000-000000000000',
+        url: 'https://legacy-public.invalid/u/42/pre-p5-basalt.html',
+      },
+    ],
+  };
+  await context.addInitScript(({ state }) => {
+    localStorage.setItem('island-proto-v1:42', JSON.stringify(state));
+    localStorage.setItem('island-proto-v1-sync:42', JSON.stringify({
+      revision: 4,
+      base: state,
+      dirty: true,
+    }));
+  }, { state: staleState });
+
+  const ownerPage = await context.newPage();
+  await ownerPage.goto(`${origin}/?initData=p5-browser`, { waitUntil: 'domcontentloaded' });
+  await ownerPage.locator('[data-bar-tab="meta"]').click();
+  await ownerPage.locator('.island-world').waitFor({ state: 'attached' });
+  await ownerPage.waitForFunction(() => {
+    const cached = JSON.parse(localStorage.getItem('island-proto-v1:42') || '{}');
+    return cached.buildings?.length === 1 && cached.buildings[0]?.name === 'Closed mechanic';
+  });
+  assert.equal(await ownerPage.getByText('Pre-P5 ash', { exact: true }).count(), 0);
+  assert.equal(await ownerPage.getByText('Pre-P5 basalt', { exact: true }).count(), 0);
+  assert.equal(bakeStatusCalls, 0, 'dirty pre-P5 cache resumed an unverifiable legacy bake');
+  const repairedCache = await ownerPage.evaluate(() =>
+    JSON.parse(localStorage.getItem('island-proto-v1:42') || '{}'));
+  assert.deepEqual(
+    repairedCache.buildings.map((building) => building.name),
+    ['Closed mechanic'],
+    'authoritative P5 state did not replace the repaired cache',
+  );
+  await ownerPage.close();
+
+  console.log('island P5 browser: exact resolver identity, bearer containment, fail-closed mismatch and legacy-cache repair verified');
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));
