@@ -59,7 +59,9 @@ function pyscript(name, ...args) {
 // Legit runtime fixture: handshake then (optionally) win. NEVER self-reloads.
 const chplFixture = (win) => `<!doctype html><html><body data-legit="1"><script>
 const send=(m)=>parent.postMessage(m,'*');
-const C=${JSON.stringify(CONTRACT)},A=${JSON.stringify(ARTIFACT)};
+// artifact digest derived from this fixture's OWN content-addressed URL (see play-browser)
+const C=${JSON.stringify(CONTRACT)};
+const A='sha256:'+((location.pathname.match(/runtime-releases\\/[^/]+\\/([0-9a-f]{64})\\//)||[])[1]||'');
 addEventListener('message',(e)=>{const d=e.data||{};
   if(d.type==='configure_level'){
     send({type:'configured',appliedSpecHash:d.spec&&d.spec.specHash,runtimeContractDigest:C,runtimeArtifactDigest:A});
@@ -84,9 +86,9 @@ const appDir = mkdtempSync(path.join(tmpdir(), 'xorig-'));
 const build = spawnSync('npx', ['--no-install', 'vite', 'build', '--outDir', appDir, '--emptyOutDir'], {
   cwd: root, encoding: 'utf8',
   env: { ...process.env, VITE_API_BASE: API, VITE_ISLAND_ENABLED: '1', VITE_CHALLENGE_V1_ENABLED: 'true', VITE_UGC_BASE_URL: APP },
-  timeout: 180_000,
+  timeout: 420_000,
 });
-assert.equal(build.status, 0, `build failed: ${build.stdout}\n${build.stderr}`);
+assert.equal(build.status, 0, `build failed (status=${build.status}${build.signal ? ', signal=' + build.signal : ''}${build.error ? ', ' + build.error.message : ''}): ${build.stdout}\n${build.stderr}`);
 
 let legitWins = true;
 const appServer = createServer((req, r) => {

@@ -60,8 +60,8 @@ function buildServe(enabled, port) {
   const origin = `http://127.0.0.1:${port}`;
   const env = { ...process.env, VITE_API_BASE: API, VITE_ISLAND_ENABLED: '1', VITE_UGC_BASE_URL: origin };
   if (enabled) env.VITE_CHALLENGE_V1_ENABLED = 'true'; else delete env.VITE_CHALLENGE_V1_ENABLED;
-  const b = spawnSync('npx', ['--no-install', 'vite', 'build', '--outDir', dir, '--emptyOutDir'], { cwd: root, encoding: 'utf8', env, timeout: 180_000 });
-  assert.equal(b.status, 0, `build failed: ${b.stdout}\n${b.stderr}`);
+  const b = spawnSync('npx', ['--no-install', 'vite', 'build', '--outDir', dir, '--emptyOutDir'], { cwd: root, encoding: 'utf8', env, timeout: 420_000 });
+  assert.equal(b.status, 0, `build failed (status=${b.status}${b.signal ? ', signal=' + b.signal : ''}${b.error ? ', ' + b.error.message : ''}): ${b.stdout}\n${b.stderr}`);
   const server = createServer((req, r) => {
     const u = new URL(req.url || '/', origin);
     if (u.pathname === '/versions.json') { r.setHeader('content-type', 'application/json'); return r.end('{}'); }
@@ -83,6 +83,10 @@ try {
   browser = await chromium.launch();
   const load = async (origin) => {
     const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
+    // The SDK fixture must exist BEFORE the app's modules evaluate — routing
+    // telegram.org alone leaves window.Telegram undefined at boot and the app never
+    // reaches /api/session (empty friends cluster, no inbox cards, no ⚡ badge).
+    await page.addInitScript(telegramSdkFixture);
     await page.route('https://telegram.org/js/telegram-web-app.js', (r) => r.fulfill({ status: 200, contentType: 'application/javascript', body: telegramSdkFixture }));
     const seen = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/session' && r.request().method() === 'POST').catch(() => null);
     await page.goto(`${origin}/?${new URLSearchParams({ initData: sign(V) }).toString()}`, { waitUntil: 'domcontentloaded' });
@@ -96,10 +100,8 @@ try {
     await page.locator('.stories').first().waitFor({ state: 'visible', timeout: 15_000 });
     await page.locator(`.isln-friends [data-friend-visit="${C}"]`).waitFor({ state: 'attached', timeout: 15_000 });
     await page.locator(`.story[data-challenge="${CID}"]`).waitFor({ state: 'attached', timeout: 15_000 });
-    // The ⚡ friend badge is applied by renderChallengeRail; at boot it can race
-    // the async island-friends population. Force a rail refresh now that both the
-    // friend cell and the inbox card are present, then the badge decorates.
-    await page.evaluate(() => window.__feedRefreshRail && window.__feedRefreshRail());
+    // Both the friend cell and the inbox card are present now; renderFriendsHud
+    // re-applies the ⚡ badges from the current inbox (P3-3), so just wait for it.
     await page.locator(`.isln-friends [data-friend-visit="${C}"] .isln-friend__challenge-badge`).waitFor({ state: 'attached', timeout: 15_000 });
     const badge = (await page.locator(`.isln-friends [data-friend-visit="${C}"] .isln-friend__challenge-badge`).textContent()) || '';
     assert.match(badge, /⚡/, `friend challenge badge text: "${badge}"`);

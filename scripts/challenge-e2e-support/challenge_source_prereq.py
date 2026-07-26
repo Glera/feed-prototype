@@ -60,14 +60,35 @@ def _seed_release_real_hex(owner_id=880001):
                 "artifact": row.runtime_artifact_digest, "index_locator": row.index_locator}
 
 
+def _existing_active_release():
+    """Reuse an already-active marble release (idempotent re-runs, and one active
+    row per mechanic/variant is a DB invariant) instead of inserting a duplicate."""
+    with SessionLocal() as db:
+        row = db.execute(text(
+            "SELECT release_id, runtime_contract_digest, runtime_artifact_digest, index_locator "
+            "FROM runtime_releases WHERE playable_id='marble-sort-swipe' AND state='active' LIMIT 1"
+        )).fetchone()
+    if row is None:
+        return None
+    return {"release_id": row[0], "contract": row[1], "artifact": row[2], "index_locator": row[3]}
+
+
 def main() -> None:
-    release = _seed_release_real_hex()
-    hashes = [_seed_sort_level(params=_sort_params(rot), state="published") for rot in range(6)]
-    _seed_sort_level(params=_sort_params(20), state="candidate")  # excluded (proves published-only)
+    # Idempotent: reuse the active release if one is already there, else seed it.
+    release = _existing_active_release() or _seed_release_real_hex()
+    with SessionLocal() as db:
+        published = db.execute(text(
+            "SELECT count(*) FROM catalog_entries WHERE mechanic='sort' AND state='published'"
+        )).scalar()
+    if published:
+        pool_size = int(published)
+    else:
+        pool_size = len([_seed_sort_level(params=_sort_params(rot), state="published") for rot in range(6)])
+        _seed_sort_level(params=_sort_params(20), state="candidate")  # excluded (proves published-only)
     print(json.dumps({
         "release_id": str(release["release_id"]), "contract": release["contract"],
         "artifact": release["artifact"], "index_locator": release["index_locator"],
-        "pool_size": len(hashes), "sample_spec_digest_rot0": _challenge_digest(release, _sort_params(0)),
+        "pool_size": pool_size, "sample_spec_digest_rot0": _challenge_digest(release, _sort_params(0)),
     }, indent=2, default=str))
 
 

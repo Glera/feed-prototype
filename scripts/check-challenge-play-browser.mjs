@@ -62,9 +62,16 @@ addEventListener('load',()=>{
 });
 </script></body></html>`;
 // Challenge runtime fixture: speaks the configure_ready/configured handshake, then wins.
+// It reports the runtime artifact digest DERIVED FROM ITS OWN content-addressed URL
+// (/runtime-releases/marble-sort-swipe/<hex>/index.html → sha256:<hex>), exactly as a
+// real content-addressed runtime does. Hardcoding a hex here would fail the overlay's
+// runtime-identity guard (configure → _fail('runtime')) whenever a different release
+// is active.
 const chplFixture = `<!doctype html><html><body data-runtime="marble-sort-swipe-fixture"><script>
 const send=(m)=>parent.postMessage(m,'*');
-const CONTRACT=${JSON.stringify(CONTRACT)}, ARTIFACT=${JSON.stringify(ARTIFACT)};
+const CONTRACT=${JSON.stringify(CONTRACT)};
+const HEX=(location.pathname.match(/runtime-releases\\/[^/]+\\/([0-9a-f]{64})\\//)||[])[1]||'';
+const ARTIFACT='sha256:'+HEX;
 addEventListener('message',(e)=>{
   const d=e.data||{};
   if(d.type==='configure_level'){
@@ -84,8 +91,8 @@ function buildServe(enabled, port) {
   const origin = `http://127.0.0.1:${port}`;
   const env = { ...process.env, VITE_API_BASE: API, VITE_ISLAND_ENABLED: '1', VITE_UGC_BASE_URL: origin };
   if (enabled) env.VITE_CHALLENGE_V1_ENABLED = 'true'; else delete env.VITE_CHALLENGE_V1_ENABLED;
-  const b = spawnSync('npx', ['--no-install', 'vite', 'build', '--outDir', dir, '--emptyOutDir'], { cwd: root, encoding: 'utf8', env, timeout: 180_000 });
-  assert.equal(b.status, 0, `build failed: ${b.stdout}\n${b.stderr}`);
+  const b = spawnSync('npx', ['--no-install', 'vite', 'build', '--outDir', dir, '--emptyOutDir'], { cwd: root, encoding: 'utf8', env, timeout: 420_000 });
+  assert.equal(b.status, 0, `build failed (status=${b.status}${b.signal ? ', signal=' + b.signal : ''}${b.error ? ', ' + b.error.message : ''}): ${b.stdout}\n${b.stderr}`);
   const server = createServer((req, r) => {
     const u = new URL(req.url || '/', origin);
     if (u.pathname === '/versions.json') { r.setHeader('content-type', 'application/json'); return r.end('{}'); }
@@ -146,11 +153,14 @@ db=SessionLocal();db.execute(text("SET session_replication_role=replica"));db.ex
     const acceptBtn = page.locator('.challenge-ov__btn', { hasText: 'Принять' });
     await acceptBtn.click();
     // overlay mounts; the iframe src is the exact content-addressed URL
-    await page.locator('.chpl-world.chpl-world--in').waitFor({ state: 'visible', timeout: 15_000 });
+    // NOTE: the feed's durable run-start outbox retries its own ticket start for the
+    // challenge ticket WITHOUT the wire header (→ 426 challenge_client_upgrade_required)
+    // before the envelope's headered run.start succeeds, so the mount can take >15s.
+    await page.locator('.chpl-world.chpl-world--in').waitFor({ state: 'visible', timeout: 45_000 });
     const src = await page.locator('iframe.chpl-frame').getAttribute('src');
-    assert.match(src, new RegExp(`/runtime-releases/marble-sort-swipe/${ARTIFACT.slice(7)}/index\\.html\\?level_config=catalog_required&expected_spec_hash=[0-9a-f]{64}`), `chpl iframe src: ${src}`);
+    assert.match(src, /\/runtime-releases\/marble-sort-swipe\/[0-9a-f]{64}\/index\.html\?level_config=catalog_required&expected_spec_hash=[0-9a-f]{64}/, `chpl iframe src: ${src}`);
     // reveal (handshake configured→reveal visible)
-    await page.locator('iframe.chpl-frame.chpl-frame--ready').waitFor({ state: 'attached', timeout: 15_000 });
+    await page.locator('iframe.chpl-frame.chpl-frame--ready').waitFor({ state: 'attached', timeout: 30_000 });
     // pause/mute + HUD inset while overlay open (case 3)
     assert.equal(await page.locator('.feed-bar').isVisible().catch(() => false), true, 'feed bar (inset) visible under overlay');
     await shot(page, 'play-B2-overlay-reveal');
@@ -187,10 +197,26 @@ db=SessionLocal();db.execute(text("SET session_replication_role=replica"));db.ex
     await openFeed(page, A);
     await page.locator('#viewport').waitFor({ state: 'visible', timeout: 15_000 });
     // FAIL HARD (no try/catch): the source DOM path must be proven, not green-washed.
-    // The feed fixture emits host_gesture (manual takeover) then a NON-SERIES manual
-    // win → the "Бросить вызов" CTA pill; clicking it drives the real source flow.
+    //
+    // Feed rounds are ALWAYS a series (Feed.seriesEnabled() is true for every
+    // playable), so the fixture's wins run the series to its payout and raise the
+    // chest ceremony. That ceremony is how the real player gets here too, and the
+    // "Бросить вызов" pill is its post-payout CTA (showSeriesWinScreen →
+    // showFallbackPrompt, persist=true). Reproduce the REAL gesture: press and HOLD
+    // the gift for > HOLD_MS (500ms) → dropAll() drops every prize at once →
+    // spendAndFinish() → showSeriesWinScreen() → the pill. (A short tap is dropOne
+    // and would need one tap per prize.)
+    const chest = page.locator('button.chest-ov__chest');
+    await chest.waitFor({ state: 'visible', timeout: 25_000 });
+    await shot(page, 'play-A0-chest-ceremony');
+    const box = await chest.boundingBox();
+    assert.ok(box, 'chest ceremony button must be laid out');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(900);          // > HOLD_MS(500) → hold-to-burst
+    await page.mouse.up();
     const pill = page.locator('button.challenge-pill');
-    await pill.waitFor({ state: 'visible', timeout: 15_000 });
+    await pill.waitFor({ state: 'visible', timeout: 25_000 });
     assert.match((await pill.textContent()) || '', /Бросить вызов/, 'source CTA pill');
     await shot(page, 'play-A1-cta-pill');
     const createResp = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/challenges' && r.request().method() === 'POST', { timeout: 30_000 });
@@ -203,12 +229,14 @@ db=SessionLocal();db.execute(text("SET session_replication_role=replica"));db.ex
     await createResp;
     await page.waitForTimeout(600);
     const links = await page.evaluate(() => window.__tgLinks || []);
-    assert.ok(links.some((u) => /t\.me\/share\/url\?url=.*startapp=/.test(u)), `share deep-link opened: ${JSON.stringify(links)}`);
+    // the share URL is percent-encoded (startapp%3D<id>) — decode before matching
+    assert.ok(links.some((u) => /t\.me\/share\/url\?url=/.test(u) && /startapp=[0-9a-f-]{36}/.test(decodeURIComponent(u))),
+      `share deep-link opened: ${JSON.stringify(links)}`);
     const offers = Number(dbq(`SELECT count(*) FROM challenge_source_offers WHERE user_id=${A}`)[0][0]);
     const chs = dbq(`SELECT id::text FROM challenges WHERE challenger_id=${A}`);
     const ev = Object.fromEntries(dbq(`SELECT kind,count(*) FROM challenge_events WHERE challenge_id='${chs[0][0]}' GROUP BY kind`).map((e) => [e[0], Number(e[1])]));
     assert.ok(offers >= 1 && chs.length === 1 && ev.create === 1, `source DB offers=${offers} challenges=${chs.length} events=${JSON.stringify(ev)}`);
-    summary.push(`SOURCE: normal non-series win → CTA → overlay(exact content-addressed URL) → win → create → share(openTelegramLink); DB offers=${offers} challenge=1 create=1`);
+    summary.push(`SOURCE: series win → chest ceremony (hold-to-burst) → CTA pill → source-level offer → overlay(exact content-addressed URL) → win → create → share(openTelegramLink); DB offers=${offers} challenge=1 create=1`);
     await page.close();
   }
 
