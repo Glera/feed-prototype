@@ -1022,6 +1022,38 @@ export function apiIslandCollect(
   );
 }
 
+export interface IslandActivityEvent {
+  claim_id: string;
+  seq: number;
+  occurred_at: string;
+  source: 'human' | 'bot';
+  actor: {
+    id: number;
+    name: string;
+    is_bot: boolean;
+  };
+  building: {
+    id: string;
+    name: string;
+  };
+}
+
+export interface IslandActivityPage {
+  schema: 'island.activity.v1';
+  cursor: number;
+  events: IslandActivityEvent[];
+}
+
+/** Read only server-recorded completion claims for the caller's own island.
+ * Omitting `afterSeq` bootstraps the current high-water mark without replaying
+ * historical activity. */
+export function apiIslandActivity(afterSeq?: number): Promise<IslandActivityPage> {
+  const query = afterSeq == null
+    ? ''
+    : `?after_seq=${encodeURIComponent(String(Math.max(0, Math.floor(afterSeq))))}`;
+  return getRequired<IslandActivityPage>(`/api/island/activity${query}`);
+}
+
 export interface IslandFriend {
   user_id: number;
   first_name: string | null;
