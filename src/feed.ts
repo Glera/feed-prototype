@@ -39,11 +39,11 @@ import {
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
-  apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept,
+  apiIslandActivity, apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept,
   apiIslandFriendRemove, apiIslandFriendBlock,
   apiIslandVisitAwardFromChest, apiIslandVisitAwardResolve,
   apiIslandWriteAccess, apiPublicIsland,
-  type IslandFriend, type IslandVisitAward,
+  type IslandActivityEvent, type IslandFriend, type IslandVisitAward,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
   type CatalogAllocateAuthorizedResultV2,
   type CatalogAllocationDecisionResult, type CatalogRunTicketRequestV2,
@@ -211,6 +211,8 @@ const ISLAND_PENDING_ACCEPT_KEY = 'island-pending-friend-accept-v1';
 const ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS = 5;
 const ISLAND_WRITE_ACCESS_ASKED_KEY = 'island-write-access-asked-v1';
 const ISLAND_WRITE_ACCESS_PENDING_KEY = 'island-write-access-pending-v1';
+const ISLAND_ACTIVITY_CURSOR_KEY = 'island-activity-cursor-v1';
+const ISLAND_ACTIVITY_POLL_MS = 30_000;
 
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since
@@ -579,9 +581,16 @@ export class Feed {
   // while daily is up. Cleared synchronously in hideDailyPanel so the frame can
   // resume the instant we return to the feed (before the panel's fade-out ends).
   private dailyOpen = false;
-  // Global "someone played your mechanic" activity sim (runs on every tab).
+  // Global real Island activity notifier (runs on every tab after authenticated
+  // bootstrap; facts come only from server-owned completion claims).
   private activityNotifierEl: HTMLElement | null = null;
   private activityNotifierTimer: number | null = null;
+  private activityNotifierQueue: string[] = [];
+  private activityNotifierActive = false;
+  private islandActivityPollTimer: number | null = null;
+  private islandActivityPollInFlight = false;
+  private islandActivityCursor: number | null | undefined;
+  private islandActivityUserId: number | null = null;
   private dailyTimerEl: HTMLElement | null = null;
   private dailyTickTimer: number | null = null;
   private dailySyncing = false;
@@ -986,6 +995,7 @@ export class Feed {
     if (ISLAND_UI_ENABLED) {
       void this.refreshIslandFriends();
       void this.processPendingFriendAccept();
+      this.startIslandActivityPolling();
     }
     this.scheduleGeneratedOfferPrefetch();
   }
@@ -1387,6 +1397,8 @@ export class Feed {
 
   private invalidateAuthenticatedSessionState(): void {
     this.authenticatedSessionEpoch += 1;
+    this.authenticatedUserId = null;
+    this.stopIslandActivityPolling();
     for (const slot of this.catalogSlots.values()) slot.exposure.binding = null;
     this.applyBuiltinFeedBindings(undefined);
     this.applyCatalogLabAuthorizationCapability(false);
@@ -4231,23 +4243,161 @@ export class Feed {
     flight.addEventListener('finish', () => { window.clearTimeout(impactTimer); land(); }, { once: true });
   }
 
+  private startIslandActivityPolling(): void {
+    const userId = this.authenticatedUserId;
+    if (userId === null || !Number.isSafeInteger(userId) || !getInitData()) return;
+    if (this.islandActivityUserId !== userId) {
+      this.islandActivityUserId = userId;
+      this.islandActivityCursor = undefined;
+    }
+    if (this.islandActivityPollTimer === null) {
+      this.islandActivityPollTimer = window.setInterval(() => {
+        if (!document.hidden) void this.pollIslandActivity();
+      }, ISLAND_ACTIVITY_POLL_MS);
+    }
+    void this.pollIslandActivity();
+  }
+
+  private stopIslandActivityPolling(): void {
+    if (this.islandActivityPollTimer !== null) {
+      window.clearInterval(this.islandActivityPollTimer);
+      this.islandActivityPollTimer = null;
+    }
+    if (this.activityNotifierTimer !== null) {
+      window.clearTimeout(this.activityNotifierTimer);
+      this.activityNotifierTimer = null;
+    }
+    this.activityNotifierQueue = [];
+    this.activityNotifierActive = false;
+    this.activityNotifierEl?.classList.remove('activity-toast--show');
+    this.islandActivityPollInFlight = false;
+    this.islandActivityCursor = undefined;
+    this.islandActivityUserId = null;
+  }
+
+  private islandActivityCursorKey(userId: number): string {
+    return `${ISLAND_ACTIVITY_CURSOR_KEY}:${userId}`;
+  }
+
+  private loadIslandActivityCursor(userId: number): number | null {
+    try {
+      const raw = localStorage.getItem(this.islandActivityCursorKey(userId));
+      if (raw === null) return null;
+      const value = Number(raw);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private saveIslandActivityCursor(userId: number, cursor: number): void {
+    try {
+      localStorage.setItem(this.islandActivityCursorKey(userId), String(cursor));
+    } catch { /* in-memory cursor still prevents repeats in private mode */ }
+  }
+
+  private islandActivityMessages(events: IslandActivityEvent[]): string[] {
+    const groups = new Map<string, IslandActivityEvent[]>();
+    for (const event of events) {
+      if (
+        !event
+        || !Number.isSafeInteger(event.seq)
+        || event.seq < 0
+        || typeof event.building?.id !== 'string'
+        || typeof event.building?.name !== 'string'
+        || typeof event.actor?.name !== 'string'
+      ) continue;
+      const groupKey = `${event.building.id}:${event.actor.is_bot ? 'bot' : 'human'}`;
+      const group = groups.get(groupKey) ?? [];
+      group.push(event);
+      groups.set(groupKey, group);
+    }
+    return [...groups.values()].map((group) => {
+      const first = group[0];
+      const actor = `${first.actor.is_bot ? '🤖' : '👤'} ${first.actor.name}`;
+      return group.length === 1
+        ? `${actor} — новое прохождение «${first.building.name}»`
+        : `${actor} и ещё ${group.length - 1} — новые прохождения «${first.building.name}»`;
+    });
+  }
+
+  private async pollIslandActivity(): Promise<void> {
+    const userId = this.authenticatedUserId;
+    if (
+      this.islandActivityPollInFlight
+      || document.hidden
+      || userId === null
+      || !Number.isSafeInteger(userId)
+      || this.islandActivityUserId !== userId
+    ) return;
+    this.islandActivityPollInFlight = true;
+    try {
+      if (this.islandActivityCursor === undefined) {
+        this.islandActivityCursor = this.loadIslandActivityCursor(userId);
+      }
+      const requestedCursor = this.islandActivityCursor;
+      const page = await apiIslandActivity(requestedCursor ?? undefined);
+      if (
+        this.authenticatedUserId !== userId
+        || page.schema !== 'island.activity.v1'
+        || !Number.isSafeInteger(page.cursor)
+        || page.cursor < 0
+        || !Array.isArray(page.events)
+      ) return;
+      const nextCursor = Math.max(requestedCursor ?? 0, page.cursor);
+      this.islandActivityCursor = nextCursor;
+      this.saveIslandActivityCursor(userId, nextCursor);
+      // A missing local cursor is a baseline read by contract: never surface
+      // historical bot activity on the first launch of this feature.
+      if (requestedCursor === null) return;
+      for (const message of this.islandActivityMessages(page.events)) {
+        this.showActivityNotifier(message);
+      }
+    } catch {
+      // Activity is ambient and must never disrupt gameplay or session sync.
+      // The unchanged cursor makes the next foreground/timer edge retry safely.
+    } finally {
+      this.islandActivityPollInFlight = false;
+    }
+  }
+
   private showActivityNotifier(text: string): void {
+    this.activityNotifierQueue.push(text);
+    if (this.activityNotifierActive) return;
+    this.presentNextActivityNotifier();
+  }
+
+  private presentNextActivityNotifier(): void {
+    const text = this.activityNotifierQueue.shift();
+    if (!text) {
+      this.activityNotifierActive = false;
+      return;
+    }
+    this.activityNotifierActive = true;
     let el = this.activityNotifierEl;
     if (!el) {
       el = document.createElement('div');
       el.className = 'activity-toast';
+      el.setAttribute('role', 'status');
+      el.setAttribute('aria-live', 'polite');
       this.viewport.appendChild(el);
       this.activityNotifierEl = el;
     }
     el.textContent = text;
-    // restart the slide-in + auto-hide
     el.classList.remove('activity-toast--show');
-    void el.offsetWidth;   // reflow so the animation replays
+    void el.offsetWidth;
     el.classList.add('activity-toast--show');
     if (this.activityNotifierTimer != null) window.clearTimeout(this.activityNotifierTimer);
+    const duration = Math.min(6000, Math.max(3000, text.length * 55));
     this.activityNotifierTimer = window.setTimeout(
-      () => el?.classList.remove('activity-toast--show'),
-      Math.min(6000, Math.max(3000, text.length * 55)),
+      () => {
+        el?.classList.remove('activity-toast--show');
+        this.activityNotifierTimer = window.setTimeout(() => {
+          this.activityNotifierActive = false;
+          this.presentNextActivityNotifier();
+        }, 360);
+      },
+      duration,
     );
   }
 

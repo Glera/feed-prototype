@@ -31,7 +31,7 @@
 | `feed-prototype` | UI острова и подключение к сервисам | `src/island.ts`, `src/feed.ts`, `src/api.ts`; в dev раздаёт `/ugc/*`, но не запускает agent jobs |
 | `swipe-generator` | Отдельная локальная персистентная очередь | `.data/jobs`, Claude/Codex adapters, detached runners; Vite запускает/перезапускает сервис на `127.0.0.1:4317` |
 | `swipe-backend` | Продакшн-эндпоинты + bake-runtime | `/api/island/theme`, durable `/api/island/bake` jobs, Node + Playwright runtime; клонирует только `swipe-ugc` |
-| `swipe-ugc` | Нерелизные базы, воркеры и hosting артефактов | `bases/sort-v2`, `generator/baselines.json`, `worker/bake.mjs`, `worker/experiment.mjs`, `render.yaml` |
+| `swipe-ugc` | Приватные нерелизные базы и воркеры; артефакты публикуются в private R2 | `bases/sort-v2`, `generator/baselines.json`, `worker/bake.mjs`, `worker/experiment.mjs` |
 | `playables` | Только first-party SWIPE-механики | `canonical/swipe-locks.json` + `scripts/check-swipe-canonical.mjs` защищают эталонный sort при каждой SWIPE-сборке |
 
 ## Поток: создание механики
@@ -98,17 +98,20 @@ Telegram. Гарантируется terminal outcome job, а не успешн�
    кэш навсегда, «новая версия» = новый файл);
 2. **тест** — headless chromium (playwright), всегда полная победа автоплеем;
    провал → ничего не коммитится, артефакты удаляются;
-3. **publish** — `git commit` + `push` в swipe-ugc (Render автодеплоит ~1 мин);
+3. **publish** — idempotent upload single-file content-addressed HTML в
+   private R2 + immutable HeadObject-проверка;
 4. **notify** — `sendMessage` игроку от бота («сгенерирована, протестирована,
-   опубликована» + ссылка);
-5. бэкенд ждёт доступности URL (до `island_deploy_wait_sec`=90 с), сохраняет
-   `ready/published`, а клиент восстанавливает поллинг после перезагрузки.
+   опубликована» + deep-link на остров);
+5. backend сохраняет только `rel + contentDigest`; клиент восстанавливает
+   поллинг после перезагрузки и получает 600-second bearer только через
+   authenticated `/island/artifact-url`.
 
-URL выдаётся игроку **строго после push** — любая аварийная ветка оставляет
-здание на эталонной механике, битых ссылок не бывает. Bake-runtime на Render
-готовится фоном при старте API: клонирует только `swipe-ugc`, ставит его
-зависимости и валидирует замороженную базу. Доступа к `playables` у runtime нет;
-статус — `bake_runtime` в `/health`.
+Hosted identity становится доступна **строго после проверочного HEAD** — любая
+аварийная ветка оставляет здание на эталонной механике, битых ссылок не бывает.
+Bake-runtime на Render готовится фоном при старте API: клонирует приватный
+`swipe-ugc` по read-only deploy key, ставит зависимости и валидирует
+замороженную базу. Доступа к `playables` у runtime нет; статус —
+`bake_runtime` в `/health`.
 
 ### Играние (лесенка приоритетов)
 
@@ -213,17 +216,16 @@ tests рецепта/hardening, hash generator-base и Chromium preview autoplay
 
 ## Хостинг и приватность
 
-Сейчас UGC хостится в **публичном** репо `github.com/Glera/swipe-ugc` +
-бесплатный Render static. Для прототипа это ок (статик-хостинг всё равно
-публичен, а public-репо даёт запасной CDN через jsDelivr).
+P5 закрыт 26.07.2026. UGC хранится в private Cloudflare R2 как single-file
+content-addressed HTML. Island state v5 содержит только `rel + contentDigest`,
+никогда bearer URL. Authenticated resolver повторно проверяет exact current
+building identity, block и takedown и выдаёт signed GET на 600 секунд.
+Публичный Render `swipe-ugc` остановлен, репозиторий приватизирован.
 
-**Решение на будущее: сгенерированные механики прятать.** Целевая схема —
-закрытый CDN: приватный bucket (S3/R2) + отдача через CDN с непубличными /
-подписанными URL, без листинга; репозиторий приватизировать или заменить
-объектным хранилищем (воркер меняет только шаг publish). Причины: механики
-игроков — контент продукта, не для скрейпинга и разглядывания вне платформы.
-Порог, за которым переезд нужен и по нагрузке: сотни генераций в день
-(git-as-storage распухает, деплой-очередь Render).
+Честный residual: уже загруженные в iframe байты нельзя отозвать из памяти.
+Block/takedown сразу запрещает новый resolve; уже выданная ссылка живёт не
+дольше 600 секунд. Device-матрица iOS/Android/macOS прошла fresh, resume,
+expiry, re-resolve и revoke.
 
 ## Social P2
 
@@ -245,6 +247,11 @@ tests рецепта/hardening, hash generator-base и Chromium preview autoplay
   создаётся/не доставляется.
 - Локальные симулированные визиты и demo counters удалены. Карта показывает
   только server-owned факты реальных игроков и зарегистрированных ботов.
+- Глобальный slide-down «кто-то сыграл» также не симулируется:
+  `GET /island/activity` читает только append-only completion claims. Первый
+  read ставит cursor без исторического replay; затем отдельные human/bot
+  сообщения приходят после authenticated bootstrap, раз в 30 секунд на
+  foreground и после reopen.
 
 ## TODO
 
@@ -261,13 +268,10 @@ tests рецепта/hardening, hash generator-base и Chromium preview autoplay
 5. `checkout -B` в `start-bake-runtime.sh` при рестарте молча отбрасывает
    незапушенный коммит (безопасно — URL не выдан, но артефакт исчезает);
    логировать факт отбрасывания.
-6. **Закрытый CDN для UGC** — см. «Хостинг и приватность» выше.
-7. Относительный hosted-URL из dev (`ugc/...`) не переключается на
-   `UGC_BASE_URL` задним числом — мигрировать или хранить `rel` вместо URL.
-8. **Level-series jobs.** Очередь и provider adapters уже общие, но отдельные
+6. **Level-series jobs.** Очередь и provider adapters уже общие, но отдельные
    baseline/schema/gate для генерации уровней pins/merge ещё не заведены.
-9. **Рецепты для merge/pins** — арт в атласах, не в константах; это шаг к
+7. **Рецепты для merge/pins** — арт в атласах, не в константах; это шаг к
     настоящим арт-пакам (image-gen: фон + спрайт-лист).
-10. **Разница Safe/Guided.** Следующий слой — externalized image-gen art packs,
+8. **Разница Safe/Guided.** Следующий слой — externalized image-gen art packs,
     иначе средний tier всё ещё в основном продаёт палитру + enum-комбинацию.
-11. После стабилизации распилить `island.ts` на map/create/experiment/api.
+9. После стабилизации распилить `island.ts` на map/create/experiment/api.
