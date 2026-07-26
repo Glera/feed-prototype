@@ -34,13 +34,14 @@ jobs:
           path: feed-prototype
           persist-credentials: false
 
-      - name: Checkout pinned public swipe-ugc sibling
+      - name: Checkout pinned private swipe-ugc sibling
         uses: actions/checkout@v4
         with:
           repository: Glera/swipe-ugc
           ref: 65f1d52bca68afc976b0ea9e0a4d0a1e7685016b
           path: swipe-ugc
           persist-credentials: false
+          ssh-key: ${{ secrets.SWIPE_UGC_DEPLOY_KEY }}
 
       - name: Set up Node 22
         uses: actions/setup-node@v4

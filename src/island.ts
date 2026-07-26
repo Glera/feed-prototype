@@ -17,6 +17,7 @@ import {
   apiCompleteIslandVisit,
   apiIslandBake,
   apiIslandBakeJob,
+  apiIslandArtifactUrl,
   apiIslandCollect,
   apiIslandReport,
   apiIslandTheme,
@@ -261,7 +262,6 @@ const WORLD_W = 540, WORLD_H = 830, VIEW_W = 390, VIEW_H = 540;
 // persisted/public snapshot.
 function fmtNum(n: number): string { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
-const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
 const LOCAL_GENERATOR_URL = String((import.meta as any).env?.VITE_LOCAL_GENERATOR_URL || 'http://127.0.0.1:4317').replace(/\/$/, '');
 
 function stableSeed(value: string): number {
@@ -302,8 +302,13 @@ function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 240);
 }
 function hostedUrl(building: Building): string | null {
-  if (building.rel) return IS_DEV ? `/ugc/${building.rel}` : `${UGC_BASE_URL}/${building.rel}`;
+  if (!IS_DEV) return null;
+  if (building.rel) return `/ugc/${building.rel}`;
   return building.url ?? null;
+}
+function hasHostedArtifact(building: Building): boolean {
+  if (IS_DEV) return Boolean(hostedUrl(building));
+  return Boolean(building.buildingId && building.rel && building.contentDigest);
 }
 
 // ── Island Social Core: builtin binding runtime resolution (F002/F007) ──────
@@ -324,7 +329,7 @@ type BuildingRuntime =
   | { kind: 'hosted' | 'stock'; src: string; label: string }
   | { kind: 'builtin'; src: string; label: string; mechanicId: string }
   | { kind: 'unavailable'; reason: string };
-function resolveBuildingRuntime(b: Building, packName: string): BuildingRuntime {
+async function resolveBuildingRuntime(b: Building, packName: string): Promise<BuildingRuntime> {
   const hosted = hostedUrl(b);
   if (hosted) {
     return {
@@ -332,6 +337,36 @@ function resolveBuildingRuntime(b: Building, packName: string): BuildingRuntime 
       src: `${hosted}${hosted.includes('?') ? '&' : '?'}auto=0`,
       label: `${isLocalExperiment(b) ? 'LOCAL LAB' : 'HOSTED'} · ${packName}`,
     };
+  }
+  if (b.rel && b.contentDigest && b.buildingId) {
+    try {
+      const resolved = await apiIslandArtifactUrl(b.buildingId);
+      const bearer = new URL(resolved.url);
+      const expiresAt = Date.parse(resolved.expires_at);
+      if (
+        resolved.building_id !== b.buildingId
+        || resolved.rel !== b.rel
+        || resolved.contentDigest !== b.contentDigest
+        || bearer.protocol !== 'https:'
+        || !bearer.searchParams.has('X-Amz-Signature')
+        || !Number.isFinite(expiresAt)
+        || expiresAt <= Date.now() + 5_000
+      ) {
+        return { kind: 'unavailable', reason: 'artifact resolver returned a different immutable identity' };
+      }
+      return {
+        kind: 'hosted',
+        // The complete query belongs to the SigV4 bearer. Never append even a
+        // harmless-looking gameplay parameter after the server signs it.
+        src: resolved.url,
+        label: `HOSTED · ${packName}`,
+      };
+    } catch (error) {
+      return { kind: 'unavailable', reason: `artifact resolver failed: ${errorText(error)}` };
+    }
+  }
+  if (b.rel || b.contentDigest || b.url) {
+    return { kind: 'unavailable', reason: 'hosted mechanic has no complete immutable identity' };
   }
   const builtin = b.builtin;
   if (builtin) {
@@ -411,7 +446,7 @@ function candidatePreviewUrl(candidate: CreationCandidate): string | null {
     return url ? `${url}${url.includes('?') ? '&' : '?'}auto=0` : null;
   }
   if (!candidate.pack) return null;
-  const shell = IS_DEV ? '/ugc/preview/sort-v2.html' : `${UGC_BASE_URL}/preview/sort-v2.html`;
+  const shell = IS_DEV ? '/ugc/preview/sort-v2.html' : './island-preview-sort-v2.html';
   return `${shell}?auto=0#${encodePreviewVariant(candidate.pack)}`;
 }
 function isLocalExperiment(building: Building): boolean {
@@ -1448,7 +1483,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // the building switches from the canonical stock fallback to the hosted build.
   async function bakeAndHost(slot: number, prompt: string): Promise<void> {
     const b = S.buildings.find((x) => x.slot === slot);
-    if (!b || b.tpl !== 'sort' || hostedUrl(b) || pollingSlots.has(slot)) return;
+    if (!b || b.tpl !== 'sort' || hasHostedArtifact(b) || pollingSlots.has(slot)) return;
     pollingSlots.add(slot);
     const packRef = b.pack;
     b.prompt = prompt;
@@ -1493,7 +1528,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         window.clearTimeout(timer);
         const data = (await res.json()) as { rel?: string; url?: string; error?: string };
         if (!res.ok || !data.url) throw new Error(String(data.error ?? `HTTP ${res.status}`));
-        job = { job_id: b.jobId ?? '', status: 'ready', rel: data.rel ?? '', url: data.url, error: '', ready: true };
+        job = {
+          job_id: b.jobId ?? '',
+          status: 'ready',
+          rel: data.rel ?? '',
+          url: data.url,
+          error: '',
+          ready: true,
+        };
       }
 
       let pollErrors = 0;
@@ -1517,16 +1559,19 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         terminalFailure = true;
         throw new Error(job.error || 'Bake job failed');
       }
-      if (!job.url || !job.rel) throw new Error('Backend published no hosted URL; check UGC_BASE_URL');
+      if (!job.rel || (!IS_DEV && !job.content_digest)) {
+        throw new Error('Backend published no immutable hosted identity');
+      }
       const now = S.buildings.find((x) => x.slot === slot);
       if (!now || now.pack !== packRef) return;   // slot was rebuilt meanwhile
       now.rel = job.rel;
+      now.contentDigest = job.content_digest;
       now.url = undefined;
       now.publishing = false;
       now.publishError = undefined;
       save();
       refreshIsland();
-      console.log('[island] hosted:', job.url, job.ready ? '(ready)' : '(deploy pending)');
+      console.log('[island] hosted identity ready:', job.rel, job.ready ? '(ready)' : '(deploy pending)');
       if (ov.isConnected) toast(job.ready ? 'Published to hosting ✅' : 'Published; hosting is warming up');
     } catch (e) {
       const message = errorText(e);
@@ -1553,7 +1598,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
 
   function resumePendingBakes(): void {
     S.buildings
-      .filter((building) => building.tpl === 'sort' && Boolean(building.jobId) && !hostedUrl(building))
+      .filter((building) => building.tpl === 'sort' && Boolean(building.jobId) && !hasHostedArtifact(building))
       .forEach((building) => { void bakeAndHost(building.slot, building.prompt ?? ''); });
   }
 
@@ -1785,7 +1830,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         ${stageRingsSvg(p.x, p.y, stage)}
         <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" fill-opacity="${stageFillOpacity(stage)}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
         <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="19" font-weight="700" fill="${letterFill}">${TPL[b.tpl].label.charAt(0)}</text>`;
-      const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : isLocalExperiment(b) ? '#58A6FF' : hostedUrl(b) ? '#4CC38A' : null;
+      const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : isLocalExperiment(b) ? '#58A6FF' : hasHostedArtifact(b) ? '#4CC38A' : null;
       if (dot) {
         s += `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`;
       }
@@ -1794,7 +1839,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text>
         <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays)}   ♥ ${fmtNum(b.likes)}</text>`;
       // Owner (§4.6): an unpublished mechanic is invisible to guests — mark it.
-      if (!guest && !busy && !hostedUrl(b) && !isLocalExperiment(b)) {
+      if (!guest && !busy && !hasHostedArtifact(b) && !isLocalExperiment(b)) {
         s += `<text x="${p.x}" y="${p.y + 95}" text-anchor="middle" font-size="9" font-weight="700" fill="#EF9F27">не виден гостям</text>`;
       }
       s += '</g>';
@@ -3366,7 +3411,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       : `<div class="isl-board">${board(b.tpl, pk)}</div>`;
     const st = localLab
       ? { c: '#58A6FF', t: 'local lab' }
-      : hostedUrl(b)
+      : hasHostedArtifact(b)
         ? { c: '#4CC38A', t: 'hosted' }
       : busy
         ? { c: '#EF9F27', t: 'publishing…' }
@@ -3374,7 +3419,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           ? { c: '#E24B4A', t: `publish failed · ${b.publishError}` }
           : { c: 'rgba(255,255,255,.45)', t: 'local draft' };
     const badge = `<span class="isl-status"${busy ? ' data-pulse' : ''}><b style="background:${st.c}"></b>${esc(st.t)}</span>`;
-    const retry = !hostedUrl(b) && !busy
+    const retry = !hasHostedArtifact(b) && !busy
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-publish>Retry publish</button>'
       : '';
     const publishLab = localLab && b.autoplayPassed === true
@@ -3398,7 +3443,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     }</div>`;
     // Not-published hint (§4.6): a mechanic without a hosted artifact is invisible
     // to guests until published.
-    const publishHint = !hostedUrl(b) && !isLocalExperiment(b) && !busy
+    const publishHint = !hasHostedArtifact(b) && !isLocalExperiment(b) && !busy
       ? '<div class="isl-pk" style="margin-top:8px;color:#EF9F27">Не виден гостям — опубликуй, чтобы к тебе приходили</div>'
       : '';
     // Owner sees a moderation takedown (§4.2 / P3): `takedown=true` arrives on
@@ -3510,40 +3555,73 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     });
     dbg(`launch: "${b.name}" tpl=${b.tpl} pack=${b.pack} guest=${guest}`);
 
-    // Resolve the runtime BEFORE anything else: a builtin (bot) building takes its
-    // runtime from the binding's `mechanicId` (identity authority, v1.4 §3.1),
-    // never from the mutable `tpl` (F002). An unresolvable mechanic fails closed —
-    // no visit, no iframe, no tpl fallback. Delivery is the current deploy.
     const pk = resolvePack(b.pack);
-    const runtime = resolveBuildingRuntime(b, pk.name);
-    if (b.builtin) {
-      dbg(`builtin binding: mechanicId=${b.builtin.mechanicId}`
-        + (b.builtin.versionsDigest
-          ? ` versionsDigest=${b.builtin.versionsDigest} (rotation/audit record; delivery = current deploy)`
-          : ''));
-    }
-    const unavailable = runtime.kind === 'unavailable';
-
-    const visitId = !unavailable && guest && publicIsland && b.buildingId ? newJobId() : null;
-    const visitStartedAt = performance.now();
-    const visitStart = visitId && publicIsland && b.buildingId
-      ? apiStartIslandVisit({
-          visit_id: visitId,
-          owner_id: publicIsland.owner.id,
-          building_id: b.buildingId,
-        })
-      : null;
-    if (visitStart) {
-      void visitStart.then((visit) => {
-        applySocial(b, visit.social);
-        dbg(`visit started: ${visit.visit_id}`);
-      }).catch((error) => dbg(`visit start failed: ${errorText(error)}`));
-    }
+    let visitId: string | null = null;
+    let visitStartedAt = performance.now();
+    let visitStart: ReturnType<typeof apiStartIslandVisit> | null = null;
 
     const cleanup = () => {
       window.removeEventListener('message', onMsg);
       try { frame.src = 'about:blank'; } catch { /* noop */ }
       play.remove();
+    };
+
+    const showUnavailable = (reason: string): void => {
+      dbg(`runtime unavailable: ${reason}`);
+      setChip('UNAVAILABLE');
+      frame.remove();
+      const msg = document.createElement('div');
+      msg.className = 'isl-win';
+      msg.innerHTML =
+        '<div class="isl-win__t">Механика недоступна</div>' +
+        '<div class="isl-win__m">Эта постройка сейчас не запускается</div>' +
+        '<button class="isl-win__home" type="button" data-home>Back to island</button>';
+      play.appendChild(msg);
+      (msg.querySelector('[data-home]') as HTMLElement).addEventListener('click', () => {
+        cleanup();
+        refreshIsland();
+      });
+      toast('Механика недоступна');
+    };
+
+    // Resolve the runtime before a visit exists. Hosted UGC receives a fresh
+    // short-lived bearer from the authenticated resolver; only exact
+    // buildingId+rel+contentDigest agreement may reach the iframe. The bearer
+    // remains in DOM memory and is never logged or persisted.
+    const launchRuntime = async (): Promise<void> => {
+      const runtime = await resolveBuildingRuntime(b, pk.name);
+      if (!play.isConnected) return;
+      if (b.builtin) {
+        dbg(`builtin binding: mechanicId=${b.builtin.mechanicId}`
+          + (b.builtin.versionsDigest
+            ? ` versionsDigest=${b.builtin.versionsDigest} (rotation/audit record; delivery = current deploy)`
+            : ''));
+      }
+      if (runtime.kind === 'unavailable') {
+        showUnavailable(runtime.reason);
+        return;
+      }
+      if (guest && publicIsland && b.buildingId) {
+        visitId = newJobId();
+        visitStartedAt = performance.now();
+        visitStart = apiStartIslandVisit({
+          visit_id: visitId,
+          owner_id: publicIsland.owner.id,
+          building_id: b.buildingId,
+        });
+        try {
+          const visit = await visitStart;
+          applySocial(b, visit.social);
+          dbg(`visit started: ${visit.visit_id}`);
+        } catch (error) {
+          dbg(`visit start failed: ${errorText(error)}`);
+          showUnavailable('server visit could not start');
+          return;
+        }
+      }
+      dbg(`loading ${runtime.kind} runtime`);
+      setChip(runtime.label);
+      frame.src = runtime.src;
     };
 
     // Shared guest report panel (§4.3): a small floating sheet over the play view,
@@ -3593,25 +3671,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       });
     };
     (play.querySelector('[data-report-head]') as HTMLElement | null)?.addEventListener('click', openGuestReportPanel);
-
-    if (runtime.kind === 'unavailable') {
-      dbg(`runtime unavailable: ${runtime.reason}`);
-      setChip('UNAVAILABLE');
-      frame.remove();
-      const msg = document.createElement('div');
-      msg.className = 'isl-win';
-      msg.innerHTML =
-        '<div class="isl-win__t">Механика недоступна</div>' +
-        '<div class="isl-win__m">Эта постройка сейчас не запускается</div>' +
-        '<button class="isl-win__home" type="button" data-home>Back to island</button>';
-      play.appendChild(msg);
-      (msg.querySelector('[data-home]') as HTMLElement).addEventListener('click', () => { cleanup(); refreshIsland(); });
-      toast('Механика недоступна');
-    } else {
-      dbg(`loading ${runtime.kind}: ${runtime.src}`);
-      setChip(runtime.label);
-      frame.src = runtime.src;
-    }
 
     let winShown = false;
     let visitCompleted = false;
@@ -3757,6 +3816,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     };
     window.addEventListener('message', onMsg);
     (play.querySelector('[data-back]') as HTMLElement).addEventListener('click', () => { cleanup(); refreshIsland(); });
+    void launchRuntime().catch((error) => {
+      if (play.isConnected) showUnavailable(errorText(error));
+    });
   }
 
   // ── header / modes ─────────────────────────────────────────────────────────
