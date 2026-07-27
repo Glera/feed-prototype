@@ -1,21 +1,26 @@
 name: challenge-e2e
 
-# Share/Challenge v1 DOM E2E — the mandatory challenge browser checks run against a
-# REAL backend stand (Postgres + swipe-backend @challenge-source-level + uvicorn) and
-# a REAL content-addressed runtime path, producing a GitHub check-run on the client
-# head. These need a database + the private backend, so they CANNOT live in the base
+# Share/Challenge v1 DOM E2E — the five mandatory challenge browser checks run
+# against a REAL backend stand (Postgres 15 + swipe-backend + uvicorn) and the REAL
+# content-addressed runtime path, producing a GitHub check-run on the client head.
+# These need a database + the private backend, so they CANNOT live in the base
 # `verify` lint (which only launches chromium against local fixtures).
 #
-# Gated on workflow_dispatch while the backend `challenge-source-level` head is still
-# moving (pass the exact backend sha as `backend_ref`). Promote to `pull_request`
-# once that head is frozen and SWIPE_BACKEND_DEPLOY_KEY is provisioned.
+# `pull_request` + `push: master` are enabled, so a new head gets a real check-run.
+# The job is self-contained given SWIPE_BACKEND_DEPLOY_KEY (read-only) and
+# SWIPE_UGC_DEPLOY_KEY. `workflow_dispatch` additionally allows pinning an exact
+# backend ref while that branch still moves.
 "on":
   workflow_dispatch:
     inputs:
       backend_ref:
         description: "swipe-backend ref (challenge-source-level head sha)"
         required: true
-        default: "challenge-source-level"
+        default: "539480b"
+  push:
+    branches:
+      - master
+  pull_request:
 
 permissions:
   contents: read
@@ -26,9 +31,9 @@ concurrency:
 
 jobs:
   challenge-e2e:
-    name: challenge DOM E2E (426 + recipient + rail + play)
+    name: challenge DOM E2E (426 + recipient + rail + play + x-origin)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:15
@@ -42,10 +47,26 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      # ── stand identity ──────────────────────────────────────────────────────
       DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/challenge_e2e
       API_ORIGIN: http://127.0.0.1:5221
       BOT_TOKEN: dev-challenge-token
+      # The source/share case asserts a t.me deep link, which challenge_deep_link()
+      # only produces when a bot username is configured.
+      BOT_USERNAME: devbot
+      # ── flags the harnesses require ─────────────────────────────────────────
       ENABLE_CHALLENGE_V1: "true"
+      # Without this the rail harness gets 404 on /api/island/friends and the
+      # unified [You | friends | challenges] row cannot be asserted.
+      ENABLE_ISLAND_SOCIAL: "true"
+      # Default is 750ms: the fixtures post their result immediately after the
+      # handshake, which would otherwise be rejected as 425 run_too_early.
+      RUN_TICKET_MIN_RESULT_MS: "0"
+      # Every client origin the harnesses serve builds on (comma-separated, exactly
+      # how Settings.cors_origins splits it): 5223/5224 rail (flag ON/OFF builds),
+      # 5233/5234 play (flag ON/OFF builds), 5235 the foreign origin of the
+      # cross-origin security probe.
+      ALLOWED_ORIGINS: http://127.0.0.1:5223,http://127.0.0.1:5224,http://127.0.0.1:5233,http://127.0.0.1:5234,http://127.0.0.1:5235
     steps:
       - name: Checkout feed-prototype
         uses: actions/checkout@v4
@@ -53,6 +74,8 @@ jobs:
           path: feed-prototype
           persist-credentials: false
 
+      # vite.config.ts imports ../swipe-ugc/recipes/sort/recipe.mjs — the same
+      # pinned sibling ref the base `verify` workflow checks out.
       - name: Checkout pinned private swipe-ugc sibling
         uses: actions/checkout@v4
         with:
@@ -66,7 +89,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Glera/swipe-backend
-          ref: ${{ inputs.backend_ref }}
+          ref: ${{ inputs.backend_ref || '539480b' }}
           path: swipe-backend
           persist-credentials: false
           ssh-key: ${{ secrets.SWIPE_BACKEND_DEPLOY_KEY }}
@@ -76,14 +99,26 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install backend + migrate + start uvicorn
+      # requirements-TEST.txt (= requirements.txt + pytest), because the E2E support
+      # scripts import the backend's own seeding helpers out of `tests/`
+      # (tests.runtime_release_test_support, tests.test_challenge_source_level_postgres),
+      # which import pytest. Chosen over copying those helpers into this repo: the
+      # backend owns the release-descriptor/activation and published-sort-pool seeding
+      # contract, and a duplicate here would silently drift from it. Two lines, and no
+      # edit to the frozen backend head.
+      - name: Install backend (with test deps) + migrate + start uvicorn
         working-directory: swipe-backend
         run: |
           python -m venv .venv
-          ./.venv/bin/pip install -r requirements.txt
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -r requirements-test.txt
           ./.venv/bin/alembic upgrade head
-          ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 5221 &
-          for i in $(seq 1 30); do curl -fsS "$API_ORIGIN/api/health" && break || sleep 1; done
+          ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 5221 --log-level warning &
+          for i in $(seq 1 60); do
+            curl -fsS "$API_ORIGIN/api/health" >/dev/null && echo "backend up" && break
+            sleep 1
+          done
+          curl -fsS "$API_ORIGIN/api/health"
 
       - name: Set up Node 22
         uses: actions/setup-node@v4
@@ -100,7 +135,10 @@ jobs:
         working-directory: feed-prototype
         run: npx playwright install --with-deps chromium
 
-      - name: Challenge DOM E2E (fail-hard, no green-wash)
+      # 5 checks, fail-hard: 426 (legacy client), recipient viral loop, rail row,
+      # play overlay (recipient + source + close + identity-mismatch + OFF toast),
+      # and the cross-origin win security probe.
+      - name: Challenge DOM E2E (5 browser checks, no green-wash)
         working-directory: feed-prototype
         env:
           VENV_PY: ${{ github.workspace }}/swipe-backend/.venv/bin/python

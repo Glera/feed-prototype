@@ -67,6 +67,7 @@ import {
 import { verifyChallengeBundleIdentity } from './challenge-player.mjs';
 import { playRecipientChallenge, playSourceChallenge, type ChallengePlayDeps } from './challenge-play.mjs';
 import { openRecipientEnvelope, openSourceEnvelope } from './challenge-envelope.mjs';
+import type { DurableChallengeEnvelope } from './challenge-envelope.mjs';
 import { mountChallengeLevel } from './challenge-play-overlay';
 import {
   queueResult,
@@ -3241,7 +3242,13 @@ export class Feed {
    *  ids minted once, reused on retry/reload. */
   private async runV1RecipientPlay(view: ChallengeSpecBoundView): Promise<void> {
     if (!getInitData()) return;
-    const env = openRecipientEnvelope(localStorage, view.id, () => crypto.randomUUID());
+    // Fail-closed durability (Codex R2 P1): without a provably persisted identity
+    // there is NO network call and NO level mount — an honest toast instead.
+    const env = this.openChallengeEnvelopeOrToast(
+      () => openRecipientEnvelope(localStorage, view.id, () => crypto.randomUUID()),
+      { challenge_id: view.id },
+    );
+    if (!env) return;
     this.challengePlayOpen = true;
     this.applyActiveStates();   // freeze + mute the feed behind the overlay
     try {
@@ -3276,7 +3283,13 @@ export class Feed {
     if (!getInitData()) return false;
     const mechanicId = 'marble-sort-swipe';
     const variantId = this.variantIdForPlayable(mechanicId);
-    const env = openSourceEnvelope(localStorage, () => crypto.randomUUID());
+    // Fail-closed durability (Codex R2 P1): no durable identity → no network, no
+    // mount, honest toast.
+    const env = this.openChallengeEnvelopeOrToast(
+      () => openSourceEnvelope(localStorage, () => crypto.randomUUID()),
+      { source: 'v1_source' },
+    );
+    if (!env) return false;
     this.challengePlayOpen = true;
     this.applyActiveStates();
     try {
@@ -3293,6 +3306,24 @@ export class Feed {
     } finally {
       this.challengePlayOpen = false;
       this.applyActiveStates();
+    }
+  }
+
+  /** Open a durable challenge envelope, or surface an honest toast and return null.
+   *  A `challenge_envelope_not_persisted` failure (quota, private mode, corrupt
+   *  slot) MUST stop the flow before any network call or level mount — playing
+   *  without durable identity is what produced duplicate offers/runs/challenges. */
+  private openChallengeEnvelopeOrToast(
+    open: () => DurableChallengeEnvelope,
+    trackProps: Record<string, unknown>,
+  ): DurableChallengeEnvelope | null {
+    try {
+      return open();
+    } catch (e) {
+      const reason = this.challengeAbortReason(e);
+      track('challenge_play_aborted', { ...trackProps, reason });
+      this.showActivityNotifier('Не удалось сохранить прогресс вызова · освободи память и попробуй снова');
+      return null;
     }
   }
 
