@@ -22,6 +22,7 @@ import {
   parseSequencingDebugProfileV1,
   parseSequencingDebugWhyNowV1,
   sequencingSnapshotSections,
+  sequencingSubjectEchoWarning,
 } from '../src/feed-sequencing-debug.mjs';
 
 let assertions = 0;
@@ -41,9 +42,18 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // ── fixtures ────────────────────────────────────────────────────────────────
 // Shapes are transcribed from the accepted backend contract
 // (swipe-backend-feed-sequencing/app/api_feed_sequencing_debug.py plus the
-// stored documents it echoes: feed_episode_materializer._receipt_document,
-// feed_sequence_planner._snapshot_document, feed_personalization_reset
-// .EpochWatermarks.as_document). The backend is frozen; this client adapts.
+// stored documents it echoes) down to the inner sections:
+//   * profile          — feed_episode_projection.ProfileProjection/FamilyProjection
+//   * epoch            — feed_personalization_reset.EpochWatermarks
+//   * snapshot         — feed_sequence_planner._snapshot_document
+//   * satiationAndGaps — feed_pacing_projection.FavoriteGapProjection (+ the
+//                        snapshot's own naturalBuiltinEvaluated)
+//   * regret           — feed_pacing_projection.RegretProjection
+//   * explorationFloor — feed_sequence_planner._FloorState
+//   * coldStart        — feed_sequence_planner._ColdStartState
+//   * chosen/rejected  — feed_sequence_planner._Candidate (+ per-branch detail)
+//   * constraintConflicts — the planner's `code`-keyed conflict records
+// The backend is frozen; this client adapts.
 
 const EPOCH = {
   personalizationEpoch: 2,
@@ -195,34 +205,81 @@ const PLAN_SNAPSHOT = {
   profile: PROFILE_DOCUMENT,
   satiationAndGaps: [
     {
+      schema: 'feed.favorite-gap-projection.v1',
       familyId: 'match',
+      previousFavoriteImpressionId: 'ff0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
       currentGapSeenUnits: 4,
-      obligationKey: 'match:2026-07-27',
+      minGapSeenUnits: 2,
+      targetGapSeenUnits: 4,
+      maxGapSeenUnits: 7,
+      drawBucket: 3,
+      drawDigest: 'a1'.repeat(32),
+      anchorBlockedByMinGap: false,
+      obligationDue: true,
+      obligationApproaching: false,
+      fulfilment: 'target',
+      forcedUnitsSinceAppearance: 0,
+      previousAppearanceForced: false,
       naturalBuiltinEvaluated: false,
     },
   ],
-  regret: { streak: 1, lastRegretAt: '2026-07-27T06:40:00.000Z' },
-  explorationFloor: { windowUnits: 20, explorationUnits: 3, floorSatisfied: true },
-  coldStart: { phase: false, probesDelivered: 4, probesRequired: 4 },
+  regret: {
+    schema: 'feed.regret-projection.v1',
+    consecutiveRegrets: 1,
+    regretImpressionIds: ['ff0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f'],
+    lastResetReason: null,
+    rescueDue: false,
+    rescueFamilyId: null,
+    rescueUnavailableReason: null,
+  },
+  explorationFloor: {
+    windowSeenUnits: 20,
+    minimumExplorationUnits: 3,
+    orderedMembership: ['favorite_anchor', 'exploration', 'favorite_anchor'],
+    explorationInWindow: 3,
+    debt: 0,
+    forcedNow: false,
+    infeasible: false,
+  },
+  coldStart: {
+    active: false,
+    probesSeen: 4,
+    familiesCovered: ['match', 'sort'],
+    promisingExists: true,
+    exitReason: 'promising_found',
+    nextProbeFamilyId: null,
+    nextProbeCatalogMechanic: null,
+  },
   continuity: { pendingTriggerId: null, pendingTriggerMechanic: null },
   runway: [
     { familyId: 'match', eligibleUnseenSeries: 2 },
     { familyId: 'sort', eligibleUnseenSeries: 0 },
   ],
   exploration: { candidate: null, rejected: [] },
+  // _Candidate.as_document(): slotType/familyId/reason/admitted plus the exact
+  // per-branch detail keys, nothing else.
   chosen: {
     slotType: 'favorite_anchor',
     familyId: 'match',
-    reason: 'favorite_gap_due',
+    reason: 'target_gap_reached',
     admitted: true,
-    runway: 2,
+    targetGapSeenUnits: 4,
   },
   chosenSlotType: 'favorite_anchor',
   rejected: [
-    { slotType: 'exploration', familyId: 'sort', reason: 'no_runway', admitted: false },
-    { slotType: 'rescue', familyId: null, reason: 'regret_streak_below_threshold', admitted: false },
+    {
+      slotType: 'favorite_anchor',
+      familyId: 'sort',
+      reason: 'min_gap_blocks_anchor',
+      admitted: false,
+      currentGapSeenUnits: 1,
+      minGapSeenUnits: 2,
+    },
+    { slotType: 'exploration', familyId: null, reason: 'forced_identity_outside_quotas', admitted: false },
   ],
-  constraintConflicts: [{ kind: 'pacing', detail: 'favorite_cap_reached' }],
+  constraintConflicts: [
+    { code: 'exploration_floor_infeasible', explorationDebt: 2, windowSeenUnits: 20 },
+  ],
   authority: {
     createsDecision: false,
     createsAuthorization: false,
@@ -496,6 +553,13 @@ for (const [label, mutation, code] of [
   ['subject missing', { subjectUserId: undefined }, 'invalid_subject'],
   ['subject numeric', { subjectUserId: 42692410 }, 'invalid_subject'],
   ['subject non-numeric text', { subjectUserId: 'me' }, 'invalid_subject'],
+  // `sources` names the stored bytes a projection came from: a response that
+  // cannot name them is not an auditable read-only projection.
+  ['sources object', { sources: {} }, 'invalid_sources'],
+  ['sources string', { sources: 'episode_materialization' }, 'invalid_sources'],
+  ['sources null', { sources: null }, 'invalid_sources'],
+  ['sources absent', { sources: undefined }, 'invalid_sources'],
+  ['sources number', { sources: 7 }, 'invalid_sources'],
 ]) {
   assert.throws(
     () => parseSequencingDebugProfileV1({ ...PROFILE_FULL, ...mutation }),
@@ -503,6 +567,18 @@ for (const [label, mutation, code] of [
     `${label} must be rejected as ${code}`,
   );
 }
+assert.equal(
+  parseSequencingDebugProfileV1({ ...PROFILE_FULL, sources: [] }).present,
+  true,
+  'an empty sources array stays the legitimate "nothing stored yet" statement',
+);
+const badSourceEntry = parseSequencingDebugProfileV1({ ...PROFILE_FULL, sources: ['nope'] });
+assert.equal(
+  badSourceEntry.present,
+  true,
+  'one malformed entry inside a well-formed sources array stays a warning',
+);
+assert.ok(badSourceEntry.warnings.some((text) => text.includes('sources[0] is not an object')));
 assert.throws(
   () => parseSequencingDebugProfileV1(null),
   (error) => error.code === 'invalid_response',
@@ -617,6 +693,21 @@ assert.deepEqual(normalizeSequencingSubject('abc'), { status: 'invalid' });
 assert.deepEqual(normalizeSequencingSubject(1.5), { status: 'invalid' });
 assert.deepEqual(normalizeSequencingSubject({}), { status: 'invalid' });
 
+// A named subject whose echo differs is a warning, never a silent swap.
+assert.equal(sequencingSubjectEchoWarning('42692410', '42692410'), null);
+assert.equal(
+  sequencingSubjectEchoWarning('42692410', '900000000000001'),
+  'server echoed subjectUserId 900000000000001 for requested user_id 42692410',
+);
+assert.equal(
+  sequencingSubjectEchoWarning('', '42692410'),
+  null,
+  'reading yourself has no requested id to compare against',
+);
+assert.equal(sequencingSubjectEchoWarning(null, '42692410'), null);
+assert.equal(sequencingSubjectEchoWarning('nope', '42692410'), null);
+assert.equal(sequencingSubjectEchoWarning('42692410', 42692410), null);
+
 assert.equal(normalizeSequencingHistoryLimit(undefined), SEQUENCING_DEBUG_HISTORY_LIMIT_DEFAULT);
 assert.equal(normalizeSequencingHistoryLimit(''), SEQUENCING_DEBUG_HISTORY_LIMIT_DEFAULT);
 assert.equal(normalizeSequencingHistoryLimit('abc'), SEQUENCING_DEBUG_HISTORY_LIMIT_DEFAULT);
@@ -685,12 +776,23 @@ const marker = '// ── feed sequencing debug (§12): read-only, GET only ─�
 assert.ok(apiSource.includes(marker), 'the sequencing debug client section must stay marked');
 const sequencingSection = apiSource.slice(apiSource.indexOf(marker));
 assert.ok(
-  !/\bpost(?:Required)?\s*[<(]/.test(sequencingSection),
-  'the sequencing debug client must not reach any POST helper',
+  !/\b(?:post|put|patch|del(?:ete)?)\w*\s*[<(]/i.test(sequencingSection),
+  'the sequencing debug client must not reach any mutating helper',
 );
 assert.ok(
-  !/method:\s*'(?:POST|PUT|PATCH|DELETE)'/.test(sequencingSection),
+  !/method\s*:\s*['"`]\s*(?:POST|PUT|PATCH|DELETE)/i.test(sequencingSection),
   'the sequencing debug client must issue GET requests only',
+);
+// Structural, not lexical: one transport call, and it never names a method, so
+// there is no place a verb could be introduced without this check noticing.
+assert.equal(
+  (sequencingSection.match(/\bfetch\s*\(/g) ?? []).length,
+  1,
+  'the sequencing debug client must own exactly one transport call',
+);
+assert.ok(
+  !/\bmethod\s*:/.test(sequencingSection),
+  'the single sequencing debug fetch must not name a method at all (GET by default)',
 );
 const debugSource = readFileSync(path.resolve(root, 'src/debug.ts'), 'utf8');
 assert.ok(
@@ -703,9 +805,49 @@ for (const forbidden of ['sequencing/debug/reset', 'apiSequencingDebugReset']) {
     `the client must not grow a reset surface (${forbidden})`,
   );
 }
+// Regional, not file-wide: the QA panel above legitimately owns reset/seed/flush
+// controls, and the sequencing sub-screen must not reach any of them — a reset
+// button wired to an already-imported helper is exactly the shape to catch.
+const regionStart = '// ── BEGIN feed sequencing debug sub-screen (§12) ───────────────────────────';
+const regionEnd = '// ── END feed sequencing debug sub-screen (§12) ─────────────────────────────';
+assert.ok(debugSource.includes(regionStart), 'the sequencing sub-screen region must stay marked');
+assert.ok(debugSource.includes(regionEnd), 'the sequencing sub-screen region must stay closed');
+const sequencingRegion = debugSource.slice(
+  debugSource.indexOf(regionStart) + regionStart.length,
+  debugSource.indexOf(regionEnd),
+);
+assert.ok(sequencingRegion.includes('renderSequencingResets'), 'the region must cover the reset tab');
+assert.ok(
+  sequencingRegion.includes('mountSequencingDebugPanel'),
+  'the region must cover the whole sub-screen',
+);
+for (const mutator of [
+  'apiReset',
+  'apiResetDaily',
+  'apiSeedChallenge',
+  'flushResults',
+  'clearOutbox',
+  'setIslandSocialMode',
+]) {
+  assert.ok(
+    !sequencingRegion.includes(mutator),
+    `the sequencing sub-screen must not reach the state-changing helper ${mutator}`,
+  );
+}
+assert.ok(
+  !/\bapi[A-Z]\w*/.test(sequencingRegion.replace(/apiSequencingDebug(?:Profile|WhyNow|History)/g, '')),
+  'the sequencing sub-screen may only call the three read-only projections',
+);
 
 // ── backend drift guard (skipped when the private repo is not a sibling) ────
+// The skip is announced on stdout and the two assertion counts are reported
+// separately, so a CI log can never imply the backend contract was verified
+// when only the local core ran.
+const coreAssertions = assertions;
 const backendSource = path.resolve(root, '../swipe-backend-feed-sequencing/app/api_feed_sequencing_debug.py');
+if (!existsSync(backendSource)) {
+  console.log(`backend drift guard: SKIPPED (backend worktree not found at ${backendSource})`);
+}
 if (existsSync(backendSource)) {
   const backend = readFileSync(backendSource, 'utf8');
   assert.ok(!backend.includes('@router.post'), 'the debug router must stay read-only');
@@ -739,4 +881,9 @@ if (existsSync(backendSource)) {
   }
 }
 
-console.log(`feed sequencing debug contract: ${assertions} assertions`);
+const driftAssertions = assertions - coreAssertions;
+if (driftAssertions > 0) console.log(`backend drift guard: ${backendSource}`);
+console.log(
+  `feed sequencing debug contract: ${coreAssertions} core`
+  + ` + ${driftAssertions} backend-drift assertions`,
+);
