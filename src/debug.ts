@@ -3,11 +3,40 @@
  * Shows initData/auth + /session status + live event log, and lets you flush the
  * pending-results outbox or reset your own server state. QA tool; no-op unless
  * explicitly opened.
+ *
+ * The feed-sequencing projections (§12) live in their own sub-screen below, so
+ * the QA flow of this panel is unchanged by them.
  */
-import { apiDiagnose, apiReset, apiResetDaily, apiSeedChallenge } from './api';
+import {
+  apiDiagnose,
+  apiReset,
+  apiResetDaily,
+  apiSeedChallenge,
+  apiSequencingDebugHistory,
+  apiSequencingDebugProfile,
+  apiSequencingDebugWhyNow,
+} from './api';
 import { getEventLog } from './telemetry';
 import { islandSocialMode, setIslandSocialMode } from './island-sim';
 import { pendingCount, pendingStars, starsEverQueued, flushResults, clearOutbox } from './outbox';
+import {
+  SEQUENCING_DEBUG_HISTORY_LIMIT_DEFAULT,
+  SEQUENCING_DEBUG_HISTORY_LIMIT_MAX,
+  SEQUENCING_DEBUG_HISTORY_LIMIT_MIN,
+  buildSequencingDebugView,
+  formatSequencingJson,
+  formatSequencingSnapshotAge,
+  formatSequencingTimestamp,
+  normalizeSequencingHistoryLimit,
+  normalizeSequencingSubject,
+} from './feed-sequencing-debug.mjs';
+import type {
+  SequencingDebugHistoryViewV1,
+  SequencingDebugKind,
+  SequencingDebugPanelStateV1,
+  SequencingDebugProfileViewV1,
+  SequencingDebugWhyNowViewV1,
+} from './feed-sequencing-debug.mjs';
 
 export async function mountDebugPanel(): Promise<void> {
   const wrap = document.createElement('div');
@@ -122,6 +151,7 @@ export async function mountDebugPanel(): Promise<void> {
     socialBtn,
     copyBtn,
     seedBtn,
+    mkBtn('⌘ Feed sequencing', () => { mountSequencingDebugPanel(); }),
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),
     resetDailyBtn,
     resetBtn,
@@ -133,4 +163,400 @@ export async function mountDebugPanel(): Promise<void> {
   await refreshHead();
   refreshLog();
   const iv = window.setInterval(refreshLog, 1000);
+}
+
+// ── feed sequencing debug sub-screen (§12) ──────────────────────────────────
+// Four read-only projections over stored snapshot/receipt bytes. Nothing here
+// recomputes a decision, and nothing here writes: the reset tab only displays
+// the receipts the history projection returns, because personalization reset is
+// an operator CLI act with its own double confirmation on the server side.
+// `?diag=1` opens this screen; the server allowlist is the only authorization.
+
+type SequencingTab = SequencingDebugKind | 'reset';
+
+const SEQUENCING_TABS: ReadonlyArray<{ id: SequencingTab; label: string }> = [
+  { id: 'profile', label: 'Profile' },
+  { id: 'why-now', label: 'Why now' },
+  { id: 'history', label: 'History' },
+  { id: 'reset', label: 'Reset' },
+];
+
+function seqField(value: unknown, key: string): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return (value as Record<string, unknown>)[key];
+}
+
+function seqText(value: unknown): string {
+  if (value === undefined || value === null || value === '') return '—';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return formatSequencingJson(value);
+}
+
+function seqRow(label: string, value: string): HTMLElement {
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;align-items:baseline;';
+  const key = document.createElement('span');
+  key.textContent = label;
+  key.style.cssText = 'color:#7a8;min-width:150px;flex:0 0 auto;';
+  const val = document.createElement('span');
+  val.textContent = value;
+  val.style.cssText = 'color:#cfe;word-break:break-all;';
+  row.append(key, val);
+  return row;
+}
+
+function seqBlock(title: string): HTMLElement {
+  const el = document.createElement('div');
+  el.style.cssText = 'border-top:1px solid #253;padding-top:6px;margin-top:6px;';
+  const h = document.createElement('div');
+  h.textContent = title;
+  h.style.cssText = 'color:#8cf;font-weight:600;margin-bottom:4px;';
+  el.append(h);
+  return el;
+}
+
+/** Verbatim JSON, collapsed. Stored bytes are evidence, so they are always
+ *  reachable even when a structured render above them is available. */
+function seqRaw(title: string, value: unknown, open = false): HTMLElement {
+  const details = document.createElement('details');
+  details.open = open;
+  details.style.cssText = 'margin-top:6px;';
+  const summary = document.createElement('summary');
+  summary.textContent = title;
+  summary.style.cssText = 'color:#8cf;cursor:pointer;';
+  const pre = document.createElement('pre');
+  pre.textContent = formatSequencingJson(value);
+  pre.style.cssText =
+    'margin:4px 0 0;white-space:pre-wrap;word-break:break-all;color:#adf;'
+    + 'max-height:46vh;overflow:auto;background:#0a0f16;padding:6px;border-radius:4px;';
+  details.append(summary, pre);
+  return details;
+}
+
+function seqSources(sources: ReadonlyArray<{
+  kind: string | null; id: string | null; digest: string | null; asOf: string | null;
+}>): HTMLElement {
+  const block = seqBlock(`sources (${sources.length})`);
+  if (sources.length === 0) {
+    block.append(seqRow('', 'no stored source for this projection'));
+    return block;
+  }
+  for (const source of sources) {
+    block.append(seqRow(
+      seqText(source.kind),
+      `${seqText(source.id)} · ${seqText(source.digest)} · ${formatSequencingTimestamp(source.asOf)}`,
+    ));
+  }
+  return block;
+}
+
+function seqWarnings(warnings: ReadonlyArray<string>): HTMLElement | null {
+  if (warnings.length === 0) return null;
+  const block = seqBlock(`contract drift (${warnings.length})`);
+  for (const warning of warnings) block.append(seqRow('', warning));
+  return block;
+}
+
+function renderSequencingProfile(view: SequencingDebugProfileViewV1): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  const head = seqBlock('snapshot');
+  head.append(
+    seqRow('subjectUserId', view.subjectUserId),
+    seqRow('snapshotAsOf', formatSequencingTimestamp(view.snapshotAsOf)),
+    seqRow('snapshotAge', formatSequencingSnapshotAge(view.snapshotAgeSeconds)),
+    seqRow('projection', seqText(view.profileSchema)),
+    seqRow('projectionAsOf', formatSequencingTimestamp(view.profileAsOf)),
+    seqRow('favoriteSet', view.favoriteSet.length ? view.favoriteSet.map(seqText).join(', ') : '—'),
+  );
+  out.push(head);
+  const families = seqBlock(`families (${view.families.length})`);
+  for (const family of view.families) {
+    families.append(seqRow(
+      seqText(seqField(family, 'familyId')),
+      [
+        `state=${seqText(seqField(family, 'state'))}`,
+        `score=${seqText(seqField(family, 'score'))}`,
+        `confidencePpm=${seqText(seqField(family, 'confidencePpm'))}`,
+        `satiation=${seqText(seqField(family, 'satiation'))}`,
+        `independentEpisodes=${seqText(seqField(family, 'independentEpisodeCount'))}`,
+        `favoriteEligible=${seqText(seqField(family, 'favoriteEligible'))}`,
+        `inFavoriteSet=${seqText(seqField(family, 'inFavoriteSet'))}`,
+        `lastStrongTerminalAt=${formatSequencingTimestamp(seqField(family, 'lastStrongTerminalAt'))}`,
+      ].join('  '),
+    ));
+  }
+  out.push(families);
+  out.push(seqRaw('epoch', view.epoch, true));
+  out.push(seqRaw('configs', view.configs));
+  out.push(seqSources(view.sources));
+  out.push(seqRaw('raw response', view.raw));
+  return out;
+}
+
+function renderSequencingWhyNow(view: SequencingDebugWhyNowViewV1): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  const head = seqBlock('decision');
+  head.append(
+    seqRow('subjectUserId', view.subjectUserId),
+    seqRow('planId', seqText(view.planId)),
+    seqRow('chosenSlotType', seqText(view.chosenSlotType)),
+    seqRow('chosenFamilyId', seqText(view.chosenFamilyId)),
+    seqRow('constraintConflict', seqText(view.constraintConflict)),
+    seqRow('coldStartPhase', seqText(view.coldStartPhase)),
+    seqRow('snapshotDigest', seqText(view.snapshotDigest)),
+  );
+  out.push(head);
+  const sections = seqBlock(`stored snapshot sections (${view.sections.length})`);
+  for (const section of view.sections) {
+    sections.append(seqRaw(section.key, section.value));
+  }
+  out.push(sections);
+  out.push(seqSources(view.sources));
+  // Mandatory verbatim view: the structured sections above are a reading aid.
+  out.push(seqRaw('raw snapshot', view.snapshot));
+  out.push(seqRaw('raw response', view.raw));
+  return out;
+}
+
+function renderSequencingHistory(view: SequencingDebugHistoryViewV1): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  const head = seqBlock('window');
+  head.append(
+    seqRow('subjectUserId', view.subjectUserId),
+    seqRow('limit (server echo)', seqText(view.limit)),
+  );
+  out.push(head);
+  const units = seqBlock(`issued → seen (${view.units.length})`);
+  for (const unit of view.units) {
+    units.append(seqRow(
+      formatSequencingTimestamp(unit.issuedAt),
+      [
+        `slot=${seqText(unit.slotType)}`,
+        `mechanic=${seqText(unit.mechanicId)}`,
+        `policy=${seqText(unit.policyVersion)}`,
+        `arm=${seqText(unit.arm)}`,
+        unit.seen === true
+          ? `seen ✓ ${formatSequencingTimestamp(unit.revealedAt)} · impression=${seqText(unit.impressionId)}`
+          : 'issued, not seen',
+        `decision=${seqText(unit.decisionId)}`,
+        `mapping=${seqText(unit.builtinMappingId)}`,
+        `rosterActivation=${seqText(unit.rosterActivationId)}`,
+      ].join('  '),
+    ));
+  }
+  out.push(units);
+  const generated = seqBlock(`generatedOfferMisses (${view.generatedOfferMisses.length})`);
+  view.generatedOfferMisses.forEach((miss, index) => {
+    generated.append(seqRaw(`miss[${index}]`, miss));
+  });
+  out.push(generated);
+  const favorite = seqBlock(`favoriteDeliveryMisses (${view.favoriteDeliveryMisses.length})`);
+  view.favoriteDeliveryMisses.forEach((miss, index) => {
+    favorite.append(seqRaw(`miss[${index}]`, miss));
+  });
+  out.push(favorite);
+  out.push(seqRow('resets', `${view.resets.length} (see the Reset tab)`));
+  out.push(seqSources(view.sources));
+  out.push(seqRaw('raw response', view.raw));
+  return out;
+}
+
+function renderSequencingResets(view: SequencingDebugHistoryViewV1): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  const note = seqBlock('read-only');
+  note.append(seqRow(
+    '',
+    'Reset receipts only. Personalization reset is an operator CLI act on the server'
+    + ' (its double confirmation lives there); this panel issues no request that changes state.',
+  ));
+  out.push(note);
+  const resets = seqBlock(`reset receipts (${view.resets.length})`);
+  if (view.resets.length === 0) resets.append(seqRow('', 'no reset receipt for this subject'));
+  for (const reset of view.resets) {
+    resets.append(seqRow(
+      seqText(reset.scope),
+      [
+        `effectiveAt=${formatSequencingTimestamp(reset.effectiveAt)}`,
+        `newEpoch=${seqText(reset.newEpoch)}`,
+        `receiptDigest=${seqText(reset.receiptDigest)}`,
+        `resetId=${seqText(reset.resetId)}`,
+      ].join('  '),
+    ));
+  }
+  out.push(resets);
+  out.push(seqRaw('raw resets', view.resets));
+  return out;
+}
+
+export function mountSequencingDebugPanel(): void {
+  const wrap = document.createElement('div');
+  wrap.style.cssText =
+    'position:fixed;inset:0;z-index:2147483647;background:rgba(2,6,12,0.97);color:#cfe;'
+    + 'font:12px/1.5 ui-monospace,monospace;padding:12px;display:flex;flex-direction:column;gap:8px;';
+
+  const mkBtn = (label: string, fn: () => void): HTMLButtonElement => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'padding:8px 12px;background:#1b2230;color:#cfe;border:1px solid #345;'
+      + 'border-radius:6px;font:600 12px ui-monospace,monospace;';
+    b.onclick = fn;
+    return b;
+  };
+
+  const title = document.createElement('div');
+  title.textContent = 'FEED SEQUENCING DEBUG (read-only, §12)';
+  title.style.cssText = 'color:#8cf;font-weight:600;';
+
+  const controls = document.createElement('div');
+  controls.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;';
+  const subjectInput = document.createElement('input');
+  subjectInput.placeholder = 'user_id (blank = me)';
+  subjectInput.inputMode = 'numeric';
+  subjectInput.style.cssText = 'width:150px;padding:6px 8px;background:#0a0f16;color:#cfe;'
+    + 'border:1px solid #345;border-radius:6px;font:12px ui-monospace,monospace;';
+  const limitInput = document.createElement('input');
+  limitInput.type = 'number';
+  limitInput.min = String(SEQUENCING_DEBUG_HISTORY_LIMIT_MIN);
+  limitInput.max = String(SEQUENCING_DEBUG_HISTORY_LIMIT_MAX);
+  limitInput.value = String(SEQUENCING_DEBUG_HISTORY_LIMIT_DEFAULT);
+  limitInput.style.cssText = 'width:72px;padding:6px 8px;background:#0a0f16;color:#cfe;'
+    + 'border:1px solid #345;border-radius:6px;font:12px ui-monospace,monospace;';
+  const limitLabel = document.createElement('span');
+  limitLabel.textContent = 'history limit';
+  limitLabel.style.cssText = 'color:#7a8;';
+
+  const tabsRow = document.createElement('div');
+  tabsRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
+  const body = document.createElement('div');
+  body.style.cssText = 'flex:1;overflow:auto;border-top:1px solid #253;padding-top:8px;';
+
+  const states: Partial<Record<SequencingDebugKind, SequencingDebugPanelStateV1 | 'loading'>> = {};
+  let active: SequencingTab = 'profile';
+  // A subject/limit change invalidates every in-flight read: a late response
+  // from the previous subject must never be painted under the new one.
+  let generation = 0;
+
+  const projectionOf = (tab: SequencingTab): SequencingDebugKind =>
+    (tab === 'reset' ? 'history' : tab);
+
+  function invalidate(): void {
+    generation += 1;
+    delete states.profile;
+    delete states['why-now'];
+    delete states.history;
+  }
+
+  async function load(kind: SequencingDebugKind, force: boolean): Promise<void> {
+    if (!force && states[kind] !== undefined) return;
+    const subject = subjectInput.value;
+    if (normalizeSequencingSubject(subject).status === 'invalid') {
+      states[kind] = {
+        kind,
+        state: 'error',
+        message: 'user_id must be a positive integer (leave it blank to read yourself)',
+        retryable: false,
+        view: null,
+      };
+      render();
+      return;
+    }
+    const mine = generation;
+    states[kind] = 'loading';
+    render();
+    const result = kind === 'profile'
+      ? await apiSequencingDebugProfile(subject)
+      : kind === 'why-now'
+        ? await apiSequencingDebugWhyNow(subject)
+        : await apiSequencingDebugHistory({ subject, limit: limitInput.value });
+    if (mine !== generation) return;
+    states[kind] = buildSequencingDebugView(kind, result);
+    render();
+  }
+
+  function renderState(tab: SequencingTab, state: SequencingDebugPanelStateV1): HTMLElement[] {
+    const out: HTMLElement[] = [];
+    if (state.state === 'unavailable' || state.state === 'error') {
+      const line = document.createElement('div');
+      line.textContent = state.message ?? '';
+      line.style.cssText = `color:${state.state === 'unavailable' ? '#9ab' : '#f97'};`;
+      out.push(line);
+      // Only a transport failure offers a retry: the server's single 404 is a
+      // final answer and re-asking it would just be noise.
+      if (state.retryable) {
+        out.push(mkBtn('↻ Retry', () => { void load(projectionOf(tab), true); }));
+      }
+      return out;
+    }
+    if (state.state === 'empty' && state.message) {
+      const line = document.createElement('div');
+      line.textContent = state.message;
+      line.style.cssText = 'color:#9ab;';
+      out.push(line);
+    }
+    const view = state.view;
+    if (view === null) return out;
+    const warnings = seqWarnings(view.warnings);
+    if (warnings !== null) out.push(warnings);
+    if (view.kind === 'profile') out.push(...renderSequencingProfile(view));
+    else if (view.kind === 'why-now') out.push(...renderSequencingWhyNow(view));
+    else if (tab === 'reset') out.push(...renderSequencingResets(view));
+    else out.push(...renderSequencingHistory(view));
+    return out;
+  }
+
+  function render(): void {
+    tabsRow.replaceChildren(...SEQUENCING_TABS.map((tab) => {
+      const b = mkBtn(tab.label, () => {
+        active = tab.id;
+        void load(projectionOf(tab.id), false);
+        render();
+      });
+      if (tab.id === active) b.style.background = '#25405c';
+      return b;
+    }));
+    limitInput.style.opacity = active === 'history' || active === 'reset' ? '1' : '0.45';
+    const state = states[projectionOf(active)];
+    if (state === undefined) {
+      const idle = document.createElement('div');
+      idle.textContent = '(not loaded)';
+      idle.style.cssText = 'color:#9ab;';
+      body.replaceChildren(idle);
+      return;
+    }
+    if (state === 'loading') {
+      const loading = document.createElement('div');
+      loading.textContent = 'loading…';
+      loading.style.cssText = 'color:#9ab;';
+      body.replaceChildren(loading);
+      return;
+    }
+    const container = document.createElement('div');
+    container.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
+    container.append(...renderState(active, state));
+    body.replaceChildren(container);
+  }
+
+  subjectInput.onchange = () => { invalidate(); void load(projectionOf(active), true); };
+  limitInput.onchange = () => {
+    limitInput.value = String(normalizeSequencingHistoryLimit(limitInput.value));
+    invalidate();
+    // Only history reads the limit, but the invalidated tab must never be left
+    // showing a stale or empty screen.
+    void load(projectionOf(active), true);
+  };
+
+  controls.append(
+    subjectInput,
+    limitLabel,
+    limitInput,
+    mkBtn('↻ Reload tab', () => { void load(projectionOf(active), true); }),
+    mkBtn('✕ Close', () => { generation += 1; wrap.remove(); }),
+  );
+
+  wrap.append(title, controls, tabsRow, body);
+  document.body.appendChild(wrap);
+  render();
+  void load('profile', false);
 }
