@@ -342,6 +342,10 @@ try {
   // Reset: receipts plus the three current epoch scopes, still read-only.
   await page.click('[data-seq-tab="reset"]');
   await waitForBody('reset receipts');
+  // Opening the reset tab also (re)loads the profile the epoch scopes come from,
+  // and that read is asynchronous: the receipts render before it lands, so the
+  // body must not be read until the scopes themselves are in.
+  await waitForBody('epoch=4');
   const resetText = await bodyText();
   for (const scope of ['personalization', 'exposures', 'onboarding']) {
     ok(resetText.includes(scope), `the reset tab names the ${scope} epoch scope`);

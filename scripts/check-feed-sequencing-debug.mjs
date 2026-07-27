@@ -794,6 +794,11 @@ assert.ok(
   !/\bmethod\s*:/.test(sequencingSection),
   'the single sequencing debug fetch must not name a method at all (GET by default)',
 );
+assert.ok(
+  /\bcache\s*:\s*'no-store'/.test(sequencingSection),
+  "the single sequencing debug fetch must pin cache: 'no-store' — a projection served"
+  + ' from the HTTP cache would present stale bytes as the current stored receipt',
+);
 const debugSource = readFileSync(path.resolve(root, 'src/debug.ts'), 'utf8');
 assert.ok(
   !/apiSequencingDebug\w*\s*\([^)]*\)\s*\.\s*then\s*\(\s*\(\)\s*=>\s*location/.test(debugSource),
