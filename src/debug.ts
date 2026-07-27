@@ -29,6 +29,7 @@ import {
   formatSequencingTimestamp,
   normalizeSequencingHistoryLimit,
   normalizeSequencingSubject,
+  sequencingSubjectEchoWarning,
 } from './feed-sequencing-debug.mjs';
 import type {
   SequencingDebugHistoryViewV1,
@@ -138,6 +139,9 @@ export async function mountDebugPanel(): Promise<void> {
     location.reload();
   });
 
+  const seqPanelBtn = mkBtn('⌘ Feed sequencing', () => { mountSequencingDebugPanel(); });
+  seqPanelBtn.dataset.qa = 'feed-sequencing-open';
+
   const seedBtn = mkBtn('⚡ Seed test challenge', async (b) => {
     b.textContent = 'seeding…';
     const r = await apiSeedChallenge();
@@ -151,11 +155,12 @@ export async function mountDebugPanel(): Promise<void> {
     socialBtn,
     copyBtn,
     seedBtn,
-    mkBtn('⌘ Feed sequencing', () => { mountSequencingDebugPanel(); }),
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),
     resetDailyBtn,
     resetBtn,
     mkBtn('✕ Close', () => { clearInterval(iv); wrap.remove(); }),
+    // Appended last so no existing QA control changes position.
+    seqPanelBtn,
   );
 
   wrap.append(head, btns, logEl);
@@ -165,7 +170,7 @@ export async function mountDebugPanel(): Promise<void> {
   const iv = window.setInterval(refreshLog, 1000);
 }
 
-// ── feed sequencing debug sub-screen (§12) ──────────────────────────────────
+// ── BEGIN feed sequencing debug sub-screen (§12) ───────────────────────────
 // Four read-only projections over stored snapshot/receipt bytes. Nothing here
 // recomputes a decision, and nothing here writes: the reset tab only displays
 // the receipts the history projection returns, because personalization reset is
@@ -339,7 +344,9 @@ function renderSequencingHistory(view: SequencingDebugHistoryViewV1): HTMLElemen
         `arm=${seqText(unit.arm)}`,
         unit.seen === true
           ? `seen ✓ ${formatSequencingTimestamp(unit.revealedAt)} · impression=${seqText(unit.impressionId)}`
-          : 'issued, not seen',
+          // A non-boolean `seen` is drift, not a negative fact: claiming
+          // "issued, not seen" there would invent a measurement.
+          : unit.seen === false ? 'issued, not seen' : 'seen: unknown (drift)',
         `decision=${seqText(unit.decisionId)}`,
         `mapping=${seqText(unit.builtinMappingId)}`,
         `rosterActivation=${seqText(unit.rosterActivationId)}`,
@@ -363,7 +370,10 @@ function renderSequencingHistory(view: SequencingDebugHistoryViewV1): HTMLElemen
   return out;
 }
 
-function renderSequencingResets(view: SequencingDebugHistoryViewV1): HTMLElement[] {
+function renderSequencingResets(
+  view: SequencingDebugHistoryViewV1,
+  epoch: unknown,
+): HTMLElement[] {
   const out: HTMLElement[] = [];
   const note = seqBlock('read-only');
   note.append(seqRow(
@@ -372,6 +382,21 @@ function renderSequencingResets(view: SequencingDebugHistoryViewV1): HTMLElement
     + ' (its double confirmation lives there); this panel issues no request that changes state.',
   ));
   out.push(note);
+  // §12.4 names three epoch scopes; the current watermarks come from the profile
+  // response already fetched for this subject — no extra endpoint is called.
+  const scopes = seqBlock('current epoch scopes');
+  if (epoch === undefined) {
+    scopes.append(seqRow('', 'not loaded (open the Profile tab)'));
+  } else {
+    scopes.append(
+      seqRow('personalization', `epoch=${seqText(seqField(epoch, 'personalizationEpoch'))}`
+        + `  watermark=${formatSequencingTimestamp(seqField(epoch, 'personalizationWatermark'))}`),
+      seqRow('exposures', `epoch=${seqText(seqField(epoch, 'exposuresEpoch'))}`
+        + `  watermark=${formatSequencingTimestamp(seqField(epoch, 'exposuresWatermark'))}`),
+      seqRow('onboarding', `epoch=${seqText(seqField(epoch, 'onboardingEpoch'))}`),
+    );
+  }
+  out.push(scopes);
   const resets = seqBlock(`reset receipts (${view.resets.length})`);
   if (view.resets.length === 0) resets.append(seqRow('', 'no reset receipt for this subject'));
   for (const reset of view.resets) {
@@ -390,8 +415,14 @@ function renderSequencingResets(view: SequencingDebugHistoryViewV1): HTMLElement
   return out;
 }
 
+// One sub-screen at a time: a second open replaces the first instead of
+// stacking another full-screen overlay over a live one.
+let closeMountedSequencingPanel: (() => void) | null = null;
+
 export function mountSequencingDebugPanel(): void {
+  closeMountedSequencingPanel?.();
   const wrap = document.createElement('div');
+  wrap.dataset.panel = 'feed-sequencing-debug';
   wrap.style.cssText =
     'position:fixed;inset:0;z-index:2147483647;background:rgba(2,6,12,0.97);color:#cfe;'
     + 'font:12px/1.5 ui-monospace,monospace;padding:12px;display:flex;flex-direction:column;gap:8px;';
@@ -414,9 +445,11 @@ export function mountSequencingDebugPanel(): void {
   const subjectInput = document.createElement('input');
   subjectInput.placeholder = 'user_id (blank = me)';
   subjectInput.inputMode = 'numeric';
+  subjectInput.dataset.seqInput = 'subject';
   subjectInput.style.cssText = 'width:150px;padding:6px 8px;background:#0a0f16;color:#cfe;'
     + 'border:1px solid #345;border-radius:6px;font:12px ui-monospace,monospace;';
   const limitInput = document.createElement('input');
+  limitInput.dataset.seqInput = 'limit';
   limitInput.type = 'number';
   limitInput.min = String(SEQUENCING_DEBUG_HISTORY_LIMIT_MIN);
   limitInput.max = String(SEQUENCING_DEBUG_HISTORY_LIMIT_MAX);
@@ -430,9 +463,13 @@ export function mountSequencingDebugPanel(): void {
   const tabsRow = document.createElement('div');
   tabsRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
   const body = document.createElement('div');
+  body.dataset.seqBody = 'true';
   body.style.cssText = 'flex:1;overflow:auto;border-top:1px solid #253;padding-top:8px;';
 
   const states: Partial<Record<SequencingDebugKind, SequencingDebugPanelStateV1 | 'loading'>> = {};
+  // The subject each state was actually requested with, so a server echo can be
+  // compared against the request that produced it rather than the live input.
+  const requestedSubjects: Partial<Record<SequencingDebugKind, string>> = {};
   let active: SequencingTab = 'profile';
   // A subject/limit change invalidates every in-flight read: a late response
   // from the previous subject must never be painted under the new one.
@@ -464,6 +501,7 @@ export function mountSequencingDebugPanel(): void {
     }
     const mine = generation;
     states[kind] = 'loading';
+    requestedSubjects[kind] = subject;
     render();
     const result = kind === 'profile'
       ? await apiSequencingDebugProfile(subject)
@@ -479,31 +517,49 @@ export function mountSequencingDebugPanel(): void {
     const out: HTMLElement[] = [];
     if (state.state === 'unavailable' || state.state === 'error') {
       const line = document.createElement('div');
+      line.dataset.seqState = state.state;
       line.textContent = state.message ?? '';
       line.style.cssText = `color:${state.state === 'unavailable' ? '#9ab' : '#f97'};`;
       out.push(line);
       // Only a transport failure offers a retry: the server's single 404 is a
       // final answer and re-asking it would just be noise.
       if (state.retryable) {
-        out.push(mkBtn('↻ Retry', () => { void load(projectionOf(tab), true); }));
+        const retry = mkBtn('↻ Retry', () => { void load(projectionOf(tab), true); });
+        retry.dataset.seqAction = 'retry';
+        out.push(retry);
       }
       return out;
     }
     if (state.state === 'empty' && state.message) {
       const line = document.createElement('div');
+      line.dataset.seqState = 'empty';
       line.textContent = state.message;
       line.style.cssText = 'color:#9ab;';
       out.push(line);
     }
     const view = state.view;
     if (view === null) return out;
-    const warnings = seqWarnings(view.warnings);
+    const echoWarning = sequencingSubjectEchoWarning(
+      requestedSubjects[projectionOf(tab)] ?? null,
+      view.subjectUserId,
+    );
+    const warnings = seqWarnings(
+      echoWarning === null ? view.warnings : [echoWarning, ...view.warnings],
+    );
     if (warnings !== null) out.push(warnings);
     if (view.kind === 'profile') out.push(...renderSequencingProfile(view));
     else if (view.kind === 'why-now') out.push(...renderSequencingWhyNow(view));
-    else if (tab === 'reset') out.push(...renderSequencingResets(view));
+    else if (tab === 'reset') out.push(...renderSequencingResets(view, profileEpoch()));
     else out.push(...renderSequencingHistory(view));
     return out;
+  }
+
+  /** The epoch of the profile response already fetched for this subject. */
+  function profileEpoch(): unknown {
+    const profileState = states.profile;
+    if (profileState === undefined || profileState === 'loading') return undefined;
+    const view = profileState.view;
+    return view !== null && view.kind === 'profile' ? view.epoch : undefined;
   }
 
   function render(): void {
@@ -511,8 +567,13 @@ export function mountSequencingDebugPanel(): void {
       const b = mkBtn(tab.label, () => {
         active = tab.id;
         void load(projectionOf(tab.id), false);
+        // The reset tab reads the epoch scopes out of the profile projection, so
+        // it makes sure that one exists for the current subject — the same
+        // request the panel already issues, never a new endpoint.
+        if (tab.id === 'reset') void load('profile', false);
         render();
       });
+      b.dataset.seqTab = tab.id;
       if (tab.id === active) b.style.background = '#25405c';
       return b;
     }));
@@ -547,16 +608,24 @@ export function mountSequencingDebugPanel(): void {
     void load(projectionOf(active), true);
   };
 
-  controls.append(
-    subjectInput,
-    limitLabel,
-    limitInput,
-    mkBtn('↻ Reload tab', () => { void load(projectionOf(active), true); }),
-    mkBtn('✕ Close', () => { generation += 1; wrap.remove(); }),
-  );
+  function close(): void {
+    // Bumping the generation first makes every in-flight read inert, so a late
+    // response cannot resurrect a removed screen.
+    generation += 1;
+    wrap.remove();
+    if (closeMountedSequencingPanel === close) closeMountedSequencingPanel = null;
+  }
+
+  const reloadBtn = mkBtn('↻ Reload tab', () => { void load(projectionOf(active), true); });
+  reloadBtn.dataset.seqAction = 'reload';
+  const closeBtn = mkBtn('✕ Close', close);
+  closeBtn.dataset.seqAction = 'close';
+  controls.append(subjectInput, limitLabel, limitInput, reloadBtn, closeBtn);
 
   wrap.append(title, controls, tabsRow, body);
   document.body.appendChild(wrap);
+  closeMountedSequencingPanel = close;
   render();
   void load('profile', false);
 }
+// ── END feed sequencing debug sub-screen (§12) ─────────────────────────────

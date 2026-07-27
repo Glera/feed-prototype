@@ -139,10 +139,12 @@ function reportUnknownKeys(value, known, label, warnings) {
 }
 
 /**
- * Validate the shared envelope. These five fields carry the read-only promise
- * of the whole contour, so a violation is a hard contract error rather than a
- * warning: a projection that claims to be recomputed must not be displayed as
- * a stored snapshot.
+ * Validate the shared envelope. Schema, readOnly, recomputed, subjectUserId and
+ * sources carry the read-only promise of the whole contour, so a violation of
+ * any of them is a hard contract error rather than a warning: a projection that
+ * claims to be recomputed — or that cannot name the stored bytes it came from —
+ * must not be displayed as a stored snapshot. Individual malformed entries
+ * inside a well-formed sources array stay warnings.
  */
 export function parseSequencingDebugEnvelope(value, expectedSchema, warnings = []) {
   if (!plainObject(value)) {
@@ -160,8 +162,13 @@ export function parseSequencingDebugEnvelope(value, expectedSchema, warnings = [
   if (typeof value.subjectUserId !== 'string' || !SUBJECT_ID_RE.test(value.subjectUserId)) {
     fail('invalid_subject', 'sequencing debug response must echo a numeric subjectUserId');
   }
-  const rawSources = arrayOrEmpty(value.sources, 'sources', warnings);
-  const sources = rawSources.map((source, index) => {
+  // `sources` carries the digests that make a projection auditable, so it fails
+  // closed like the other promise-bearing fields. An empty array is legitimate:
+  // it is how the server states that nothing is stored for this subject yet.
+  if (!Array.isArray(value.sources)) {
+    fail('invalid_sources', 'sequencing debug response must carry a sources array');
+  }
+  const sources = value.sources.map((source, index) => {
     const label = `sources[${index}]`;
     if (!plainObject(source)) {
       warnings.push(`${label} is not an object`);
@@ -444,6 +451,21 @@ export function normalizeSequencingSubject(value) {
   const parsed = Number(trimmed);
   if (!Number.isSafeInteger(parsed) || parsed < 1) return Object.freeze({ status: 'invalid' });
   return Object.freeze({ status: 'subject', userId: parsed });
+}
+
+/**
+ * The server always echoes the subject it actually read. When an operator named
+ * one explicitly and the echo differs, the displayed bytes belong to a different
+ * user than the one on screen — surfaced as a warning, while the value shown
+ * stays the server's.
+ */
+export function sequencingSubjectEchoWarning(requested, echoed) {
+  const subject = normalizeSequencingSubject(requested === undefined ? null : requested);
+  if (subject.status !== 'subject') return null;
+  if (typeof echoed !== 'string' || echoed === '') return null;
+  return String(subject.userId) === echoed
+    ? null
+    : `server echoed subjectUserId ${echoed} for requested user_id ${subject.userId}`;
 }
 
 /** The server rejects anything outside 1..50; an unusable input falls back. */

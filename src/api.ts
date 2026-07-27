@@ -1096,7 +1096,10 @@ export function variantIdForMechanic(mechanicId: string): string {
 async function sequencingDebugGet(path: string): Promise<SequencingDebugResult> {
   let r: Response;
   try {
-    r = await fetch(`${API_BASE}${path}`, { headers: headers() });
+    // No method is named: this is a GET by construction. `no-store` keeps a
+    // stale projection out of the HTTP cache — debug reads must show the
+    // current stored bytes, not a cached copy of an older receipt.
+    r = await fetch(`${API_BASE}${path}`, { headers: headers(), cache: 'no-store' });
   } catch (e) {
     return { status: 'error', message: `Network error: ${e instanceof Error ? e.message : String(e)}` };
   }

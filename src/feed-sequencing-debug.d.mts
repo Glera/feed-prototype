@@ -148,6 +148,10 @@ export function buildSequencingDebugView(
   result: SequencingDebugResult,
 ): SequencingDebugPanelStateV1;
 export function normalizeSequencingSubject(value: unknown): SequencingDebugSubject;
+export function sequencingSubjectEchoWarning(
+  requested: unknown,
+  echoed: unknown,
+): string | null;
 export function normalizeSequencingHistoryLimit(value: unknown): number;
 export function buildSequencingDebugPath(
   kind: SequencingDebugKind,
