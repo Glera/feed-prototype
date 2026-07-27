@@ -158,9 +158,10 @@ export async function mountDebugPanel(): Promise<void> {
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),
     resetDailyBtn,
     resetBtn,
-    mkBtn('✕ Close', () => { clearInterval(iv); wrap.remove(); }),
-    // Appended last so no existing QA control changes position.
+    // Last of the functional controls, so no existing QA control changes
+    // position; Close stays the terminal button of the row.
     seqPanelBtn,
+    mkBtn('✕ Close', () => { clearInterval(iv); wrap.remove(); }),
   );
 
   wrap.append(head, btns, logEl);
