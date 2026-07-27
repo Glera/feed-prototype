@@ -7052,18 +7052,34 @@ export class Feed {
       const inner = f.photo_url
         ? `<img src="${this.esc(f.photo_url)}" alt="" draggable="false"><span class="isln-friend__initial">${this.esc(initial)}</span>`
         : `<span>${this.esc(initial)}</span>`;
-      cells += `<button type="button" class="isln-friend${f.is_bot ? ' isln-friend--bot' : ''}" data-friend-visit="${f.user_id}" title="${this.esc(name)}">${inner}</button>`;
+      cells +=
+        '<div class="isln-friend-cell">' +
+          `<button type="button" class="isln-friend${f.is_bot ? ' isln-friend--bot' : ''}" data-friend-visit="${f.user_id}" aria-label="${this.esc(name)}">${inner}</button>` +
+          `<div class="story__name isln-friend__name">${this.esc(name)}</div>` +
+        '</div>';
     }
     // Fill remaining slots (up to 3 total) with dimmed empty cells that also invite.
     const emptyCount = overflow > 0 ? 0 : Math.max(0, 3 - shown.length);
     for (let i = 0; i < emptyCount; i++) {
-      cells += '<button type="button" class="isln-friend isln-friend--empty" data-friend-invite aria-label="Пригласить друга">+</button>';
+      cells +=
+        '<div class="isln-friend-cell">' +
+          '<button type="button" class="isln-friend isln-friend--empty" data-friend-invite aria-label="Пригласить друга">+</button>' +
+          '<div class="story__name isln-friend__name" aria-hidden="true">&nbsp;</div>' +
+        '</div>';
     }
     if (overflow > 0) {
-      cells += `<button type="button" class="isln-friend isln-friend--more" data-friends-list>+${overflow}</button>`;
+      cells +=
+        '<div class="isln-friend-cell">' +
+          `<button type="button" class="isln-friend isln-friend--more" data-friends-list aria-label="Ещё друзей: ${overflow}">+${overflow}</button>` +
+          '<div class="story__name isln-friend__name" aria-hidden="true">&nbsp;</div>' +
+        '</div>';
     }
     // The invite "+" is always present.
-    cells += '<button type="button" class="isln-friend isln-friend--invite" data-friend-invite aria-label="Пригласить друга">+</button>';
+    cells +=
+      '<div class="isln-friend-cell">' +
+        '<button type="button" class="isln-friend isln-friend--invite" data-friend-invite aria-label="Пригласить друга">+</button>' +
+        '<div class="story__name isln-friend__name" aria-hidden="true">&nbsp;</div>' +
+      '</div>';
     el.innerHTML = cells;
     // Photo fallback: on load error drop the <img> so the initial shows through.
     el.querySelectorAll<HTMLImageElement>('.isln-friend img').forEach((img) =>

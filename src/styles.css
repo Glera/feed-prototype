@@ -3110,12 +3110,19 @@ body {
    avatar/level. One flex item holding a compact row of round cells + invite "+". */
 .isln-friends {
   flex: 0 0 auto;
-  align-self: center;
+  align-self: flex-start;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 5px;
   padding: 0 2px;
   pointer-events: auto;
+}
+.isln-friend-cell {
+  width: 40px;
+  flex: 0 0 40px;
+  display: grid;
+  justify-items: center;
+  gap: 5px;
 }
 .isln-friend {
   position: relative;
@@ -3131,6 +3138,9 @@ body {
   place-items: center;
   overflow: hidden;
   padding: 0;
+}
+.isln-friend__name {
+  width: 40px;
 }
 .isln-friend img {
   position: absolute;

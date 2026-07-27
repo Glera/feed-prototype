@@ -109,7 +109,7 @@ const friends = [1, 2, 3, 4].map((id) => ({
   first_name: `Друг ${id}`,
   username: null,
   photo_url: null,
-  is_bot: id === 4,
+  is_bot: id === 1 || id === 4,
   has_island: true,
   published_buildings: 1,
 }));
@@ -197,6 +197,24 @@ try {
   const page = await context.newPage();
   await page.goto(`${origin}/?initData=p2-browser`, { waitUntil: 'domcontentloaded' });
   await page.locator('.isln-friends [data-friends-list]').waitFor({ state: 'visible' });
+
+  const firstFriend = page.locator(
+    `.isln-friends [data-friend-visit="${friends[0].user_id}"]`,
+  );
+  const firstFriendCell = firstFriend.locator('..');
+  const firstFriendName = firstFriendCell.locator('.isln-friend__name');
+  assert.equal(await firstFriendName.textContent(), friends[0].first_name);
+  assert.equal(await firstFriend.getAttribute('title'), null, 'friend name must not overlay avatar');
+  assert.match(await firstFriend.getAttribute('class'), /isln-friend--bot/);
+  const [avatarBox, nameBox] = await Promise.all([
+    firstFriend.boundingBox(),
+    firstFriendName.boundingBox(),
+  ]);
+  assert.ok(avatarBox && nameBox);
+  assert.ok(
+    nameBox.y >= avatarBox.y + avatarBox.height,
+    'friend name must render below the avatar',
+  );
 
   const invite = page.locator('.isln-friends [data-friend-invite]').last();
   await invite.click();
