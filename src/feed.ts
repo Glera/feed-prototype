@@ -220,7 +220,9 @@ const ISLAND_ACTIVITY_CURSOR_KEY = 'island-activity-cursor-v1';
 const ISLAND_ACTIVITY_POLL_MS = 75_000;
 // …and at most ONE toast per this window. Everything that lands inside it is
 // coalesced into a single line, so a busy island can never spam the feed.
-const ISLAND_ACTIVITY_TOAST_GAP_MS = 120_000;
+// Operator-set at one minute for the current (tiny) player base; it is expected
+// to be widened again as traffic grows.
+const ISLAND_ACTIVITY_TOAST_GAP_MS = 60_000;
 
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since

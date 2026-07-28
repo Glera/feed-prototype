@@ -9,7 +9,7 @@
  * Live in-session behaviour (the same feed, read on a light poll):
  *   а. a claim landing in the background surfaces within one poll, with the "!"
  *      on the island tab;
- *   б/в. everything inside the 2-minute window is coalesced into ONE toast, and
+ *   б/в. everything inside the 1-minute window is coalesced into ONE toast, and
  *      the next toast cannot appear before that window is over;
  *   г. claims that land while the player is inside a mechanic wait for the
  *      return to browse;
@@ -17,7 +17,7 @@
  *   е. human and bot facts stay visibly distinct in a coalesced line;
  *   ж. tapping the toast opens the player's island.
  *
- * Time is virtualised with Playwright's clock so the 75s poll and the 2-minute
+ * Time is virtualised with Playwright's clock so the 75s poll and the 1-minute
  * rate limit are exercised in seconds.
  */
 import assert from 'node:assert/strict';
@@ -269,14 +269,23 @@ try {
   await metaAlert.waitFor({ state: 'visible', timeout: 10_000 });   // а: the "!" lights up
   await page.screenshot({ path: path.join(shotDir, 'activity-toast-single.png') });
 
-  // б/в. four more claims inside the window → ONE toast, and not before 2 minutes.
+  // б/в. four more claims inside the window → ONE toast, and not before the
+  // rate-limit window (operator-set to one minute) is over.
   addClaim('Пётр');
   addClaim('Оля');
   addClaim('Ким');
   addClaim('Женя');
-  await advance(80_000);            // the poll reads them…
-  assert.equal((await toasts()).length, 1, 'в: no second toast inside the 2-minute window');
-  await advance(45_000);            // …and the window opens at ~125s
+  // Read them RIGHT AWAY (seconds after the last toast) through the pause-return
+  // catch-up read — the 75s light poll alone would land outside a 60s window.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.waitForTimeout(900);   // the catch-up read lands inside the window…
+  assert.equal((await toasts()).length, 1, 'в: no second toast inside the rate-limit window');
+  await advance(65_000);            // …and the window opens just after a minute
   const coalesced = await toasts();
   assert.equal(coalesced.length, 2, `б: exactly one more toast (${JSON.stringify(coalesced)})`);
   assert.equal(
@@ -341,7 +350,7 @@ try {
 
   console.log(
     'island real activity browser: baseline + cursor resume + live poll toast with "!" + '
-    + '2-minute coalescing/rate limit + held during interception + bot-only marking + '
+    + '1-minute coalescing/rate limit + held during interception + bot-only marking + '
     + 'tap opens the island + no repeat on re-entry verified',
   );
 } finally {
