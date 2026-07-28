@@ -50,6 +50,7 @@ import {
 import { burstConfetti } from './fx';
 import { coverUrl, playableUrl, PLAYABLES } from './playables';
 import { shareTelegramLink, showConfirm } from './telegram';
+import { userScopedStorageKey } from './user-scope';
 
 declare const __ISLAND_SORT_RECIPE__: {
   baseBuild: string;
@@ -572,10 +573,7 @@ function restoreLocalExperimentThread(value: unknown): LocalExperimentThread | n
   };
 }
 function localExperimentStorageKey(): string {
-  const userId = (window as unknown as {
-    Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
-  }).Telegram?.WebApp?.initDataUnsafe?.user?.id;
-  return `island-local-experiments-v1${Number.isSafeInteger(userId) ? `:${userId}` : ''}`;
+  return userScopedStorageKey('island-local-experiments-v1');
 }
 function loadLocalExperiments(): LocalExperimentState {
   if (!IS_DEV) return { buildings: [], packs: {}, threads: {} };
@@ -1036,7 +1034,11 @@ function maxBadgeSvg(cx: number, cy: number): string {
 // the STALE job/pack after such a change; we compare the full identity instead so
 // any digest-affecting change is treated as a fresh request. Mirrors the bake
 // jobId-in-state resume pattern.
+// Scoped per user: the map is keyed by SLOT (0..3), which every island reuses,
+// so an unscoped map would let a second account on the same device resume the
+// first account's theme job and paint its pack into their slot.
 const THEME_JOB_KEY = 'island-theme-jobs-v1';
+const themeJobStorageKey = (): string => userScopedStorageKey(THEME_JOB_KEY);
 interface ThemeJobHandle { jobId?: string; requestId: string; identity: string; }
 
 /** Canonical client-side request identity over exactly the fields that feed the
@@ -1055,10 +1057,10 @@ function themeRequestIdentity(
 }
 
 function readThemeJobHandles(): Record<string, ThemeJobHandle> {
-  try { return JSON.parse(localStorage.getItem(THEME_JOB_KEY) || '{}') || {}; } catch { return {}; }
+  try { return JSON.parse(localStorage.getItem(themeJobStorageKey()) || '{}') || {}; } catch { return {}; }
 }
 function writeThemeJobHandles(map: Record<string, ThemeJobHandle>): void {
-  try { localStorage.setItem(THEME_JOB_KEY, JSON.stringify(map)); } catch { /* private mode */ }
+  try { localStorage.setItem(themeJobStorageKey(), JSON.stringify(map)); } catch { /* private mode */ }
 }
 function ensureThemeJobHandle(slot: number, identity: string): ThemeJobHandle {
   const map = readThemeJobHandles();
@@ -1101,16 +1103,37 @@ function forgetThemeJob(slot: number, requestId?: string): void {
 // id makes every repeat a replay of the same append-only receipt.
 const COLLECT_RETRY_DELAYS_MS = [1500, 4000, 9000];
 
+// Scoped per user like everything else that persists player state — but the
+// migration is DELIBERATELY conservative in the other direction: a claim id is
+// what makes a repeated collect a replay of the same append-only receipt, so
+// losing one could pay a second time. The legacy device-wide map is therefore
+// never mutated or wholesale-copied; a single entry is adopted only when it is
+// provably this user's, i.e. it is filed under a building of their OWN island
+// (these functions are called for own-island collects only, and buildingId is a
+// server-owned per-owner UUID).
 const COLLECT_CLAIM_KEY = 'island-collect-claims-v1';
+const collectClaimStorageKey = (): string => userScopedStorageKey(COLLECT_CLAIM_KEY);
+function readClaimMap(key: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '{}') as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as Record<string, string>;
+  } catch { return {}; }
+}
 function loadCollectClaims(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem(COLLECT_CLAIM_KEY) || '{}') || {}; } catch { return {}; }
+  return readClaimMap(collectClaimStorageKey());
 }
 function saveCollectClaims(map: Record<string, string>): void {
-  try { localStorage.setItem(COLLECT_CLAIM_KEY, JSON.stringify(map)); } catch { /* private mode */ }
+  try { localStorage.setItem(collectClaimStorageKey(), JSON.stringify(map)); } catch { /* private mode */ }
 }
 function ensureCollectClaim(buildingId: string): string {
   const map = loadCollectClaims();
-  if (!map[buildingId]) { map[buildingId] = newJobId(); saveCollectClaims(map); }
+  if (!map[buildingId]) {
+    const scopedKey = collectClaimStorageKey();
+    const inherited = scopedKey === COLLECT_CLAIM_KEY ? undefined : readClaimMap(COLLECT_CLAIM_KEY)[buildingId];
+    map[buildingId] = typeof inherited === 'string' && inherited ? inherited : newJobId();
+    saveCollectClaims(map);
+  }
   return map[buildingId];
 }
 function clearCollectClaim(buildingId: string): void {

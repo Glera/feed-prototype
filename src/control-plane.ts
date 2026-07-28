@@ -5,6 +5,7 @@ import {
   type ControlPlaneFlushResult,
 } from './control-plane-outbox.mjs';
 import { getInitData } from './telegram';
+import { telegramUserId } from './user-scope';
 import { sessionIdOf } from './telemetry';
 import type {
   CatalogConfigurationFailurePayload,
@@ -228,15 +229,9 @@ function onPageShow(): void {
   void flushControlPlane({ force: true });
 }
 
+/** Same identity as every other user-scoped key (src/user-scope.ts); the outbox
+ *  additionally keeps a stable bucket for an authenticated-but-unidentified
+ *  launch instead of falling back to a device-wide key. */
 function telegramUserScope(): string {
-  const unsafeId = (window as unknown as {
-    Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
-  }).Telegram?.WebApp?.initDataUnsafe?.user?.id;
-  if (Number.isSafeInteger(unsafeId)) return String(unsafeId);
-  try {
-    const rawUser = new URLSearchParams(getInitData() ?? '').get('user');
-    const parsed = rawUser ? JSON.parse(rawUser) as { id?: unknown } : null;
-    if (parsed && typeof parsed.id === 'number' && Number.isSafeInteger(parsed.id)) return String(parsed.id);
-  } catch { /* dev initData without a parseable user */ }
-  return 'authenticated';
+  return telegramUserId() ?? 'authenticated';
 }

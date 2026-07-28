@@ -121,6 +121,7 @@ import { track } from './telemetry';
 import { mountIslandVisitAwardCard } from './island-p2-card.mjs';
 import { burstConfetti } from './fx';
 import { hasPendingStageUpgrade } from './island-celebrations';
+import { userScopedStorage, userScopedStorageKey } from './user-scope';
 import {
   getStartParam,
   shareChallenge,
@@ -209,7 +210,24 @@ const ISLAND_NOTIFICATIONS_UI_ENABLED = ISLAND_UI_ENABLED && (() => {
 // Pending friend-invite accept persists across boots until a definitive outcome,
 // so a new user whose FK row is created by the FIRST /session still lands the
 // accept on that session (F004). Bounded by an attempt cap.
+/**
+ * A `localStorage` view namespaced by the authenticated Telegram user (see
+ * `src/user-scope.ts`). Used for the contract modules that own their storage key
+ * internally: the staged feed-roster activation and the played-canary ring are
+ * both issued to ONE player, so on a shared device they must not be read by the
+ * next account. The view resolves the scope per operation, so one instance
+ * survives an account switch.
+ */
+let scopedStorageView: Storage | null = null;
+const scopedStorage = (): Storage => (
+  scopedStorageView ?? (scopedStorageView = userScopedStorage(localStorage))
+);
+
+// Scoped per user: an f_<code> invite is accepted AS the launching account, so a
+// leftover code must never be landed by whoever opens the app next on a shared
+// device. No carry-over from the legacy key — the deep link can be reopened.
 const ISLAND_PENDING_ACCEPT_KEY = 'island-pending-friend-accept-v1';
+const islandPendingAcceptKey = (): string => userScopedStorageKey(ISLAND_PENDING_ACCEPT_KEY);
 const ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS = 5;
 const ISLAND_WRITE_ACCESS_ASKED_KEY = 'island-write-access-asked-v1';
 const ISLAND_WRITE_ACCESS_PENDING_KEY = 'island-write-access-pending-v1';
@@ -1021,7 +1039,7 @@ export class Feed {
     // still flushing any events persisted by an earlier app launch.
     initControlPlane();
     this.authenticatedUserId = Number(session.user.id);
-    const rosterStage = await stageFeedRosterForNextSession(localStorage, session.feedRoster);
+    const rosterStage = await stageFeedRosterForNextSession(scopedStorage(), session.feedRoster);
     if (rosterStage.status === 'rejected') {
       track('roster_snapshot_rejected', { reason: rosterStage.reason });
     }
@@ -1187,7 +1205,7 @@ export class Feed {
           const canary = validateCatalogCanaryAuthorityResult(
             rawCanary,
           );
-          if (catalogCanaryWasPlayed(localStorage, canary.authorizationId)) {
+          if (catalogCanaryWasPlayed(scopedStorage(), canary.authorizationId)) {
             this.catalogCanaryServedThisPage = true;
           } else {
             if (!catalogCanaryAuthorityAllowsAllocation(canary)) {
@@ -1884,7 +1902,7 @@ export class Feed {
             try {
               const raw = await apiGetCatalogCanaryAuthorityRequired();
               const canary = validateCatalogCanaryAuthorityResult(raw);
-              if (catalogCanaryWasPlayed(localStorage, canary.authorizationId)) {
+              if (catalogCanaryWasPlayed(scopedStorage(), canary.authorizationId)) {
                 this.catalogCanaryServedThisPage = true;
                 authority = null;
               } else {
@@ -6801,7 +6819,7 @@ export class Feed {
         // For a canary allocation the opaque authorization is the allocation
         // identity by contract; CatalogFeedSlot intentionally retains no
         // separate authority object after delivery.
-        rememberPlayedCatalogCanary(localStorage, catalog.allocation.allocationId);
+        rememberPlayedCatalogCanary(scopedStorage(), catalog.allocation.allocationId);
         this.catalogCanaryServedThisPage = true;
       }
       // First transition autoplay → manual for this unit = a takeover.
@@ -7653,16 +7671,16 @@ export class Feed {
     // 5xx would retry forever. Definitive outcomes clear the key entirely.
     try {
       let attempts = 0;
-      const raw = localStorage.getItem(ISLAND_PENDING_ACCEPT_KEY);
+      const raw = localStorage.getItem(islandPendingAcceptKey());
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed && parsed.code === code) attempts = Number(parsed.attempts) || 0;
       }
-      localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code, attempts }));
+      localStorage.setItem(islandPendingAcceptKey(), JSON.stringify({ code, attempts }));
     } catch { /* private mode */ }
   }
   private clearPendingFriendAccept(): void {
-    try { localStorage.removeItem(ISLAND_PENDING_ACCEPT_KEY); } catch { /* private mode */ }
+    try { localStorage.removeItem(islandPendingAcceptKey()); } catch { /* private mode */ }
   }
 
   // Land a pending friend-invite accept AFTER /session (F004). Runs at most once
@@ -7672,7 +7690,7 @@ export class Feed {
     if (!ISLAND_UI_ENABLED || !getInitData()) return;
     let pending: { code: string; attempts: number } | null = null;
     try {
-      const raw = localStorage.getItem(ISLAND_PENDING_ACCEPT_KEY);
+      const raw = localStorage.getItem(islandPendingAcceptKey());
       const parsed = raw ? JSON.parse(raw) : null;
       if (parsed && typeof parsed.code === 'string') {
         pending = { code: parsed.code, attempts: Number(parsed.attempts) || 0 };
@@ -7682,7 +7700,7 @@ export class Feed {
     if (pending.attempts >= ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS) { this.clearPendingFriendAccept(); return; }
     // Record this attempt up-front so a crash mid-flight cannot loop forever.
     try {
-      localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code: pending.code, attempts: pending.attempts + 1 }));
+      localStorage.setItem(islandPendingAcceptKey(), JSON.stringify({ code: pending.code, attempts: pending.attempts + 1 }));
     } catch { /* private mode */ }
     try {
       const res = await apiIslandFriendAccept(pending.code);
