@@ -695,6 +695,9 @@ export class Feed {
   private islandFriends: IslandFriend[] = [];
   // The friends-row cell whose avatar is currently "away" on a visited island.
   private guestAvatarCell: HTMLElement | null = null;
+  // Collection cards this chest still owes; the bar stays in its lifted layer
+  // until the last one has landed on the collections button.
+  private chestCardsPending = 0;
   private friendsHudEl: HTMLElement | null = null;
   private friendAcceptCode: string | null = null;
   private storiesMomentumFrame: number | null = null;
@@ -3958,9 +3961,16 @@ export class Feed {
     // goes (showSeriesWinScreen / clearSeriesUi). The whole HUD moves because it's
     // the stacking-context root — a child's z-index can't escape it.
     this.hudEl?.classList.add('hud--chest-lift');
-    // Same lift for the bottom bar so the collections button (the card-drop target)
-    // is visible above the scrim and cards tuck into it. Cleared in showSeriesWinScreen.
-    this.feedBarEl?.classList.add('feed-bar--chest-lift');
+    // Same intent for the bottom bar — but a z-index alone CANNOT do it here. The
+    // HUD is a child of .viewport (the scrim's own layer), while the bar lives in
+    // .feed, which is a stacking context of its own (`contain: layout paint` in
+    // styles.css). A z-index on the bar therefore only re-orders it INSIDE .feed,
+    // and the whole .feed subtree still paints under the scrim — which is exactly
+    // the "collections button under the dim" the ceremony showed. While cards are
+    // in flight the bar is parked in .viewport instead, and it goes back to .feed
+    // as soon as the last card has landed.
+    this.chestCardsPending = cardCount;
+    if (cardCount > 0) this.liftBarForCardDrop();
 
     // The chest flies IN from the slot-row chest icon and scales up to centre; the
     // slot panel fades out as it launches.
@@ -4614,6 +4624,32 @@ export class Feed {
     this.updatePuzzleCounter();
   }
 
+  // ── Card-drop target: the collections button above the chest dim ──────────
+  // `.feed` is a stacking context (`contain: layout paint`), so the bar can never
+  // out-paint the chest scrim from inside it, whatever its z-index. For the length
+  // of the card drop the bar is therefore moved into `.viewport` — the scrim's own
+  // layer — where z-index 2706 > the scrim's 2700 actually means something. It
+  // keeps its exact geometry (the portal class re-applies the safe-area insets it
+  // inherited from `.feed`) and is a landing TARGET only: pointer-events are off,
+  // so the ceremony stays modal.
+  private liftBarForCardDrop(): void {
+    const bar = this.feedBarEl;
+    if (!bar || bar.parentElement === this.viewport) return;
+    bar.classList.add('feed-bar--chest-portal');
+    this.viewport.appendChild(bar);
+  }
+
+  /** Back to the normal layer — only once every dropped card has landed (or on a
+   *  forced teardown, where nothing can still be owed). */
+  private restoreBarAfterCardDrop(force = false): void {
+    if (!force && this.chestCardsPending > 0) return;
+    this.chestCardsPending = 0;
+    const bar = this.feedBarEl;
+    if (!bar) return;
+    bar.classList.remove('feed-bar--chest-portal');
+    if (this.feedEl && bar.parentElement !== this.feedEl) this.feedEl.appendChild(bar);
+  }
+
   // Drop one collection card. Like stars/puzzles it pops UP OUT of the gift first
   // (phase 1, above the gift), then in phase 2 arcs DOWN into the collections button
   // on the bar, shrinking as it tucks in. Rendered above the gift/scrim (z 2720).
@@ -4622,8 +4658,14 @@ export class Feed {
     const target = this.collectionsBtnEl?.getBoundingClientRect();
     const toCX = target ? target.left - vp.left + target.width / 2 : 60;
     const toCY = target ? target.top - vp.top + target.height / 2 : vp.height - 30;
-    const w = 84;
+    // Drop size (was 84): a dropping card reads as a small collectible, not as a
+    // full card slapped over the chest. The 18px frame in `.coll-card` is authored
+    // for the 132px reference card, so it is scaled with the width — otherwise a
+    // smaller card is just a card swallowed by its own frame, and the ribbon title
+    // (sized in cqw) stops being readable.
+    const w = 64;
     const cardEl = makeCollectionCard(card, w);
+    cardEl.style.borderWidth = `${Math.round((18 * w) / 132)}px`;
     const wrap = document.createElement('div');
     // Above the gift (z 2, in the scrim at 2700) AND the lifted bar (2706), so it
     // flies over the gift and lands visibly on the collections icon.
@@ -4650,6 +4692,9 @@ export class Feed {
       // progress changes only through the dedicated persisted state, never from
       // this random animation (which may also contain duplicates).
       this.bumpCollectionsBtn();
+      // The target only needs to out-paint the dim while cards are travelling.
+      this.chestCardsPending = Math.max(0, this.chestCardsPending - 1);
+      this.restoreBarAfterCardDrop();
     };
     const DUR = REWARD_SHOT_MS + 170;
     if (!wrap.animate) {
@@ -4749,7 +4794,8 @@ export class Feed {
   private showSeriesWinScreen(i: number): void {
     // Fade the chest overlay out.
     this.hudEl?.classList.remove('hud--chest-lift');   // scrim gone → drop the HUD lift
-    this.feedBarEl?.classList.remove('feed-bar--chest-lift');
+    // A card still in the air keeps the bar in its lifted layer until it lands.
+    this.restoreBarAfterCardDrop();
     this.stopChestSparks();
     const chest = this.chestEl;
     if (chest) {
@@ -4902,7 +4948,7 @@ export class Feed {
     this.dismissChallengePill();
     this.islandVisitAwardPromise = null;
     this.hudEl?.classList.remove('hud--chest-lift');
-    this.feedBarEl?.classList.remove('feed-bar--chest-lift');
+    this.restoreBarAfterCardDrop(true);   // hard reset: no card can still be owed
     // Restore normal arrival-poster behaviour (a future feed arrival at this unit
     // should show its cover again).
     this.feedEl?.querySelectorAll('.game--series-reload').forEach((el) => el.classList.remove('game--series-reload'));

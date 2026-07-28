@@ -3313,9 +3313,17 @@ body {
    under the pinned puzzle counter. */
 .stories { padding-right: 78px; }
 
-/* Lift the bottom bar above the chest scrim (like .hud--chest-lift) so the
-   collections button is visible as cards fly down and tuck into it. */
-.feed-bar--chest-lift { z-index: 2706; }
+/* Card drop: the bar is temporarily re-parented into .viewport (see
+   liftBarForCardDrop) because .feed is its own stacking context — inside .feed no
+   z-index can lift the collections button above the chest scrim. Here it can, so
+   the cards land on a BRIGHT target instead of a dimmed one. The insets restore
+   the geometry the bar inherited from .feed, and it is a target, not a control. */
+.feed-bar--chest-portal {
+  z-index: 2706;
+  left: var(--safe-left);
+  right: var(--safe-right);
+  pointer-events: none;
+}
 
 /* Collections button count badge on the bar icon. */
 .feed-bar__icon { position: relative; }
