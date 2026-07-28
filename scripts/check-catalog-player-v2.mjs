@@ -207,9 +207,18 @@ throws(() => buildCatalogPlayerLevelBinding(bundle(), 3, 7), /outside the immuta
 throws(() => buildCatalogPlayerLevelBinding(bundle(), 1, 0), /frameEpoch/);
 
 const navigation = buildCatalogFrameNavigation(binding, 'http://localhost:4173/feed/path');
-equal(navigation.src, `http://localhost:4173/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/index.html?level_config=catalog_required&expected_spec_hash=${specHash1}`);
+equal(navigation.src, `http://localhost:4173/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/index.html?level_config=catalog_required&expected_spec_hash=${specHash1}&quality=standard&tier=standard`);
 equal(navigation.expectedOrigin, 'http://localhost:4173');
 equal(navigation.referrerPolicy, 'origin');
+equal(navigation.deviceTier, 'standard');
+equal(
+  buildCatalogFrameNavigation(binding, 'http://localhost:4173/feed/path', 'premium').src,
+  `http://localhost:4173/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/index.html?level_config=catalog_required&expected_spec_hash=${specHash1}&quality=premium&tier=premium`,
+);
+throws(
+  () => buildCatalogFrameNavigation(binding, 'http://localhost:4173/feed/path', 'unknown'),
+  /deviceTier/,
+);
 const absoluteBundle = bundle();
 absoluteBundle.runtime.indexLocator = `https://runtime.example.test/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/index.html`;
 const absoluteBinding = buildCatalogPlayerLevelBinding(absoluteBundle, 1, 1);
@@ -221,7 +230,7 @@ equal(
     buildCatalogPlayerLevelBinding(nestedIndexBundle, 1, 1),
     'https://feed.example.test',
   ).src,
-  `https://feed.example.test/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/game/player.html?level_config=catalog_required&expected_spec_hash=${specHash1}`,
+  `https://feed.example.test/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/game/player.html?level_config=catalog_required&expected_spec_hash=${specHash1}&quality=standard&tier=standard`,
   'the server-owned descriptor may use any safe file below the exact digest root',
 );
 const mutableBundle = bundle();
@@ -232,7 +241,7 @@ const skinBinding = buildCatalogPlayerLevelBinding(skinBundle(), 1, 22);
 equal(skinBinding.skinHash, skinHash);
 equal(
   buildCatalogFrameNavigation(skinBinding, 'https://feed.example.test').src,
-  `https://feed.example.test/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/index.html?level_config=catalog_required&expected_spec_hash=${specHash1}&expected_skin_hash=${skinHash}`,
+  `https://feed.example.test/runtime-releases/marble-sort-swipe/${'d'.repeat(64)}/index.html?level_config=catalog_required&expected_spec_hash=${specHash1}&expected_skin_hash=${skinHash}&quality=standard&tier=standard`,
   'skin identity is committed before iframe navigation',
 );
 deepEqual(Object.keys(buildCatalogConfigurationFailure(skinBinding, 'digest')).sort(), [
@@ -267,7 +276,9 @@ const session = new CatalogPlayerV2Session({
   frameEpoch: 9,
   frameSource,
   baseUrl: 'https://feed.example.test/app',
+  deviceTier: 'premium',
 });
+equal(session.navigation.deviceTier, 'premium');
 throws(() => { session.binding = {}; }, TypeError, 'session identity is non-writable');
 equal(session.setVisible(true, 9).effects.length, 0, 'visibility alone cannot reveal');
 const readyData = {

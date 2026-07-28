@@ -5,6 +5,7 @@ const PLAYABLE_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const NONCE_RE = /^[0-9a-f]{32}$/;
 const FAILURE_REASONS = new Set(['timeout', 'digest', 'origin', 'runtime', 'contract', 'mount']);
 const MAX_LEVELS = 6;
+const DEVICE_TIERS = new Set(['premium', 'standard', 'low']);
 
 export const CATALOG_FRAME_REFERRER_POLICY = 'origin';
 
@@ -311,7 +312,10 @@ export function buildCatalogPlayerLevelBinding(bundleInput, ordinal, frameEpoch)
  * locators are deployment-root-relative by contract; mutable aliases and
  * pre-existing query/fragment data are rejected.
  */
-export function buildCatalogFrameNavigation(binding, baseUrl) {
+export function buildCatalogFrameNavigation(binding, baseUrl, deviceTier = 'standard') {
+  if (!DEVICE_TIERS.has(deviceTier)) {
+    fail('invalid_device_tier', 'deviceTier must be premium, standard or low');
+  }
   const expectedRoot = `runtime-releases/${binding.playableId}/${binding.runtimeArtifactDigest.slice(7)}/`;
   const locator = binding.indexLocator;
   const validContentAddressedPath = (value) => {
@@ -342,11 +346,17 @@ export function buildCatalogFrameNavigation(binding, baseUrl) {
   target.searchParams.set('level_config', 'catalog_required');
   target.searchParams.set('expected_spec_hash', binding.specHash);
   if (binding.skinHash) target.searchParams.set('expected_skin_hash', binding.skinHash);
+  // Platform-owned quality is runtime context, not part of the immutable
+  // catalog artifact identity. Both spellings support current and older
+  // shared swipe runtimes.
+  target.searchParams.set('quality', deviceTier);
+  target.searchParams.set('tier', deviceTier);
   return deepFreeze({
     src: target.href,
     expectedOrigin: target.origin,
     referrerPolicy: CATALOG_FRAME_REFERRER_POLICY,
     frameEpoch: binding.frameEpoch,
+    deviceTier,
   });
 }
 
@@ -407,7 +417,7 @@ export class CatalogPlayerV2Session {
       fail('invalid_session', 'frameSource identity is required');
     }
     const binding = buildCatalogPlayerLevelBinding(options.bundle, options.ordinal, options.frameEpoch);
-    const navigation = buildCatalogFrameNavigation(binding, options.baseUrl);
+    const navigation = buildCatalogFrameNavigation(binding, options.baseUrl, options.deviceTier);
     Object.defineProperties(this, {
       binding: { value: binding, enumerable: true },
       navigation: { value: navigation, enumerable: true },

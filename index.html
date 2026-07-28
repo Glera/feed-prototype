@@ -17,6 +17,14 @@
        the swipe feel matches a device; on mobile it fills the viewport. -->
   <div id="viewport" class="viewport">
     <div id="feed" class="feed"></div>
+    <!-- Visible before the module starts. Parent device-tier measurement and
+         versions/roster bootstrap happen under this cover; Feed replaces it
+         with its progress-aware preloader before the first iframe is shown. -->
+    <div id="platform-boot-preloader" class="preloader" aria-live="polite">
+      <div class="preloader__title">Loading mini-games…</div>
+      <div class="preloader__bar"><div class="preloader__fill"></div></div>
+      <div class="preloader__progress">Checking device…</div>
+    </div>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

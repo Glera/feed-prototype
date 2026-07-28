@@ -336,12 +336,14 @@ window.Telegram={WebApp:{
         const params=[...actual.searchParams.keys()].sort().join(',');
         const ordinal=Math.min(state.acceptedLevelResults.length,2);
         const currentSpecHash=state.closure.specHashes[ordinal]??state.closure.specHash;
-        const expectedParams='expected_skin_hash,expected_spec_hash,level_config';
+        const expectedParams='expected_skin_hash,expected_spec_hash,level_config,quality,tier';
         state.closure.frameExact=actual.origin===expected.origin&&actual.pathname===expected.pathname
           &&params===expectedParams
           &&actual.searchParams.get('level_config')==='catalog_required'
           &&actual.searchParams.get('expected_spec_hash')===currentSpecHash
-          &&actual.searchParams.get('expected_skin_hash')===expectedSkinHash;
+          &&actual.searchParams.get('expected_skin_hash')===expectedSkinHash
+          &&['premium','standard','low'].includes(actual.searchParams.get('quality'))
+          &&actual.searchParams.get('tier')===actual.searchParams.get('quality');
       }catch{state.closure.frameExact=false}
     }
     const c=state.closure;

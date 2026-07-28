@@ -103,6 +103,7 @@ export interface CatalogFrameNavigation {
   expectedOrigin: string;
   referrerPolicy: 'origin';
   frameEpoch: number;
+  deviceTier: 'premium' | 'standard' | 'low';
 }
 
 export interface CatalogConfigurationFailurePayload {
@@ -159,6 +160,7 @@ export interface CatalogPlayerSessionOptions {
   frameEpoch: number;
   frameSource: object;
   baseUrl: string;
+  deviceTier?: 'premium' | 'standard' | 'low';
 }
 
 export const CATALOG_FRAME_REFERRER_POLICY: 'origin';
@@ -175,7 +177,11 @@ export function catalogPlayerV2Enabled(
 ): boolean;
 export function validateCatalogTicketLevelSpecBundle(value: unknown): CatalogTicketLevelSpecBundle;
 export function buildCatalogPlayerLevelBinding(bundle: CatalogTicketLevelSpecBundle, ordinal: number, frameEpoch: number): CatalogPlayerLevelBinding;
-export function buildCatalogFrameNavigation(binding: CatalogPlayerLevelBinding, baseUrl: string): CatalogFrameNavigation;
+export function buildCatalogFrameNavigation(
+  binding: CatalogPlayerLevelBinding,
+  baseUrl: string,
+  deviceTier?: 'premium' | 'standard' | 'low',
+): CatalogFrameNavigation;
 export function buildCatalogConfigurationFailure(binding: CatalogPlayerLevelBinding, reason: CatalogFailureReason): CatalogConfigurationFailurePayload;
 export function buildCatalogLevelImpression(binding: CatalogPlayerLevelBinding, impressionId: string, levelImpressionId: string): CatalogLevelImpressionPayload;
 

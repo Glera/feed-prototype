@@ -1,11 +1,12 @@
 import './styles.css';
 import { createFeed } from './feed';
-import { setMechanicVersions } from './playables';
+import { setMechanicVersions, setPlatformDeviceTier, type PlatformDeviceTier } from './playables';
 import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 import { loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
+import { resolvePlatformDeviceTier } from './device-tier.mjs';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
@@ -21,6 +22,13 @@ const feedEl = document.getElementById('feed')!;
 // first so the feed can open on the challenged mechanic. Normal launches skip
 // the await entirely (getStartParam is sync) → no added boot latency.
 async function boot(): Promise<void> {
+  // Resolve exactly once in the visible parent context, before the first
+  // host-paused mechanic iframe is created. Hidden iframe benchmarks are
+  // throttled by Telegram/WebKit and used to under-classify the whole feed.
+  const deviceTier = resolvePlatformDeviceTier();
+  setPlatformDeviceTier(deviceTier.tier as PlatformDeviceTier);
+  (window as Window & { __platformDeviceTier?: unknown }).__platformDeviceTier = deviceTier;
+
   // Per-mechanic cache-bust manifest (content hashes, written by export-swipe.sh).
   // Fetched no-store + cb so even a stale-cached feed pulls the CURRENT versions →
   // a changed mechanic's iframe URL busts without needing a full app cache clear.
@@ -62,6 +70,9 @@ async function boot(): Promise<void> {
     ? await loadVerifiedFeedRosterSessionSnapshot(localStorage)
     : null;
   createFeed(viewport, feedEl, challenge, publicIsland, rosterSnapshot, friendAcceptCode);
+  // Feed mounted its own progress-aware preloader before returning, so the
+  // platform boot cover can disappear without exposing an unclassified frame.
+  document.getElementById('platform-boot-preloader')?.remove();
 }
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
@@ -71,9 +82,15 @@ if (labAuthLaunch) {
   // Focused device approval flow: do not mount or warm the playable feed under
   // a security decision. The backend remains the authority for dev allowlisting
   // and feature availability.
+  document.getElementById('platform-boot-preloader')?.remove();
   void import('./lab-auth').then((module) => module.mountCatalogLabAuth());
 } else {
-  void boot();
+  void boot().catch((error) => {
+    // Do not leave a permanent opaque cover if a non-optional boot dependency
+    // fails. The feed stays unmounted, preserving the failure boundary.
+    document.getElementById('platform-boot-preloader')?.remove();
+    console.error('[boot] failed', error);
+  });
 }
 
 // On-device backend diagnostics: ?diag=1, or open in Telegram via

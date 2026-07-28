@@ -8,6 +8,7 @@ import {
   mechanicPrefetchBytes,
   mechanicAssetUrls,
   mechanicIsAvailable,
+  getPlatformDeviceTier,
   type Playable,
 } from './playables';
 // Series-reward gift icons (inlined into the single-file feed bundle). One is picked
@@ -6409,6 +6410,7 @@ export class Feed {
         frameEpoch: slot.frameEpoch,
         frameSource,
         baseUrl: location.href,
+        deviceTier: getPlatformDeviceTier(),
       });
     } catch (error) {
       console.warn('[catalog-player-v2] invalid ticket delivery bundle', error);

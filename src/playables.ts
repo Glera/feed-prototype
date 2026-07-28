@@ -11,6 +11,8 @@
  * `?base=https://<your-render-host>/` to point the iframes at the deployed
  * bundles while developing the feed shell locally.
  */
+import { buildPlayableNavigationUrl } from './playable-navigation.mjs';
+
 // Build stamp baked by vite (same value as the version badge). Used to
 // cache-bust mechanic iframe URLs so a redeploy is picked up even by WebViews
 // (Telegram) that cache same-origin siblings by URL and ignore Cache-Control.
@@ -116,6 +118,30 @@ export interface Playable {
   id: string;
 }
 
+export type PlatformDeviceTier = 'premium' | 'standard' | 'low';
+let platformDeviceTier: PlatformDeviceTier = 'standard';
+let platformDeviceTierLocked = false;
+
+/**
+ * The parent platform resolves this once before any playable iframe is mounted.
+ * A page lifetime has one immutable tier so warm/current/story mechanics cannot
+ * disagree about the same device.
+ */
+export function setPlatformDeviceTier(tier: PlatformDeviceTier): void {
+  if (!['premium', 'standard', 'low'].includes(tier)) {
+    throw new Error(`unsupported platform device tier: ${String(tier)}`);
+  }
+  if (platformDeviceTierLocked && platformDeviceTier !== tier) {
+    throw new Error(`platform device tier is already locked to ${platformDeviceTier}`);
+  }
+  platformDeviceTier = tier;
+  platformDeviceTierLocked = true;
+}
+
+export function getPlatformDeviceTier(): PlatformDeviceTier {
+  return platformDeviceTier;
+}
+
 export const PLAYABLES: Playable[] = [
   { id: 'merge-locked-v1-swipe' },
   { id: 'marble-sort-swipe' },
@@ -135,23 +161,14 @@ export const PLAYABLES: Playable[] = [
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
  *  override the host with `?base=…` for local development. */
 export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: boolean; series?: string; level?: number } = {}): string {
-  let base = new URLSearchParams(location.search).get('base') || './';
-  if (!base.endsWith('/')) base += '/';
-  const url = `${base}${htmlFileFor(id)}.html`;   // may alias to another mechanic's build
-  const params = new URLSearchParams();
-  if (options.hostPaused) params.set('hostPaused', '1');
-  if (options.auto !== undefined) params.set('auto', options.auto ? '1' : '0');
-  // Series difficulty/economy overrides for this level (JSON, url-encoded). The
-  // mechanic reads `?series=` at boot and applies them (shared/series.ts).
-  if (options.series) params.set('series', options.series);
-  // Which built-in LEVEL the mechanic should load (e.g. pins series: level 1, 2…).
-  // The mechanic reads `?level=` at boot (main.ts currentLevelIdx).
-  if (options.level != null) params.set('level', String(options.level));
-  // Cache-bust: per-mechanic content hash (falls back to the feed build tag) so
-  // the WebView refetches a mechanic's sibling HTML exactly when its bundle changed.
-  params.set('v', mechanicVersion(id));
-  const query = params.toString();
-  return query ? `${url}?${query}` : url;
+  const base = new URLSearchParams(location.search).get('base') || './';
+  return buildPlayableNavigationUrl({
+    base,
+    htmlFile: htmlFileFor(id), // may alias to another mechanic's build
+    version: mechanicVersion(id),
+    deviceTier: platformDeviceTier,
+    ...options,
+  });
 }
 
 /** Exact URL referenced by exported SWIPE HTML, including its payload hash. */
