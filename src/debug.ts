@@ -40,7 +40,11 @@ import type {
 } from './feed-sequencing-debug.mjs';
 
 export async function mountDebugPanel(): Promise<void> {
+  // Idempotent mount: the panel now has a permanent operator button, so a second
+  // tap while it is open must not stack a second copy over the first.
+  if (document.querySelector('[data-panel="swipe-debug"]')) return;
   const wrap = document.createElement('div');
+  wrap.dataset.panel = 'swipe-debug';
   wrap.style.cssText =
     'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.93);color:#4f8;' +
     'font:12px/1.5 ui-monospace,monospace;padding:12px;display:flex;flex-direction:column;gap:8px;';
