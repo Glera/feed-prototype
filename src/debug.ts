@@ -17,7 +17,7 @@ import {
   apiSequencingDebugWhyNow,
 } from './api';
 import { getEventLog } from './telemetry';
-import { islandSocialMode, setIslandSocialMode } from './island-sim';
+import { mountIslandModerationConsole } from './island-moderation-console';
 import { pendingCount, pendingStars, starsEverQueued, flushResults, clearOutbox } from './outbox';
 import {
   SEQUENCING_DEBUG_HISTORY_LIMIT_DEFAULT,
@@ -131,14 +131,6 @@ export async function mountDebugPanel(): Promise<void> {
     setTimeout(() => { b.textContent = '📋 Copy log'; }, 1500);
   });
 
-  // Island social data: FAKE (simulated plays/likes/notifier/collectible pucks) vs
-  // REAL (sim off — genuine backend likes + shares only). Persisted; reload applies it.
-  const socialLabel = () => `Island data: ${islandSocialMode() === 'fake' ? 'FAKE (simulated)' : 'REAL (backend)'}`;
-  const socialBtn = mkBtn(socialLabel(), () => {
-    setIslandSocialMode(islandSocialMode() === 'fake' ? 'real' : 'fake');
-    location.reload();
-  });
-
   const seqPanelBtn = mkBtn('⌘ Feed sequencing', () => { mountSequencingDebugPanel(); });
   seqPanelBtn.dataset.qa = 'feed-sequencing-open';
 
@@ -150,9 +142,14 @@ export async function mountDebugPanel(): Promise<void> {
     setTimeout(() => { b.textContent = '⚡ Seed test challenge'; }, 2000);
   });
 
+  // Island Moderation (P3): navigation to the operator console. NOT an auth
+  // boundary — the server gates every moderation call by island_moderator_ids
+  // (F015), so a non-moderator here just gets 403 toasts.
+  const moderationBtn = mkBtn('🏝️ Island Moderation', () => { void mountIslandModerationConsole(); });
+
   btns.append(
     mkBtn('↻ Refresh', () => { void refreshHead(); refreshLog(); }),
-    socialBtn,
+    moderationBtn,
     copyBtn,
     seedBtn,
     mkBtn('Flush pending', async () => { await flushResults(); await refreshHead(); }),

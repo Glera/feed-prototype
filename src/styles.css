@@ -3106,6 +3106,138 @@ body {
 }
 .hud__puzzles--bump { animation: hud-bump 0.42s; }
 
+/* Island Social Core (§4.4): friend cells in the HUD scroller, right of the
+   avatar/level. One flex item holding a compact row of round cells + invite "+". */
+.isln-friends {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 0 2px;
+  pointer-events: auto;
+}
+.isln-friend-cell {
+  width: 40px;
+  flex: 0 0 40px;
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+}
+.isln-friend {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font: 900 15px/1 system-ui, sans-serif;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 0;
+}
+.isln-friend__name {
+  width: 40px;
+}
+.isln-friend img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* The initial sits under the photo; if the photo fails it is removed and the
+   initial shows through (fallback bound in renderFriendsHud). */
+.isln-friend__initial { position: relative; z-index: 0; }
+.isln-friend--bot { border-color: rgba(88, 166, 255, 0.5); box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.28) inset; }
+.isln-friend--empty,
+.isln-friend--invite {
+  color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.05);
+  border-style: dashed;
+  font-weight: 700;
+  font-size: 18px;
+}
+.isln-friend--invite { color: #8FD8C2; border-color: rgba(143, 216, 194, 0.5); }
+.isln-friend--more {
+  font-size: 12px;
+  font-weight: 900;
+  color: #BBD3FF;
+  background: rgba(110, 168, 255, 0.16);
+  border-color: rgba(110, 168, 255, 0.34);
+}
+
+/* Friend list overlay (§4.4). P2 adds remove/block rows here. */
+.isln-flist { position: absolute; inset: 0; z-index: 3400; display: grid; place-items: end center; }
+.isln-flist__scrim { position: absolute; inset: 0; background: rgba(4, 8, 12, 0.55); }
+.isln-flist__card {
+  position: relative;
+  width: min(420px, 92%);
+  margin-bottom: calc(var(--bar-reserve) + 16px);
+  background: #141d28;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  padding: 16px;
+  color: #fff;
+  max-height: 70%;
+  overflow-y: auto;
+}
+.isln-flist__h { font-size: 16px; font-weight: 800; margin-bottom: 10px; }
+.isln-frow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.isln-frow--empty { color: rgba(255, 255, 255, 0.55); font-size: 13px; justify-content: center; }
+.isln-frow__ava { width: 36px; height: 36px; flex: 0 0 36px; border-radius: 50%; overflow: hidden; background: #2E6E86; display: grid; place-items: center; font-weight: 800; }
+.isln-frow__ava img { width: 100%; height: 100%; object-fit: cover; }
+.isln-frow__ava--bot { background: #274a72; }
+.isln-frow__nm { flex: 1; min-width: 0; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.isln-frow__go { flex: 0 0 auto; border: 1px solid rgba(143, 216, 194, 0.5); background: rgba(76, 195, 138, 0.14); color: #8FD8C2; border-radius: 999px; padding: 7px 10px; font: 800 11px/1 system-ui, sans-serif; }
+.isln-frow__go:disabled { opacity: 0.4; }
+.isln-frow__remove,
+.isln-frow__block { flex: 0 0 auto; border: 0; background: transparent; padding: 6px 2px; font: 700 10px/1 system-ui, sans-serif; }
+.isln-frow__remove { color: rgba(255, 255, 255, 0.62); }
+.isln-frow__block { color: #ff8f91; }
+.isln-flist__close { width: 100%; margin-top: 12px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.08); color: #fff; border-radius: 12px; padding: 11px; font: 800 14px/1 system-ui, sans-serif; }
+
+/* P2 chest-bound visit card. It occupies the one post-chest prompt slot and
+   therefore replaces (rather than stacks with) the challenge pill. */
+.isln-award {
+  width: min(360px, calc(100vw - 36px));
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 10px 12px;
+  margin: 0 auto 12px;
+  padding: 13px;
+  border: 1px solid rgba(143, 216, 194, 0.42);
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(27, 73, 67, 0.95), rgba(18, 31, 47, 0.97));
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
+  color: #fff;
+  text-align: left;
+  pointer-events: auto;
+}
+.isln-award__avatar {
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #2E6E86;
+  font: 900 18px/1 system-ui, sans-serif;
+}
+.isln-award__avatar--bot { background: #274a72; }
+.isln-award__avatar img { width: 100%; height: 100%; object-fit: cover; }
+.isln-award__copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.isln-award__copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 850 15px/1.2 system-ui, sans-serif; }
+.isln-award__copy span { color: rgba(255, 255, 255, 0.72); font: 600 12px/1.35 system-ui, sans-serif; }
+.isln-award__actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1.25fr; gap: 8px; }
+.isln-award__actions button { border-radius: 12px; padding: 10px; font: 850 13px/1 system-ui, sans-serif; }
+.isln-award__later { border: 1px solid rgba(255,255,255,.16); background: rgba(255,255,255,.08); color: rgba(255,255,255,.76); }
+.isln-award__go { border: 1px solid rgba(143,216,194,.52); background: #4CC38A; color: #08251b; }
+.isln-award__actions button:disabled { opacity: .5; }
+
 /* "Someone played your mechanic" — a global notifier that slides down from the very
    top, ABOVE the HUD/top panel, on every view (feed included). Transient and
    click-through so it never blocks the mechanic below. Sits in the empty center of

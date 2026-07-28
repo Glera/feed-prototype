@@ -17,11 +17,19 @@ import {
   apiCompleteIslandVisit,
   apiIslandBake,
   apiIslandBakeJob,
+  apiIslandArtifactUrl,
+  apiIslandCollect,
+  apiIslandReport,
   apiIslandTheme,
+  apiIslandThemeJob,
+  apiIslandVisitResult,
   apiPublicIsland,
   apiSetIslandLike,
   apiStartIslandVisit,
+  type IslandReportReason,
   type IslandBakeJob,
+  type IslandThemeJob,
+  type IslandThemePack,
   type IslandBuildingState,
   type IslandDifficultyPreference,
   type IslandMotionPreference,
@@ -29,11 +37,11 @@ import {
   type IslandSocialView,
   type IslandStoredPack,
   type IslandTemplateId,
+  type IslandVisitResult,
   type PublicIslandView,
 } from './api';
 import { IslandStateSync, cacheIslandState, loadIslandState, replaceIslandState } from './island-state';
-import { ISLAND_SIM_EVENT, islandSocialMode, loadIslandSim, saveIslandSim } from './island-sim';
-import { coverUrl, playableUrl } from './playables';
+import { coverUrl, playableUrl, PLAYABLES } from './playables';
 import { shareTelegramLink, showConfirm } from './telegram';
 
 declare const __ISLAND_SORT_RECIPE__: {
@@ -41,6 +49,16 @@ declare const __ISLAND_SORT_RECIPE__: {
 };
 
 const SORT_RECIPE = __ISLAND_SORT_RECIPE__;
+
+// Island Social Core (P3, §4.3): buildings this session has already reported, so
+// a repeat tap on "Пожаловаться" honestly says the report is already in. The
+// server dedups authoritatively (UNIQUE(building, reporter)); this is only UI.
+const reportedBuildings = new Set<string>();
+const REPORT_REASON_LABELS: Array<{ id: IslandReportReason; label: string }> = [
+  { id: 'inappropriate', label: 'Неприемлемый контент' },
+  { id: 'broken', label: 'Не работает / сломано' },
+  { id: 'other', label: 'Другое' },
+];
 
 export interface IslandHostCtx {
   close(): void;
@@ -240,11 +258,10 @@ const UNLOCKED_SLOTS = 4;
 // The pannable world extent (max slot reach + margin), and the visible window.
 const WORLD_W = 540, WORLD_H = 830, VIEW_W = 390, VIEW_H = 540;
 
-// Local activity simulation is a dev-only feed presentation. Island counters
-// always render the backend-owned values from the persisted/public snapshot.
+// Island counters always render backend-owned values from the
+// persisted/public snapshot.
 function fmtNum(n: number): string { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n); }
 const IS_DEV = Boolean((import.meta as any).env?.DEV);
-const UGC_BASE_URL = String((import.meta as any).env?.VITE_UGC_BASE_URL || 'https://swipe-ugc.onrender.com').replace(/\/$/, '');
 const LOCAL_GENERATOR_URL = String((import.meta as any).env?.VITE_LOCAL_GENERATOR_URL || 'http://127.0.0.1:4317').replace(/\/$/, '');
 
 function stableSeed(value: string): number {
@@ -285,8 +302,118 @@ function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').slice(0, 240);
 }
 function hostedUrl(building: Building): string | null {
-  if (building.rel) return IS_DEV ? `/ugc/${building.rel}` : `${UGC_BASE_URL}/${building.rel}`;
+  if (!IS_DEV) return null;
+  if (building.rel) return `/ugc/${building.rel}`;
   return building.url ?? null;
+}
+function hasHostedArtifact(building: Building): boolean {
+  if (IS_DEV) return Boolean(hostedUrl(building));
+  return Boolean(building.buildingId && building.rel && building.contentDigest);
+}
+
+// ── Island Social Core: builtin binding runtime resolution (F002/F007) ──────
+// Per ТЗ v1.4 §3.1 the binding is the IDENTITY authority: `mechanicId` is the sole
+// runtime authority (never the mutable `tpl`) and `rosterRevision`/`versionsDigest`
+// are a rotation/audit record — NOT a content digest the client can verify. The
+// platform has no versioned/content-addressed delivery for builtin mechanics, so
+// runtime DELIVERY is the current deploy (honest, per v1.4). `mechanicId` may be a
+// catalog mechanic (a TPL key like "sort") or a direct first-party playable id;
+// either must map to a known platform playable, otherwise we fail closed (no tpl
+// fallback).
+function resolveBuiltinPlayableId(mechanicId: string): string | null {
+  if (Object.prototype.hasOwnProperty.call(TPL, mechanicId)) return TPL[mechanicId as TplId].playableId;
+  if (PLAYABLES.some((p) => p.id === mechanicId)) return mechanicId;
+  return null;
+}
+type BuildingRuntime =
+  | { kind: 'hosted' | 'stock'; src: string; label: string }
+  | { kind: 'builtin'; src: string; label: string; mechanicId: string }
+  | { kind: 'unavailable'; reason: string };
+async function resolveBuildingRuntime(b: Building, packName: string): Promise<BuildingRuntime> {
+  const hosted = hostedUrl(b);
+  if (hosted) {
+    return {
+      kind: 'hosted',
+      src: `${hosted}${hosted.includes('?') ? '&' : '?'}auto=0`,
+      label: `${isLocalExperiment(b) ? 'LOCAL LAB' : 'HOSTED'} · ${packName}`,
+    };
+  }
+  if (b.rel && b.contentDigest && b.buildingId) {
+    try {
+      const resolved = await apiIslandArtifactUrl(b.buildingId);
+      const bearer = new URL(resolved.url);
+      const expiresAt = Date.parse(resolved.expires_at);
+      if (
+        resolved.building_id !== b.buildingId
+        || resolved.rel !== b.rel
+        || resolved.contentDigest !== b.contentDigest
+        || bearer.protocol !== 'https:'
+        || !bearer.searchParams.has('X-Amz-Signature')
+        || !Number.isFinite(expiresAt)
+        || expiresAt <= Date.now() + 5_000
+      ) {
+        return { kind: 'unavailable', reason: 'artifact resolver returned a different immutable identity' };
+      }
+      return {
+        kind: 'hosted',
+        // The complete query belongs to the SigV4 bearer. Never append even a
+        // harmless-looking gameplay parameter after the server signs it.
+        src: resolved.url,
+        label: `HOSTED · ${packName}`,
+      };
+    } catch (error) {
+      return { kind: 'unavailable', reason: `artifact resolver failed: ${errorText(error)}` };
+    }
+  }
+  if (b.rel || b.contentDigest || b.url) {
+    return { kind: 'unavailable', reason: 'hosted mechanic has no complete immutable identity' };
+  }
+  const builtin = b.builtin;
+  if (builtin) {
+    const id = resolveBuiltinPlayableId(builtin.mechanicId);
+    // mechanicId is the runtime authority: an unresolvable mechanic (e.g. one that
+    // has disappeared from the platform playable set) fails closed.
+    if (!id || !PLAYABLES.some((p) => p.id === id)) {
+      return { kind: 'unavailable', reason: `builtin mechanic "${builtin.mechanicId}" does not resolve to a known runtime` };
+    }
+    // Delivery = the CURRENT deploy for this mechanic (v1.4 §3.1): there is no
+    // versioned/content-addressed builtin delivery, so a deploy that rotates the
+    // mechanic's bytes under an unchanged binding is expected to keep working. The
+    // binding's `versionsDigest`/`rosterRevision` are an identity/audit record, not
+    // a client-verifiable content digest — no byte-level digest comparison here.
+    return {
+      kind: 'builtin',
+      src: playableUrl(id, { auto: false }),
+      label: `BUILTIN · ${builtin.mechanicId}`,
+      mechanicId: builtin.mechanicId,
+    };
+  }
+  // Non-builtin: the canonical first-party stock build (owner drafts / fallback).
+  return { kind: 'stock', src: playableUrl(TPL[b.tpl].playableId, { auto: false }), label: `STOCK · ${b.tpl}` };
+}
+
+// ── Island Social Core: guest completion-claim with bounded retry (F003) ────
+// A win earlier than island_play_min_win_ms makes /result return 425; without a
+// retry the claim is lost forever. Reuse the SAME visit_id and retry (bounded)
+// after Retry-After (or until the min-win window has plausibly elapsed). Transient
+// network / 5xx also get a bounded retry. Idempotent server → exactly one claim.
+async function claimVisitResult(visitId: string, startedAt: number): Promise<IslandVisitResult> {
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await apiIslandVisitResult(visitId, performance.now() - startedAt);
+    } catch (error) {
+      const retriable = error instanceof ApiRequestError
+        && (error.status === 425 || error.status === 0 || error.status >= 500);
+      if (!retriable || attempt >= MAX_ATTEMPTS) throw error;
+      let waitMs = 1200;
+      if (error instanceof ApiRequestError && error.status === 425) {
+        const elapsed = performance.now() - startedAt;
+        waitMs = error.retryAfterMs ?? Math.max(1200, 8200 - elapsed);
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+    }
+  }
 }
 function sortVariant(pack: Pack): Record<string, unknown> {
   return {
@@ -319,7 +446,7 @@ function candidatePreviewUrl(candidate: CreationCandidate): string | null {
     return url ? `${url}${url.includes('?') ? '&' : '?'}auto=0` : null;
   }
   if (!candidate.pack) return null;
-  const shell = IS_DEV ? '/ugc/preview/sort-v2.html' : `${UGC_BASE_URL}/preview/sort-v2.html`;
+  const shell = IS_DEV ? '/ugc/preview/sort-v2.html' : './island-preview-sort-v2.html';
   return `${shell}?auto=0#${encodePreviewVariant(candidate.pack)}`;
 }
 function isLocalExperiment(building: Building): boolean {
@@ -474,14 +601,57 @@ function newJobId(): string {
 
 // Guided generation is always the bounded backend/API path. Subscription
 // agents belong exclusively to the local wild experiment service.
+interface AiThemeOptions {
+  /** A durable job id from a prior submit whose in-memory handle was lost (e.g.
+   *  reload). When set, aiTheme resumes it instead of re-submitting. */
+  resumeJobId?: string;
+  /** Minted and persisted before the first POST. A retry with this identity
+   * replays the same backend row even if it already became terminal. */
+  requestId?: string;
+  /** Called with a durable job id as soon as one is issued, so the caller can
+   *  persist it for resume-after-reload. */
+  onJob?: (jobId: string) => void;
+}
+
+class ThemeJobTerminalError extends Error {}
+
+async function requestTheme(
+  payload: { prompt: string; avoid?: string; difficulty: IslandDifficultyPreference; motion: IslandMotionPreference },
+  opts: AiThemeOptions,
+): Promise<IslandThemePack> {
+  const job = await apiIslandTheme({ ...payload, request_id: opts.requestId });
+  opts.onJob?.(job.job_id);
+  return pollThemeJob(job);
+}
+
 async function aiTheme(
   prompt: string,
   avoid?: string,
   difficulty: IslandDifficultyPreference = 'surprise',
   motion: IslandMotionPreference = 'surprise',
+  opts: AiThemeOptions = {},
 ): Promise<Pack | null> {
   try {
-    const apiPack = await apiIslandTheme({ prompt, avoid, difficulty, motion });
+    // The backend always returns a durable job that we poll to a terminal pack.
+    // UX is unchanged — the slot still shows "theme ready ✨" once this resolves.
+    let apiPack: IslandThemePack;
+    if (opts.resumeJobId) {
+      // Resume a prior job (read it) rather than re-POST: recovers a completed
+      // pack and avoids a second quota charge. Only a 404 (job gone/expired)
+      // falls back to a fresh request; a terminal `failed` propagates as-is.
+      try {
+        const resumed = await apiIslandThemeJob(opts.resumeJobId);
+        apiPack = await pollThemeJob(resumed);
+      } catch (resumeError) {
+        if (resumeError instanceof ApiRequestError && resumeError.status === 404) {
+          apiPack = await requestTheme({ prompt, avoid, difficulty, motion }, opts);
+        } else {
+          throw resumeError;
+        }
+      }
+    } else {
+      apiPack = await requestTheme({ prompt, avoid, difficulty, motion }, opts);
+    }
     console.log('[island] backend theme:', apiPack.name, apiPack.items.join(' '));
     return normalizePack({
       id: apiPack.id ?? '', name: apiPack.name.slice(0, 24), kw: apiPack.kw ?? [],
@@ -497,6 +667,37 @@ async function aiTheme(
     console.log('[island] bounded API theme unavailable:', errorText(e));
     throw e;
   }
+}
+
+/** Poll a durable async theme job (backend §5.1) to its terminal pack. Mirrors
+ *  the bake poll: transient GET errors are tolerated so a warm/slow model run
+ *  still resolves. A reload mid-generation drops the in-memory draft as before,
+ *  but the backend's request-digest dedup makes a re-submit of the same prompt
+ *  return this same job rather than double-charging quota. */
+async function pollThemeJob(initial: IslandThemeJob): Promise<IslandThemePack> {
+  let job = initial;
+  let pollErrors = 0;
+  const deadlineAt = Date.now() + 6 * 60_000;
+  for (let attempt = 0; job.status !== 'ready' && job.status !== 'failed'; attempt++) {
+    if (attempt >= 180 || Date.now() >= deadlineAt) {
+      throw new Error('theme generation is taking too long');
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw new Error('theme generation is taking too long');
+    try {
+      job = await apiIslandThemeJob(job.job_id, remainingMs);
+      pollErrors = 0;
+    } catch (e) {
+      if (Date.now() >= deadlineAt) throw new Error('theme generation is taking too long');
+      if (++pollErrors < 4) continue;
+      throw e;
+    }
+  }
+  if (job.status === 'failed' || !job.pack) {
+    throw new ThemeJobTerminalError(job.error || 'theme generation failed');
+  }
+  return job.pack;
 }
 
 type LocalGeneratorState = 'queued' | 'starting' | 'running' | 'ready' | 'failed' | 'cancelled';
@@ -731,6 +932,150 @@ function luminance(hex: string): number {
   return (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
 }
 
+// ── Island Social Core: house stages (§4.1) ─────────────────────────────────
+// Server-owned stage 0..10 = min(foreign_claims, 10). If the backend has not yet
+// attached `stage` we derive it from `foreign_claims`, else 0 — always defensive.
+function stageOf(b: IslandBuildingState): number {
+  const raw = typeof b.stage === 'number'
+    ? b.stage
+    : typeof b.foreign_claims === 'number' ? b.foreign_claims : 0;
+  return Math.max(0, Math.min(10, Math.floor(raw)));
+}
+// Blueprint colour code per stage: amber → violet → blue → green → gold (MAX).
+function stageColor(stage: number): string {
+  if (stage >= 10) return '#FFCE54';
+  if (stage >= 8) return '#4CC38A';
+  if (stage >= 5) return '#58A6FF';
+  if (stage >= 2) return '#C4A7E7';
+  return '#EF9F27';
+}
+// Sector fill density: 10 steps of ground-tint opacity so a grown house reads as a
+// denser, more saturated patch (0.34 at stage 0 → ~1.0 at stage 10).
+function stageFillOpacity(stage: number): number {
+  return Math.round((0.34 + stage * 0.066) * 100) / 100;
+}
+function polarPoint(cx: number, cy: number, r: number, deg: number): { x: number; y: number } {
+  const rad = (deg * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+// 10 concentric step-arcs around the slot rim; `stage` of them are lit in the
+// stage colour, the rest are faint. This is the visual "10 ступеней домика".
+function stageRingsSvg(cx: number, cy: number, stage: number): string {
+  const R = 47, segs = 10, step = 360 / segs, gap = 7, span = step - gap;
+  const color = stageColor(stage);
+  let out = '';
+  for (let i = 0; i < segs; i++) {
+    const lit = i < stage;
+    const a0 = -90 + i * step + gap / 2;
+    const p0 = polarPoint(cx, cy, R, a0);
+    const p1 = polarPoint(cx, cy, R, a0 + span);
+    out += `<path d="M${p0.x.toFixed(1)} ${p0.y.toFixed(1)} A${R} ${R} 0 0 1 ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}" fill="none" stroke="${lit ? color : 'rgba(255,255,255,.14)'}" stroke-width="${lit ? 3.2 : 1.8}" stroke-linecap="round"/>`;
+  }
+  return out;
+}
+// "MAX" pill for a stage-10 building — placed below the name/plays label so it
+// never collides with the top gift puck. (A maxed house is always hosted, so the
+// "не виден гостям" hint is mutually exclusive here.)
+function maxBadgeSvg(cx: number, cy: number): string {
+  const x = cx, y = cy + 96;
+  return `<g class="isl-max"><rect x="${x - 18}" y="${y - 9}" width="36" height="16" rx="8" fill="#FFCE54" stroke="rgba(13,17,24,.9)" stroke-width="1.5"/>` +
+    `<text x="${x}" y="${y + 3.5}" text-anchor="middle" font-size="10" font-weight="900" fill="#3A2C05">MAX</text></g>`;
+}
+
+// ── Island Social Core: idempotent owner-collect claim ids (§4.2) ───────────
+// A collect claim_id is minted before the request and persisted per building so a
+// retry after a lost response reuses the same id (append-only receipt is
+// idempotent). Cleared only after the server acknowledges the collect.
+// Durable handle for an in-flight async theme job, keyed by creation slot. A
+// reload drops the in-memory draft, so on re-generation we resume this job (read
+// it) instead of POSTing again — recovering a completed pack and, crucially, not
+// charging quota a second time (the server only dedups while non-terminal).
+//
+// The handle is bound to the FULL normalized request identity, not just the
+// prompt: the server digest is sha256(JCS({user, prompt, preferences:{avoid,
+// difficulty, motion}})), so changing avoid/difficulty/motion at the same prompt
+// yields a different server job. Comparing only slot+prompt (F002) would resume
+// the STALE job/pack after such a change; we compare the full identity instead so
+// any digest-affecting change is treated as a fresh request. Mirrors the bake
+// jobId-in-state resume pattern.
+const THEME_JOB_KEY = 'island-theme-jobs-v1';
+interface ThemeJobHandle { jobId?: string; requestId: string; identity: string; }
+
+/** Canonical client-side request identity over exactly the fields that feed the
+ *  server digest (the user id is constant per client, so it is omitted). Written
+ *  with a fixed key order so it is a stable comparison key on both sides of a
+ *  reload. Normalization (trim, empty-avoid→null) matches the backend. */
+function themeRequestIdentity(
+  prompt: string,
+  avoid: string | undefined,
+  difficulty: IslandDifficultyPreference,
+  motion: IslandMotionPreference,
+): string {
+  const normPrompt = (prompt ?? '').trim();
+  const normAvoid = avoid && avoid.trim() ? avoid.trim() : null;
+  return JSON.stringify({ prompt: normPrompt, preferences: { avoid: normAvoid, difficulty, motion } });
+}
+
+function readThemeJobHandles(): Record<string, ThemeJobHandle> {
+  try { return JSON.parse(localStorage.getItem(THEME_JOB_KEY) || '{}') || {}; } catch { return {}; }
+}
+function writeThemeJobHandles(map: Record<string, ThemeJobHandle>): void {
+  try { localStorage.setItem(THEME_JOB_KEY, JSON.stringify(map)); } catch { /* private mode */ }
+}
+function ensureThemeJobHandle(slot: number, identity: string): ThemeJobHandle {
+  const map = readThemeJobHandles();
+  const current = map[String(slot)];
+  if (current?.identity === identity) {
+    if (!current.requestId) {
+      current.requestId = newJobId();
+      writeThemeJobHandles(map);
+    }
+    return current;
+  }
+  const handle = { requestId: newJobId(), identity };
+  map[String(slot)] = handle;
+  writeThemeJobHandles(map);
+  return handle;
+}
+function rememberThemeJob(
+  slot: number,
+  jobId: string,
+  identity: string,
+  requestId: string,
+): void {
+  const map = readThemeJobHandles();
+  const current = map[String(slot)];
+  // A stale response from an older request must never replace the newer handle.
+  if (current?.identity !== identity || current.requestId !== requestId) return;
+  current.jobId = jobId;
+  writeThemeJobHandles(map);
+}
+function forgetThemeJob(slot: number, requestId?: string): void {
+  const map = readThemeJobHandles();
+  const current = map[String(slot)];
+  if (current && (!requestId || current.requestId === requestId)) {
+    delete map[String(slot)];
+    writeThemeJobHandles(map);
+  }
+}
+
+const COLLECT_CLAIM_KEY = 'island-collect-claims-v1';
+function loadCollectClaims(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(COLLECT_CLAIM_KEY) || '{}') || {}; } catch { return {}; }
+}
+function saveCollectClaims(map: Record<string, string>): void {
+  try { localStorage.setItem(COLLECT_CLAIM_KEY, JSON.stringify(map)); } catch { /* private mode */ }
+}
+function ensureCollectClaim(buildingId: string): string {
+  const map = loadCollectClaims();
+  if (!map[buildingId]) { map[buildingId] = newJobId(); saveCollectClaims(map); }
+  return map[buildingId];
+}
+function clearCollectClaim(buildingId: string): void {
+  const map = loadCollectClaims();
+  if (map[buildingId]) { delete map[buildingId]; saveCollectClaims(map); }
+}
+
 // Compact preview driven by the same persisted variant config as the live fork.
 function board(tpl: TplId, pk: Pack): string {
   const dark = parseInt(pk.boardBg.slice(1, 3), 16) < 100;
@@ -801,6 +1146,7 @@ const CSS = `
 .isl-namebar{position:relative;flex:0 0 auto;display:flex;justify-content:center;padding:9px 54px 3px}
 .isl-namebar__pill{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(0,0,0,.38);border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:5px 15px;font-size:12.5px;font-weight:700;color:rgba(255,255,255,.84)}
 .isl-share{position:absolute;right:14px;top:6px;width:32px;height:32px;border:1px solid rgba(255,255,255,.14);border-radius:50%;background:rgba(0,0,0,.32);color:#fff;font:700 18px/1 system-ui;display:grid;place-items:center}
+.isl-botbadge{margin-left:8px;background:rgba(88,166,255,.16);border:1px solid rgba(88,166,255,.42);border-radius:999px;padding:4px 10px;font-size:11px;font-weight:800;color:#9DC3FF;white-space:nowrap}
 .isl-share:disabled{opacity:.45}
 .isl-ava{width:38px;height:38px;border-radius:50%;background:#2E6E86;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;flex:0 0 38px}
 .isl-who{flex:1;min-width:0}
@@ -906,6 +1252,7 @@ const CSS = `
   background:rgba(7,9,15,.88);text-align:center;padding:24px}
 .isl-win__t{font-size:20px;font-weight:800}
 .isl-win__m{font-size:13px;color:rgba(255,255,255,.6)}
+.isl-gift{font-size:15px;font-weight:800;color:#FFD98A;background:rgba(255,206,84,.12);border:1px solid rgba(255,206,84,.34);border-radius:12px;padding:9px 16px}
 .isl-like{border:2px solid #E8603C;background:transparent;color:#fff;border-radius:999px;padding:11px 22px;font:inherit;font-size:14.5px}
 .isl-like--on{background:#E8603C;font-weight:800}
 .isl-win__home{background:#fff;color:#10222C;border:none;border-radius:13px;padding:12px 30px;font:inherit;font-size:14.5px;font-weight:800}
@@ -943,15 +1290,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       }
     : loadIslandState();
   if (!guest && ctx.puzzles) S.tokens = Math.max(0, ctx.puzzles());
-  // Local presentation sim (owner island only): puzzles pile up over the player's
-  // own mechanics from simulated plays. The FEED drives the loop; here we just read
-  // it to render + collect, and refresh when it fires. Guest/public islands ignore it.
-  let sim = loadIslandSim();
-  const onSimTick = () => {
-    if (!ov.isConnected) { window.removeEventListener(ISLAND_SIM_EVENT, onSimTick); return; }
-    if (!guest) refreshIsland();
-  };
-  if (!guest) window.addEventListener(ISLAND_SIM_EVENT, onSimTick);
   const localExperiments: LocalExperimentState = guest
     ? { buildings: [], packs: {}, threads: {} }
     : loadLocalExperiments();
@@ -982,6 +1320,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   let progressTimer = 0;
   let generationSeq = 0;
   const generationBySlot = new Map<number, number>();
+  // Buildings with a real collect POST in flight: a second tap is ignored until
+  // the request settles, so ctx.addPuzzles never double-fires for one claim.
+  const collectingBuildings = new Set<string>();
   const readyDrafts = new Map<number, CreationDraft>();
   const pollingSlots = new Set<number>();
   const pendingPhaseBySlot = new Map<number, string>();
@@ -1142,7 +1483,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // the building switches from the canonical stock fallback to the hosted build.
   async function bakeAndHost(slot: number, prompt: string): Promise<void> {
     const b = S.buildings.find((x) => x.slot === slot);
-    if (!b || b.tpl !== 'sort' || hostedUrl(b) || pollingSlots.has(slot)) return;
+    if (!b || b.tpl !== 'sort' || hasHostedArtifact(b) || pollingSlots.has(slot)) return;
     pollingSlots.add(slot);
     const packRef = b.pack;
     b.prompt = prompt;
@@ -1187,7 +1528,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         window.clearTimeout(timer);
         const data = (await res.json()) as { rel?: string; url?: string; error?: string };
         if (!res.ok || !data.url) throw new Error(String(data.error ?? `HTTP ${res.status}`));
-        job = { job_id: b.jobId ?? '', status: 'ready', rel: data.rel ?? '', url: data.url, error: '', ready: true };
+        job = {
+          job_id: b.jobId ?? '',
+          status: 'ready',
+          rel: data.rel ?? '',
+          url: data.url,
+          error: '',
+          ready: true,
+        };
       }
 
       let pollErrors = 0;
@@ -1211,16 +1559,19 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         terminalFailure = true;
         throw new Error(job.error || 'Bake job failed');
       }
-      if (!job.url || !job.rel) throw new Error('Backend published no hosted URL; check UGC_BASE_URL');
+      if (!job.rel || (!IS_DEV && !job.content_digest)) {
+        throw new Error('Backend published no immutable hosted identity');
+      }
       const now = S.buildings.find((x) => x.slot === slot);
       if (!now || now.pack !== packRef) return;   // slot was rebuilt meanwhile
       now.rel = job.rel;
+      now.contentDigest = job.content_digest;
       now.url = undefined;
       now.publishing = false;
       now.publishError = undefined;
       save();
       refreshIsland();
-      console.log('[island] hosted:', job.url, job.ready ? '(ready)' : '(deploy pending)');
+      console.log('[island] hosted identity ready:', job.rel, job.ready ? '(ready)' : '(deploy pending)');
       if (ov.isConnected) toast(job.ready ? 'Published to hosting ✅' : 'Published; hosting is warming up');
     } catch (e) {
       const message = errorText(e);
@@ -1247,7 +1598,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
 
   function resumePendingBakes(): void {
     S.buildings
-      .filter((building) => building.tpl === 'sort' && Boolean(building.jobId) && !hostedUrl(building))
+      .filter((building) => building.tpl === 'sort' && Boolean(building.jobId) && !hasHostedArtifact(building))
       .forEach((building) => { void bakeAndHost(building.slot, building.prompt ?? ''); });
   }
 
@@ -1270,7 +1621,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   ov.innerHTML =
     // The top HUD (level + puzzle counter) and the bottom nav bar are the feed's —
     // they stay put across views. The island only labels itself on a small backing.
-    `<div class="isl-namebar"><span class="isl-namebar__pill">🏝️ ${esc(islandLabel)}</span>${guest ? '' : '<button class="isl-share" type="button" data-share-island aria-label="Share island" title="Share island">↗</button>'}</div>` +
+    // Bot islands are always labelled as such (§4.3): a guest must be able to
+    // tell a "system neighbour" island from a real player's.
+    `<div class="isl-namebar"><span class="isl-namebar__pill">🏝️ ${esc(islandLabel)}</span>${guest && publicIsland?.owner.is_bot ? '<span class="isl-botbadge" title="Системный сосед">🤖 бот</span>' : ''}${guest ? '' : '<button class="isl-share" type="button" data-share-island aria-label="Share island" title="Share island">↗</button>'}</div>` +
     '<div class="isl-worldbox"><svg viewBox="0 0 390 540" preserveAspectRatio="xMidYMid slice"></svg><div class="isl-legend" data-legend></div></div>' +
     `<button class="isl-cta" type="button" data-guest-cta${guest ? '' : ' hidden'}>Play a series here</button>` +
     '<div class="isl-scrim" data-scrim></div>' +
@@ -1403,10 +1756,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   scrim.addEventListener('click', closeSheet);
 
   function refreshIsland(persist = false): void {
-    if (!guest) sim = loadIslandSim();   // the feed loop may have accrued new puzzle pucks since last render
-    // Fake social data (simulated plays/likes overlay + collectible pucks) shows only
-    // on the owner's own island with the 'fake' toggle on; 'real' shows pure backend data.
-    const fake = !guest && islandSocialMode() === 'fake';
     // Blueprint scheme (design variant B): dot grid, thin island outline,
     // central hub with connectors, slots as theme-filled circles with the
     // template initial. Status lives in rim DOTS (legend at the bottom);
@@ -1453,10 +1802,15 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
             <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="18" font-weight="700" fill="rgba(255,255,255,.9)">${TPL[draft.tpl].label.charAt(0)}</text>
             <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.75)">theme ready</text></g>`;
         } else if (!guest) {
-          s += `<g class="isl-sector" data-slot="${i}">
-            <circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.35)" stroke-width="1.4" stroke-dasharray="6 6"/>
-            <text x="${p.x}" y="${p.y + 9}" text-anchor="middle" font-size="26" font-weight="600" fill="rgba(255,255,255,.7)" class="isl-plus">+</text>
-            <text x="${p.x}" y="${p.y + 58}" text-anchor="middle" font-size="10.5" fill="rgba(255,255,255,.45)">build</text></g>`;
+          // Foundation CTA (§4.6): an empty owner slot reads as a laid foundation
+          // — a brighter dashed plot with a solid inner ring and an explicit
+          // "Создай механику" call-to-action, louder than the old faint dotted "+".
+          s += `<g class="isl-sector isl-foundation" data-slot="${i}">
+            <circle cx="${p.x}" cy="${p.y}" r="40" fill="rgba(143,216,194,.06)" stroke="rgba(143,216,194,.55)" stroke-width="1.8" stroke-dasharray="7 6"/>
+            <circle cx="${p.x}" cy="${p.y}" r="27" fill="none" stroke="rgba(143,216,194,.4)" stroke-width="1.2"/>
+            <text x="${p.x}" y="${p.y + 10}" text-anchor="middle" font-size="30" font-weight="700" fill="#8FD8C2" class="isl-plus">+</text>
+            <rect x="${p.x - 52}" y="${p.y + 48}" width="104" height="18" rx="9" fill="#8FD8C2"/>
+            <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="800" fill="#0C2019">Создай механику</text></g>`;
         } else {
           s += `<circle cx="${p.x}" cy="${p.y}" r="40" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="1.2" stroke-dasharray="6 6"/>`;
         }
@@ -1468,28 +1822,49 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       // blocked in the building card until it finishes.
       const busy = Boolean(b.publishing) || pollingSlots.has(i) || pendingSlots.has(i);
       const letterFill = luminance(pk.ground) > 0.55 ? '#1F1E1B' : '#FFFFFF';
+      // Stage 0..10 (§4.1): concentric step-arcs around the rim + a stage-scaled
+      // ground-fill density; a "MAX" badge at stage 10. Server-derived; defensive
+      // if the backend has not yet attached `stage`.
+      const stage = stageOf(b);
       s += `<g class="isl-sector${b.fresh ? ' isl-sector--new' : ''}" data-b="${i}">
-        <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
+        ${stageRingsSvg(p.x, p.y, stage)}
+        <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" fill-opacity="${stageFillOpacity(stage)}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
         <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="19" font-weight="700" fill="${letterFill}">${TPL[b.tpl].label.charAt(0)}</text>`;
-      const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : isLocalExperiment(b) ? '#58A6FF' : hostedUrl(b) ? '#4CC38A' : null;
+      const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : isLocalExperiment(b) ? '#58A6FF' : hasHostedArtifact(b) ? '#4CC38A' : null;
       if (dot) {
         s += `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`;
       }
+      if (stage >= 10) s += maxBadgeSvg(p.x, p.y);
       s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
         <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text>
-        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays + (fake ? (sim.plays[i] || 0) : 0))}   ♥ ${fmtNum(b.likes + (fake ? (sim.likes[i] || 0) : 0))}</text></g>`;
-      // Uncollected puzzles earned from simulated plays — a gently bobbing token over
-      // the mechanic; tap to collect (scatter → fly into the counter). Fake mode only.
-      // A per-slot negative animation-delay desyncs the bob so they don't move in unison.
-      const rew = fake ? (sim.reward[i] || 0) : 0;
-      if (rew > 0) {
-        const px = p.x, py = p.y - 52;
-        const delay = -((i * 0.67) % 2.4).toFixed(2);   // desync the bob per slot (period = 2.4s, see .isl-puz)
-        s += `<g class="isl-puz" data-collect="${i}" style="animation-delay:${delay}s">` +
-          `<circle cx="${px}" cy="${py}" r="15.5" fill="rgba(58,42,102,.97)" stroke="#fff" stroke-width="1.6"/>` +
-          `<text x="${px}" y="${py + 5.5}" text-anchor="middle" font-size="16">🧩</text>` +
-          `<circle cx="${px + 13}" cy="${py - 11}" r="8" fill="#4CC38A" stroke="rgba(13,17,24,.9)" stroke-width="1.5"/>` +
-          `<text x="${px + 13}" y="${py - 7.6}" text-anchor="middle" font-size="9.5" font-weight="800" fill="#08210F">${rew}</text>` +
+        <text x="${p.x}" y="${p.y + 82}" text-anchor="middle" font-size="10" font-weight="600" fill="rgba(255,255,255,.64)">▶ ${fmtNum(b.plays)}   ♥ ${fmtNum(b.likes)}</text>`;
+      // Owner (§4.6): an unpublished mechanic is invisible to guests — mark it.
+      if (!guest && !busy && !hasHostedArtifact(b) && !isLocalExperiment(b)) {
+        s += `<text x="${p.x}" y="${p.y + 95}" text-anchor="middle" font-size="9" font-weight="700" fill="#EF9F27">не виден гостям</text>`;
+      }
+      s += '</g>';
+      // Gifts over a building:
+      //  • Owner (§4.2): uncollected gifts pile up from backend-owned
+      //    `pending_gifts` — a bobbing puzzle token; tap to collect
+      //    (scatter → fly into the shared counter).
+      //  • Guest (§4.3): a public building offering a gift today shows a wrapped
+      //    "подарочек" hint; tapping the building plays it, which claims the gift.
+      const px = p.x, py = p.y - 52;
+      const delay = -((i * 0.67) % 2.4).toFixed(2);   // desync the bob per slot (period = 2.4s, see .isl-puz)
+      if (!guest) {
+        const rew = b.pending_gifts || 0;
+        if (rew > 0) {
+          s += `<g class="isl-puz" data-collect="${i}" style="animation-delay:${delay}s">` +
+            `<circle cx="${px}" cy="${py}" r="15.5" fill="rgba(58,42,102,.97)" stroke="#fff" stroke-width="1.6"/>` +
+            `<text x="${px}" y="${py + 5.5}" text-anchor="middle" font-size="16">🧩</text>` +
+            `<circle cx="${px + 13}" cy="${py - 11}" r="8" fill="#4CC38A" stroke="rgba(13,17,24,.9)" stroke-width="1.5"/>` +
+            `<text x="${px + 13}" y="${py - 7.6}" text-anchor="middle" font-size="9.5" font-weight="800" fill="#08210F">${rew}</text>` +
+            '</g>';
+        }
+      } else if (b.gift_available_today) {
+        s += `<g class="isl-puz" data-visit-gift="${i}" style="animation-delay:${delay}s">` +
+          `<circle cx="${px}" cy="${py}" r="15.5" fill="rgba(232,96,60,.97)" stroke="#fff" stroke-width="1.6"/>` +
+          `<text x="${px}" y="${py + 5.5}" text-anchor="middle" font-size="16">🎁</text>` +
           '</g>';
       }
       if (b.fresh) {
@@ -1514,8 +1889,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     svg.querySelectorAll<SVGElement>('[data-lock]').forEach((g) =>
       g.addEventListener('click', () => { if (!panMoved) toast('Слот откроется позже'); }));
     svg.querySelectorAll<SVGElement>('[data-collect]').forEach((g) =>
-      g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) collectReward(Number(g.dataset.collect), g); }));
-    const likes = buildings.reduce((a, b) => a + b.likes + (fake ? (sim.likes[b.slot] || 0) : 0), 0);
+      g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) void collectReward(Number(g.dataset.collect), g); }));
+    // Guest gift hint: tapping it just plays the building (which claims the gift).
+    svg.querySelectorAll<SVGElement>('[data-visit-gift]').forEach((g) =>
+      g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) openBuilding(Number(g.dataset.visitGift)); }));
+    const likes = buildings.reduce((a, b) => a + b.likes, 0);
     const statEl = ov.querySelector('[data-stat]');
     if (statEl) statEl.textContent = `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;
     const tokEl = ov.querySelector('[data-tok]');
@@ -1524,18 +1902,43 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (persist) save();
   }
 
-  // Collect the puzzles bobbing over a mechanic: clear the local reward, then hand
-  // the amount + tap point to the feed, which flies the pucks into the ONE shared
-  // HUD counter (scatter → arc into it).
-  function collectReward(slot: number, el: SVGElement): void {
+  // Collect the gifts bobbing over a mechanic (§4.2). It POSTs a persisted,
+  // idempotent collect claim and applies the server's exact
+  // disposition (granted flies puzzles; daily_cap / rewards_disabled show honest
+  // toasts; empty is a no-op). A lost response keeps the claim id for retry.
+  async function collectReward(slot: number, el: SVGElement): Promise<void> {
     if (guest) return;
-    const amount = sim.reward[slot] || 0;
-    if (amount <= 0) return;
-    sim.reward[slot] = 0;
-    saveIslandSim(sim);
-    const r = el.getBoundingClientRect();
-    ctx.addPuzzles?.(amount, { x: r.left + r.width / 2, y: r.top + r.height / 2 });
-    refreshIsland();
+    const rect = el.getBoundingClientRect();
+    const from = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const b = S.buildings.find((x) => x.slot === slot);
+    if (!b || !b.buildingId || (b.pending_gifts || 0) <= 0) return;
+    const buildingId = b.buildingId;
+    // In-flight guard: ignore repeat taps until this collect settles so one claim
+    // never fires ctx.addPuzzles twice (double-counting the local puzzle counter
+    // before the next re-sync). The claim id itself stays idempotent for retry.
+    if (collectingBuildings.has(buildingId)) return;
+    collectingBuildings.add(buildingId);
+    const claimId = ensureCollectClaim(buildingId);
+    try {
+      const res = await apiIslandCollect(buildingId, claimId);
+      clearCollectClaim(buildingId);
+      const now = S.buildings.find((x) => x.buildingId === buildingId);
+      if (now) now.pending_gifts = res.pending_gifts ?? 0;
+      if (res.disposition === 'granted' && res.puzzles > 0) {
+        ctx.addPuzzles?.(res.puzzles, from);
+        toast(`Собрано ${res.puzzles} 🧩`);
+      } else if (res.disposition === 'daily_cap') {
+        toast('Дневной лимит островных пазлов достигнут — соберите завтра');
+      } else if (res.disposition === 'rewards_disabled') {
+        toast('Награды временно на паузе');
+      }
+      refreshIsland();
+    } catch (error) {
+      // Keep the claim id so the next tap retries idempotently.
+      toast(`Не удалось собрать · ${errorText(error)}`);
+    } finally {
+      collectingBuildings.delete(buildingId);
+    }
   }
 
   // ── creation flow ──────────────────────────────────────────────────────────
@@ -2142,8 +2545,21 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     })() : null;
 
     const guided = candidateFor(req, 'guided')!;
+    // Resume an in-flight job from a prior (pre-reload) submit with the SAME full
+    // request identity (prompt + avoid + difficulty + motion) instead of
+    // re-POSTing; persist the job id as soon as one is issued. A change to any
+    // digest-affecting field makes the identity mismatch → a fresh request.
+    const requestIdentity = themeRequestIdentity(req.prompt, req.avoid, req.difficulty, req.motion);
+    const themeHandle = ensureThemeJobHandle(req.slot, requestIdentity);
+    let themeJobFailedTerminal = false;
     try {
-      const pack = await aiTheme(req.prompt, req.avoid, req.difficulty, req.motion);
+      const pack = await aiTheme(req.prompt, req.avoid, req.difficulty, req.motion, {
+        resumeJobId: themeHandle.jobId,
+        requestId: themeHandle.requestId,
+        onJob: (jobId) => rememberThemeJob(
+          req.slot, jobId, requestIdentity, themeHandle.requestId,
+        ),
+      });
       if (generationBySlot.get(req.slot) !== generationId) return;
       if (!pack) throw new Error('API model is unavailable');
       pack.id = `ai-${newJobId()}`;
@@ -2154,6 +2570,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       guided.state = 'failed';
       guided.error = errorText(error);
       guided.phase = 'FAILED';
+      themeJobFailedTerminal = error instanceof ThemeJobTerminalError;
+    } finally {
+      // A transient poll/network failure does NOT settle the backend job. Keep its
+      // durable handle so a retry/reload resumes the exact job instead of creating
+      // another charge after it later becomes terminal.
+      if (themeJobFailedTerminal && generationBySlot.get(req.slot) === generationId) {
+        forgetThemeJob(req.slot, themeHandle.requestId);
+      }
     }
     repaintCandidates(req);
 
@@ -2837,15 +3261,27 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   }
 
   async function reviseGuided(req: CreationDraft, feedback: string): Promise<void> {
+    const revisionGenerationId = ++generationSeq;
+    generationBySlot.set(req.slot, revisionGenerationId);
     const previousPack = req.pack;
     const candidate = candidateFor(req, 'guided');
     const revisedPrompt = `${req.prompt}\nRevision request: ${feedback}`.trim().slice(0, 500);
+    const avoid = variantFingerprint(previousPack);
+    const requestIdentity = themeRequestIdentity(revisedPrompt, avoid, req.difficulty, req.motion);
+    const themeHandle = ensureThemeJobHandle(req.slot, requestIdentity);
     openSheet(`<h3>Revising guided option…</h3><div class="isl-sub">${esc(feedback)}</div>
       <ul class="isl-lablog"><li><b></b><span>Sending the bounded brief to the API model</span></li><li><b></b><span>Validating theme and gameplay parameters</span></li></ul>
       <button class="isl-btn isl-btn--ghost" type="button" data-dismiss>Keep browsing</button>`);
     sheet.querySelector('[data-dismiss]')?.addEventListener('click', closeSheet);
     try {
-      const pack = await aiTheme(revisedPrompt, variantFingerprint(previousPack), req.difficulty, req.motion);
+      const pack = await aiTheme(revisedPrompt, avoid, req.difficulty, req.motion, {
+        resumeJobId: themeHandle.jobId,
+        requestId: themeHandle.requestId,
+        onJob: (jobId) => rememberThemeJob(
+          req.slot, jobId, requestIdentity, themeHandle.requestId,
+        ),
+      });
+      if (generationBySlot.get(req.slot) !== revisionGenerationId) return;
       if (!pack) throw new Error('API model returned no validated variant');
       pack.id = `ai-${newJobId()}`;
       req.prompt = revisedPrompt;
@@ -2862,6 +3298,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       readyDrafts.set(req.slot, req);
       if (ov.isConnected) stepPreview();
     } catch (error) {
+      if (generationBySlot.get(req.slot) !== revisionGenerationId) return;
+      if (error instanceof ThemeJobTerminalError) {
+        forgetThemeJob(req.slot, themeHandle.requestId);
+      }
       const message = errorText(error);
       if (candidate) {
         candidate.pack = previousPack;
@@ -2906,6 +3346,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (cur !== req) return;
       const { slot, tpl: tplId, prompt } = req;
       // Slots are the cap: building on an occupied slot replaces its mechanic.
+      generationBySlot.delete(slot);
+      pendingSlots.delete(slot);
+      pendingPhaseBySlot.delete(slot);
+      forgetThemeJob(slot);
       readyDrafts.delete(slot);
       removeLocalExperiment(slot);
       if (!PACKS.some((pack) => pack.id === pk.id)) S.aiPacks = { ...(S.aiPacks ?? {}), [pk.id]: pk };
@@ -2967,7 +3411,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       : `<div class="isl-board">${board(b.tpl, pk)}</div>`;
     const st = localLab
       ? { c: '#58A6FF', t: 'local lab' }
-      : hostedUrl(b)
+      : hasHostedArtifact(b)
         ? { c: '#4CC38A', t: 'hosted' }
       : busy
         ? { c: '#EF9F27', t: 'publishing…' }
@@ -2975,7 +3419,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           ? { c: '#E24B4A', t: `publish failed · ${b.publishError}` }
           : { c: 'rgba(255,255,255,.45)', t: 'local draft' };
     const badge = `<span class="isl-status"${busy ? ' data-pulse' : ''}><b style="background:${st.c}"></b>${esc(st.t)}</span>`;
-    const retry = !hostedUrl(b) && !busy
+    const retry = !hasHostedArtifact(b) && !busy
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-publish>Retry publish</button>'
       : '';
     const publishLab = localLab && b.autoplayPassed === true
@@ -2987,14 +3431,38 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     const revisionProgress = editableExperiment && pendingSlots.has(slot)
       ? '<button class="isl-btn isl-btn--ghost" type="button" data-revision-progress>View revision progress</button>'
       : '';
+    // Stage line (§4.1): "Стадия N/10 · гости прошли: K", with the human vs
+    // "system neighbour" (bot) split shown separately (F006) when the backend
+    // reports the bot portion.
+    const stage = stageOf(b);
+    const foreignClaims = typeof b.foreign_claims === 'number' ? b.foreign_claims : 0;
+    const botClaims = typeof b.bot_claims === 'number' ? Math.min(b.bot_claims, foreignClaims) : null;
+    const peopleClaims = botClaims != null ? Math.max(0, foreignClaims - botClaims) : null;
+    const stageLine = `<div class="isl-sub" style="margin-top:-8px">Стадия ${stage}/10${stage >= 10 ? ' · <b style="color:#FFCE54">MAX</b>' : ''} · гости прошли: ${foreignClaims}${
+      botClaims != null ? ` <span style="opacity:.75">(люди ${peopleClaims} + соседи ${botClaims})</span>` : ''
+    }</div>`;
+    // Not-published hint (§4.6): a mechanic without a hosted artifact is invisible
+    // to guests until published.
+    const publishHint = !hasHostedArtifact(b) && !isLocalExperiment(b) && !busy
+      ? '<div class="isl-pk" style="margin-top:8px;color:#EF9F27">Не виден гостям — опубликуй, чтобы к тебе приходили</div>'
+      : '';
+    // Owner sees a moderation takedown (§4.2 / P3): `takedown=true` arrives on
+    // /island/state; the building stays in the owner's world but is hidden from
+    // guests until an operator restores it.
+    const takedownBanner = b.takedown === true
+      ? '<div class="isl-pk" style="margin-top:8px;color:#F0605A;font-weight:700">⚑ Снято оператором — гости этот домик не видят</div>'
+      : '';
     openSheet(`<h3>${esc(b.name)}</h3>
       <div class="isl-sub">${TPL[b.tpl].label} · Lv ${levelOf(b)} · ${b.plays} plays · ♥ ${b.likes} ${badge}</div>
+      ${stageLine}
+      ${takedownBanner}
       ${buildingPreview}
       <button class="isl-btn isl-btn--pri" type="button" data-play>▶ Play the series</button>
       ${revisionProgress}
       ${refineLab}
       ${publishLab}
       ${retry}
+      ${publishHint}
       <button class="isl-btn isl-btn--ghost" type="button" data-rebuild${busy ? ' disabled' : ''}>Rebuild slot · replace this mechanic</button>
       <button class="isl-btn isl-btn--ghost" type="button" data-delete${busy ? ' disabled' : ''}>Delete mechanic</button>
       <div class="isl-pk" style="margin-top:10px">${busy
@@ -3052,9 +3520,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   function playSeries(b: Building): void {
     const play = document.createElement('div');
     play.className = 'isl-play';
+    // A guest may report another player's UGC building (not a bot builtin). The
+    // ⚑ control lives in the play header so it is reachable after a WIN or a LOSS
+    // alike (§4.3), not only from the win modal.
+    const canReport = Boolean(guest && b.buildingId && publicIsland && !publicIsland.owner.is_bot);
     play.innerHTML =
       '<div class="isl-play__head">' +
         `<div class="isl-play__nm">${esc(b.name)} <span style="opacity:.55;font-weight:600">· ${TPL[b.tpl].label}</span></div>` +
+        (canReport ? '<button class="isl-dbg" type="button" data-report-head title="Пожаловаться">⚑</button>' : '') +
         '<button class="isl-dbg" type="button" data-dbg>boot…</button>' +
         '<button class="isl-close" type="button" aria-label="Back" data-back>✕</button>' +
       '</div>';
@@ -3082,46 +3555,144 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     });
     dbg(`launch: "${b.name}" tpl=${b.tpl} pack=${b.pack} guest=${guest}`);
 
-    const visitId = guest && publicIsland && b.buildingId ? newJobId() : null;
-    const visitStartedAt = performance.now();
-    const visitStart = visitId && publicIsland && b.buildingId
-      ? apiStartIslandVisit({
-          visit_id: visitId,
-          owner_id: publicIsland.owner.id,
-          building_id: b.buildingId,
-        })
-      : null;
-    if (visitStart) {
-      void visitStart.then((visit) => {
-        applySocial(b, visit.social);
-        dbg(`visit started: ${visit.visit_id}`);
-      }).catch((error) => dbg(`visit start failed: ${errorText(error)}`));
-    }
-
-    // The canonical playable is never transformed in the client. Generated
-    // mechanics exist only as tested hosted/local-lab artifacts.
-    const stockSrc = playableUrl(TPL[b.tpl].playableId, { auto: false });
     const pk = resolvePack(b.pack);
-    void (async () => {
-      const hosted = hostedUrl(b);
-      if (hosted) {
-        dbg(`loading hosted build: ${hosted}`);
-        setChip(`${isLocalExperiment(b) ? 'LOCAL LAB' : 'HOSTED'} · ${pk.name}`);
-        frame.src = `${hosted}${hosted.includes('?') ? '&' : '?'}auto=0`;
-        return;
-      }
-      dbg(`loading canonical stock: ${stockSrc}`);
-      setChip(`STOCK · ${b.tpl}`);
-      frame.src = stockSrc;
-    })();
+    let visitId: string | null = null;
+    let visitStartedAt = performance.now();
+    let visitStart: ReturnType<typeof apiStartIslandVisit> | null = null;
 
     const cleanup = () => {
       window.removeEventListener('message', onMsg);
       try { frame.src = 'about:blank'; } catch { /* noop */ }
       play.remove();
     };
+
+    const showUnavailable = (reason: string): void => {
+      dbg(`runtime unavailable: ${reason}`);
+      setChip('UNAVAILABLE');
+      frame.remove();
+      const msg = document.createElement('div');
+      msg.className = 'isl-win';
+      msg.innerHTML =
+        '<div class="isl-win__t">Механика недоступна</div>' +
+        '<div class="isl-win__m">Эта постройка сейчас не запускается</div>' +
+        '<button class="isl-win__home" type="button" data-home>Back to island</button>';
+      play.appendChild(msg);
+      (msg.querySelector('[data-home]') as HTMLElement).addEventListener('click', () => {
+        cleanup();
+        refreshIsland();
+      });
+      toast('Механика недоступна');
+    };
+
+    // Resolve the runtime before a visit exists. Hosted UGC receives a fresh
+    // short-lived bearer from the authenticated resolver; only exact
+    // buildingId+rel+contentDigest agreement may reach the iframe. The bearer
+    // remains in DOM memory and is never logged or persisted.
+    const launchRuntime = async (): Promise<void> => {
+      const runtime = await resolveBuildingRuntime(b, pk.name);
+      if (!play.isConnected) return;
+      if (b.builtin) {
+        dbg(`builtin binding: mechanicId=${b.builtin.mechanicId}`
+          + (b.builtin.versionsDigest
+            ? ` versionsDigest=${b.builtin.versionsDigest} (rotation/audit record; delivery = current deploy)`
+            : ''));
+      }
+      if (runtime.kind === 'unavailable') {
+        showUnavailable(runtime.reason);
+        return;
+      }
+      if (guest && publicIsland && b.buildingId) {
+        visitId = newJobId();
+        visitStartedAt = performance.now();
+        visitStart = apiStartIslandVisit({
+          visit_id: visitId,
+          owner_id: publicIsland.owner.id,
+          building_id: b.buildingId,
+        });
+        try {
+          const visit = await visitStart;
+          applySocial(b, visit.social);
+          dbg(`visit started: ${visit.visit_id}`);
+        } catch (error) {
+          dbg(`visit start failed: ${errorText(error)}`);
+          showUnavailable('server visit could not start');
+          return;
+        }
+      }
+      dbg(`loading ${runtime.kind} runtime`);
+      setChip(runtime.label);
+      frame.src = runtime.src;
+    };
+
+    // Shared guest report panel (§4.3): a small floating sheet over the play view,
+    // reachable from the header ⚑ and the win modal. The server pins the exact
+    // artifact revision, dedups by (building, reporter) and rate-limits per day.
+    const openGuestReportPanel = (): void => {
+      if (!canReport || !b.buildingId) return;
+      if (reportedBuildings.has(b.buildingId)) { toast('Жалоба уже отправлена'); return; }
+      if (play.querySelector('[data-report-panel]')) return;  // already open
+      const panel = document.createElement('div');
+      panel.dataset.reportPanel = '1';
+      panel.style.cssText =
+        'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:12;width:min(320px,86%);' +
+        'background:#141926;border:1px solid #2a3448;border-radius:12px;padding:14px;box-shadow:0 12px 40px rgba(0,0,0,.5);' +
+        'display:flex;flex-direction:column;gap:8px;color:#cdd3df;font:500 13px/1.4 system-ui,sans-serif;';
+      panel.innerHTML =
+        '<div style="font-weight:700;color:#eef">Пожаловаться на домик</div>' +
+        REPORT_REASON_LABELS.map((r, i) =>
+          `<label style="display:flex;gap:8px;align-items:center"><input type="radio" name="isl-report-reason" value="${r.id}"${i === 0 ? ' checked' : ''}> ${esc(r.label)}</label>`,
+        ).join('') +
+        '<textarea data-report-text maxlength="500" rows="2" placeholder="Комментарий (необязательно)" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,.3);color:#eef;border:1px solid #345;border-radius:8px;padding:7px;font:inherit;resize:vertical"></textarea>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+        '<button type="button" data-report-cancel style="padding:8px 12px;background:#1b2230;color:#cfe;border:1px solid #345;border-radius:8px;font:600 12px inherit">Отмена</button>' +
+        '<button type="button" data-report-send style="padding:8px 12px;background:#b23b3b;color:#fff;border:0;border-radius:8px;font:600 12px inherit">Отправить</button>' +
+        '</div>';
+      play.appendChild(panel);
+      panel.querySelector('[data-report-cancel]')?.addEventListener('click', () => panel.remove());
+      panel.querySelector('[data-report-send]')?.addEventListener('click', async () => {
+        const send = panel.querySelector('[data-report-send]') as HTMLButtonElement;
+        const reason = (panel.querySelector('input[name="isl-report-reason"]:checked') as HTMLInputElement | null)?.value as IslandReportReason | undefined;
+        const text = (panel.querySelector('[data-report-text]') as HTMLTextAreaElement | null)?.value ?? '';
+        if (!reason || !b.buildingId) return;
+        send.disabled = true;
+        try {
+          await apiIslandReport(b.buildingId, reason, text);
+          reportedBuildings.add(b.buildingId);
+          panel.remove();
+          toast('Спасибо! Жалоба отправлена');
+        } catch (error) {
+          if (error instanceof ApiRequestError && error.status === 429) {
+            toast('Слишком много жалоб сегодня — попробуй завтра');
+          } else {
+            toast(`Не удалось отправить · ${errorText(error)}`);
+          }
+          send.disabled = false;
+        }
+      });
+    };
+    (play.querySelector('[data-report-head]') as HTMLElement | null)?.addEventListener('click', openGuestReportPanel);
+
     let winShown = false;
     let visitCompleted = false;
+    // Disposition-aware guest gift modal (§4.3): honest text for every outcome.
+    const showGiftOutcome = (win: HTMLElement, result: IslandVisitResult): void => {
+      const el = win.querySelector('[data-gift]') as HTMLElement | null;
+      if (!el) return;
+      let text: string;
+      if (result.disposition === 'granted' && result.gift && result.gift.puzzles > 0) {
+        text = `🎁 Подарок: +${result.gift.puzzles} 🧩`;
+      } else if (result.disposition === 'repeat_day') {
+        text = '🎁 Сегодня подарок уже получен — приходи завтра';
+      } else if (result.disposition === 'daily_cap') {
+        text = 'Дневной лимит островных пазлов достигнут';
+      } else if (result.disposition === 'rewards_disabled' || result.disposition === 'zero_policy') {
+        text = 'Спасибо за визит!';
+      } else {
+        text = 'Спасибо за визит!';
+      }
+      el.textContent = text;
+      el.hidden = false;
+    };
     const showWin = () => {
       if (winShown) return;
       winShown = true;
@@ -3131,9 +3702,21 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         '<div class="isl-win__t">Round won! 🎉</div>' +
         (guest ? '<div class="isl-win__m" data-visit-status>Verifying this visit…</div>'
                : '<div class="isl-win__m">Your own build — no tokens for self-plays</div>') +
+        (guest ? '<div class="isl-gift" data-gift hidden></div>' : '') +
         (guest ? `<button class="isl-like${b.liked ? ' isl-like--on' : ''}" type="button" data-like disabled>${b.liked ? '♥ Liked' : '♡ Like this mechanic'}</button>` : '') +
+        // Guest report affordance (§4.3): only on another player's UGC building
+        // (a bot builtin has no artifact to moderate).
+        (canReport
+          ? '<button class="isl-report" type="button" data-report style="background:none;border:0;color:#8892a6;font:600 12px inherit;text-decoration:underline;margin-top:6px;cursor:pointer">⚑ Пожаловаться</button>'
+          : '') +
         '<button class="isl-win__home" type="button" data-home>Back to island</button>';
       play.appendChild(win);
+      const reportButton = win.querySelector('[data-report]') as HTMLButtonElement | null;
+      if (reportButton && b.buildingId && reportedBuildings.has(b.buildingId)) {
+        reportButton.textContent = '⚑ Жалоба отправлена';
+        reportButton.disabled = true;
+      }
+      reportButton?.addEventListener('click', () => openGuestReportPanel());
       const likeButton = win.querySelector('[data-like]') as HTMLButtonElement | null;
       const paintLike = () => {
         if (!likeButton) return;
@@ -3184,6 +3767,34 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
           paintLike();
         }
         if (ov.isConnected) refreshIsland(false);
+        // Island Social Core (§4.3): record the completion claim and resolve the
+        // gift, then show a disposition-aware gift modal. Fail-quiet: the like
+        // prompt above is preserved regardless of the gift outcome.
+        void (async () => {
+          if (!visitId) return;
+          try {
+            const result = await claimVisitResult(visitId, visitStartedAt);
+            dbg(`gift claim: ${result.disposition} stage=${result.stage} foreign=${result.foreign_claims}`);
+            // F010: adopt the authoritative stage/counters and stop re-offering a
+            // consumed gift, so a re-entry shows the new stage — not a stale puck.
+            b.stage = result.stage;
+            b.foreign_claims = result.foreign_claims;
+            if (result.disposition === 'granted' || result.disposition === 'repeat_day') {
+              b.gift_available_today = false;
+            }
+            if (play.isConnected) showGiftOutcome(win, result);
+            // F009: a granted gift credits the GUEST's own puzzle balance — fly the
+            // pucks into the shared HUD counter exactly like an owner reward.
+            if (result.disposition === 'granted' && result.gift && result.gift.puzzles > 0) {
+              const giftEl = win.querySelector('[data-gift]') as HTMLElement | null;
+              const rect = (giftEl ?? win).getBoundingClientRect();
+              ctx.addPuzzles?.(result.gift.puzzles, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+            }
+            if (ov.isConnected) refreshIsland(false);
+          } catch (error) {
+            dbg(`gift claim failed: ${errorText(error)}`);
+          }
+        })();
       })().catch((error) => {
         dbg(`visit completion failed: ${errorText(error)}`);
         if (!play.isConnected) return;
@@ -3205,6 +3816,9 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     };
     window.addEventListener('message', onMsg);
     (play.querySelector('[data-back]') as HTMLElement).addEventListener('click', () => { cleanup(); refreshIsland(); });
+    void launchRuntime().catch((error) => {
+      if (play.isConnected) showUnavailable(errorText(error));
+    });
   }
 
   // ── header / modes ─────────────────────────────────────────────────────────

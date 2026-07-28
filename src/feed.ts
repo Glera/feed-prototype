@@ -39,6 +39,11 @@ import {
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
   apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
+  apiIslandActivity, apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept,
+  apiIslandFriendRemove, apiIslandFriendBlock,
+  apiIslandVisitAwardFromChest, apiIslandVisitAwardResolve,
+  apiIslandWriteAccess, apiPublicIsland,
+  type IslandActivityEvent, type IslandFriend, type IslandVisitAward,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
   type CatalogAllocateAuthorizedResultV2,
   type CatalogAllocationDecisionResult, type CatalogRunTicketRequestV2,
@@ -110,12 +115,19 @@ import {
   initControlPlane,
   queueControlPlaneEvent,
 } from './control-plane';
-import { loadIslandState } from './island-state';
-import { simulateActivity, islandSocialMode, ISLAND_SIM_EVENT, type SimBuildingRef } from './island-sim';
 import { levelStarReward, seriesRewards } from './rewards.mjs';
 import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
-import { getStartParam, shareChallenge, getInitData, hasTelegramHostContext } from './telegram';
+import { mountIslandVisitAwardCard } from './island-p2-card.mjs';
+import {
+  getStartParam,
+  shareChallenge,
+  shareTelegramLink,
+  getInitData,
+  hasTelegramHostContext,
+  requestTelegramWriteAccess,
+  showConfirm,
+} from './telegram';
 import {
   catalogLabAuthorizationAvailable,
   catalogLabAuthUrl,
@@ -173,15 +185,34 @@ const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of dis
 // Guided-UGC island (src/island.ts) is an unreleased meta prototype. Its feed-bar
 // entry (the "Мета" tab) stays HIDDEN by default so a friend cohort never stumbles
 // into it; opt in per build with VITE_ISLAND_ENABLED=1 (or =true), matching the
-// existing default-off VITE_* front gates (see control-plane.ts). This gates ONLY
-// the UI entry — direct `?island=<ownerId>` deep-link visits (main.ts →
-// publicIsland → openIslandWorld) are intentionally untouched. The separate
-// Creator District prototype (openMetaWorld, reached via ?metaworld=1) keeps its
-// entry so its own testing path is unaffected.
+// existing default-off VITE_* front gates (see control-plane.ts). Operator decision
+// (F005, supersedes the earlier COHORT-PREFLIGHT stance for the social surface):
+// the flag gates the ENTIRE social surface — with it OFF, direct-entry deep links
+// (`i_<owner>` / `?island=` / `f_<code>`) do NOT resolve a public island, do NOT
+// mount the island world and do NOT accept invites; the deep link is silently
+// ignored (see main.ts). The separate Creator District prototype (openMetaWorld,
+// reached via ?metaworld=1) keeps its entry so its own testing path is unaffected.
 const ISLAND_UI_ENABLED = (() => {
   const raw = String((import.meta as any).env?.VITE_ISLAND_ENABLED ?? '').toLowerCase();
   return raw === 'true' || raw === '1';
 })();
+const ISLAND_VISIT_AWARD_UI_ENABLED = ISLAND_UI_ENABLED && (() => {
+  const raw = String((import.meta as any).env?.VITE_ISLAND_VISIT_AWARDS_ENABLED ?? '').toLowerCase();
+  return raw === 'true' || raw === '1';
+})();
+const ISLAND_NOTIFICATIONS_UI_ENABLED = ISLAND_UI_ENABLED && (() => {
+  const raw = String((import.meta as any).env?.VITE_ISLAND_NOTIFICATIONS_ENABLED ?? '').toLowerCase();
+  return raw === 'true' || raw === '1';
+})();
+// Pending friend-invite accept persists across boots until a definitive outcome,
+// so a new user whose FK row is created by the FIRST /session still lands the
+// accept on that session (F004). Bounded by an attempt cap.
+const ISLAND_PENDING_ACCEPT_KEY = 'island-pending-friend-accept-v1';
+const ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS = 5;
+const ISLAND_WRITE_ACCESS_ASKED_KEY = 'island-write-access-asked-v1';
+const ISLAND_WRITE_ACCESS_PENDING_KEY = 'island-write-access-pending-v1';
+const ISLAND_ACTIVITY_CURSOR_KEY = 'island-activity-cursor-v1';
+const ISLAND_ACTIVITY_POLL_MS = 30_000;
 
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since
@@ -550,9 +581,16 @@ export class Feed {
   // while daily is up. Cleared synchronously in hideDailyPanel so the frame can
   // resume the instant we return to the feed (before the panel's fade-out ends).
   private dailyOpen = false;
-  // Global "someone played your mechanic" activity sim (runs on every tab).
+  // Global real Island activity notifier (runs on every tab after authenticated
+  // bootstrap; facts come only from server-owned completion claims).
   private activityNotifierEl: HTMLElement | null = null;
   private activityNotifierTimer: number | null = null;
+  private activityNotifierQueue: string[] = [];
+  private activityNotifierActive = false;
+  private islandActivityPollTimer: number | null = null;
+  private islandActivityPollInFlight = false;
+  private islandActivityCursor: number | null | undefined;
+  private islandActivityUserId: number | null = null;
   private dailyTimerEl: HTMLElement | null = null;
   private dailyTickTimer: number | null = null;
   private dailySyncing = false;
@@ -635,6 +673,11 @@ export class Feed {
   private claimedStarRewards = new Set<number>();
   private hudEl: HTMLElement | null = null;
   private storiesEl: HTMLElement | null = null;
+  // Island Social Core (§4.4): friend HUD cells. Only mounted/loaded under
+  // VITE_ISLAND_ENABLED; visible across every view because the HUD is.
+  private islandFriends: IslandFriend[] = [];
+  private friendsHudEl: HTMLElement | null = null;
+  private friendAcceptCode: string | null = null;
   private storiesMomentumFrame: number | null = null;
   private levelBadgeEl: HTMLElement | null = null;
   private levelBadgeSquash: Animation | null = null;   // in-flight counter squash (star-arrival reaction)
@@ -654,6 +697,7 @@ export class Feed {
   private runTickets = new Map<string, RunTicketRequest>();
   private activeChallenge: ChallengeView | null = null;
   private publicIsland: PublicIslandView | null = null;
+  private authenticatedUserId: number | null = null;
   private inboxChallenges: ChallengeInboxItem[] = [];   // top-rail: friends' challenges to play
   private challengeCompleted = false;
   private challengeOverlayOpen = false;
@@ -680,6 +724,7 @@ export class Feed {
   private seriesTransitionEl: HTMLElement | null = null;
   private chestSparkTimer: number | null = null;
   private seriesWinShown = new Set<number>();   // series-end win screen is up on this unit
+  private islandVisitAwardPromise: Promise<IslandVisitAward | null> | null = null;
   private seriesLevelUpPending: number | null = null;   // level to celebrate on the first swipe off the series win screen (null = no level-up)
   private lastSolveMs = 0;                        // most recent manual solve time (result readout + challenge)
   private pendingSeriesParams = new Map<number, string>();   // encoded ?series= for the next mount of index i
@@ -798,6 +843,7 @@ export class Feed {
     publicIsland: PublicIslandView | null = null,
     rosterEntries: ReadonlyArray<FeedRosterSessionEntryV1 | null> = [],
     rosterActivationId: string | null = null,
+    friendAcceptCode: string | null = null,
   ) {
     this.viewport = viewport;
     this.feedEl = feedEl;
@@ -807,6 +853,7 @@ export class Feed {
     this.feedRosterActivationId = rosterActivationId;
     this.activeChallenge = challenge;
     this.publicIsland = publicIsland;
+    this.friendAcceptCode = friendAcceptCode;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     const initialPlayableId = this.playables[this.realIndex()]?.id;
@@ -822,10 +869,11 @@ export class Feed {
     this.updateMechanicStates();
     this.updateHud(false);
     this.mountPreloader();
-    // Fake island social data (plays/likes/notifier/pucks) runs whenever the owner
-    // has the 'fake' toggle on (default until real players exist); 'real' turns it off
-    // so genuine backend likes/shares can be tested. Toggle lives in the debug panel.
-    if (islandSocialMode() === 'fake') this.startIslandActivity();
+    // Island Social Core (§4.4/F004): a friend deep-link (startapp=f_<code>) is
+    // only PERSISTED here; the actual accept + HUD refresh run after the first
+    // successful /session bootstrap (applySessionBootstrap), because a fresh
+    // user's FK row does not exist until then.
+    if (ISLAND_UI_ENABLED && this.friendAcceptCode) this.persistPendingFriendAccept(this.friendAcceptCode);
     if (this.publicIsland) window.setTimeout(() => this.openIslandWorld(), 0);
 
     // After a slide settles: normalise the ring position, resume the arrived
@@ -924,6 +972,7 @@ export class Feed {
     // created/refreshed the user row. This avoids a first-run FK race while
     // still flushing any events persisted by an earlier app launch.
     initControlPlane();
+    this.authenticatedUserId = Number(session.user.id);
     const rosterStage = await stageFeedRosterForNextSession(localStorage, session.feedRoster);
     if (rosterStage.status === 'rejected') {
       track('roster_snapshot_rejected', { reason: rosterStage.reason });
@@ -941,6 +990,13 @@ export class Feed {
     this.applyConfirmedBalances(await flushResults());
     await this.syncDaily(false);
     void this.refreshChallengeRail();
+    // Island Social Core (F004): the user row is now committed, so it is safe to
+    // load the friend HUD and land any pending friend-invite accept.
+    if (ISLAND_UI_ENABLED) {
+      void this.refreshIslandFriends();
+      void this.processPendingFriendAccept();
+      this.startIslandActivityPolling();
+    }
     this.scheduleGeneratedOfferPrefetch();
   }
 
@@ -1341,6 +1397,8 @@ export class Feed {
 
   private invalidateAuthenticatedSessionState(): void {
     this.authenticatedSessionEpoch += 1;
+    this.authenticatedUserId = null;
+    this.stopIslandActivityPolling();
     for (const slot of this.catalogSlots.values()) slot.exposure.binding = null;
     this.applyBuiltinFeedBindings(undefined);
     this.applyCatalogLabAuthorizationCapability(false);
@@ -3276,7 +3334,12 @@ export class Feed {
         `<div class="story__name">${this.esc(name)}</div>`;
       frag.appendChild(el);
     }
-    if (me && me.nextSibling) rail.insertBefore(frag, me.nextSibling);
+    // Insert after the friends cluster (§4.4) when it is present, so the running
+    // order stays [You/level] [friends] [challenges…]; otherwise right after You.
+    const anchor = (this.friendsHudEl && this.friendsHudEl.parentElement === rail)
+      ? this.friendsHudEl
+      : me;
+    if (anchor && anchor.nextSibling) rail.insertBefore(frag, anchor.nextSibling);
     else rail.appendChild(frag);
     this.hudEl?.classList.toggle('hud--stories-can-right', rail.scrollWidth > rail.clientWidth + 1);
   }
@@ -4180,46 +4243,161 @@ export class Feed {
     flight.addEventListener('finish', () => { window.clearTimeout(impactTimer); land(); }, { once: true });
   }
 
-  // ── "Someone played your mechanic" — global activity sim ─────────────────────
-  // Dev-only presentation demo. Runs on every local tab, independent of
-  // the island overlay. Each tick simulates a visit (plays/likes), slides a notifier
-  // above the top panel. Production never starts this loop; real island plays
-  // and likes are counted by the backend visit API.
-  private startIslandActivity(): void {
-    const buildings = (): SimBuildingRef[] =>
-      loadIslandState().buildings.map((b) => ({ slot: b.slot, name: b.name }));
-    const tick = () => {
-      const ev = simulateActivity(buildings());
-      if (ev) {
-        this.showActivityNotifier(
-          ev.visitors > 1
-            ? `${ev.who} и ещё ${ev.visitors - 1} играли в «${ev.name}»`
-            : `${ev.who} играл в «${ev.name}»`,
-        );
-        window.dispatchEvent(new CustomEvent(ISLAND_SIM_EVENT));
+  private startIslandActivityPolling(): void {
+    const userId = this.authenticatedUserId;
+    if (userId === null || !Number.isSafeInteger(userId) || !getInitData()) return;
+    if (this.islandActivityUserId !== userId) {
+      this.islandActivityUserId = userId;
+      this.islandActivityCursor = undefined;
+    }
+    if (this.islandActivityPollTimer === null) {
+      this.islandActivityPollTimer = window.setInterval(() => {
+        if (!document.hidden) void this.pollIslandActivity();
+      }, ISLAND_ACTIVITY_POLL_MS);
+    }
+    void this.pollIslandActivity();
+  }
+
+  private stopIslandActivityPolling(): void {
+    if (this.islandActivityPollTimer !== null) {
+      window.clearInterval(this.islandActivityPollTimer);
+      this.islandActivityPollTimer = null;
+    }
+    if (this.activityNotifierTimer !== null) {
+      window.clearTimeout(this.activityNotifierTimer);
+      this.activityNotifierTimer = null;
+    }
+    this.activityNotifierQueue = [];
+    this.activityNotifierActive = false;
+    this.activityNotifierEl?.classList.remove('activity-toast--show');
+    this.islandActivityPollInFlight = false;
+    this.islandActivityCursor = undefined;
+    this.islandActivityUserId = null;
+  }
+
+  private islandActivityCursorKey(userId: number): string {
+    return `${ISLAND_ACTIVITY_CURSOR_KEY}:${userId}`;
+  }
+
+  private loadIslandActivityCursor(userId: number): number | null {
+    try {
+      const raw = localStorage.getItem(this.islandActivityCursorKey(userId));
+      if (raw === null) return null;
+      const value = Number(raw);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private saveIslandActivityCursor(userId: number, cursor: number): void {
+    try {
+      localStorage.setItem(this.islandActivityCursorKey(userId), String(cursor));
+    } catch { /* in-memory cursor still prevents repeats in private mode */ }
+  }
+
+  private islandActivityMessages(events: IslandActivityEvent[]): string[] {
+    const groups = new Map<string, IslandActivityEvent[]>();
+    for (const event of events) {
+      if (
+        !event
+        || !Number.isSafeInteger(event.seq)
+        || event.seq < 0
+        || typeof event.building?.id !== 'string'
+        || typeof event.building?.name !== 'string'
+        || typeof event.actor?.name !== 'string'
+      ) continue;
+      const groupKey = `${event.building.id}:${event.actor.is_bot ? 'bot' : 'human'}`;
+      const group = groups.get(groupKey) ?? [];
+      group.push(event);
+      groups.set(groupKey, group);
+    }
+    return [...groups.values()].map((group) => {
+      const first = group[0];
+      const actor = `${first.actor.is_bot ? '🤖' : '👤'} ${first.actor.name}`;
+      return group.length === 1
+        ? `${actor} — новое прохождение «${first.building.name}»`
+        : `${actor} и ещё ${group.length - 1} — новые прохождения «${first.building.name}»`;
+    });
+  }
+
+  private async pollIslandActivity(): Promise<void> {
+    const userId = this.authenticatedUserId;
+    if (
+      this.islandActivityPollInFlight
+      || document.hidden
+      || userId === null
+      || !Number.isSafeInteger(userId)
+      || this.islandActivityUserId !== userId
+    ) return;
+    this.islandActivityPollInFlight = true;
+    try {
+      if (this.islandActivityCursor === undefined) {
+        this.islandActivityCursor = this.loadIslandActivityCursor(userId);
       }
-      window.setTimeout(tick, 6000 + Math.random() * 5000);   // ~6–11s
-    };
-    window.setTimeout(tick, 3400 + Math.random() * 2200);     // first soon after boot
+      const requestedCursor = this.islandActivityCursor;
+      const page = await apiIslandActivity(requestedCursor ?? undefined);
+      if (
+        this.authenticatedUserId !== userId
+        || page.schema !== 'island.activity.v1'
+        || !Number.isSafeInteger(page.cursor)
+        || page.cursor < 0
+        || !Array.isArray(page.events)
+      ) return;
+      const nextCursor = Math.max(requestedCursor ?? 0, page.cursor);
+      this.islandActivityCursor = nextCursor;
+      this.saveIslandActivityCursor(userId, nextCursor);
+      // A missing local cursor is a baseline read by contract: never surface
+      // historical bot activity on the first launch of this feature.
+      if (requestedCursor === null) return;
+      for (const message of this.islandActivityMessages(page.events)) {
+        this.showActivityNotifier(message);
+      }
+    } catch {
+      // Activity is ambient and must never disrupt gameplay or session sync.
+      // The unchanged cursor makes the next foreground/timer edge retry safely.
+    } finally {
+      this.islandActivityPollInFlight = false;
+    }
   }
 
   private showActivityNotifier(text: string): void {
+    this.activityNotifierQueue.push(text);
+    if (this.activityNotifierActive) return;
+    this.presentNextActivityNotifier();
+  }
+
+  private presentNextActivityNotifier(): void {
+    const text = this.activityNotifierQueue.shift();
+    if (!text) {
+      this.activityNotifierActive = false;
+      return;
+    }
+    this.activityNotifierActive = true;
     let el = this.activityNotifierEl;
     if (!el) {
       el = document.createElement('div');
       el.className = 'activity-toast';
+      el.setAttribute('role', 'status');
+      el.setAttribute('aria-live', 'polite');
       this.viewport.appendChild(el);
       this.activityNotifierEl = el;
     }
     el.textContent = text;
-    // restart the slide-in + auto-hide
     el.classList.remove('activity-toast--show');
-    void el.offsetWidth;   // reflow so the animation replays
+    void el.offsetWidth;
     el.classList.add('activity-toast--show');
     if (this.activityNotifierTimer != null) window.clearTimeout(this.activityNotifierTimer);
+    const duration = Math.min(6000, Math.max(3000, text.length * 55));
     this.activityNotifierTimer = window.setTimeout(
-      () => el?.classList.remove('activity-toast--show'),
-      Math.min(6000, Math.max(3000, text.length * 55)),
+      () => {
+        el?.classList.remove('activity-toast--show');
+        this.activityNotifierTimer = window.setTimeout(() => {
+          this.activityNotifierActive = false;
+          this.presentNextActivityNotifier();
+        }, 360);
+      },
+      duration,
     );
   }
 
@@ -4305,7 +4483,7 @@ export class Feed {
     if (series && reward > 0 && mechanicId) {
       const catalog = series.catalog;
       if (catalog && series.catalogChestQueued) return;
-      void queueResult({
+      const payload = {
         mechanic_id: catalog?.bundle?.runtime.playableId ?? mechanicId,
         variant_id: series.ticket.variant_id,
         run_id: series.payoutRunId, metric_key: 'series', metric_value: this.seriesLen(), stars: reward,
@@ -4313,6 +4491,10 @@ export class Feed {
         run_ticket: series.ticket,
         series_id: catalog?.bundle?.seriesId,
         tz_offset_minutes: currentTzOffsetMinutes(),
+      };
+      this.islandVisitAwardPromise = queueResultWithReceipt(payload).then((receipt) => {
+        if (receipt.status !== 'confirmed') return null;
+        return this.requestIslandVisitAward(series.payoutRunId);
       });
       this.bumpDailyProgress('stars_50', reward);
     }
@@ -4340,7 +4522,10 @@ export class Feed {
       tz_offset_minutes: currentTzOffsetMinutes(),
     }).then((receipt) => {
       if (receipt.status === 'confirmed'
-        && catalogResultAllowsProgress(receipt, series.payoutRunId)) return true;
+        && catalogResultAllowsProgress(receipt, series.payoutRunId)) {
+        this.islandVisitAwardPromise = this.requestIslandVisitAward(series.payoutRunId);
+        return true;
+      }
       // Terminal rejection is normally handled synchronously by the shared
       // listener. Storage failure has no server edge, so close it here too.
       if (this.catalogSlotIsCurrent(catalog)) {
@@ -4418,10 +4603,90 @@ export class Feed {
     // action) — same style/placement as the post-win pill, so it reads as a
     // distinct call-to-action. Persistent while the win screen is up; cleared
     // when the player leaves the unit (markUnitShown → dismissChallengePill).
-    const lastRunId = this.series?.lastRunId;
-    if (lastRunId && !this.series?.catalog) {
-      this.showChallengePill(mechanicId, this.lastSolveMs || 5000, lastRunId, true);
+    const payoutRunId = this.series?.payoutRunId ?? null;
+    const lastRunId = this.series?.lastRunId ?? null;
+    const catalogSeries = Boolean(this.series?.catalog);
+    const showFallbackPrompt = () => {
+      if (
+        lastRunId
+        && !catalogSeries
+        && payoutRunId
+        && this.series?.payoutRunId === payoutRunId
+        && this.seriesWinShown.has(i)
+      ) {
+        this.showChallengePill(mechanicId, this.lastSolveMs || 5000, lastRunId, true);
+      }
+    };
+    const awardPromise = this.islandVisitAwardPromise;
+    if (awardPromise && payoutRunId) {
+      void awardPromise.then((award) => {
+        if (
+          this.series?.payoutRunId !== payoutRunId
+          || !this.seriesWinShown.has(i)
+        ) return;
+        if (award?.won && !award.holdout && award.target) {
+          this.showIslandVisitAwardCard(i, award);
+        } else {
+          showFallbackPrompt();
+        }
+      });
+    } else {
+      showFallbackPrompt();
     }
+  }
+
+  private async requestIslandVisitAward(runId: string): Promise<IslandVisitAward | null> {
+    if (!ISLAND_VISIT_AWARD_UI_ENABLED || !getInitData()) return null;
+    try {
+      return await apiIslandVisitAwardFromChest(runId);
+    } catch {
+      // P2 is deliberately fail-quiet: a disabled backend flag, cold start, or
+      // target exhaustion must never delay/replace the confirmed chest.
+      return null;
+    }
+  }
+
+  private showIslandVisitAwardCard(i: number, award: IslandVisitAward): void {
+    const state = this.stateEls[i];
+    const reward = state?.querySelector<HTMLElement>('.reward');
+    const target = award.target;
+    if (!reward || !target || reward.querySelector('.isln-award')) return;
+    this.dismissChallengePill();
+    mountIslandVisitAwardCard({
+      parent: reward,
+      award,
+      escapeHtml: (value) => this.esc(value),
+      onShown: () => {
+        track('island_visit_award_shown', {
+          roll_id: award.roll_id,
+          target_is_bot: target.is_bot,
+        });
+      },
+      onDecline: async () => {
+        try {
+          await apiIslandVisitAwardResolve(award.roll_id, 'decline');
+          track('island_visit_award_declined', { roll_id: award.roll_id });
+        } catch {
+          track('island_visit_award_resolution_failed', {
+            roll_id: award.roll_id,
+            action: 'decline',
+          });
+        }
+      },
+      onAccept: async () => {
+        await apiIslandVisitAwardResolve(award.roll_id, 'accept');
+        const view = await apiPublicIsland(target.owner_id);
+        track('island_visit_award_accepted', {
+          roll_id: award.roll_id,
+          target_is_bot: target.is_bot,
+        });
+        this.publicIsland = view;
+        this.openIslandWorld();
+      },
+      onError: () => {
+        this.showActivityNotifier('Остров сейчас недоступен');
+      },
+    });
   }
 
   // × (or any exit) mid-series: break it, no reward.
@@ -4437,6 +4702,7 @@ export class Feed {
     this.seriesLevelUpPending = null;
     this.pulsePendingSlot = -1;
     this.dismissChallengePill();
+    this.islandVisitAwardPromise = null;
     this.hudEl?.classList.remove('hud--chest-lift');
     this.feedBarEl?.classList.remove('feed-bar--chest-lift');
     // Restore normal arrival-poster behaviour (a future feed arrival at this unit
@@ -5252,6 +5518,17 @@ export class Feed {
     const stories = hud.querySelector<HTMLElement>('.stories');
     this.storiesEl = stories;
     if (stories) this.attachStoryScroller(stories);
+    // Island Social Core (§4.4): friend cells sit right of the avatar/level, in
+    // the same scroller, gated by VITE_ISLAND_ENABLED. Loaded lazily after auth.
+    if (ISLAND_UI_ENABLED && stories) {
+      const me = stories.querySelector('.story--me');
+      const cluster = document.createElement('div');
+      cluster.className = 'isln-friends';
+      if (me && me.nextSibling) stories.insertBefore(cluster, me.nextSibling);
+      else stories.appendChild(cluster);
+      this.friendsHudEl = cluster;
+      this.renderFriendsHud();   // empty cells now; the network refresh runs post-/session
+    }
   }
 
 
@@ -6732,17 +7009,280 @@ export class Feed {
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
     const islandLevel = this.levelForStars(this.totalStars);
-    const ownIsland = !this.publicIsland;
     void import('./island').then((m) => m.renderIslandWorld(ov, {
       close: () => this.closeOverlay(),
       level: islandLevel,
       puzzles: () => this.totalPuzzles,
       publicIsland: this.publicIsland ?? undefined,
-      // Collecting puzzles credits the shared counter — only on the player's OWN island.
-      addPuzzles: ownIsland ? (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from) : undefined,
+      // The counter always belongs to the CURRENT user, so credit it on both
+      // islands: owner collect on their own island, and a granted guest gift on
+      // someone else's — both are the current user's puzzle balance (F009). Owner
+      // accrual stays gated to the own island inside collectReward.
+      addPuzzles: (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from),
     }));
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
+  }
+
+  // ── Island Social Core (§4.4): friend HUD cells ───────────────────────────
+  // A row of 3 friend cells + an invite "+" sits right of the avatar/level, in
+  // the HUD scroller (so it is visible on every view). Empty cells are dimmed;
+  // filled cells show a photo/initial and open that friend's island; an overflow
+  // "+N" cell opens the full list. All gated by VITE_ISLAND_ENABLED.
+  private async refreshIslandFriends(): Promise<void> {
+    if (!ISLAND_UI_ENABLED || !getInitData()) return;
+    try {
+      this.islandFriends = await apiIslandFriends();
+    } catch {
+      /* keep the last good list; the HUD stays usable */
+    }
+    this.renderFriendsHud();
+  }
+
+  private renderFriendsHud(): void {
+    const el = this.friendsHudEl;
+    if (!el) return;
+    const friends = this.islandFriends;
+    const shown = friends.slice(0, 3);
+    const overflow = Math.max(0, friends.length - 3);
+    let cells = '';
+    for (const f of shown) {
+      const name = f.first_name || f.username || 'Друг';
+      const initial = (name.trim()[0] || '?').toUpperCase();
+      const inner = f.photo_url
+        ? `<img src="${this.esc(f.photo_url)}" alt="" draggable="false"><span class="isln-friend__initial">${this.esc(initial)}</span>`
+        : `<span>${this.esc(initial)}</span>`;
+      cells +=
+        '<div class="isln-friend-cell">' +
+          `<button type="button" class="isln-friend${f.is_bot ? ' isln-friend--bot' : ''}" data-friend-visit="${f.user_id}" aria-label="${this.esc(name)}">${inner}</button>` +
+          `<div class="story__name isln-friend__name">${this.esc(name)}</div>` +
+        '</div>';
+    }
+    // Fill remaining slots (up to 3 total) with dimmed empty cells that also invite.
+    const emptyCount = overflow > 0 ? 0 : Math.max(0, 3 - shown.length);
+    for (let i = 0; i < emptyCount; i++) {
+      cells +=
+        '<div class="isln-friend-cell">' +
+          '<button type="button" class="isln-friend isln-friend--empty" data-friend-invite aria-label="Пригласить друга">+</button>' +
+          '<div class="story__name isln-friend__name" aria-hidden="true">&nbsp;</div>' +
+        '</div>';
+    }
+    if (overflow > 0) {
+      cells +=
+        '<div class="isln-friend-cell">' +
+          `<button type="button" class="isln-friend isln-friend--more" data-friends-list aria-label="Ещё друзей: ${overflow}">+${overflow}</button>` +
+          '<div class="story__name isln-friend__name" aria-hidden="true">&nbsp;</div>' +
+        '</div>';
+    }
+    // The invite "+" is always present.
+    cells +=
+      '<div class="isln-friend-cell">' +
+        '<button type="button" class="isln-friend isln-friend--invite" data-friend-invite aria-label="Пригласить друга">+</button>' +
+        '<div class="story__name isln-friend__name" aria-hidden="true">&nbsp;</div>' +
+      '</div>';
+    el.innerHTML = cells;
+    // Photo fallback: on load error drop the <img> so the initial shows through.
+    el.querySelectorAll<HTMLImageElement>('.isln-friend img').forEach((img) =>
+      img.addEventListener('error', () => img.remove(), { once: true }));
+    el.querySelectorAll<HTMLElement>('[data-friend-visit]').forEach((b) =>
+      b.addEventListener('click', () => this.openFriendIsland(Number(b.dataset.friendVisit))));
+    el.querySelectorAll<HTMLElement>('[data-friend-invite]').forEach((b) =>
+      b.addEventListener('click', () => { void this.inviteFriend(); }));
+    el.querySelectorAll<HTMLElement>('[data-friends-list]').forEach((b) =>
+      b.addEventListener('click', () => this.openFriendsList()));
+  }
+
+  private async inviteFriend(): Promise<void> {
+    if (!getInitData()) { this.showActivityNotifier('Открой в Telegram, чтобы приглашать друзей'); return; }
+    void this.maybeRequestIslandWriteAccess();
+    try {
+      const res = await apiIslandFriendCode();
+      shareTelegramLink(res.link, res.link, 'Заходи ко мне на остров!');
+    } catch (e) {
+      this.showActivityNotifier(`Не удалось создать приглашение · ${e instanceof ApiRequestError ? e.message : 'ошибка'}`);
+    }
+  }
+
+  private async maybeRequestIslandWriteAccess(): Promise<void> {
+    if (
+      !ISLAND_NOTIFICATIONS_UI_ENABLED
+      || !getInitData()
+      || !Number.isSafeInteger(this.authenticatedUserId)
+    ) return;
+    const askedKey = `${ISLAND_WRITE_ACCESS_ASKED_KEY}:${this.authenticatedUserId}`;
+    const pendingKey = `${ISLAND_WRITE_ACCESS_PENDING_KEY}:${this.authenticatedUserId}`;
+    let pending: boolean | null = null;
+    try {
+      const rawPending = localStorage.getItem(pendingKey);
+      if (rawPending === 'true' || rawPending === 'false') {
+        pending = rawPending === 'true';
+      } else if (localStorage.getItem(askedKey) === '1') {
+        return;
+      }
+      // Persist before opening the native prompt so a WebView close cannot prompt
+      // repeatedly on every meaningful action.
+      if (pending == null) localStorage.setItem(askedKey, '1');
+    } catch { /* private mode: Telegram itself still remembers the permission */ }
+    const allowed = pending ?? await requestTelegramWriteAccess();
+    if (allowed == null) return;
+    try {
+      // Preserve the native answer until backend acknowledgement. A transient
+      // API failure is retried on the next meaningful action without prompting
+      // Telegram a second time.
+      localStorage.setItem(pendingKey, String(allowed));
+    } catch { /* private mode */ }
+    try {
+      await apiIslandWriteAccess(allowed);
+      try { localStorage.removeItem(pendingKey); } catch { /* private mode */ }
+      this.showActivityNotifier(
+        allowed ? 'Уведомления об острове включены' : 'Уведомления не включены',
+      );
+    } catch {
+      // The native permission remains authoritative; the pending value above is
+      // resubmitted on the next friend action.
+    }
+  }
+
+  private persistPendingFriendAccept(code: string): void {
+    // The f_<code> start param survives app reopen, so this runs on every boot.
+    // Preserve the accumulated attempt count for the SAME code (R2-F002) — only a
+    // NEW code resets it to 0 — otherwise a reopen would reset the cap and a stuck
+    // 5xx would retry forever. Definitive outcomes clear the key entirely.
+    try {
+      let attempts = 0;
+      const raw = localStorage.getItem(ISLAND_PENDING_ACCEPT_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.code === code) attempts = Number(parsed.attempts) || 0;
+      }
+      localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code, attempts }));
+    } catch { /* private mode */ }
+  }
+  private clearPendingFriendAccept(): void {
+    try { localStorage.removeItem(ISLAND_PENDING_ACCEPT_KEY); } catch { /* private mode */ }
+  }
+
+  // Land a pending friend-invite accept AFTER /session (F004). Runs at most once
+  // per bootstrap; a transient failure keeps the code for the next bootstrap,
+  // bounded by an attempt cap; a definitive outcome (or cap) clears it.
+  private async processPendingFriendAccept(): Promise<void> {
+    if (!ISLAND_UI_ENABLED || !getInitData()) return;
+    let pending: { code: string; attempts: number } | null = null;
+    try {
+      const raw = localStorage.getItem(ISLAND_PENDING_ACCEPT_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed.code === 'string') {
+        pending = { code: parsed.code, attempts: Number(parsed.attempts) || 0 };
+      }
+    } catch { pending = null; }
+    if (!pending) return;
+    if (pending.attempts >= ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS) { this.clearPendingFriendAccept(); return; }
+    // Record this attempt up-front so a crash mid-flight cannot loop forever.
+    try {
+      localStorage.setItem(ISLAND_PENDING_ACCEPT_KEY, JSON.stringify({ code: pending.code, attempts: pending.attempts + 1 }));
+    } catch { /* private mode */ }
+    try {
+      const res = await apiIslandFriendAccept(pending.code);
+      const name = res.friend?.first_name || res.friend?.username || 'другом';
+      this.clearPendingFriendAccept();
+      this.showActivityNotifier(
+        res.status === 'already' ? `Вы уже друзья с ${name}` : `Вы теперь друзья с ${name}`,
+      );
+      void this.refreshIslandFriends();
+    } catch (e) {
+      // Permanent outcomes stop the retry with an honest toast (no block leak,
+      // §4.4/§2.2). Transient errors (network / 5xx / not-yet-committed row) keep
+      // the code so the next successful /session bootstrap retries it.
+      if (e instanceof ApiRequestError && (e.status === 400 || e.status === 404 || e.status === 409)) {
+        this.clearPendingFriendAccept();
+        this.showActivityNotifier(
+          e.status === 409 ? 'Достигнут лимит друзей'
+            : e.status === 400 ? 'Это ваш собственный код'
+              : 'Приглашение недоступно',
+        );
+      }
+    }
+  }
+
+  private openFriendsList(): void {
+    // A lightweight list overlay: name + "в гости". P2 adds remove/block here.
+    const existing = this.viewport.querySelector('.isln-flist');
+    if (existing) { existing.remove(); return; }
+    const panel = document.createElement('div');
+    panel.className = 'isln-flist';
+    const rows = this.islandFriends.map((f) => {
+      const name = f.first_name || f.username || 'Друг';
+      const initial = (name.trim()[0] || '?').toUpperCase();
+      const avatar = f.photo_url
+        ? `<img src="${this.esc(f.photo_url)}" alt="">`
+        : `<span>${this.esc(initial)}</span>`;
+      return `<div class="isln-frow">` +
+        `<span class="isln-frow__ava${f.is_bot ? ' isln-frow__ava--bot' : ''}">${avatar}</span>` +
+        `<span class="isln-frow__nm">${this.esc(name)}${f.is_bot ? ' 🤖' : ''}</span>` +
+        `<button type="button" class="isln-frow__go" data-visit="${f.user_id}"${f.has_island ? '' : ' disabled'}>в гости</button>` +
+        `<button type="button" class="isln-frow__remove" data-remove="${f.user_id}">удалить</button>` +
+        `<button type="button" class="isln-frow__block" data-block="${f.user_id}">блок</button>` +
+        `</div>`;
+    }).join('') || '<div class="isln-frow isln-frow--empty">Пока нет друзей — пригласи кого-нибудь</div>';
+    panel.innerHTML =
+      '<div class="isln-flist__scrim" data-close></div>' +
+      `<div class="isln-flist__card"><div class="isln-flist__h">Друзья</div>${rows}` +
+      '<button type="button" class="isln-flist__close" data-close>Закрыть</button></div>';
+    this.viewport.appendChild(panel);
+    panel.querySelectorAll<HTMLElement>('[data-close]').forEach((b) =>
+      b.addEventListener('click', () => panel.remove()));
+    panel.querySelectorAll<HTMLElement>('[data-visit]').forEach((b) =>
+      b.addEventListener('click', () => { panel.remove(); this.openFriendIsland(Number(b.dataset.visit)); }));
+    panel.querySelectorAll<HTMLButtonElement>('[data-remove]').forEach((button) =>
+      button.addEventListener('click', () => {
+        void this.removeOrBlockIslandFriend(Number(button.dataset.remove), false, panel);
+      }));
+    panel.querySelectorAll<HTMLButtonElement>('[data-block]').forEach((button) =>
+      button.addEventListener('click', () => {
+        void this.removeOrBlockIslandFriend(Number(button.dataset.block), true, panel);
+      }));
+  }
+
+  private async removeOrBlockIslandFriend(
+    userId: number,
+    block: boolean,
+    panel: HTMLElement,
+  ): Promise<void> {
+    const friend = this.islandFriends.find((candidate) => candidate.user_id === userId);
+    if (!friend) return;
+    const name = friend.first_name || friend.username || 'этого пользователя';
+    const confirmed = await showConfirm(
+      block
+        ? `Заблокировать ${name}? Вы больше не увидите острова друг друга.`
+        : `Удалить ${name} из друзей?`,
+    );
+    if (!confirmed) return;
+    try {
+      if (block) await apiIslandFriendBlock(userId, true);
+      else await apiIslandFriendRemove(userId);
+      this.islandFriends = this.islandFriends.filter((candidate) => candidate.user_id !== userId);
+      panel.remove();
+      this.renderFriendsHud();
+      this.showActivityNotifier(block ? `${name} заблокирован` : `${name} удалён из друзей`);
+    } catch (error) {
+      this.showActivityNotifier(
+        `Не удалось изменить список · ${error instanceof ApiRequestError ? error.message : 'ошибка'}`,
+      );
+    }
+  }
+
+  private openFriendIsland(ownerId: number): void {
+    if (!Number.isSafeInteger(ownerId) || ownerId <= 0) return;
+    if (this.overlayOpen) return;
+    void (async () => {
+      try {
+        const view = await apiPublicIsland(ownerId);
+        this.publicIsland = view;
+        this.openIslandWorld();
+      } catch (e) {
+        this.showActivityNotifier(`Остров недоступен · ${e instanceof ApiRequestError ? e.message : 'ошибка'}`);
+      }
+    })();
   }
 
   private metaTemplates(): MetaTemplate[] {
@@ -7204,6 +7744,9 @@ export class Feed {
     if (!this.overlayOpen) return;
     this.overlayOpen = false;
     const ov = this.overlayEl;
+    // After leaving a visited (guest) island, the meta tab reopens the OWNER's own
+    // island — a runtime friend visit / deep-link must not stick (§4.4).
+    if (ov?.classList.contains('island-world')) this.publicIsland = null;
     const storyFrame = this.storyFrame;
     if (storyFrame) {
       this.pauseStoryFrame(true);
@@ -9286,6 +9829,7 @@ export function createFeed(
   challenge: ChallengeView | null = null,
   publicIsland: PublicIslandView | null = null,
   rosterSnapshot: FeedRosterSessionV1 | null = null,
+  friendAcceptCode: string | null = null,
 ) {
   const resolution: FeedRosterResolutionV1 = resolveFeedRosterSession(
     rosterSnapshot,
@@ -9346,5 +9890,6 @@ export function createFeed(
     publicIsland,
     rosterEntries,
     resolution.source === 'roster' ? resolution.activationId : null,
+    friendAcceptCode,
   );
 }

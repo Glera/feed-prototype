@@ -56,10 +56,23 @@ export class ApiRequestError extends Error {
     public readonly status: number,
     message: string,
     public readonly code: string | null = null,
+    // Parsed `Retry-After` (ms) when the server sent one — used by bounded
+    // retry loops (e.g. the island 425 "played too early" claim path).
+    public readonly retryAfterMs: number | null = null,
   ) {
     super(message);
     this.name = 'ApiRequestError';
   }
+}
+
+/** Parse an HTTP `Retry-After` header (delta-seconds or HTTP-date) into ms. */
+function parseRetryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const when = Date.parse(header);
+  if (Number.isFinite(when)) return Math.max(0, when - Date.now());
+  return null;
 }
 
 const configuredOutboxRequestTimeoutMs = Number(
@@ -122,14 +135,19 @@ function backendErrorCode(data: unknown): string | null {
   return typeof code === 'string' ? code : null;
 }
 
-async function postRequired<T>(path: string, body?: unknown, timeoutMs?: number): Promise<T> {
+async function postRequired<T>(
+  path: string,
+  body?: unknown,
+  timeoutMs?: number,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
   let r: Response;
   let text: string;
   try {
     ({ response: r, text } = await withRequestTimeout(async (signal) => {
       const response = await fetch(`${API_BASE}${path}`, {
         method: 'POST',
-        headers: headers(),
+        headers: extraHeaders ? { ...headers(), ...extraHeaders } : headers(),
         body: body != null ? JSON.stringify(body) : undefined,
         signal,
       });
@@ -147,6 +165,7 @@ async function postRequired<T>(path: string, body?: unknown, timeoutMs?: number)
       r.status,
       `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
       backendErrorCode(data),
+      parseRetryAfterMs(r.headers.get('Retry-After')),
     );
   }
   if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
@@ -162,6 +181,32 @@ async function putRequired<T>(path: string, body: unknown): Promise<T> {
       body: JSON.stringify(body),
       // Island snapshots are small; allow a final write to outlive WebView
       // pagehide when Telegram closes the Mini App immediately after an action.
+      keepalive: true,
+    });
+  } catch (e) {
+    throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const text = await r.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
+  if (!r.ok) {
+    const detail = data?.detail ?? data?.error ?? text ?? r.statusText;
+    throw new ApiRequestError(
+      r.status,
+      `HTTP ${r.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+      backendErrorCode(data),
+    );
+  }
+  if (data == null) throw new ApiRequestError(r.status, 'Backend returned an empty response');
+  return data as T;
+}
+
+async function deleteRequired<T>(path: string): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}${path}`, {
+      method: 'DELETE',
+      headers: headers(),
       keepalive: true,
     });
   } catch (e) {
@@ -809,7 +854,36 @@ export interface IslandBuildingState {
   publishError?: string;
   jobId?: string;
   rel?: string;
+  contentDigest?: string;
+  // Development/rolling-compatibility only. Production closed delivery never
+  // receives or persists an artifact URL in island state.
   url?: string;
+  // ── Island Social Core (P1) server-derived fields ──────────────────────────
+  // All optional and read-only: the backend adds them to /island/state (owner)
+  // and /island/public (guest). The client only renders them; they are never
+  // authored locally. `stage` = min(foreign_claims, 10). `bot_claims` is the
+  // "system neighbour" (bot) portion of foreign_claims, shown separately (F006).
+  stage?: number;
+  foreign_claims?: number;
+  bot_claims?: number;
+  pending_gifts?: number;        // owner /island/state — uncollected gifts (0..9)
+  gift_available_today?: boolean; // guest /island/public — a gift is offered today
+  is_public?: boolean;            // published UGC artifact (visible to guests)
+  takedown?: boolean;             // moderation-removed (P3); hidden from guests
+  // Builtin binding (ТЗ v1.4 §3.1, F007): for a bot builtin building the runtime is
+  // resolved from `mechanicId` (the identity/runtime authority), NEVER from the
+  // mutable `tpl`. Present only on builtin (bot) buildings in /island/public;
+  // absent for player UGC.
+  builtin?: IslandBuiltinBinding;
+}
+
+export interface IslandBuiltinBinding {
+  // Runtime authority — resolves to a first-party playable; fail-closed if unknown.
+  mechanicId: string;
+  // Rotation/audit record only (identity, not a client-verifiable content digest).
+  // The platform has no versioned builtin delivery — delivery is the current deploy.
+  rosterRevision?: string;
+  versionsDigest?: string;
 }
 
 export interface IslandPersistedState {
@@ -838,7 +912,13 @@ export function apiSaveIslandState(state: IslandPersistedState, expectedRevision
 }
 
 export interface PublicIslandView {
-  owner: { id: number; first_name: string | null; username: string | null };
+  owner: {
+    id: number;
+    first_name: string | null;
+    username: string | null;
+    photo_url?: string | null; // Island Social Core: from TMA initData (§2.2)
+    is_bot?: boolean;          // Island Social Core: bot island → "бот" badge (§4.3)
+  };
   buildings: IslandBuildingState[];
   aiPacks?: Record<string, IslandStoredPack> | null;
   deep_link: string;
@@ -885,20 +965,397 @@ export function apiSetIslandLike(buildingId: string, ownerId: number, liked: boo
   });
 }
 
+// ── Island Social Core (P1) — gifts, collect, friends ───────────────────────
+// Backend routes are gated by ENABLE_ISLAND_SOCIAL server-side; forms track ТЗ
+// v1.3 §2.2 exactly. Every function degrades through the ApiRequestError path so
+// the client can show an honest toast without breaking the visit/play flow.
+
+/** Guest completion-claim disposition (ТЗ §2.2 result response). */
+export type IslandGiftDisposition =
+  | 'granted' | 'repeat_day' | 'daily_cap' | 'rewards_disabled' | 'zero_policy';
+
+/** Owner-collect receipt disposition (ТЗ §2.2 collect response). */
+export type IslandCollectDisposition =
+  | 'granted' | 'empty' | 'daily_cap' | 'rewards_disabled';
+
+/** Response of POST /island/visits/{visit_id}/result — a projection of the
+ *  immutable completion-outcome receipt (ТЗ §2.2). */
+export interface IslandVisitResult {
+  claim_recorded: boolean;
+  stage: number;
+  foreign_claims: number;
+  disposition: IslandGiftDisposition;
+  gift: { puzzles: number } | null;
+}
+
+/** Guest claims a completed visit; the server gates min-time, cooldown, caps and
+ *  the reward kill-switch, and always writes a terminal receipt (ТЗ §2.2). */
+export function apiIslandVisitResult(
+  visitId: string,
+  durationMs: number,
+): Promise<IslandVisitResult> {
+  return postRequired<IslandVisitResult>(
+    `/api/island/visits/${encodeURIComponent(visitId)}/result`,
+    { outcome: 'completed', duration_ms: Math.max(0, Math.round(durationMs)) },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** Response of POST /island/buildings/{building_id}/collect — a projection of the
+ *  append-only collect receipt (ТЗ §2.2). `pending_gifts` is the materialised
+ *  counter after the collect so the client can repaint the badge. */
+export interface IslandCollectResult {
+  disposition: IslandCollectDisposition;
+  gifts: number;
+  puzzles: number;
+  pending_gifts?: number;
+}
+
+/** Owner collects piled gifts. `claimId` MUST be persisted before the request and
+ *  reused on retry so the append-only receipt is idempotent (ТЗ §2.2). */
+export function apiIslandCollect(
+  buildingId: string,
+  claimId: string,
+): Promise<IslandCollectResult> {
+  return postRequired<IslandCollectResult>(
+    `/api/island/buildings/${encodeURIComponent(buildingId)}/collect`,
+    { claim_id: claimId },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export interface IslandActivityEvent {
+  claim_id: string;
+  seq: number;
+  occurred_at: string;
+  source: 'human' | 'bot';
+  actor: {
+    id: number;
+    name: string;
+    is_bot: boolean;
+  };
+  building: {
+    id: string;
+    name: string;
+  };
+}
+
+export interface IslandActivityPage {
+  schema: 'island.activity.v1';
+  cursor: number;
+  events: IslandActivityEvent[];
+}
+
+/** Read only server-recorded completion claims for the caller's own island.
+ * Omitting `afterSeq` bootstraps the current high-water mark without replaying
+ * historical activity. */
+export function apiIslandActivity(afterSeq?: number): Promise<IslandActivityPage> {
+  const query = afterSeq == null
+    ? ''
+    : `?after_seq=${encodeURIComponent(String(Math.max(0, Math.floor(afterSeq))))}`;
+  return getRequired<IslandActivityPage>(`/api/island/activity${query}`);
+}
+
+export interface IslandFriend {
+  user_id: number;
+  first_name: string | null;
+  username: string | null;
+  photo_url: string | null;
+  is_bot: boolean;
+  has_island: boolean;
+  published_buildings: number;
+}
+
+/** POST /island/friends/code → a durable invite code + deep-link (ТЗ §2.2). */
+export interface IslandFriendCodeResult {
+  code: string;
+  link: string;
+}
+
+export function apiIslandFriendCode(): Promise<IslandFriendCodeResult> {
+  return postRequired<IslandFriendCodeResult>(
+    '/api/island/friends/code',
+    undefined,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** POST /island/friends/accept {code}. The response body is not fully pinned in
+ *  ТЗ §2.2 (только коды ошибок 400/404/409, 200 no-op); we read the new friend's
+ *  profile best-effort for the toast and never depend on a specific field. */
+export interface IslandFriendAcceptResult {
+  status?: string;
+  friend?: Partial<IslandFriend> | null;
+}
+
+export function apiIslandFriendAccept(code: string): Promise<IslandFriendAcceptResult> {
+  return postRequired<IslandFriendAcceptResult>(
+    '/api/island/friends/accept',
+    { code },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** GET /island/friends → active friendships (ТЗ §2.2). Accepts either a bare
+ *  array or a `{friends:[...]}` envelope so the client is resilient to either. */
+export async function apiIslandFriends(): Promise<IslandFriend[]> {
+  const r = await getRequired<IslandFriend[] | { friends?: IslandFriend[] }>('/api/island/friends');
+  if (Array.isArray(r)) return r;
+  return r?.friends ?? [];
+}
+
+export function apiIslandFriendRemove(userId: number): Promise<{ removed: boolean }> {
+  return deleteRequired<{ removed: boolean }>(
+    `/api/island/friends/${encodeURIComponent(String(userId))}`,
+  );
+}
+
+export function apiIslandFriendBlock(
+  userId: number,
+  blocked: boolean,
+): Promise<{ blocked: boolean; friendship_removed: boolean }> {
+  return putRequired<{ blocked: boolean; friendship_removed: boolean }>(
+    `/api/island/friends/${encodeURIComponent(String(userId))}/block`,
+    { blocked },
+  );
+}
+
+export interface IslandVisitAwardTarget {
+  owner_id: number;
+  first_name: string | null;
+  username: string | null;
+  photo_url: string | null;
+  is_bot: boolean;
+  deep_link: string;
+}
+
+export interface IslandVisitAward {
+  run_id: string;
+  roll_id: string;
+  won: boolean;
+  holdout: boolean;
+  state: 'offered' | 'accepted' | 'declined';
+  target: IslandVisitAwardTarget | null;
+  gift_preview: { puzzles: number } | null;
+}
+
+export function apiIslandVisitAwardFromChest(runId: string): Promise<IslandVisitAward> {
+  return postRequired<IslandVisitAward>(
+    '/api/island/visit-award/from-chest',
+    { run_id: runId },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandVisitAwardResolve(
+  rollId: string,
+  action: 'accept' | 'decline',
+): Promise<IslandVisitAward> {
+  return postRequired<IslandVisitAward>(
+    `/api/island/visit-award/${encodeURIComponent(rollId)}/${action}`,
+    undefined,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandWriteAccess(
+  allowsWritePm: boolean,
+): Promise<{ allows_write_pm: boolean }> {
+  return putRequired<{ allows_write_pm: boolean }>(
+    '/api/island/notifications/write-access',
+    { allows_write_pm: allowsWritePm },
+  );
+}
+
+/** Durable `/island/theme` job (backend §5.1). POST returns 202 {job_id}; the
+ *  client polls it to terminal `ready` (with the pack) or `failed`. */
+export interface IslandThemeJob {
+  job_id: string;
+  status: 'queued' | 'generating' | 'ready' | 'failed';
+  pack?: IslandThemePack;
+  error?: string;
+}
+
+// ── Island Social Core (P3) — guest report + operator moderation ────────────
+// Report is a guest route (gated server-side by ENABLE_ISLAND_SOCIAL). The
+// moderation routes are ADDITIONALLY gated by the server-enforced
+// `island_moderator_ids` allowlist on every request (ТЗ §2.2, F015): the client
+// ?diag=1 moderation page is navigation only, NOT an authorization boundary —
+// a non-moderator caller simply gets 403 from the server.
+
+export type IslandReportReason = 'inappropriate' | 'broken' | 'other';
+
+export interface IslandReportResult {
+  report_id: string;
+  building_id: string;
+  reason: string;
+  status: string;
+  created_at: string | null;
+}
+
+/** POST /island/buildings/{id}/report — a guest reports a published building.
+ *  The server pins the exact artifact revision at report time, dedups by
+ *  (building, reporter) — a repeat returns the saved row (200) — and rate-limits
+ *  per UTC day (ТЗ §2.2, F011). */
+export function apiIslandReport(
+  buildingId: string,
+  reason: IslandReportReason,
+  text?: string,
+): Promise<IslandReportResult> {
+  const trimmed = text && text.trim() ? text.trim().slice(0, 500) : null;
+  return postRequired<IslandReportResult>(
+    `/api/island/buildings/${encodeURIComponent(buildingId)}/report`,
+    { reason, text: trimmed },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export interface IslandModerationOwner {
+  id: number;
+  first_name: string | null;
+  username: string | null;
+  is_bot?: boolean;
+}
+
+export interface IslandModerationPublication {
+  building_id: string;
+  owner: IslandModerationOwner;
+  name: string;
+  prompt: string | null;
+  rel: string | null;
+  url: string | null;
+  counts: {
+    plays: number;
+    likes: number;
+    bot_likes: number;
+    foreign_claims: number;
+    bot_claims: number;
+    pending_gifts: number;
+  };
+  reports: { open: number; total: number };
+  taken_down: boolean;
+  created_at: string | null;
+}
+
+export interface IslandModerationReport {
+  report_id: string;
+  building_id: string;
+  owner: IslandModerationOwner | null;
+  reporter_id: number;
+  reason: string;
+  text: string | null;
+  status: string;
+  artifact_rel: string | null;
+  taken_down: boolean;
+  created_at: string | null;
+}
+
+export interface IslandTakedownResult {
+  building_id: string;
+  taken_down: boolean;
+  artifact_rel: string | null;
+}
+
+export function apiIslandModerationPublications(
+  opts: { limit?: number; before?: string | null } = {},
+): Promise<{ publications: IslandModerationPublication[]; next_before: string | null }> {
+  const params = new URLSearchParams({ limit: String(opts.limit ?? 50) });
+  if (opts.before) params.set('before', opts.before);
+  return withRequestTimeout(
+    (signal) => getRequired(
+      `/api/island/moderation/publications?${params.toString()}`,
+      signal,
+    ),
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandModerationReports(
+  opts: { status?: string; before?: string | null } = {},
+): Promise<{ reports: IslandModerationReport[]; next_before: string | null }> {
+  const params = new URLSearchParams();
+  if (opts.status) params.set('status', opts.status);
+  if (opts.before) params.set('before', opts.before);
+  const q = params.toString();
+  return withRequestTimeout(
+    (signal) => getRequired(
+      `/api/island/moderation/reports${q ? `?${q}` : ''}`,
+      signal,
+    ),
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+/** POST /island/moderation/takedown — the exact artifact_rel reviewed must match
+ *  the building's current revision or the server returns 409 (F011). */
+export function apiIslandModerationTakedown(
+  buildingId: string,
+  artifactRel: string,
+  reason?: string,
+): Promise<IslandTakedownResult> {
+  return postRequired<IslandTakedownResult>(
+    '/api/island/moderation/takedown',
+    { building_id: buildingId, artifact_rel: artifactRel, reason: reason ?? null },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandModerationRestore(
+  buildingId: string,
+  reason?: string,
+): Promise<IslandTakedownResult> {
+  return postRequired<IslandTakedownResult>(
+    '/api/island/moderation/restore',
+    { building_id: buildingId, reason: reason ?? null },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandModerationResolveReport(
+  reportId: string,
+  status: 'reviewed' | 'dismissed' | 'escalated',
+  reason?: string,
+): Promise<IslandModerationReport> {
+  return postRequired<IslandModerationReport>(
+    `/api/island/moderation/reports/${encodeURIComponent(reportId)}/resolve`,
+    { status, reason: reason ?? null },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
 export function apiIslandTheme(payload: {
+  request_id?: string;
   prompt: string;
   avoid?: string;
   difficulty?: IslandDifficultyPreference;
   motion?: IslandMotionPreference;
-}): Promise<IslandThemePack> {
-  return postRequired<IslandThemePack>('/api/island/theme', payload);
+}): Promise<IslandThemeJob> {
+  return postRequired<IslandThemeJob>(
+    '/api/island/theme',
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiIslandThemeJob(
+  jobId: string,
+  timeoutMs: number = OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+): Promise<IslandThemeJob> {
+  return withRequestTimeout(
+    (signal) => getRequired<IslandThemeJob>(
+      `/api/island/theme/${encodeURIComponent(jobId)}`,
+      signal,
+    ),
+    Math.min(OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS, Math.max(1, timeoutMs)),
+  );
 }
 
 export interface IslandBakeJob {
   job_id: string;
   status: 'queued' | 'baking' | 'deploying' | 'ready' | 'published' | 'failed';
   rel: string;
-  url: string;
+  content_digest?: string;
+  url?: string;
   error: string;
   ready: boolean;
 }
@@ -909,6 +1366,20 @@ export function apiIslandBake(payload: { request_id: string; pack: IslandThemePa
 
 export function apiIslandBakeJob(jobId: string): Promise<IslandBakeJob> {
   return getRequired<IslandBakeJob>(`/api/island/bake/${encodeURIComponent(jobId)}`);
+}
+
+export interface IslandArtifactUrl {
+  building_id: string;
+  rel: string;
+  contentDigest: string;
+  url: string;
+  expires_at: string;
+}
+
+export function apiIslandArtifactUrl(buildingId: string): Promise<IslandArtifactUrl> {
+  return getRequired<IslandArtifactUrl>(
+    `/api/island/artifact-url?building_id=${encodeURIComponent(buildingId)}`,
+  );
 }
 
 export interface ChallengeInboxItem {
