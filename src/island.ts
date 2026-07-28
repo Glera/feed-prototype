@@ -2112,10 +2112,6 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   async function playUpgradeCeremony(item: QueuedUpgrade): Promise<void> {
     const b = visibleBuildings().find((x) => x.buildingId === item.buildingId);
     if (!b) { commitCelebrated(item); return; }
-    // The watermark advances with THIS scene (not at the end of the queue): an
-    // interrupted ceremony can lose its own confetti, but a level can never be
-    // celebrated twice, and every house still unshown replays on the next entry.
-    commitCelebrated(item);
     const fast = ceremonyFastForward;
     // Full-view catcher: a tap skips this scene instead of opening the house
     // under it, and it also swallows pan gestures while the scene runs.
@@ -2145,6 +2141,13 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         '</div>';
       burstConfetti(ov, 8);   // shared feed chest FX, raining in front of the plaque
       await ceremonyWait(ceremonyFastForward ? 420 : 1250);
+      // The watermark advances at the END of this house's scene (played through
+      // OR skipped by a tap) — never at the end of the queue and never before the
+      // scene. A scene the owner never got to see (app killed, island closed
+      // mid-scene) therefore replays on the next entry: a silent level-up is the
+      // failure this feature exists to prevent, and a repeated burst in that rare
+      // case is harmless. Houses already celebrated before it are not replayed.
+      if (ov.isConnected) commitCelebrated(item);
     } finally {
       layer.remove();
     }

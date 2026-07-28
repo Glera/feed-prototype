@@ -12,6 +12,11 @@
  *   д. a tap skips the current scene and fast-forwards the rest; watermark advanced;
  *   е. a repeat entry with no growth is silent;
  *   ж. the island tab "!" lights for a pending upgrade and clears once celebrated;
+ *   к. a scene killed halfway REPLAYS on the next entry (a silent level-up is the
+ *      failure mode this feature exists to prevent), while houses celebrated
+ *      before it are never replayed;
+ *   и. growth landing while the owner is on the island celebrates without a
+ *      re-entry, but never on top of an open building card;
  *   з. a building the server no longer returns leaves the watermark silently.
  *
  * Screenshots (scene = confetti + plaque) go to $CEREMONY_SHOT_DIR when set.
@@ -309,13 +314,36 @@ try {
   assert.deepEqual(await scenes(), [], 'е: an already celebrated island is silent on re-entry');
   assert.deepEqual(await watermark(), { [HOUSE_A]: 9, [HOUSE_B]: 4 }, 'е: watermark unchanged');
 
-  // ── з. a building the server dropped leaves the watermark silently ─────────
-  dropHouse(HOUSE_B);
+  // ── к. killed mid-scene → that scene REPLAYS, finished houses do not ───────
+  // The watermark advances at the END of each house's own scene, so a silent
+  // level-up is impossible; a repeated burst after a kill is the accepted cost.
+  setStage(HOUSE_B, 5);
+  setStage(HOUSE_A, 10);
   await enterIsland();
   await openIsland();
+  // Wait until the SECOND scene (slot 2) is on screen, i.e. slot 1 already
+  // finished and committed, then kill the page in the middle of it.
+  await page.waitForFunction(
+    () => window.__ceremonies.length === 2 && Boolean(document.querySelector('.isl-upgrade__card')),
+    null,
+    { timeout: 20_000 },
+  );
+  assert.deepEqual(
+    await watermark(),
+    { [HOUSE_A]: 9, [HOUSE_B]: 5 },
+    'к: the finished scene committed; the running one has NOT',
+  );
+  await page.reload({ waitUntil: 'domcontentloaded' });   // kill mid-scene
+  await metaTab.waitFor({ state: 'visible', timeout: 20_000 });
+  await sleep(600);
+  await islandAlert.waitFor({ state: 'visible', timeout: 15_000 });
+  await openIsland();
   await settle();
-  assert.deepEqual(await scenes(), [], 'з: a removed building must not celebrate anything');
-  assert.deepEqual(await watermark(), { [HOUSE_A]: 9 }, 'з: the removed building is pruned from the watermark');
+  const replayed = await scenes();
+  assert.equal(replayed.length, 1, `к: only the interrupted house replays (got ${replayed.length})`);
+  assert.equal(replayed[0].slot, '2', 'к: a house celebrated before the kill is never replayed');
+  assert.match(replayed[0].text, /Уровень 9 → 10/, `к: the interrupted scene replays intact "${replayed[0].text}"`);
+  assert.deepEqual(await watermark(), { [HOUSE_A]: 10, [HOUSE_B]: 5 }, 'к: the replayed scene advanced the watermark');
 
   // ── и. growth that lands WHILE the owner is on the island ─────────────────
   // It celebrates without a re-entry (rule 6), but never on top of an open
@@ -327,7 +355,7 @@ try {
   // the same click its handler listens for instead of aiming at a pixel.
   await page.locator('.island-world svg [data-b="2"]').dispatchEvent('click');
   await page.locator('.isl-sheet--show').waitFor({ state: 'visible', timeout: 8000 });
-  setStage(HOUSE_A, 10);
+  setStage(HOUSE_B, 6);
   await sleep(13_000);                     // the island's own 10s state poll pulls it
   assert.equal(await page.locator('.isl-upgrade').count(), 0, 'и: a ceremony must not cover an open building card');
   assert.deepEqual(await scenes(), [], 'и: nothing is celebrated while the card is open');
@@ -336,12 +364,21 @@ try {
   await settle();
   const live = await scenes();
   assert.equal(live.length, 1, `и: exactly one live ceremony (got ${live.length})`);
-  assert.match(live[0].text, /Уровень 9 → 10/, `и: plaque text "${live[0].text}"`);
-  assert.deepEqual(await watermark(), { [HOUSE_A]: 10 }, 'и: the live ceremony advanced the watermark');
+  assert.match(live[0].text, /Уровень 5 → 6/, `и: plaque text "${live[0].text}"`);
+  assert.deepEqual(await watermark(), { [HOUSE_A]: 10, [HOUSE_B]: 6 }, 'и: the live ceremony advanced the watermark');
+
+  // ── з. a building the server dropped leaves the watermark silently ─────────
+  dropHouse(HOUSE_B);
+  await enterIsland();
+  await openIsland();
+  await settle();
+  assert.deepEqual(await scenes(), [], 'з: a removed building must not celebrate anything');
+  assert.deepEqual(await watermark(), { [HOUSE_A]: 10 }, 'з: the removed building is pruned from the watermark');
 
   console.log(
     'island upgrade ceremony browser: silent first entry + single/×K scenes + slot-ordered queue + tap skip + '
-    + 'silent re-entry + "!" badge lifecycle + removed-building prune + live upgrade behind an open card verified',
+    + 'silent re-entry + "!" badge lifecycle + mid-scene kill replay + live upgrade behind an open card + '
+    + 'removed-building prune verified',
   );
 } finally {
   await browser?.close();
