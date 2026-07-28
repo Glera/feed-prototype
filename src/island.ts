@@ -68,6 +68,10 @@ export interface IslandHostCtx {
   // Collecting puzzles piled over a mechanic adds them to the ONE shared HUD counter.
   // `from` is the tap point in viewport px so the feed can fly the pucks into it.
   addPuzzles?: (n: number, from?: { x: number; y: number }) => void;
+  // Exact server correction for an OPTIMISTIC reward already added by addPuzzles:
+  // `delta` = granted − predicted. Applied silently (no rollback animation), the
+  // server staying the only authority over the balance.
+  reconcilePuzzles?: (delta: number) => void;
 }
 
 type TplId = IslandTemplateId;
@@ -1059,6 +1063,10 @@ function forgetThemeJob(slot: number, requestId?: string): void {
   }
 }
 
+// Backoff for an optimistic collect whose response was lost. The persisted claim
+// id makes every repeat a replay of the same append-only receipt.
+const COLLECT_RETRY_DELAYS_MS = [1500, 4000, 9000];
+
 const COLLECT_CLAIM_KEY = 'island-collect-claims-v1';
 function loadCollectClaims(): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(COLLECT_CLAIM_KEY) || '{}') || {}; } catch { return {}; }
@@ -1902,10 +1910,14 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (persist) save();
   }
 
-  // Collect the gifts bobbing over a mechanic (§4.2). It POSTs a persisted,
-  // idempotent collect claim and applies the server's exact
-  // disposition (granted flies puzzles; daily_cap / rewards_disabled show honest
-  // toasts; empty is a no-op). A lost response keeps the claim id for retry.
+  // Collect the gifts bobbing over a mechanic (§4.2) — OPTIMISTICALLY. The gift
+  // puck clears and the puzzles fly in the same tick as the tap; the persisted,
+  // idempotent collect claim is POSTed in parallel and only reconciles afterwards:
+  //   • granted            → apply the exact granted−predicted difference;
+  //   • daily_cap/disabled → take the predicted delta back, honest toast;
+  //   • determined refusal → undo the delta and restore the gift badge;
+  //   • lost response      → keep the optimistic state, retry with the SAME claim
+  //                          id (an append-only receipt cannot pay twice).
   async function collectReward(slot: number, el: SVGElement): Promise<void> {
     if (guest) return;
     const rect = el.getBoundingClientRect();
@@ -1919,13 +1931,19 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (collectingBuildings.has(buildingId)) return;
     collectingBuildings.add(buildingId);
     const claimId = ensureCollectClaim(buildingId);
+    // The server rate is config-owned; 1 puzzle per gift is the shipped default and
+    // only ever a PREDICTION here — the reconcile below is what makes it exact.
+    const predicted = Math.max(0, b.pending_gifts || 0);
+    b.pending_gifts = 0;
+    refreshIsland();
+    if (predicted > 0) ctx.addPuzzles?.(predicted, from);
     try {
       const res = await apiIslandCollect(buildingId, claimId);
       clearCollectClaim(buildingId);
       const now = S.buildings.find((x) => x.buildingId === buildingId);
       if (now) now.pending_gifts = res.pending_gifts ?? 0;
+      ctx.reconcilePuzzles?.((res.puzzles || 0) - predicted);
       if (res.disposition === 'granted' && res.puzzles > 0) {
-        ctx.addPuzzles?.(res.puzzles, from);
         toast(`Собрано ${res.puzzles} 🧩`);
       } else if (res.disposition === 'daily_cap') {
         toast('Дневной лимит островных пазлов достигнут — соберите завтра');
@@ -1934,11 +1952,53 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       }
       refreshIsland();
     } catch (error) {
-      // Keep the claim id so the next tap retries idempotently.
-      toast(`Не удалось собрать · ${errorText(error)}`);
+      const status = error instanceof ApiRequestError ? error.status : 0;
+      if (status >= 400 && status < 500) {
+        // Determined refusal: the collect did not happen. Undo the optimistic
+        // delta, put the gift back and mint a fresh claim id (a reused one is
+        // exactly what a 409 rejects).
+        ctx.reconcilePuzzles?.(-predicted);
+        clearCollectClaim(buildingId);
+        const now = S.buildings.find((x) => x.buildingId === buildingId);
+        if (now) now.pending_gifts = predicted;
+        refreshIsland();
+        toast('Не удалось собрать — попробуйте ещё раз');
+      } else {
+        // Lost response: nothing is known, so the optimistic state stays and the
+        // same persisted claim id is retried. The island re-hydrates from the
+        // server on the next open, which is the final authority either way.
+        retryCollect(buildingId, claimId, predicted, 0);
+      }
     } finally {
       collectingBuildings.delete(buildingId);
     }
+  }
+
+  /** Bounded background retry of a collect whose response was lost. Safe by the
+   *  persisted claim id: the receipt is append-only and a replay returns the same
+   *  response, so a retry can never harvest a second time. */
+  function retryCollect(buildingId: string, claimId: string, predicted: number, attempt: number): void {
+    if (attempt >= COLLECT_RETRY_DELAYS_MS.length) return;
+    window.setTimeout(() => {
+      void (async () => {
+        try {
+          const res = await apiIslandCollect(buildingId, claimId);
+          clearCollectClaim(buildingId);
+          const now = S.buildings.find((x) => x.buildingId === buildingId);
+          if (now) now.pending_gifts = res.pending_gifts ?? 0;
+          ctx.reconcilePuzzles?.((res.puzzles || 0) - predicted);
+          refreshIsland();
+        } catch (error) {
+          const status = error instanceof ApiRequestError ? error.status : 0;
+          if (status >= 400 && status < 500) {
+            ctx.reconcilePuzzles?.(-predicted);
+            clearCollectClaim(buildingId);
+            return;
+          }
+          retryCollect(buildingId, claimId, predicted, attempt + 1);
+        }
+      })();
+    }, COLLECT_RETRY_DELAYS_MS[attempt]);
   }
 
   // ── creation flow ──────────────────────────────────────────────────────────

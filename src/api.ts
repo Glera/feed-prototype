@@ -37,7 +37,32 @@ function headers(): Record<string, string> {
   return h;
 }
 
+// Dev-only latency hook (default OFF). `?apidelay=<ms>` on the URL — or
+// VITE_API_DEV_DELAY_MS at build time — stalls every backend call so an
+// optimistic UI can be watched against a deliberately slow server. It is guarded
+// by `import.meta.env.DEV`, so a production build folds this to the constant 0
+// and the stall can never fire in front of a player.
+const DEV_API_DELAY_MS: number = (() => {
+  if (!(import.meta as any).env?.DEV) return 0;
+  const read = (value: unknown): number => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.min(30_000, Math.round(parsed)) : 0;
+  };
+  try {
+    const fromQuery = read(new URLSearchParams(location.search).get('apidelay'));
+    if (fromQuery > 0) return fromQuery;
+  } catch { /* no location (worker/test host) */ }
+  return read((import.meta as any).env?.VITE_API_DEV_DELAY_MS);
+})();
+
+function devApiDelay(): Promise<void> | null {
+  if (DEV_API_DELAY_MS <= 0) return null;
+  return new Promise<void>((resolve) => setTimeout(resolve, DEV_API_DELAY_MS));
+}
+
 async function post<T>(path: string, body?: unknown): Promise<T | null> {
+  const stall = devApiDelay();
+  if (stall) await stall;
   try {
     const r = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
@@ -141,6 +166,8 @@ async function postRequired<T>(
   timeoutMs?: number,
   extraHeaders?: Record<string, string>,
 ): Promise<T> {
+  const stall = devApiDelay();
+  if (stall) await stall;
   let r: Response;
   let text: string;
   try {
@@ -728,8 +755,22 @@ export function apiDailySync(): Promise<DailyStateResp | null> {
   return post<DailyStateResp>('/api/daily/sync', { tz_offset_minutes: tzOffsetMinutes() });
 }
 
-export function apiDailyClaim(questId: string): Promise<DailyStateResp | null> {
-  return post<DailyStateResp>('/api/daily/claim', { quest_id: questId, tz_offset_minutes: tzOffsetMinutes() });
+/** Claim the daily quest reward. Keeps the failure KIND. The optimistic claim path has to
+ *  tell a determined server refusal (4xx — not complete / unknown quest) apart
+ *  from a lost response (network, timeout, 5xx): the first rolls the optimistic
+ *  reward back, the second keeps it and retries. `post()` collapses both to
+ *  `null`, so it cannot drive that decision.
+ *
+ *  The backend claim is idempotent by `quest_id`: an already-claimed quest is a
+ *  no-op that returns the same state, and the puzzle award carries the
+ *  `daily:<user>:<day>:<quest>` idempotency key — so a retry can never pay
+ *  twice. */
+export function apiDailyClaimRequired(questId: string): Promise<DailyStateResp> {
+  return postRequired<DailyStateResp>(
+    '/api/daily/claim',
+    { quest_id: questId, tz_offset_minutes: tzOffsetMinutes() },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
 }
 
 /** QA only: begin a fresh daily cycle while preserving already-earned puzzles. */
