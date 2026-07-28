@@ -150,6 +150,7 @@ const historyBody = (subjectUserId, marker, limit) => ({
 const requests = [];
 let mode = 'ok';
 let origin = '';
+let builtIndexHtml = Buffer.alloc(0);
 
 const json = (response, value, status = 200) => {
   response.statusCode = status;
@@ -205,7 +206,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/versions.json') return json(response, {});
   if (url.pathname === '/' || url.pathname === '/index.html') {
     response.setHeader('content-type', 'text/html; charset=utf-8');
-    return response.end(readFileSync(path.join(root, 'dist', 'index.html')));
+    return response.end(builtIndexHtml);
   }
   if (url.pathname.endsWith('.html')) {
     response.setHeader('content-type', 'text/html; charset=utf-8');
@@ -230,8 +231,21 @@ const build = spawnSync('npm', ['run', 'build'], {
 });
 if (build.status !== 0) {
   await new Promise((resolve) => server.close(resolve));
-  assert.fail(`${build.stdout}\n${build.stderr}`);
+  const siblingHint = /Could not resolve "\.\.\/swipe-ugc/.test(`${build.stdout}${build.stderr}`)
+    ? '\nvite.config.ts needs the ../swipe-ugc sibling checkout; a bare git worktree'
+      + ' (e.g. under .claude/worktrees/) has no sibling and cannot run this check.'
+    : '';
+  assert.fail(`${build.stdout}\n${build.stderr}${siblingHint}`);
 }
+// Serve the exact bytes this run just built. dist/ is shared by every check and
+// by concurrent sessions in the same checkout; re-reading it per request would
+// let a concurrent `npm run build` (different baked VITE_API_BASE) replace the
+// bundle mid-check, silently pointing every later /api call at a dead origin
+// and failing a scenario a minute later on an unrelated-looking timeout.
+builtIndexHtml = readFileSync(path.join(root, 'dist', 'index.html'));
+assert.ok(builtIndexHtml.includes(origin),
+  `freshly built dist/index.html does not bake this run's API origin ${origin} — `
+  + 'a concurrent build overwrote dist/ during this check\'s npm run build');
 
 const initData = new URLSearchParams({
   query_id: 'sequencing-debug-browser',

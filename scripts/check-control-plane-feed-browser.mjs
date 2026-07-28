@@ -50,6 +50,7 @@ const cpEventBatches = [];
 const ticketRequests = [];
 const requestLog = [];
 let origin = '';
+let builtIndexHtml = Buffer.alloc(0);
 let runStartFailuresRemaining = 100;
 let sessionRequests = 0;
 let delayedDailySync = true;
@@ -164,7 +165,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/versions.json') return json(response, {});
   if (url.pathname === '/' || url.pathname === '/index.html') {
     response.setHeader('content-type', 'text/html; charset=utf-8');
-    return response.end(readFileSync(path.join(root, 'dist', 'index.html')));
+    return response.end(builtIndexHtml);
   }
   if (url.pathname.endsWith('.html')) {
     response.setHeader('content-type', 'text/html; charset=utf-8');
@@ -191,7 +192,23 @@ const build = spawnSync('npm', ['run', 'build'], {
   },
   timeout: 120_000,
 });
-assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+if (build.status !== 0) {
+  await new Promise((resolve) => server.close(resolve));
+  const siblingHint = /Could not resolve "\.\.\/swipe-ugc/.test(`${build.stdout}${build.stderr}`)
+    ? '\nvite.config.ts needs the ../swipe-ugc sibling checkout; a bare git worktree'
+      + ' (e.g. under .claude/worktrees/) has no sibling and cannot run this check.'
+    : '';
+  assert.fail(`${build.stdout}\n${build.stderr}${siblingHint}`);
+}
+// Serve the exact bytes this run just built. dist/ is shared by every check and
+// by concurrent sessions in the same checkout; re-reading it per request would
+// let a concurrent `npm run build` (different baked VITE_API_BASE) replace the
+// bundle mid-check, silently pointing every later /api call at a dead origin
+// and failing a scenario a minute later on an unrelated-looking timeout.
+builtIndexHtml = readFileSync(path.join(root, 'dist', 'index.html'));
+assert.ok(builtIndexHtml.includes(origin),
+  `freshly built dist/index.html does not bake this run's API origin ${origin} — `
+  + 'a concurrent build overwrote dist/ during this check\'s npm run build');
 
 const browser = await chromium.launch();
 try {
