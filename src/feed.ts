@@ -135,6 +135,10 @@ import {
   catalogLabAuthUrl,
 } from './catalog-lab-navigation.mjs';
 import {
+  debugPanelQaRouteRequested,
+  operatorDebugPanelAvailable,
+} from './operator-debug-entry.mjs';
+import {
   buildBuiltinFeedDecisionV2,
   resolveFeedRosterSession,
   stageFeedRosterForNextSession,
@@ -685,6 +689,11 @@ export class Feed {
   // Bottom-bar version label: platform (build) + backend (git SHA, after auth).
   private versionEl: HTMLElement | null = null;
   private catalogLabNavEl: HTMLButtonElement | null = null;
+  // Debug-panel entry in the bottom-bar corner. It exists only for an operator
+  // (server capability) or an explicit QA route — for everybody else there is
+  // no element at all, not a hidden one.
+  private debugEntryEl: HTMLButtonElement | null = null;
+  private debugEntryQaRoute = false;
   private operatorLevelFlaggingAvailable = false;
   private operatorLevelFlagControl: OperatorLevelFlagControl | null = null;
   private operatorLevelFlagDraft: Readonly<{
@@ -1027,6 +1036,7 @@ export class Feed {
     }
     this.applyBuiltinFeedBindings(session.builtin_feed_bindings);
     this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
+    this.applyOperatorDebugEntryCapability(session.catalog_lab_authorization_available);
     this.applyOperatorLevelFlaggingCapability(session.operator_level_flagging_available);
     this.applyServerBalance(session.balance);
     if (typeof session.puzzles === 'number') this.applyServerPuzzles(session.puzzles);
@@ -1453,6 +1463,7 @@ export class Feed {
     for (const slot of this.catalogSlots.values()) slot.exposure.binding = null;
     this.applyBuiltinFeedBindings(undefined);
     this.applyCatalogLabAuthorizationCapability(false);
+    this.applyOperatorDebugEntryCapability(false);
     this.applyOperatorLevelFlaggingCapability(false);
     for (const slot of [...this.catalogSlots.values()]) {
       this.activateCatalogBuiltinFallback(slot, 'session_authentication_rejected');
@@ -5632,24 +5643,6 @@ export class Feed {
       });
       switcher.appendChild(icon);
     });
-    // Keep QA controls out of the normal production UI. A tester can still open
-    // them explicitly via ?diag=1 or the Telegram start_param=diag allowlisted by
-    // the backend; local Vite development shows the button automatically.
-    const showDebug = Boolean((import.meta as any).env?.DEV)
-      || new URLSearchParams(location.search).has('diag')
-      || getStartParam() === 'diag';
-    if (showDebug) {
-      const dbg = document.createElement('button');
-      dbg.type = 'button';
-      dbg.className = 'feed-bar__icon';
-      dbg.setAttribute('aria-label', 'Debug');
-      dbg.textContent = '🐞';
-      dbg.style.fontSize = '17px';
-      dbg.style.opacity = '0.65';
-      dbg.addEventListener('pointerdown', (e) => e.stopPropagation());
-      dbg.addEventListener('click', (e) => { e.stopPropagation(); void import('./debug').then((m) => m.mountDebugPanel()); });
-      switcher.appendChild(dbg);
-    }
     bar.appendChild(switcher);
 
     // Account-gated operator entry. It starts hidden and is revealed only by
@@ -5686,6 +5679,54 @@ export class Feed {
     this.attachSwipeSurface(bar);
     this.feedEl.appendChild(bar);
     this.feedBarEl = bar;
+    // Explicit QA routes (?diag, startapp=diag, local Vite dev) open the debug
+    // entry immediately, exactly as before. An operator gets the same button
+    // permanently once /session answers the capability — no query parameter.
+    this.debugEntryQaRoute = debugPanelQaRouteRequested({
+      dev: Boolean((import.meta as any).env?.DEV),
+      search: location.search,
+      startParam: getStartParam(),
+    });
+    if (this.debugEntryQaRoute) this.ensureDebugEntry();
+  }
+
+  /**
+   * Create the bottom-bar debug entry once. A second call is a no-op, so the QA
+   * route and the operator capability can both ask for it without duplicating.
+   */
+  private ensureDebugEntry(): void {
+    if (this.debugEntryEl || !this.feedBarEl) return;
+    const dbg = document.createElement('button');
+    dbg.type = 'button';
+    dbg.className = 'feed-bar__debug';
+    dbg.setAttribute('aria-label', 'Debug panel');
+    dbg.textContent = '🐞';
+    // The bar is a paging swipe surface: swallow the gesture so opening the
+    // panel never also advances the feed underneath it.
+    dbg.addEventListener('pointerdown', (event) => event.stopPropagation());
+    dbg.addEventListener('click', (event) => {
+      event.stopPropagation();
+      // mountDebugPanel is idempotent — repeated taps under an open panel
+      // cannot stack a second copy.
+      void import('./debug').then((m) => m.mountDebugPanel());
+    });
+    this.feedBarEl.appendChild(dbg);
+    this.debugEntryEl = dbg;
+  }
+
+  /**
+   * The operator debug entry is server-decided, exactly like the LAB button
+   * beside it. A non-operator leaves no DOM trace at all: nothing is created,
+   * and a session that loses the capability drops the element it created.
+   */
+  private applyOperatorDebugEntryCapability(value: unknown): void {
+    if (operatorDebugPanelAvailable(value)) {
+      this.ensureDebugEntry();
+      return;
+    }
+    if (this.debugEntryQaRoute) return;
+    this.debugEntryEl?.remove();
+    this.debugEntryEl = null;
   }
 
   // Kept while the daily panel transitions from its old toast implementation.

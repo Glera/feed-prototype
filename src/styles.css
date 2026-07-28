@@ -932,6 +932,30 @@ body {
 .feed-bar__lab[hidden] { display: none; }
 .feed-bar__lab:active { transform: scale(0.94); }
 .feed-bar__lab:focus-visible { outline: 2px solid #9bdfff; outline-offset: 2px; }
+/* Debug-panel entry: bottom-right corner of the bar, immediately left of LAB
+   (both appear together for an operator). Deliberately dim and outside the
+   centred tab switcher, so the four product tabs never shift and no feed
+   gesture surface changes. It exists only for an operator / an explicit QA
+   route — there is no hidden variant of it. */
+.feed-bar__debug {
+  position: absolute;
+  right: 54px;
+  bottom: calc(var(--safe-bottom) + 8px);
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.9);
+  font: 15px/1 system-ui, sans-serif;
+  opacity: 0.55;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.feed-bar__debug:active { transform: scale(0.94); opacity: 0.9; }
+.feed-bar__debug:focus-visible { outline: 2px solid #9bdfff; outline-offset: 2px; }
 @keyframes daily-alert-in {
   0% { transform: scale(0); }
   62% { transform: scale(1.28); }
