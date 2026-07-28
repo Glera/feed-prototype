@@ -16,6 +16,7 @@
 export const SEQUENCING_DEBUG_PROFILE_SCHEMA = 'feed.debug-profile.v1';
 export const SEQUENCING_DEBUG_WHY_NOW_SCHEMA = 'feed.debug-why-now.v1';
 export const SEQUENCING_DEBUG_HISTORY_SCHEMA = 'feed.debug-history.v1';
+export const SEQUENCING_DEBUG_SHADOW_VS_ACTUAL_SCHEMA = 'feed.debug-shadow-vs-actual.v1';
 
 export const SEQUENCING_DEBUG_HISTORY_LIMIT_DEFAULT = 20;
 export const SEQUENCING_DEBUG_HISTORY_LIMIT_MIN = 1;
@@ -25,12 +26,44 @@ export const SEQUENCING_DEBUG_PATHS = Object.freeze({
   profile: '/api/feed/sequencing/debug/profile',
   'why-now': '/api/feed/sequencing/debug/why-now',
   history: '/api/feed/sequencing/debug/history',
+  'shadow-vs-actual': '/api/feed/sequencing/debug/shadow-vs-actual',
 });
 
 const SCHEMA_BY_KIND = Object.freeze({
   profile: SEQUENCING_DEBUG_PROFILE_SCHEMA,
   'why-now': SEQUENCING_DEBUG_WHY_NOW_SCHEMA,
   history: SEQUENCING_DEBUG_HISTORY_SCHEMA,
+  'shadow-vs-actual': SEQUENCING_DEBUG_SHADOW_VS_ACTUAL_SCHEMA,
+});
+
+/** The projections whose window the server bounds with the same `limit`. */
+const LIMITED_KINDS = Object.freeze(['history', 'shadow-vs-actual']);
+
+/**
+ * Why a unit carries no shadow verdict (§ slice 11). These are the server's
+ * own stored reasons, listed here only so an unknown one can be reported as
+ * drift instead of being silently displayed as a known state.
+ */
+export const SEQUENCING_DEBUG_ABSENCE_REASONS = Object.freeze([
+  'out_of_scope',
+  'no_runner_item',
+  'queued',
+  'retry_wait',
+  'leased',
+  'blocked',
+  'plan_missing_for_item',
+]);
+
+// Honest wording per stored reason. None of these claims a comparison happened:
+// a unit without a plan is "no verdict", never "the shadow agreed/disagreed".
+const ABSENCE_TEXT = Object.freeze({
+  out_of_scope: 'out of scope — this decision is not a built-in slot the shadow plans',
+  no_runner_item: 'no data — no runner item exists for this decision',
+  queued: 'no data — queued, not planned yet',
+  retry_wait: 'no data — waiting to retry',
+  leased: 'no data — leased, planning in flight',
+  blocked: 'no data — blocked',
+  plan_missing_for_item: 'no data — the item names a plan that is not stored',
 });
 
 // The stored plan snapshot is echoed verbatim by the server; this is a render
@@ -352,6 +385,185 @@ export function parseSequencingDebugHistoryV1(value) {
   });
 }
 
+/**
+ * Slice 11 — what the feed actually showed next to what the shadow would have
+ * chosen for the same decision.
+ *
+ * `matchesActual` is the server's comparison of two stored values; this module
+ * only folds it (plus the presence of a plan) into a display verdict and never
+ * compares the families itself. A unit that carries neither a plan nor a stated
+ * absence — or both at once — is drift and is reported as such rather than
+ * being rendered as agreement.
+ */
+export function parseSequencingDebugShadowVsActualV1(value) {
+  const warnings = [];
+  const envelope = parseSequencingDebugEnvelope(
+    value, SEQUENCING_DEBUG_SHADOW_VS_ACTUAL_SCHEMA, warnings,
+  );
+  reportUnknownKeys(
+    value,
+    ['schema', 'subjectUserId', 'readOnly', 'recomputed', 'sources', 'limit', 'units'],
+    'shadow-vs-actual',
+    warnings,
+  );
+  const unitKeys = [
+    'decisionId', 'issuedAt', 'slotType', 'mechanicId', 'builtinMappingId', 'feedPosition',
+    'seen', 'impressionId', 'revealedAt', 'actual', 'armId', 'shadowPlan', 'absence',
+  ];
+  const shadowKeys = [
+    'planId', 'planDigest', 'asOf', 'chosenSlotType', 'chosenFamilyId', 'reason',
+    'matchesActual', 'constraintConflicts', 'coldStart',
+  ];
+  const units = [];
+  for (const [index, unit] of arrayOrEmpty(value.units, 'units', warnings).entries()) {
+    const label = `units[${index}]`;
+    if (!plainObject(unit)) {
+      // Structured rendering skips it; the raw view below still shows the item.
+      warnings.push(`${label} is not an object`);
+      continue;
+    }
+    reportUnknownKeys(unit, unitKeys, label, warnings);
+
+    let actual = { catalogMechanic: null, familyId: null };
+    if (plainObject(unit.actual)) {
+      reportUnknownKeys(unit.actual, ['catalogMechanic', 'familyId'], `${label}.actual`, warnings);
+      actual = {
+        catalogMechanic: stringOrNull(
+          unit.actual.catalogMechanic, `${label}.actual.catalogMechanic`, warnings,
+        ),
+        familyId: stringOrNull(unit.actual.familyId, `${label}.actual.familyId`, warnings),
+      };
+    } else if (unit.actual !== null && unit.actual !== undefined) {
+      warnings.push(`${label}.actual is not an object`);
+    } else {
+      warnings.push(`${label}.actual is absent`);
+    }
+
+    let shadowPlan = null;
+    if (plainObject(unit.shadowPlan)) {
+      const plan = unit.shadowPlan;
+      const planLabel = `${label}.shadowPlan`;
+      reportUnknownKeys(plan, shadowKeys, planLabel, warnings);
+      let coldStart = { active: null, probesSeen: null, exitReason: null };
+      if (plainObject(plan.coldStart)) {
+        reportUnknownKeys(
+          plan.coldStart, ['active', 'probesSeen', 'exitReason'], `${planLabel}.coldStart`, warnings,
+        );
+        coldStart = {
+          active: booleanOrNull(plan.coldStart.active, `${planLabel}.coldStart.active`, warnings),
+          probesSeen: integerOrNull(
+            plan.coldStart.probesSeen, `${planLabel}.coldStart.probesSeen`, warnings,
+          ),
+          exitReason: stringOrNull(
+            plan.coldStart.exitReason, `${planLabel}.coldStart.exitReason`, warnings,
+          ),
+        };
+      } else if (plan.coldStart !== null && plan.coldStart !== undefined) {
+        warnings.push(`${planLabel}.coldStart is not an object`);
+      }
+      const conflicts = arrayOrEmpty(
+        plan.constraintConflicts, `${planLabel}.constraintConflicts`, warnings,
+      ).map((code, codeIndex) => stringOrNull(
+        code, `${planLabel}.constraintConflicts[${codeIndex}]`, warnings,
+      ));
+      shadowPlan = Object.freeze({
+        planId: stringOrNull(plan.planId, `${planLabel}.planId`, warnings),
+        planDigest: stringOrNull(plan.planDigest, `${planLabel}.planDigest`, warnings),
+        asOf: stringOrNull(plan.asOf, `${planLabel}.asOf`, warnings),
+        chosenSlotType: stringOrNull(plan.chosenSlotType, `${planLabel}.chosenSlotType`, warnings),
+        chosenFamilyId: stringOrNull(plan.chosenFamilyId, `${planLabel}.chosenFamilyId`, warnings),
+        reason: stringOrNull(plan.reason, `${planLabel}.reason`, warnings),
+        matchesActual: booleanOrNull(plan.matchesActual, `${planLabel}.matchesActual`, warnings),
+        constraintConflicts: Object.freeze(conflicts),
+        coldStart: Object.freeze(coldStart),
+      });
+    } else if (unit.shadowPlan !== null && unit.shadowPlan !== undefined) {
+      warnings.push(`${label}.shadowPlan is neither an object nor null`);
+    }
+
+    let absence = null;
+    if (plainObject(unit.absence)) {
+      reportUnknownKeys(unit.absence, ['reason', 'detail'], `${label}.absence`, warnings);
+      const reason = stringOrNull(unit.absence.reason, `${label}.absence.reason`, warnings);
+      if (reason !== null && !SEQUENCING_DEBUG_ABSENCE_REASONS.includes(reason)) {
+        warnings.push(`${label}.absence.reason carries an unknown code ${reason}`);
+      }
+      absence = Object.freeze({
+        reason,
+        detail: stringOrNull(unit.absence.detail, `${label}.absence.detail`, warnings),
+      });
+    } else if (unit.absence !== null && unit.absence !== undefined) {
+      warnings.push(`${label}.absence is neither an object nor null`);
+    }
+
+    // Exactly one of the two must be present: a unit that claims both a verdict
+    // and a reason for having none cannot be read as either.
+    if (shadowPlan !== null && absence !== null) {
+      warnings.push(`${label} carries both a shadowPlan and an absence`);
+    }
+    if (shadowPlan === null && absence === null) {
+      warnings.push(`${label} carries neither a shadowPlan nor an absence`);
+    }
+
+    let verdict;
+    // The contradiction is decided before `matchesActual` is read at all: a unit
+    // that carries both a plan and a stated absence must never render as
+    // agreement just because the plan happens to claim one.
+    if (shadowPlan !== null && absence !== null) verdict = 'unknown';
+    else if (shadowPlan === null) verdict = 'absent';
+    else if (shadowPlan.matchesActual === true) verdict = 'match';
+    else if (shadowPlan.matchesActual === false) verdict = 'mismatch';
+    else verdict = 'unknown';
+
+    units.push(Object.freeze({
+      decisionId: stringOrNull(unit.decisionId, `${label}.decisionId`, warnings),
+      issuedAt: stringOrNull(unit.issuedAt, `${label}.issuedAt`, warnings),
+      slotType: stringOrNull(unit.slotType, `${label}.slotType`, warnings),
+      mechanicId: stringOrNull(unit.mechanicId, `${label}.mechanicId`, warnings),
+      builtinMappingId: stringOrNull(unit.builtinMappingId, `${label}.builtinMappingId`, warnings),
+      feedPosition: integerOrNull(unit.feedPosition, `${label}.feedPosition`, warnings),
+      seen: booleanOrNull(unit.seen, `${label}.seen`, warnings),
+      impressionId: stringOrNull(unit.impressionId, `${label}.impressionId`, warnings),
+      revealedAt: stringOrNull(unit.revealedAt, `${label}.revealedAt`, warnings),
+      actual: Object.freeze(actual),
+      armId: stringOrNull(unit.armId, `${label}.armId`, warnings),
+      shadowPlan,
+      absence,
+      verdict,
+    }));
+  }
+  return Object.freeze({
+    kind: 'shadow-vs-actual',
+    subjectUserId: envelope.subjectUserId,
+    sources: envelope.sources,
+    limit: integerOrNull(value.limit, 'limit', warnings),
+    units: Object.freeze(units),
+    present: units.length > 0,
+    warnings: Object.freeze(warnings),
+    raw: freezeJson(value),
+  });
+}
+
+/**
+ * Display text for a stated absence. An unknown code is echoed verbatim rather
+ * than mapped onto the nearest known one — inventing a state here would be the
+ * one thing this projection exists to prevent.
+ */
+export function formatSequencingShadowAbsence(absence) {
+  if (!plainObject(absence)) return 'shadow: no verdict';
+  const reason = typeof absence.reason === 'string' && absence.reason !== ''
+    ? absence.reason
+    : null;
+  if (reason === null) return 'shadow: no verdict (reason absent)';
+  const text = Object.prototype.hasOwnProperty.call(ABSENCE_TEXT, reason)
+    ? ABSENCE_TEXT[reason]
+    : `no data — ${reason}`;
+  const detail = typeof absence.detail === 'string' && absence.detail !== ''
+    ? ` (${absence.detail})`
+    : '';
+  return `shadow: ${text}${detail}`;
+}
+
 /** Ordered {key, value} pairs of a stored snapshot; nothing is dropped. */
 export function sequencingSnapshotSections(snapshot) {
   if (!plainObject(snapshot)) return Object.freeze([]);
@@ -368,6 +580,7 @@ export function parseSequencingDebugProjection(kind, value) {
   if (kind === 'profile') return parseSequencingDebugProfileV1(value);
   if (kind === 'why-now') return parseSequencingDebugWhyNowV1(value);
   if (kind === 'history') return parseSequencingDebugHistoryV1(value);
+  if (kind === 'shadow-vs-actual') return parseSequencingDebugShadowVsActualV1(value);
   return fail('unknown_projection', `unknown sequencing debug projection ${String(kind)}`);
 }
 
@@ -375,6 +588,7 @@ const EMPTY_MESSAGE = Object.freeze({
   profile: 'no committed receipt for this subject yet',
   'why-now': 'no stored plan snapshot for this subject yet',
   history: 'no decisions, misses or reset receipts for this subject yet',
+  'shadow-vs-actual': 'no decisions in this window for this subject yet',
 });
 
 /**
@@ -501,7 +715,7 @@ export function buildSequencingDebugPath(kind, options = {}) {
   }
   const params = [];
   if (subject.status === 'subject') params.push(`user_id=${subject.userId}`);
-  if (kind === 'history') {
+  if (LIMITED_KINDS.includes(kind)) {
     params.push(`limit=${normalizeSequencingHistoryLimit(options.limit)}`);
   }
   return params.length > 0 ? `${base}?${params.join('&')}` : base;

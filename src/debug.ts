@@ -14,6 +14,7 @@ import {
   apiSeedChallenge,
   apiSequencingDebugHistory,
   apiSequencingDebugProfile,
+  apiSequencingDebugShadowVsActual,
   apiSequencingDebugWhyNow,
 } from './api';
 import { getEventLog } from './telemetry';
@@ -25,6 +26,7 @@ import {
   SEQUENCING_DEBUG_HISTORY_LIMIT_MIN,
   buildSequencingDebugView,
   formatSequencingJson,
+  formatSequencingShadowAbsence,
   formatSequencingSnapshotAge,
   formatSequencingTimestamp,
   normalizeSequencingHistoryLimit,
@@ -36,6 +38,8 @@ import type {
   SequencingDebugKind,
   SequencingDebugPanelStateV1,
   SequencingDebugProfileViewV1,
+  SequencingDebugShadowVerdict,
+  SequencingDebugShadowVsActualViewV1,
   SequencingDebugWhyNowViewV1,
 } from './feed-sequencing-debug.mjs';
 
@@ -173,7 +177,7 @@ export async function mountDebugPanel(): Promise<void> {
 }
 
 // ── BEGIN feed sequencing debug sub-screen (§12) ───────────────────────────
-// Four read-only projections over stored snapshot/receipt bytes. Nothing here
+// Five read-only projections over stored snapshot/receipt bytes. Nothing here
 // recomputes a decision, and nothing here writes: the reset tab only displays
 // the receipts the history projection returns, because personalization reset is
 // an operator CLI act with its own double confirmation on the server side.
@@ -185,6 +189,10 @@ const SEQUENCING_TABS: ReadonlyArray<{ id: SequencingTab; label: string }> = [
   { id: 'profile', label: 'Profile' },
   { id: 'why-now', label: 'Why now' },
   { id: 'history', label: 'History' },
+  // Slice 11 lives in its own tab on purpose: History answers "what did the feed
+  // issue and was it seen", and folding a second, differently-sourced verdict
+  // into those rows would make one line read as one fact.
+  { id: 'shadow-vs-actual', label: 'Vs' },
   { id: 'reset', label: 'Reset' },
 ];
 
@@ -372,6 +380,114 @@ function renderSequencingHistory(view: SequencingDebugHistoryViewV1): HTMLElemen
   return out;
 }
 
+/** match / mismatch / no-verdict, straight off the parsed unit. */
+function seqVsBadge(verdict: SequencingDebugShadowVerdict): HTMLElement {
+  const badge = document.createElement('span');
+  badge.dataset.seqVsBadge = verdict;
+  badge.textContent = verdict === 'match' ? 'match ✓'
+    : verdict === 'mismatch' ? 'mismatch ✗'
+      : verdict === 'absent' ? 'no verdict' : 'verdict unknown (drift)';
+  const color = verdict === 'match' ? '#4f8' : verdict === 'mismatch' ? '#f97' : '#9ab';
+  badge.style.cssText = `color:${color};border:1px solid currentColor;border-radius:4px;`
+    + 'padding:0 5px;flex:0 0 auto;';
+  return badge;
+}
+
+/**
+ * Slice 11 — the fact next to the shadow verdict for the same decision.
+ *
+ * Every line is stored bytes: the fact from the decision/impression, the
+ * verdict from the committed plan snapshot. A unit without a plan is rendered
+ * as an explicit reason, never as silence and never as agreement — and
+ * out-of-scope decisions are listed rather than filtered, so the tab cannot
+ * imply the shadow covered the whole feed.
+ */
+function renderSequencingShadowVsActual(
+  view: SequencingDebugShadowVsActualViewV1,
+): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  const head = seqBlock('window');
+  head.append(
+    seqRow('subjectUserId', view.subjectUserId),
+    seqRow('limit (server echo)', seqText(view.limit)),
+    // Kept short on purpose: the rows below are what the operator came for.
+    seqRow('coverage', 'unplanned decisions are listed, each with its reason'),
+    seqRow('verdict', "matchesActual is the server's stored comparison"),
+  );
+  out.push(head);
+
+  const units = seqBlock(`fact vs shadow (${view.units.length})`);
+  for (const unit of view.units) {
+    const row = document.createElement('div');
+    row.dataset.seqVs = 'unit';
+    row.dataset.seqVsVerdict = unit.verdict;
+    row.style.cssText = 'border-left:2px solid #253;padding:2px 0 4px 8px;margin-bottom:5px;';
+
+    const headline = document.createElement('div');
+    headline.style.cssText = 'display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;';
+    const when = document.createElement('span');
+    when.textContent = formatSequencingTimestamp(unit.issuedAt);
+    when.style.cssText = 'color:#7a8;flex:0 0 auto;';
+    // Fall back down the identity chain the server actually sent; never invent a
+    // label for a family the stored plan did not name.
+    const shown = unit.actual.familyId ?? unit.actual.catalogMechanic ?? unit.mechanicId ?? '—';
+    const plan = unit.shadowPlan;
+    const summary = document.createElement('span');
+    summary.dataset.seqVsSummary = 'true';
+    summary.textContent = plan === null
+      ? `shown ${shown} · ${formatSequencingShadowAbsence(unit.absence)}`
+      : `shown ${shown} · shadow would pick ${plan.chosenFamilyId ?? plan.chosenSlotType ?? '—'}`
+        + `${plan.reason ? ` (${plan.reason})` : ''}`;
+    summary.style.cssText = 'color:#cfe;word-break:break-all;';
+    headline.append(when, seqVsBadge(unit.verdict), summary);
+    row.append(headline);
+
+    row.append(seqRow('shown', [
+      `mechanic=${seqText(unit.mechanicId)}`,
+      `catalog=${seqText(unit.actual.catalogMechanic)}`,
+      `family=${seqText(unit.actual.familyId)}`,
+      `slot=${seqText(unit.slotType)}`,
+      `feedPosition=${seqText(unit.feedPosition)}`,
+      unit.seen === true
+        ? `seen ✓ ${formatSequencingTimestamp(unit.revealedAt)} · impression=${seqText(unit.impressionId)}`
+        // A non-boolean `seen` is drift, not a negative fact.
+        : unit.seen === false ? 'issued, not seen' : 'seen: unknown (drift)',
+      `arm=${seqText(unit.armId)}`,
+      `decision=${seqText(unit.decisionId)}`,
+      `mapping=${seqText(unit.builtinMappingId)}`,
+    ].join('  ')));
+
+    if (plan === null) {
+      const absence = seqRow('shadow', formatSequencingShadowAbsence(unit.absence));
+      absence.dataset.seqVsAbsence = unit.absence?.reason ?? '';
+      row.append(absence);
+    } else {
+      row.append(seqRow('shadow', [
+        `slot=${seqText(plan.chosenSlotType)}`,
+        `family=${seqText(plan.chosenFamilyId)}`,
+        `reason=${seqText(plan.reason)}`,
+        `matchesActual=${seqText(plan.matchesActual)}`,
+        `conflicts=${plan.constraintConflicts.length
+          ? plan.constraintConflicts.map(seqText).join(',') : '—'}`,
+        `coldStart=${seqText(plan.coldStart.active)}`
+        + ` probes=${seqText(plan.coldStart.probesSeen)}`
+        + ` exit=${seqText(plan.coldStart.exitReason)}`,
+      ].join('  ')));
+      row.append(seqRow('shadow plan', [
+        `plan=${seqText(plan.planId)}`,
+        `digest=${seqText(plan.planDigest)}`,
+        `asOf=${formatSequencingTimestamp(plan.asOf)}`,
+      ].join('  ')));
+    }
+    units.append(row);
+  }
+  out.push(units);
+  out.push(seqSources(view.sources));
+  // Mandatory verbatim view: the rows above are a reading aid, not the evidence.
+  out.push(seqRaw('raw response', view.raw));
+  return out;
+}
+
 function renderSequencingResets(
   view: SequencingDebugHistoryViewV1,
   epoch: unknown,
@@ -485,6 +601,7 @@ export function mountSequencingDebugPanel(): void {
     delete states.profile;
     delete states['why-now'];
     delete states.history;
+    delete states['shadow-vs-actual'];
   }
 
   async function load(kind: SequencingDebugKind, force: boolean): Promise<void> {
@@ -509,7 +626,9 @@ export function mountSequencingDebugPanel(): void {
       ? await apiSequencingDebugProfile(subject)
       : kind === 'why-now'
         ? await apiSequencingDebugWhyNow(subject)
-        : await apiSequencingDebugHistory({ subject, limit: limitInput.value });
+        : kind === 'shadow-vs-actual'
+          ? await apiSequencingDebugShadowVsActual({ subject, limit: limitInput.value })
+          : await apiSequencingDebugHistory({ subject, limit: limitInput.value });
     if (mine !== generation) return;
     states[kind] = buildSequencingDebugView(kind, result);
     render();
@@ -551,6 +670,7 @@ export function mountSequencingDebugPanel(): void {
     if (warnings !== null) out.push(warnings);
     if (view.kind === 'profile') out.push(...renderSequencingProfile(view));
     else if (view.kind === 'why-now') out.push(...renderSequencingWhyNow(view));
+    else if (view.kind === 'shadow-vs-actual') out.push(...renderSequencingShadowVsActual(view));
     else if (tab === 'reset') out.push(...renderSequencingResets(view, profileEpoch()));
     else out.push(...renderSequencingHistory(view));
     return out;
@@ -579,7 +699,8 @@ export function mountSequencingDebugPanel(): void {
       if (tab.id === active) b.style.background = '#25405c';
       return b;
     }));
-    limitInput.style.opacity = active === 'history' || active === 'reset' ? '1' : '0.45';
+    limitInput.style.opacity = active === 'history' || active === 'reset'
+      || active === 'shadow-vs-actual' ? '1' : '0.45';
     const state = states[projectionOf(active)];
     if (state === undefined) {
       const idle = document.createElement('div');

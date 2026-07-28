@@ -8,18 +8,22 @@ import {
   SEQUENCING_DEBUG_HISTORY_LIMIT_DEFAULT,
   SEQUENCING_DEBUG_HISTORY_LIMIT_MAX,
   SEQUENCING_DEBUG_HISTORY_SCHEMA,
+  SEQUENCING_DEBUG_ABSENCE_REASONS,
   SEQUENCING_DEBUG_PATHS,
   SEQUENCING_DEBUG_PROFILE_SCHEMA,
+  SEQUENCING_DEBUG_SHADOW_VS_ACTUAL_SCHEMA,
   SEQUENCING_DEBUG_WHY_NOW_SCHEMA,
   buildSequencingDebugPath,
   buildSequencingDebugView,
   formatSequencingJson,
+  formatSequencingShadowAbsence,
   formatSequencingSnapshotAge,
   formatSequencingTimestamp,
   normalizeSequencingHistoryLimit,
   normalizeSequencingSubject,
   parseSequencingDebugHistoryV1,
   parseSequencingDebugProfileV1,
+  parseSequencingDebugShadowVsActualV1,
   parseSequencingDebugWhyNowV1,
   sequencingSnapshotSections,
   sequencingSubjectEchoWarning,
@@ -430,6 +434,129 @@ const HISTORY_EMPTY = {
   resets: [],
 };
 
+// Slice 11 (`feed.debug-shadow-vs-actual.v1`). Every field below is transcribed
+// from the frozen unit contract in
+// swipe-backend/docs/specs/feed-sequencing-shadow-operations.md — the spec is
+// the authority here, not the router that serves it. The four units cover the
+// four shapes an operator has to be able to tell apart at a glance: agreement,
+// disagreement, an out-of-scope decision, and a stated absence with a detail.
+const VS_UNIT_MATCH = {
+  decisionId: 'c1a0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  issuedAt: '2026-07-27T07:00:00.000Z',
+  slotType: 'builtin',
+  mechanicId: 'marble-sort-swipe',
+  builtinMappingId: 'd2b0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  feedPosition: 3,
+  seen: true,
+  impressionId: 'e3c0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  revealedAt: '2026-07-27T07:00:01.250Z',
+  actual: { catalogMechanic: 'sort/base', familyId: 'sort' },
+  armId: 'shadow_treatment',
+  shadowPlan: {
+    planId: 'f4d0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+    planDigest: '7'.repeat(64),
+    asOf: '2026-07-27T06:59:59.000Z',
+    chosenSlotType: 'builtin',
+    chosenFamilyId: 'sort',
+    reason: 'favorite_runway',
+    matchesActual: true,
+    constraintConflicts: [],
+    coldStart: { active: false, probesSeen: 4, exitReason: 'probe_budget_met' },
+  },
+  absence: null,
+};
+
+const VS_UNIT_MISMATCH = {
+  decisionId: 'a5e0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  issuedAt: '2026-07-27T06:58:00.000Z',
+  slotType: 'builtin',
+  mechanicId: 'pins-v1',
+  builtinMappingId: 'b6f0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  feedPosition: 2,
+  seen: false,
+  impressionId: null,
+  revealedAt: null,
+  actual: { catalogMechanic: 'pins/base', familyId: 'pins' },
+  armId: 'shadow_treatment',
+  shadowPlan: {
+    planId: 'c7a0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+    planDigest: '8'.repeat(64),
+    asOf: '2026-07-27T06:57:59.000Z',
+    chosenSlotType: 'builtin',
+    chosenFamilyId: 'sort',
+    reason: 'exploration_floor',
+    matchesActual: false,
+    constraintConflicts: ['satiation_block', 'continuity_hold'],
+    coldStart: { active: true, probesSeen: 1, exitReason: null },
+  },
+  absence: null,
+};
+
+const VS_UNIT_OUT_OF_SCOPE = {
+  decisionId: 'd8b0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  issuedAt: '2026-07-27T06:56:00.000Z',
+  slotType: 'challenge',
+  mechanicId: 'merge-timepress',
+  builtinMappingId: null,
+  feedPosition: 1,
+  seen: true,
+  impressionId: 'e9c0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  revealedAt: '2026-07-27T06:56:02.000Z',
+  actual: { catalogMechanic: null, familyId: null },
+  armId: 'shadow_treatment',
+  shadowPlan: null,
+  absence: { reason: 'out_of_scope', detail: null },
+};
+
+const VS_UNIT_BLOCKED = {
+  decisionId: 'fad0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  issuedAt: '2026-07-27T06:55:00.000Z',
+  slotType: 'builtin',
+  mechanicId: 'second-board-v1',
+  builtinMappingId: '0be0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+  feedPosition: null,
+  seen: false,
+  impressionId: null,
+  revealedAt: null,
+  actual: { catalogMechanic: 'second-board/base', familyId: null },
+  armId: null,
+  shadowPlan: null,
+  absence: { reason: 'blocked', detail: 'config_digest_mismatch' },
+};
+
+const VS_FULL = {
+  schema: SEQUENCING_DEBUG_SHADOW_VS_ACTUAL_SCHEMA,
+  subjectUserId: '42692410',
+  readOnly: true,
+  recomputed: false,
+  sources: [
+    {
+      kind: 'sequence_plan_snapshot',
+      id: 'f4d0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+      digest: '7'.repeat(64),
+      asOf: '2026-07-27T06:59:59.000Z',
+    },
+    {
+      kind: 'sequence_plan_snapshot',
+      id: 'c7a0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+      digest: '8'.repeat(64),
+      asOf: '2026-07-27T06:57:59.000Z',
+    },
+  ],
+  limit: 20,
+  units: [VS_UNIT_MATCH, VS_UNIT_MISMATCH, VS_UNIT_OUT_OF_SCOPE, VS_UNIT_BLOCKED],
+};
+
+const VS_EMPTY = {
+  schema: SEQUENCING_DEBUG_SHADOW_VS_ACTUAL_SCHEMA,
+  subjectUserId: '900000000000001',
+  readOnly: true,
+  recomputed: false,
+  sources: [],
+  limit: 20,
+  units: [],
+};
+
 // ── verbatim pass-through ───────────────────────────────────────────────────
 const profile = parseSequencingDebugProfileV1(PROFILE_FULL);
 assert.equal(profile.subjectUserId, '42692410');
@@ -542,6 +669,201 @@ const historyResetsOnly = parseSequencingDebugHistoryV1({
   resets: HISTORY_FULL.resets,
 });
 assert.equal(historyResetsOnly.present, true);
+
+// ── slice 11: fact vs shadow ────────────────────────────────────────────────
+const vs = parseSequencingDebugShadowVsActualV1(VS_FULL);
+assert.equal(vs.kind, 'shadow-vs-actual');
+assert.equal(vs.subjectUserId, '42692410');
+assert.equal(vs.limit, 20);
+assert.equal(vs.present, true);
+assert.deepEqual(vs.warnings, [], 'the exact spec shape produces no drift warning');
+assert.equal(vs.units.length, 4);
+assert.equal(vs.sources.length, 2, 'each planned unit names the snapshot it came from');
+
+// The verdict is folded from stored bytes only — never from comparing the two
+// family ids in the client.
+assert.deepEqual(vs.units.map((unit) => unit.verdict), [
+  'match', 'mismatch', 'absent', 'absent',
+]);
+
+const [matched, mismatched, outOfScope, blocked] = vs.units;
+assert.equal(matched.actual.familyId, 'sort');
+assert.equal(matched.shadowPlan.chosenFamilyId, 'sort');
+assert.equal(matched.shadowPlan.matchesActual, true);
+assert.equal(matched.shadowPlan.reason, 'favorite_runway');
+assert.equal(matched.shadowPlan.planDigest, '7'.repeat(64));
+assert.equal(matched.shadowPlan.coldStart.probesSeen, 4);
+assert.deepEqual(matched.shadowPlan.constraintConflicts, []);
+assert.equal(matched.feedPosition, 3);
+assert.equal(matched.seen, true);
+assert.equal(matched.impressionId, 'e3c0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f');
+assert.equal(matched.armId, 'shadow_treatment');
+assert.equal(matched.absence, null);
+
+assert.equal(mismatched.seen, false, 'an unseen decision still carries a shadow verdict');
+assert.equal(mismatched.actual.familyId, 'pins');
+assert.equal(mismatched.shadowPlan.chosenFamilyId, 'sort');
+assert.deepEqual(
+  mismatched.shadowPlan.constraintConflicts,
+  ['satiation_block', 'continuity_hold'],
+);
+assert.equal(mismatched.shadowPlan.coldStart.active, true);
+assert.equal(mismatched.shadowPlan.coldStart.exitReason, null);
+
+// Out-of-scope decisions are carried, not filtered: hiding them would let the
+// tab imply the shadow covered the whole feed.
+assert.equal(outOfScope.slotType, 'challenge');
+assert.equal(outOfScope.shadowPlan, null);
+assert.equal(outOfScope.absence.reason, 'out_of_scope');
+assert.equal(outOfScope.actual.catalogMechanic, null);
+assert.equal(blocked.absence.reason, 'blocked');
+assert.equal(blocked.absence.detail, 'config_digest_mismatch');
+assert.equal(blocked.feedPosition, null);
+assert.equal(blocked.armId, null);
+
+assert.equal(
+  formatSequencingShadowAbsence(outOfScope.absence),
+  'shadow: out of scope — this decision is not a built-in slot the shadow plans',
+);
+assert.equal(
+  formatSequencingShadowAbsence(blocked.absence),
+  'shadow: no data — blocked (config_digest_mismatch)',
+);
+for (const [reason, expected] of [
+  ['no_runner_item', 'shadow: no data — no runner item exists for this decision'],
+  ['queued', 'shadow: no data — queued, not planned yet'],
+  ['retry_wait', 'shadow: no data — waiting to retry'],
+  ['leased', 'shadow: no data — leased, planning in flight'],
+  ['plan_missing_for_item', 'shadow: no data — the item names a plan that is not stored'],
+]) {
+  assert.equal(formatSequencingShadowAbsence({ reason, detail: null }), expected);
+}
+// Every reason the spec lists has wording; an unknown one is echoed, not mapped
+// onto the nearest known state.
+assert.deepEqual(SEQUENCING_DEBUG_ABSENCE_REASONS, [
+  'out_of_scope', 'no_runner_item', 'queued', 'retry_wait', 'leased', 'blocked',
+  'plan_missing_for_item',
+]);
+assert.equal(
+  formatSequencingShadowAbsence({ reason: 'future_reason', detail: null }),
+  'shadow: no data — future_reason',
+);
+assert.equal(formatSequencingShadowAbsence(null), 'shadow: no verdict');
+assert.equal(
+  formatSequencingShadowAbsence({ reason: null, detail: null }),
+  'shadow: no verdict (reason absent)',
+);
+
+const vsEmpty = parseSequencingDebugShadowVsActualV1(VS_EMPTY);
+assert.equal(vsEmpty.present, false);
+assert.deepEqual(vsEmpty.warnings, []);
+assert.equal(
+  buildSequencingDebugView('shadow-vs-actual', { status: 'ok', body: VS_EMPTY }).message,
+  'no decisions in this window for this subject yet',
+);
+assert.equal(
+  buildSequencingDebugView('shadow-vs-actual', { status: 'unavailable' }).retryable,
+  false,
+  'the single non-leaking 404 is never retried on this tab either',
+);
+assert.equal(
+  buildSequencingDebugView('shadow-vs-actual', { status: 'ok', body: VS_FULL }).state,
+  'data',
+);
+
+// A verdict that is neither true nor false must not read as agreement.
+const vsDriftedVerdict = parseSequencingDebugShadowVsActualV1({
+  ...VS_FULL,
+  units: [{ ...VS_UNIT_MATCH, shadowPlan: { ...VS_UNIT_MATCH.shadowPlan, matchesActual: 'yes' } }],
+});
+assert.equal(vsDriftedVerdict.units[0].verdict, 'unknown');
+assert.equal(vsDriftedVerdict.units[0].shadowPlan.matchesActual, null);
+assert.ok(vsDriftedVerdict.warnings.some((text) => text.includes('matchesActual is not a boolean')));
+
+// Exactly one of shadowPlan/absence is the contract; both shapes of a violation
+// are reported instead of being silently resolved in either direction.
+const vsBoth = parseSequencingDebugShadowVsActualV1({
+  ...VS_FULL,
+  units: [{ ...VS_UNIT_MATCH, absence: { reason: 'queued', detail: null } }],
+});
+assert.ok(vsBoth.warnings.some((text) => text.includes('carries both a shadowPlan and an absence')));
+// The unit still says matchesActual: true. A contradictory unit must not be
+// readable as agreement — the drift decides the verdict before the boolean does.
+assert.equal(vsBoth.units[0].shadowPlan.matchesActual, true);
+assert.equal(
+  vsBoth.units[0].verdict,
+  'unknown',
+  'a unit claiming both a verdict and a reason for having none is never a match',
+);
+const vsNeither = parseSequencingDebugShadowVsActualV1({
+  ...VS_FULL,
+  units: [{ ...VS_UNIT_MATCH, shadowPlan: null, absence: null }],
+});
+assert.ok(
+  vsNeither.warnings.some((text) => text.includes('carries neither a shadowPlan nor an absence')),
+);
+assert.equal(vsNeither.units[0].verdict, 'absent');
+
+const vsUnknownReason = parseSequencingDebugShadowVsActualV1({
+  ...VS_FULL,
+  units: [{ ...VS_UNIT_BLOCKED, absence: { reason: 'future_reason', detail: null } }],
+});
+assert.ok(
+  vsUnknownReason.warnings.some((text) => text.includes('unknown code future_reason')),
+  'a new absence code is drift the operator can see, not a silent new state',
+);
+
+const vsDrift = parseSequencingDebugShadowVsActualV1({
+  ...VS_FULL,
+  futureField: 1,
+  units: [
+    { ...VS_UNIT_MATCH, futureUnitField: true },
+    'not-an-object',
+    { ...VS_UNIT_MISMATCH, actual: 'sort', shadowPlan: { ...VS_UNIT_MISMATCH.shadowPlan, futureShadowField: 1 } },
+  ],
+});
+assert.equal(vsDrift.present, true, 'unknown fields do not blank out the projection');
+assert.ok(vsDrift.warnings.some((text) => text.includes('futureField')));
+assert.ok(vsDrift.warnings.some((text) => text.includes('futureUnitField')));
+assert.ok(vsDrift.warnings.some((text) => text.includes('futureShadowField')));
+assert.ok(vsDrift.warnings.some((text) => text.includes('units[1] is not an object')));
+assert.ok(vsDrift.warnings.some((text) => text.includes('units[2].actual is not an object')));
+assert.equal(vsDrift.units.length, 2, 'a malformed unit is skipped in the structured render');
+assert.equal(vsDrift.raw.units.length, 3, 'and still visible in the raw view');
+assert.equal(vsDrift.units[1].actual.familyId, null, 'a drifted actual never invents a family');
+
+const vsMissingUnits = parseSequencingDebugShadowVsActualV1({
+  schema: SEQUENCING_DEBUG_SHADOW_VS_ACTUAL_SCHEMA,
+  subjectUserId: '42692410',
+  readOnly: true,
+  recomputed: false,
+  sources: [],
+  limit: 20,
+});
+assert.equal(vsMissingUnits.present, false);
+assert.deepEqual(vsMissingUnits.warnings, ['units is absent']);
+
+// The projection is never displayed under another tab, and vice versa.
+assert.throws(
+  () => parseSequencingDebugShadowVsActualV1(HISTORY_FULL),
+  (error) => error.code === 'unsupported_schema',
+);
+assert.throws(
+  () => parseSequencingDebugHistoryV1(VS_FULL),
+  (error) => error.code === 'unsupported_schema',
+);
+// The shared envelope is the same promise here as everywhere else.
+for (const [mutation, code] of [
+  [{ readOnly: false }, 'not_read_only'],
+  [{ recomputed: true }, 'recomputed_projection'],
+  [{ subjectUserId: 42692410 }, 'invalid_subject'],
+  [{ sources: null }, 'invalid_sources'],
+]) {
+  assert.throws(
+    () => parseSequencingDebugShadowVsActualV1({ ...VS_FULL, ...mutation }),
+    (error) => error instanceof FeedSequencingDebugContractError && error.code === code,
+  );
+}
 
 // ── envelope is the promise, and it fails closed ────────────────────────────
 for (const [label, mutation, code] of [
@@ -748,7 +1070,28 @@ assert.throws(
   () => buildSequencingDebugPath('reset'),
   (error) => error.code === 'unknown_projection',
 );
-assert.deepEqual(Object.keys(SEQUENCING_DEBUG_PATHS), ['profile', 'why-now', 'history']);
+assert.deepEqual(
+  Object.keys(SEQUENCING_DEBUG_PATHS),
+  ['profile', 'why-now', 'history', 'shadow-vs-actual'],
+);
+// Slice 11 is bounded by the same window control as history — the panel always
+// states the window it is displaying.
+assert.equal(
+  buildSequencingDebugPath('shadow-vs-actual'),
+  '/api/feed/sequencing/debug/shadow-vs-actual?limit=20',
+);
+assert.equal(
+  buildSequencingDebugPath('shadow-vs-actual', { subject: '42692410', limit: '5' }),
+  '/api/feed/sequencing/debug/shadow-vs-actual?user_id=42692410&limit=5',
+);
+assert.equal(
+  buildSequencingDebugPath('shadow-vs-actual', { subject: '', limit: 999 }),
+  '/api/feed/sequencing/debug/shadow-vs-actual?limit=50',
+);
+assert.throws(
+  () => buildSequencingDebugPath('shadow-vs-actual', { subject: 'me' }),
+  (error) => error.code === 'invalid_subject_input',
+);
 
 // ── formatting only ─────────────────────────────────────────────────────────
 assert.equal(formatSequencingSnapshotAge(0), '0s');
@@ -823,6 +1166,10 @@ const sequencingRegion = debugSource.slice(
 );
 assert.ok(sequencingRegion.includes('renderSequencingResets'), 'the region must cover the reset tab');
 assert.ok(
+  sequencingRegion.includes('renderSequencingShadowVsActual'),
+  'the region must cover the fact-vs-shadow tab',
+);
+assert.ok(
   sequencingRegion.includes('mountSequencingDebugPanel'),
   'the region must cover the whole sub-screen',
 );
@@ -840,8 +1187,10 @@ for (const mutator of [
   );
 }
 assert.ok(
-  !/\bapi[A-Z]\w*/.test(sequencingRegion.replace(/apiSequencingDebug(?:Profile|WhyNow|History)/g, '')),
-  'the sequencing sub-screen may only call the three read-only projections',
+  !/\bapi[A-Z]\w*/.test(sequencingRegion.replace(
+    /apiSequencingDebug(?:Profile|WhyNow|History|ShadowVsActual)/g, '',
+  )),
+  'the sequencing sub-screen may only call the four read-only projections',
 );
 
 // ── backend drift guard (skipped when the private repo is not a sibling) ────
@@ -860,9 +1209,11 @@ if (existsSync(backendSource)) {
     `"${SEQUENCING_DEBUG_PROFILE_SCHEMA}"`,
     `"${SEQUENCING_DEBUG_WHY_NOW_SCHEMA}"`,
     `"${SEQUENCING_DEBUG_HISTORY_SCHEMA}"`,
+    `"${SEQUENCING_DEBUG_SHADOW_VS_ACTUAL_SCHEMA}"`,
     '@router.get("/profile")',
     '@router.get("/why-now")',
     '@router.get("/history")',
+    '@router.get("/shadow-vs-actual")',
     'prefix="/feed/sequencing/debug"',
     'status_code=404',
   ]) {
@@ -878,6 +1229,11 @@ if (existsSync(backendSource)) {
     'builtinMappingId', 'rosterActivationId', 'seen', 'impressionId', 'revealedAt',
     'resetId', 'scope', 'effectiveAt', 'newEpoch', 'receiptDigest',
     'kind', 'id', 'digest', 'asOf',
+    // slice 11 — the fact-vs-shadow unit
+    'feedPosition', 'actual', 'catalogMechanic', 'familyId', 'armId', 'shadowPlan',
+    'planDigest', 'chosenSlotType', 'chosenFamilyId', 'reason', 'matchesActual',
+    'constraintConflicts', 'coldStart', 'active', 'probesSeen', 'exitReason',
+    'absence', 'detail',
   ]) {
     assert.ok(
       backend.includes(`"${field}"`),
