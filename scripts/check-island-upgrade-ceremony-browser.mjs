@@ -19,7 +19,17 @@
  *      re-entry, but never on top of an open building card;
  *   з. a building the server no longer returns leaves the watermark silently.
  *
- * Screenshots (scene = confetti + plaque) go to $CEREMONY_SHOT_DIR when set.
+ * Plus the guest-visit chrome on a friend's island:
+ *   а. the tapped friend's avatar leaves the HUD row, lands next to the namebar
+ *      pill and flies home on exit (photo and letter placeholder alike);
+ *   б. no bar tab is active while visiting, and any bar button exits into it
+ *      («Мета» exits to the player's own island);
+ *   в. the explicit ✕ is the second way out;
+ *   г. the scene carries the guest colour-grade class;
+ *   д. there is no "Play a series here" CTA on someone else's island.
+ *
+ * Screenshots (scene = confetti + plaque, guest/own island) go to
+ * $CEREMONY_SHOT_DIR when set.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -50,8 +60,19 @@ const build = spawnSync(
 );
 assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 
+// Smallest valid PNG, so a friend avatar can actually load in the harness.
+const AVATAR_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
 const server = createServer((request, response) => {
   const url = new URL(request.url || '/', origin);
+  if (url.pathname === '/avatar.png') {
+    response.setHeader('content-type', 'image/png');
+    response.end(AVATAR_PNG);
+    return;
+  }
   if (url.pathname === '/versions.json') {
     response.setHeader('content-type', 'application/json');
     response.end('{}');
@@ -127,6 +148,44 @@ const islandState = () => ({
   updated_at: new Date().toISOString(),
 });
 
+// Two friends in the HUD row: one with a real photo, one who only has a letter
+// placeholder — the avatar flight must behave identically for both.
+const FRIENDS = [
+  { user_id: 90001, first_name: 'Photo', username: null, photo_url: `${origin}/avatar.png`, is_bot: false, has_island: true, published_buildings: 1 },
+  { user_id: 90002, first_name: 'Ника', username: null, photo_url: null, is_bot: false, has_island: true, published_buildings: 1 },
+];
+
+const publicIslandView = (ownerId) => {
+  const friend = FRIENDS.find((f) => f.user_id === ownerId) || FRIENDS[0];
+  return {
+    owner: {
+      id: friend.user_id,
+      first_name: friend.first_name,
+      username: friend.username,
+      photo_url: friend.photo_url,
+      is_bot: false,
+    },
+    buildings: [{
+      slot: 1,
+      tpl: 'sort',
+      pack: 'neon',
+      name: 'Их механика',
+      plays: 12,
+      likes: 4,
+      liked: false,
+      buildingId: '33333333-3333-4333-8333-333333333333',
+      rel: 'a/guest.html',
+      contentDigest: 'sha256:deadbeef',
+      stage: 4,
+      foreign_claims: 4,
+      is_public: true,
+      gift_available_today: true,
+    }],
+    deep_link: `${origin}/?island=${friend.user_id}`,
+    share_url: `${origin}/?island=${friend.user_id}`,
+  };
+};
+
 // Records every ceremony scene the DOM ever shows, with its final plaque text.
 const ceremonyProbe = `
 window.__ceremonies = [];
@@ -188,7 +247,9 @@ try {
     // The client may push its own snapshot back; the SERVER answer is always the
     // authority, so a PUT can never invent or erase a stage.
     if (url.pathname === '/api/island/state') return json(islandState());
-    if (url.pathname === '/api/island/friends') return json([]);
+    if (url.pathname === '/api/island/friends') return json(FRIENDS);
+    const publicIsland = url.pathname.match(/^\/api\/island\/public\/(\d+)$/);
+    if (publicIsland) return json(publicIslandView(Number(publicIsland[1])));
     if (url.pathname === '/api/island/activity') return json({ schema: 'island.activity.v1', cursor: 0, events: [] });
     if (url.pathname === '/api/challenges' && method === 'GET') return json([]);
     if (url.pathname === '/api/events') return json({ accepted: 0 });
@@ -375,10 +436,100 @@ try {
   assert.deepEqual(await scenes(), [], 'з: a removed building must not celebrate anything');
   assert.deepEqual(await watermark(), { [HOUSE_A]: 10 }, 'з: the removed building is pruned from the watermark');
 
+  // ══ guest visit chrome (а–д) ══════════════════════════════════════════════
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const friendCell = page.locator('.isln-friends [data-friend-visit="90001"]');
+  const letterCell = page.locator('.isln-friends [data-friend-visit="90002"]');
+  const guestAva = page.locator('.island-world [data-guest-ava]');
+  const island = page.locator('.island-world');
+  await friendCell.waitFor({ state: 'visible', timeout: 20_000 });
+  const activeTabs = () => page.locator('.feed-bar__icon--active').count();
+  assert.ok(await activeTabs() > 0, 'baseline: a tab is active on the feed');
+
+  // а. the tapped friend's avatar leaves the row and lands next to the pill
+  await friendCell.click();
+  await island.waitFor({ state: 'attached', timeout: 15_000 });
+  await guestAva.waitFor({ state: 'visible', timeout: 8000 });
+  assert.equal(await guestAva.locator('img').count(), 1, 'а: the friend photo landed in the guest namebar');
+  assert.equal(await friendCell.isVisible(), false, 'а: the avatar is away from the row during the visit');
+  assert.equal(await letterCell.isVisible(), true, 'а: only the visited friend leaves the row');
+  assert.match(
+    await page.locator('.isl-namebar__pill').textContent(),
+    /Photo's Island/,
+    'а: the namebar names the visited friend',
+  );
+  // г. the whole scene is colour-graded as "somebody else's island"
+  assert.match(await island.getAttribute('class'), /island-world--guest/, 'г: guest colour grade class');
+  // б. a guest is nowhere in the bar
+  assert.equal(await activeTabs(), 0, 'б: no bar tab reads as active on a friend island');
+  // д. no series CTA on someone else's island
+  assert.equal(await page.locator('[data-guest-cta]').count(), 0, 'д: the series CTA is gone');
+  assert.equal(
+    await page.getByText('Play a series here').count(),
+    0,
+    'д: no "Play a series here" button in the guest scene',
+  );
+  // в. the ✕ exists and is the explicit way out
+  assert.equal(await page.locator('.island-world [data-guest-close]').count(), 1, 'в: guest ✕ present');
+  if (shotDir) {
+    await page.screenshot({ path: path.join(shotDir, 'guest-island-after.png') });
+  }
+  await page.locator('.island-world [data-guest-close]').click();
+  await island.waitFor({ state: 'detached', timeout: 8000 });
+  await friendCell.waitFor({ state: 'visible', timeout: 8000 });   // а: the avatar flew home
+  assert.ok(await activeTabs() > 0, 'в: leaving a guest island restores a normal active tab');
+
+  // б. any bar button is an exit into that tab — including a letter-placeholder friend
+  await letterCell.click();
+  await island.waitFor({ state: 'attached', timeout: 15_000 });
+  await guestAva.waitFor({ state: 'visible', timeout: 8000 });
+  assert.equal(await guestAva.locator('img').count(), 0, 'а: a friend with no photo flies as a letter');
+  assert.equal(
+    (await guestAva.locator('.isln-friend__initial').textContent()).trim(),
+    'Н',
+    'а: the letter placeholder is the same one the row shows',
+  );
+  assert.equal(await letterCell.isVisible(), false, 'а: the letter cell is away too');
+  await page.locator('[data-bar-tab="collections"]').click();
+  await island.waitFor({ state: 'detached', timeout: 8000 });
+  await letterCell.waitFor({ state: 'visible', timeout: 8000 });
+  assert.match(
+    await page.locator('[data-bar-tab="collections"]').getAttribute('class'),
+    /feed-bar__icon--active/,
+    'б: the tapped bar tab is where the exit lands',
+  );
+
+  // б. «Мета» from a friend's island exits to the player's OWN island
+  await page.locator('[data-bar-tab="feed"]').click();
+  await friendCell.click();
+  await island.waitFor({ state: 'attached', timeout: 15_000 });
+  await guestAva.waitFor({ state: 'visible', timeout: 8000 });
+  await metaTab.click();
+  await page.waitForFunction(
+    () => {
+      const el = document.querySelector('.island-world');
+      return Boolean(el) && !el.classList.contains('island-world--guest');
+    },
+    null,
+    { timeout: 10_000 },
+  );
+  assert.equal(await page.locator('.island-world [data-guest-close]').count(), 0, 'б: the own island has no guest ✕');
+  // The return flight lands a beat after the own island is already up.
+  await friendCell.waitFor({ state: 'visible', timeout: 8000 });   // а: home on the meta exit too
+  assert.match(
+    await metaTab.getAttribute('class'),
+    /feed-bar__icon--active/,
+    'б: «Мета» from a guest island lands on the own island tab',
+  );
+  if (shotDir) {
+    await sleep(400);
+    await page.screenshot({ path: path.join(shotDir, 'own-island-after.png') });
+  }
+
   console.log(
     'island upgrade ceremony browser: silent first entry + single/×K scenes + slot-ordered queue + tap skip + '
     + 'silent re-entry + "!" badge lifecycle + mid-scene kill replay + live upgrade behind an open card + '
-    + 'removed-building prune verified',
+    + 'removed-building prune + guest avatar flight/bar exit/✕/colour grade/no-series verified',
   );
 } finally {
   await browser?.close();
