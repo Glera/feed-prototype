@@ -38,7 +38,10 @@ export function setMechanicVersions(m: Record<string, MechanicManifestValue> | n
 // Some feed entries REUSE another mechanic's shipped HTML (e.g. a different level of
 // the same build). id → html basename. Falls back to the id itself.
 const HTML_ALIAS: Record<string, string> = {
-  'pins-l3-swipe': 'pins-swipe',   // level-3 pins series rides the same pins-swipe build (?level=3)
+  'pins-l3-swipe': 'pins-swipe',
+  'pins-l5-swipe': 'pins-swipe',
+  'pins-l7-swipe': 'pins-swipe',
+  'pins-l9-swipe': 'pins-swipe',
 };
 function htmlFileFor(id: string): string { return HTML_ALIAS[id] ?? id; }
 function manifestEntry(id: string): MechanicManifestEntry | null {
@@ -116,14 +119,17 @@ export interface Playable {
 export const PLAYABLES: Playable[] = [
   { id: 'merge-locked-v1-swipe' },
   { id: 'marble-sort-swipe' },
-  { id: 'pins-swipe' },
+  { id: 'pins-swipe' },                       // FTUE release levels 1–2
   { id: 'merge-timepress-v1-swipe' },
   { id: 'merge-timepress-v2-swipe' },
   { id: 'merge-timepress-no-orders-v1-swipe' },
-  { id: 'pins-l3-swipe' },                    // level-3 pins as its own 1-level series (spaced away from pins-swipe)
+  { id: 'pins-l3-swipe' },                    // FTUE release levels 3–4
   { id: 'short-drama-swipe' },
+  { id: 'pins-l5-swipe' },                    // FTUE release levels 5–6
   { id: 'merge-second-board-v1-swipe' },
+  { id: 'pins-l7-swipe' },                    // FTUE release levels 7–8
   { id: 'merge-second-board-v2-swipe' },
+  { id: 'pins-l9-swipe' },                    // FTUE release levels 9–10
 ];
 
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
