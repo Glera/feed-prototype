@@ -119,6 +119,8 @@ import { levelStarReward, seriesRewards } from './rewards.mjs';
 import { seriesGameLevel as resolveSeriesGameLevel, seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
 import { mountIslandVisitAwardCard } from './island-p2-card.mjs';
+import { burstConfetti } from './fx';
+import { hasPendingStageUpgrade } from './island-celebrations';
 import {
   getStartParam,
   shareChallenge,
@@ -212,7 +214,15 @@ const ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS = 5;
 const ISLAND_WRITE_ACCESS_ASKED_KEY = 'island-write-access-asked-v1';
 const ISLAND_WRITE_ACCESS_PENDING_KEY = 'island-write-access-pending-v1';
 const ISLAND_ACTIVITY_CURSOR_KEY = 'island-activity-cursor-v1';
-const ISLAND_ACTIVITY_POLL_MS = 30_000;
+// Live "someone played mine" notifications: a LIGHT background poll of the same
+// owner activity feed the session-start message already reads, plus one extra
+// read at a natural attention pause (the player's own series just ended).
+const ISLAND_ACTIVITY_POLL_MS = 75_000;
+// …and at most ONE toast per this window. Everything that lands inside it is
+// coalesced into a single line, so a busy island can never spam the feed.
+// Operator-set at one minute for the current (tiny) player base; it is expected
+// to be widened again as traffic grows.
+const ISLAND_ACTIVITY_TOAST_GAP_MS = 60_000;
 
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since
@@ -594,6 +604,11 @@ export class Feed {
   private islandActivityPollInFlight = false;
   private islandActivityCursor: number | null | undefined;
   private islandActivityUserId: number | null = null;
+  // Claims read but not yet shown: held while the rate-limit window is closed or
+  // while the player is inside a mechanic, then shown as ONE coalesced toast.
+  private islandActivityPending: IslandActivityEvent[] = [];
+  private islandActivityToastAt = 0;
+  private islandActivityFlushTimer: number | null = null;
   private dailyTimerEl: HTMLElement | null = null;
   private dailyTickTimer: number | null = null;
   private dailySyncing = false;
@@ -606,6 +621,7 @@ export class Feed {
   private islandNavBtnEl: HTMLButtonElement | null = null;
   private islandNavAlertEl: HTMLElement | null = null;
   private islandGiftsPending = false;
+  private islandUpgradesPending = false;
   private islandGiftsProbing = false;
   // Optimistic meta rewards: predicted puzzle pieces still flying into the HUD
   // counter, and the exact server correction waiting for them to land.
@@ -690,6 +706,11 @@ export class Feed {
   // Island Social Core (§4.4): friend HUD cells. Only mounted/loaded under
   // VITE_ISLAND_ENABLED; visible across every view because the HUD is.
   private islandFriends: IslandFriend[] = [];
+  // The friends-row cell whose avatar is currently "away" on a visited island.
+  private guestAvatarCell: HTMLElement | null = null;
+  // Collection cards this chest still owes; the bar stays in its lifted layer
+  // until the last one has landed on the collections button.
+  private chestCardsPending = 0;
   private friendsHudEl: HTMLElement | null = null;
   private friendAcceptCode: string | null = null;
   private storiesMomentumFrame: number | null = null;
@@ -2764,8 +2785,10 @@ export class Feed {
     }
   }
 
+  // "There is something waiting on the island" = uncollected gifts OR house
+  // growth the owner has not been shown yet (the upgrade ceremony watermark).
   private updateIslandNavAlert(): void {
-    const ready = this.islandGiftsPending;
+    const ready = this.islandGiftsPending || this.islandUpgradesPending;
     if (this.islandNavAlertEl) this.islandNavAlertEl.hidden = !ready;
     if (this.islandNavBtnEl) {
       this.islandNavBtnEl.classList.toggle('feed-bar__icon--attention', ready);
@@ -2779,11 +2802,17 @@ export class Feed {
     this.updateIslandNavAlert();
   }
 
+  private setIslandUpgradesPending(pending: boolean): void {
+    if (this.islandUpgradesPending === pending) return;
+    this.islandUpgradesPending = pending;
+    this.updateIslandNavAlert();
+  }
+
   /** Cheapest existing way to learn whether the island has anything to collect:
    *  ONE lazy GET /api/island/state (the same owner snapshot the island itself
-   *  hydrates from — `pending_gifts` is server-owned there). No new route, off
-   *  every hot path, and silent on failure: no network simply means no badge.
-   *  Skipped entirely when this build has no island tab. */
+   *  hydrates from — `pending_gifts` and `stage` are server-owned there). No new
+   *  route, off every hot path, and silent on failure: no network simply means no
+   *  badge. Skipped entirely when this build has no island tab. */
   private async refreshIslandGiftsBadge(): Promise<void> {
     if (!this.islandNavAlertEl || !getInitData()) return;
     if (this.islandGiftsProbing) return;
@@ -2792,6 +2821,10 @@ export class Feed {
       const snapshot = await apiIslandState();
       const buildings = snapshot.state?.buildings ?? [];
       this.setIslandGiftsPending(buildings.some((building) => (building.pending_gifts ?? 0) > 0));
+      // A building this device has never seen is NOT pending: its watermark is
+      // initialised without a ceremony, so a first launch cannot light the badge
+      // for historical guest activity.
+      this.setIslandUpgradesPending(hasPendingStageUpgrade(buildings));
     } catch {
       /* offline / not authenticated — leave the badge as it is */
     } finally {
@@ -3938,9 +3971,16 @@ export class Feed {
     // goes (showSeriesWinScreen / clearSeriesUi). The whole HUD moves because it's
     // the stacking-context root — a child's z-index can't escape it.
     this.hudEl?.classList.add('hud--chest-lift');
-    // Same lift for the bottom bar so the collections button (the card-drop target)
-    // is visible above the scrim and cards tuck into it. Cleared in showSeriesWinScreen.
-    this.feedBarEl?.classList.add('feed-bar--chest-lift');
+    // Same intent for the bottom bar — but a z-index alone CANNOT do it here. The
+    // HUD is a child of .viewport (the scrim's own layer), while the bar lives in
+    // .feed, which is a stacking context of its own (`contain: layout paint` in
+    // styles.css). A z-index on the bar therefore only re-orders it INSIDE .feed,
+    // and the whole .feed subtree still paints under the scrim — which is exactly
+    // the "collections button under the dim" the ceremony showed. While cards are
+    // in flight the bar is parked in .viewport instead, and it goes back to .feed
+    // as soon as the last card has landed.
+    this.chestCardsPending = cardCount;
+    if (cardCount > 0) this.liftBarForCardDrop();
 
     // The chest flies IN from the slot-row chest icon and scales up to centre; the
     // slot panel fades out as it launches.
@@ -4418,12 +4458,19 @@ export class Feed {
       window.clearTimeout(this.activityNotifierTimer);
       this.activityNotifierTimer = null;
     }
+    if (this.islandActivityFlushTimer !== null) {
+      window.clearTimeout(this.islandActivityFlushTimer);
+      this.islandActivityFlushTimer = null;
+    }
     this.activityNotifierQueue = [];
     this.activityNotifierActive = false;
     this.activityNotifierEl?.classList.remove('activity-toast--show');
     this.islandActivityPollInFlight = false;
     this.islandActivityCursor = undefined;
     this.islandActivityUserId = null;
+    // Held-but-unshown claims are deliberately dropped, not persisted: their
+    // watermark never advanced, so the next session reads them again.
+    this.islandActivityPending = [];
   }
 
   private islandActivityCursorKey(userId: number): string {
@@ -4447,29 +4494,81 @@ export class Feed {
     } catch { /* in-memory cursor still prevents repeats in private mode */ }
   }
 
-  private islandActivityMessages(events: IslandActivityEvent[]): string[] {
-    const groups = new Map<string, IslandActivityEvent[]>();
-    for (const event of events) {
-      if (
-        !event
-        || !Number.isSafeInteger(event.seq)
-        || event.seq < 0
-        || typeof event.building?.id !== 'string'
-        || typeof event.building?.name !== 'string'
-        || typeof event.actor?.name !== 'string'
-      ) continue;
-      const groupKey = `${event.building.id}:${event.actor.is_bot ? 'bot' : 'human'}`;
-      const group = groups.get(groupKey) ?? [];
-      group.push(event);
-      groups.set(groupKey, group);
+  private validActivityEvents(events: IslandActivityEvent[]): IslandActivityEvent[] {
+    return events.filter((event) => Boolean(event)
+      && Number.isSafeInteger(event.seq)
+      && event.seq >= 0
+      && typeof event.building?.id === 'string'
+      && typeof event.building?.name === 'string'
+      && typeof event.actor?.name === 'string');
+  }
+
+  /** ONE line for a whole batch. A single claim keeps the exact wording the
+   *  session-start message has always used. Human and bot facts stay visibly
+   *  distinct with the SAME markers this notifier already used (👤 / 🤖): the
+   *  headline name is the freshest HUMAN, bots are counted separately, and a
+   *  bots-only batch is headed by the bot marker instead of borrowing a face. */
+  private islandActivityMessage(events: IslandActivityEvent[]): string {
+    const valid = this.validActivityEvents(events);
+    if (!valid.length) return '';
+    if (valid.length === 1) {
+      const only = valid[0];
+      return `${only.actor.is_bot ? '🤖' : '👤'} ${only.actor.name} — новое прохождение «${only.building.name}»`;
     }
-    return [...groups.values()].map((group) => {
-      const first = group[0];
-      const actor = `${first.actor.is_bot ? '🤖' : '👤'} ${first.actor.name}`;
-      return group.length === 1
-        ? `${actor} — новое прохождение «${first.building.name}»`
-        : `${actor} и ещё ${group.length - 1} — новые прохождения «${first.building.name}»`;
-    });
+    const humans = valid.filter((event) => !event.actor.is_bot);
+    const bots = valid.length - humans.length;
+    const led = humans.length ? humans : valid;
+    const lead = led[led.length - 1];
+    let text = `${humans.length ? '👤' : '🤖'} ${lead.actor.name}`;
+    if (led.length > 1) text += ` и ещё ${led.length - 1}`;
+    // Agreement follows the headline count; the lead can stand alone when the
+    // rest of the batch is bots, and the gender is unknown either way.
+    text += led.length > 1 ? ' сыграли в твои механики' : ' сыграл(а) в твои механики';
+    if (humans.length && bots > 0) text += ` · 🤖 ${bots}`;
+    return text;
+  }
+
+  /** A toast must never land on top of a mechanic the player is inside. The
+   *  reward/win screen and the feed itself are fair game — those are the pauses
+   *  this notification is meant for. */
+  private activityToastBlocked(): boolean {
+    if (this.chestEl) return true;
+    const i = this.realIndex();
+    if (!this.manualRuns.has(i)) return false;
+    return !this.stateEls[i]?.classList.contains('game__state--earned');
+  }
+
+  /** Show the held claims as one coalesced toast, or arm the moment when it
+   *  becomes allowed. Called after every read, on every feed state change and
+   *  when the rate-limit window reopens — never on a timer while blocked. */
+  private flushIslandActivityToast(): void {
+    if (!this.islandActivityPending.length) return;
+    const wait = Math.max(0, ISLAND_ACTIVITY_TOAST_GAP_MS - (Date.now() - this.islandActivityToastAt));
+    if (wait > 0) { this.scheduleIslandActivityFlush(wait); return; }
+    if (this.activityToastBlocked()) return;   // applyActiveStates re-tries on return
+    const batch = this.islandActivityPending;
+    this.islandActivityPending = [];
+    const message = this.islandActivityMessage(batch);
+    if (!message) return;
+    this.islandActivityToastAt = Date.now();
+    // Persist ONLY what has actually been shown: a claim read but never toasted
+    // (session ended, still held) comes back on the next launch, and a claim the
+    // player has already seen never does.
+    const userId = this.islandActivityUserId;
+    if (userId !== null) {
+      const shownThrough = batch.reduce((max, event) => Math.max(max, event.seq), 0);
+      const known = this.loadIslandActivityCursor(userId);
+      this.saveIslandActivityCursor(userId, Math.max(known ?? 0, shownThrough));
+    }
+    this.showActivityNotifier(message);
+  }
+
+  private scheduleIslandActivityFlush(delayMs: number): void {
+    if (this.islandActivityFlushTimer !== null) return;
+    this.islandActivityFlushTimer = window.setTimeout(() => {
+      this.islandActivityFlushTimer = null;
+      this.flushIslandActivityToast();
+    }, Math.max(50, delayMs));
   }
 
   private async pollIslandActivity(): Promise<void> {
@@ -4495,15 +4594,25 @@ export class Feed {
         || page.cursor < 0
         || !Array.isArray(page.events)
       ) return;
+      // The fetch cursor advances in memory so the next read only asks for what
+      // is genuinely new; the PERSISTED watermark advances when a toast is shown.
       const nextCursor = Math.max(requestedCursor ?? 0, page.cursor);
       this.islandActivityCursor = nextCursor;
-      this.saveIslandActivityCursor(userId, nextCursor);
       // A missing local cursor is a baseline read by contract: never surface
       // historical bot activity on the first launch of this feature.
-      if (requestedCursor === null) return;
-      for (const message of this.islandActivityMessages(page.events)) {
-        this.showActivityNotifier(message);
+      if (requestedCursor === null) {
+        this.saveIslandActivityCursor(userId, nextCursor);
+        return;
       }
+      const fresh = this.validActivityEvents(page.events)
+        .filter((event) => event.seq > requestedCursor)
+        .sort((a, b) => a.seq - b.seq);
+      if (!fresh.length) return;
+      this.islandActivityPending.push(...fresh);
+      // New claims mean the island has grown — light the existing "!" the same
+      // way the lazy startup probe does, from the same server snapshot.
+      void this.refreshIslandGiftsBadge();
+      this.flushIslandActivityToast();
     } catch {
       // Activity is ambient and must never disrupt gameplay or session sync.
       // The unchanged cursor makes the next foreground/timer edge retry safely.
@@ -4518,6 +4627,17 @@ export class Feed {
     this.presentNextActivityNotifier();
   }
 
+  /** Take the toast off screen immediately (it was acted on). */
+  private hideActivityNotifier(): void {
+    if (this.activityNotifierTimer != null) {
+      window.clearTimeout(this.activityNotifierTimer);
+      this.activityNotifierTimer = null;
+    }
+    this.activityNotifierEl?.classList.remove('activity-toast--show');
+    this.activityNotifierActive = false;
+    this.activityNotifierQueue = [];
+  }
+
   private presentNextActivityNotifier(): void {
     const text = this.activityNotifierQueue.shift();
     if (!text) {
@@ -4528,9 +4648,20 @@ export class Feed {
     let el = this.activityNotifierEl;
     if (!el) {
       el = document.createElement('div');
-      el.className = 'activity-toast';
+      el.className = 'activity-toast activity-toast--tappable';
       el.setAttribute('role', 'status');
       el.setAttribute('aria-live', 'polite');
+      // The toast is about the player's island, so it is the shortest way there:
+      // one tap runs the exact bar-tab chain (close what is open, mark the tab,
+      // open the island) — where the ceremony and the gifts already live.
+      el.addEventListener('pointerdown', (event) => event.stopPropagation());
+      el.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.hideActivityNotifier();
+        const metaTab = this.feedBarEl?.querySelector<HTMLElement>('[data-bar-tab="meta"]');
+        if (metaTab) metaTab.click();
+        else this.openIslandWorld();
+      });
       this.viewport.appendChild(el);
       this.activityNotifierEl = el;
     }
@@ -4594,6 +4725,32 @@ export class Feed {
     this.updatePuzzleCounter();
   }
 
+  // ── Card-drop target: the collections button above the chest dim ──────────
+  // `.feed` is a stacking context (`contain: layout paint`), so the bar can never
+  // out-paint the chest scrim from inside it, whatever its z-index. For the length
+  // of the card drop the bar is therefore moved into `.viewport` — the scrim's own
+  // layer — where z-index 2706 > the scrim's 2700 actually means something. It
+  // keeps its exact geometry (the portal class re-applies the safe-area insets it
+  // inherited from `.feed`) and is a landing TARGET only: pointer-events are off,
+  // so the ceremony stays modal.
+  private liftBarForCardDrop(): void {
+    const bar = this.feedBarEl;
+    if (!bar || bar.parentElement === this.viewport) return;
+    bar.classList.add('feed-bar--chest-portal');
+    this.viewport.appendChild(bar);
+  }
+
+  /** Back to the normal layer — only once every dropped card has landed (or on a
+   *  forced teardown, where nothing can still be owed). */
+  private restoreBarAfterCardDrop(force = false): void {
+    if (!force && this.chestCardsPending > 0) return;
+    this.chestCardsPending = 0;
+    const bar = this.feedBarEl;
+    if (!bar) return;
+    bar.classList.remove('feed-bar--chest-portal');
+    if (this.feedEl && bar.parentElement !== this.feedEl) this.feedEl.appendChild(bar);
+  }
+
   // Drop one collection card. Like stars/puzzles it pops UP OUT of the gift first
   // (phase 1, above the gift), then in phase 2 arcs DOWN into the collections button
   // on the bar, shrinking as it tucks in. Rendered above the gift/scrim (z 2720).
@@ -4602,8 +4759,14 @@ export class Feed {
     const target = this.collectionsBtnEl?.getBoundingClientRect();
     const toCX = target ? target.left - vp.left + target.width / 2 : 60;
     const toCY = target ? target.top - vp.top + target.height / 2 : vp.height - 30;
-    const w = 84;
+    // Drop size (was 84): a dropping card reads as a small collectible, not as a
+    // full card slapped over the chest. The 18px frame in `.coll-card` is authored
+    // for the 132px reference card, so it is scaled with the width — otherwise a
+    // smaller card is just a card swallowed by its own frame, and the ribbon title
+    // (sized in cqw) stops being readable.
+    const w = 64;
     const cardEl = makeCollectionCard(card, w);
+    cardEl.style.borderWidth = `${Math.round((18 * w) / 132)}px`;
     const wrap = document.createElement('div');
     // Above the gift (z 2, in the scrim at 2700) AND the lifted bar (2706), so it
     // flies over the gift and lands visibly on the collections icon.
@@ -4630,6 +4793,9 @@ export class Feed {
       // progress changes only through the dedicated persisted state, never from
       // this random animation (which may also contain duplicates).
       this.bumpCollectionsBtn();
+      // The target only needs to out-paint the dim while cards are travelling.
+      this.chestCardsPending = Math.max(0, this.chestCardsPending - 1);
+      this.restoreBarAfterCardDrop();
     };
     const DUR = REWARD_SHOT_MS + 170;
     if (!wrap.animate) {
@@ -4729,7 +4895,11 @@ export class Feed {
   private showSeriesWinScreen(i: number): void {
     // Fade the chest overlay out.
     this.hudEl?.classList.remove('hud--chest-lift');   // scrim gone → drop the HUD lift
-    this.feedBarEl?.classList.remove('feed-bar--chest-lift');
+    // A card still in the air keeps the bar in its lifted layer until it lands.
+    this.restoreBarAfterCardDrop();
+    // The smart moment: the player's own series just ended, attention is free —
+    // one extra read of the owner activity feed rides that pause.
+    void this.pollIslandActivity();
     this.stopChestSparks();
     const chest = this.chestEl;
     if (chest) {
@@ -4882,7 +5052,7 @@ export class Feed {
     this.dismissChallengePill();
     this.islandVisitAwardPromise = null;
     this.hudEl?.classList.remove('hud--chest-lift');
-    this.feedBarEl?.classList.remove('feed-bar--chest-lift');
+    this.restoreBarAfterCardDrop(true);   // hard reset: no card can still be owed
     // Restore normal arrival-poster behaviour (a future feed arrival at this unit
     // should show its cover again).
     this.feedEl?.querySelectorAll('.game--series-reload').forEach((el) => el.classList.remove('game--series-reload'));
@@ -5433,9 +5603,15 @@ export class Feed {
       icon.addEventListener('pointerdown', (e) => e.stopPropagation());
       icon.addEventListener('click', (e) => {
         e.stopPropagation();
-        // Bottom nav stays available on the meta: re-tapping the open meta is a
-        // no-op; tapping any other tab closes the current overlay first, then opens.
-        if (tab.name === 'meta' && this.overlayEl?.classList.contains('island-world')) return;
+        // Bottom nav stays available on the meta: re-tapping the OWN open island
+        // is a no-op; tapping any other tab closes the current overlay first,
+        // then opens. On a friend's island every button — including "Мета" — is
+        // an exit into that tab (there, "Мета" means "back to my own island").
+        if (
+          tab.name === 'meta'
+          && !this.publicIsland
+          && this.overlayEl?.classList.contains('island-world')
+        ) return;
         if (this.overlayOpen) this.closeOverlay();
         switcher.querySelectorAll('.feed-bar__icon--active').forEach((el) => el.classList.remove('feed-bar__icon--active'));
         icon.classList.add('feed-bar__icon--active');
@@ -6660,6 +6836,9 @@ export class Feed {
   }
 
   private applyActiveStates() {
+    // Returning to browse (or reaching a win screen) is when a held "someone
+    // played yours" toast is finally allowed on screen.
+    this.flushIslandActivityToast();
     this.frames.forEach((_f, i) => {
       this.setFramePaused(i, this.shouldPauseFrame(i));
       this.tryRevealFrame(i);
@@ -6884,6 +7063,9 @@ export class Feed {
       this.pauseAllFrames();
       return;
     }
+    // Back from a pause: exactly ONE catch-up read (the interval keeps its own
+    // rhythm, and nothing is polled while the app is away).
+    void this.pollIslandActivity();
     this.applyActiveStates();
     this.tryRevealFrame(this.realIndex());
     this.scheduleWarmNext();
@@ -7195,13 +7377,21 @@ export class Feed {
     if (this.overlayOpen) return;
     this.overlayOpen = true;
     this.applyActiveStates();
+    // A guest is "nowhere" in the bar: visiting a friend belongs to no tab, so
+    // no tab may read as active while their island is up.
+    const guestOwner = this.publicIsland?.owner ?? null;
+    if (guestOwner) {
+      this.feedBarEl?.querySelectorAll('.feed-bar__icon--active')
+        .forEach((el) => el.classList.remove('feed-bar__icon--active'));
+    }
 
     const ov = document.createElement('div');
     ov.className = 'island-world';
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
     const islandLevel = this.levelForStars(this.totalStars);
-    void import('./island').then((m) => m.renderIslandWorld(ov, {
+    void import('./island').then((m) => {
+      m.renderIslandWorld(ov, {
       close: () => this.closeOverlay(),
       level: islandLevel,
       puzzles: () => this.totalPuzzles,
@@ -7217,9 +7407,90 @@ export class Feed {
       // The island already knows the server-owned gift counts it just drew, so
       // the nav badge follows a collect with no extra request.
       onPendingGifts: (total: number) => this.setIslandGiftsPending(total > 0),
-    }));
+      // The island owns the upgrade watermark while it is open: the badge clears
+      // as each ceremony is shown, without another /island/state probe.
+        onPendingUpgrades: (total: number) => this.setIslandUpgradesPending(total > 0),
+      });
+      // The island markup now exists: fly the friend's own avatar out of the
+      // friends row into the namebar so the visit is visibly the same person.
+      if (guestOwner && ov.isConnected) this.flyFriendAvatarToIsland(guestOwner);
+    });
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
+  }
+
+  // ── Guest visit: the friend's avatar travels with the player ───────────────
+  // Tapping a friend cell hands that exact face over to the visited island's
+  // namebar (and hands it back on exit), so "this is the same person" is read
+  // from motion, not from a re-drawn picture. A visit opened from a deep link
+  // has no source cell: the namebar is filled statically and nothing flies.
+  private flyFriendAvatarToIsland(owner: PublicIslandView['owner']): void {
+    const anchor = this.overlayEl?.querySelector<HTMLElement>('[data-guest-ava]');
+    if (!anchor) return;
+    const name = owner.first_name || owner.username || 'Друг';
+    const initial = (name.trim()[0] || '?').toUpperCase();
+    const cell = this.friendsHudEl?.querySelector<HTMLElement>(`[data-friend-visit="${owner.id}"]`) ?? null;
+    anchor.innerHTML = cell
+      ? cell.innerHTML
+      : (owner.photo_url
+        ? `<img src="${this.esc(owner.photo_url)}" alt="" draggable="false">`
+        : `<span class="isln-friend__initial">${this.esc(initial)}</span>`);
+    if (!cell) return;
+    // The row keeps the slot (visibility, not display) so nothing reflows — but the
+    // WHOLE cell goes, avatar and name together: a name label under an empty ring
+    // reads as a broken row, not as "they are over there".
+    this.setFriendCellAway(cell, true);
+    this.guestAvatarCell = cell;
+    const from = cell.getBoundingClientRect();
+    const to = anchor.getBoundingClientRect();
+    anchor.style.visibility = 'hidden';
+    this.animateAvatarFlight(anchor.innerHTML, from, to, () => { anchor.style.visibility = ''; });
+  }
+
+  /** Hide/restore a whole friends-row slot (avatar + name) while its owner's
+   *  island is being visited. The button keeps its layout box, so the flight can
+   *  still measure where the avatar has to land. */
+  private setFriendCellAway(cell: HTMLElement, away: boolean): void {
+    const slot = cell.closest<HTMLElement>('.isln-friend-cell') ?? cell;
+    slot.classList.toggle('isln-friend--away', away);
+  }
+
+  /** Exit from a guest island: the avatar flies back into its row slot. */
+  private returnFriendAvatarFromIsland(): void {
+    const cell = this.guestAvatarCell;
+    this.guestAvatarCell = null;
+    if (!cell) return;
+    const reveal = () => this.setFriendCellAway(cell, false);
+    const anchor = this.overlayEl?.querySelector<HTMLElement>('[data-guest-ava]');
+    const from = anchor?.getBoundingClientRect();
+    const to = cell.getBoundingClientRect();
+    if (!anchor || !from || !from.width || !to.width) { reveal(); return; }
+    anchor.style.visibility = 'hidden';
+    this.animateAvatarFlight(anchor.innerHTML, from, to, reveal);
+  }
+
+  /** One arced flight of an avatar clone between two viewport rects. The clone
+   *  lives on the viewport layer, so it survives the island overlay's removal. */
+  private animateAvatarFlight(html: string, from: DOMRect, to: DOMRect, onDone: () => void): void {
+    const vp = this.viewport.getBoundingClientRect();
+    const fly = document.createElement('div');
+    fly.className = 'isln-friend isln-friend--fly';
+    fly.innerHTML = html;
+    fly.style.cssText =
+      `position:absolute;left:${from.left - vp.left}px;top:${from.top - vp.top}px;`
+      + `width:${from.width}px;height:${from.height}px;z-index:3400;`;
+    this.viewport.appendChild(fly);
+    const dx = (to.left + to.width / 2) - (from.left + from.width / 2);
+    const dy = (to.top + to.height / 2) - (from.top + from.height / 2);
+    const scale = from.width ? to.width / from.width : 1;
+    const finish = () => { fly.remove(); onDone(); };
+    if (!fly.animate) { finish(); return; }
+    const anim = fly.animate([
+      { transform: 'translate(0px, 0px) scale(1)' },
+      { transform: `translate(${dx * 0.5}px, ${dy * 0.5 - 16}px) scale(${(1 + scale) / 2})`, offset: 0.55 },
+      { transform: `translate(${dx}px, ${dy}px) scale(${scale})` },
+    ], { duration: 440, easing: 'cubic-bezier(0.3, 0.9, 0.3, 1)', fill: 'forwards' });
+    anim.addEventListener('finish', finish, { once: true });
   }
 
   // ── Island Social Core (§4.4): friend HUD cells ───────────────────────────
@@ -7957,6 +8228,9 @@ export class Feed {
     // After leaving a visited (guest) island, the meta tab reopens the OWNER's own
     // island — a runtime friend visit / deep-link must not stick (§4.4).
     if (ov?.classList.contains('island-world')) {
+      // Guest exit: hand the avatar back to its slot in the friends row before
+      // the overlay fades (the flight itself lives on the viewport layer).
+      this.returnFriendAvatarFromIsland();
       this.publicIsland = null;
       // Coming back from the island: re-read what is still collectable there so
       // the "!" badge matches the server rather than the last drawn frame.
@@ -9577,34 +9851,10 @@ export class Feed {
   }
 
   // Level-up-style confetti: a one-shot burst that rains down evenly across the
-  // WHOLE screen from the top. Lives on the fixed viewport layer.
+  // WHOLE screen from the top. Lives on the fixed viewport layer. The burst
+  // itself lives in ./fx so the island upgrade ceremony can reuse this exact FX.
   private burstStarConfetti() {
-    const colors = ['#ffd85a', '#45d68c', '#37a6ff', '#ff4f8b', '#ff9f45', '#b07bff', '#5ee6a8'];
-    const rect = this.viewport.getBoundingClientRect();
-    const count = 40;
-    for (let n = 0; n < count; n++) {
-      const c = document.createElement('div');
-      c.className = 'confetti';
-      const w = 7 + Math.random() * 7, h = 10 + Math.random() * 10;
-      // Spread evenly across the width (n-based columns + jitter) so the fall is uniform.
-      const x = ((n + Math.random()) / count) * rect.width;
-      c.style.cssText =
-        `left:${x}px;top:-24px;width:${w}px;height:${h}px;z-index:2580;` +
-        `background:${colors[(n + Math.floor(Math.random() * colors.length)) % colors.length]};` +
-        `border-radius:${Math.random() < 0.4 ? '50%' : '2px'};`;
-      this.viewport.appendChild(c);
-      const dur = 1500 + Math.random() * 1100;
-      if (!c.animate) { window.setTimeout(() => c.remove(), dur); continue; }
-      const driftX = (Math.random() - 0.5) * 150;
-      const fall = rect.height + 80;
-      const rot = Math.random() * 900 - 450;
-      const a = c.animate([
-        { transform: 'translate(0, 0) rotate(0deg)', opacity: 1 },
-        { transform: `translate(${driftX}px, ${fall}px) rotate(${rot}deg)`, opacity: 1, offset: 0.85 },
-        { transform: `translate(${driftX}px, ${fall + 40}px) rotate(${rot}deg)`, opacity: 0 },
-      ], { duration: dur, delay: Math.random() * 220, easing: 'cubic-bezier(0.3, 0.2, 0.5, 1)', fill: 'forwards' });
-      a.addEventListener('finish', () => c.remove(), { once: true });
-    }
+    burstConfetti(this.viewport);
   }
 
   // Ember burst at the counter when the star lands — styled like the coal sparks

@@ -68,11 +68,64 @@ const endpoints = await new Promise((resolve, reject) => {
 const exactSpecHashes = EXACT_THREE_LEVEL_SPEC_HASHES;
 const browser = await chromium.launch();
 
-const runScenario = async (url, { firstFailure, expectLevelRetry = false }) => {
+// Chest-ceremony UI probe (installed for the success scenario only): the card
+// drop is presentation, but two of its properties are load-bearing and invisible
+// to the receipt assertions — the collections button must be ABOVE the chest dim
+// while cards travel to it (it is the drop target), and it must fall back to its
+// normal layer afterwards; and a dropped card must stay a small collectible.
+const CHEST_UI_PROBE = `
+window.__chestUiProbe = { cards: [], barTouched: false };
+new MutationObserver((records) => {
+  for (const record of records) {
+    for (const node of record.addedNodes) {
+      if (node.nodeType !== 1) continue;
+      const card = node.classList && node.classList.contains('coll-card')
+        ? node
+        : (node.querySelector ? node.querySelector('.coll-card') : null);
+      if (!card) continue;
+      const bar = document.querySelector('.feed-bar');
+      const scrim = document.querySelector('.chest-ov');
+      const style = getComputedStyle(card);
+      window.__chestUiProbe.cards.push({
+        width: parseFloat(style.width),
+        border: parseFloat(style.borderTopWidth),
+        scrimPresent: Boolean(scrim),
+        scrimZ: scrim ? Number(getComputedStyle(scrim).zIndex) : null,
+        barZ: bar ? Number(getComputedStyle(bar).zIndex) : null,
+        barInScrimLayer: Boolean(bar && bar.parentElement
+          && bar.parentElement.classList.contains('viewport')),
+        barPortalClass: Boolean(bar && bar.classList.contains('feed-bar--chest-portal')),
+      });
+    }
+  }
+}).observe(document, { childList: true, subtree: true });`;
+
+const readChestUiProbe = async (page) => {
+  // The last card lands ~0.7s after the chest empties; give the restore its beat.
+  await page.waitForTimeout(1500);
+  // The real Feed runs inside the harness controller's iframe — addInitScript
+  // installed the observer there too, so read it from that frame.
+  const frame = page.frames().find((candidate) => candidate !== page.mainFrame()
+    && candidate.url().includes('/feed'));
+  assert.ok(frame, 'the harness must host the real Feed in a frame');
+  return frame.evaluate(() => {
+    const bar = document.querySelector('.feed-bar');
+    return {
+      cards: window.__chestUiProbe?.cards ?? [],
+      barBackInFeed: Boolean(bar && bar.parentElement
+        && bar.parentElement.classList.contains('feed')),
+      barPortalClass: Boolean(bar && bar.classList.contains('feed-bar--chest-portal')),
+      barZ: bar ? getComputedStyle(bar).zIndex : null,
+    };
+  });
+};
+
+const runScenario = async (url, { firstFailure, expectLevelRetry = false, probeChestUi = false }) => {
   const page = await browser.newPage();
   const browserErrors = [];
   page.on('pageerror', (error) => browserErrors.push(error.stack || error.message));
   try {
+    if (probeChestUi) await page.addInitScript(CHEST_UI_PROBE);
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => {
       const state = window.__catalogFeedDogfoodHarness;
@@ -161,6 +214,33 @@ const runScenario = async (url, { firstFailure, expectLevelRetry = false }) => {
       [['confirmed', 200]],
       diagnostic,
     );
+    if (probeChestUi) {
+      const ui = await readChestUiProbe(page);
+      const uiDiagnostic = JSON.stringify(ui, null, 2);
+      assert.ok(ui.cards.length > 0, `the chest must drop collection cards\n${uiDiagnostic}`);
+      for (const card of ui.cards) {
+        // The drop target must out-paint the dim WHILE the card travels to it.
+        assert.equal(card.scrimPresent, true, `a card drops over the chest scrim\n${uiDiagnostic}`);
+        assert.equal(card.barInScrimLayer, true, `the collections bar must be in the scrim's layer\n${uiDiagnostic}`);
+        assert.equal(card.barPortalClass, true, `the lifted bar carries its portal class\n${uiDiagnostic}`);
+        assert.ok(
+          card.barZ > card.scrimZ,
+          `the bar must paint above the dim (bar ${card.barZ} vs scrim ${card.scrimZ})\n${uiDiagnostic}`,
+        );
+        // Small collectible, not a full-size card over the chest (was 84px).
+        assert.ok(
+          card.width > 40 && card.width <= 70,
+          `a dropped card stays small (${card.width}px)\n${uiDiagnostic}`,
+        );
+        // The frame scales with the card, so the art/ribbon stay readable.
+        assert.ok(
+          card.border > 4 && card.border < card.width * 0.2,
+          `the frame is proportional (${card.border}px on ${card.width}px)\n${uiDiagnostic}`,
+        );
+      }
+      assert.equal(ui.barBackInFeed, true, `the bar returns to its normal layer\n${uiDiagnostic}`);
+      assert.equal(ui.barPortalClass, false, `the portal class is cleared\n${uiDiagnostic}`);
+    }
     return state;
   } finally {
     await page.close();
@@ -457,7 +537,7 @@ const runCanaryThenPublishedScenario = async () => {
 
 try {
   await runCanaryThenPublishedScenario();
-  const positive = await runScenario(endpoints.successUrl, { firstFailure: null });
+  const positive = await runScenario(endpoints.successUrl, { firstFailure: null, probeChestUi: true });
   const reload = await runScenario(endpoints.reloadUrl, { firstFailure: null });
   const eventOrder = await runScenario(endpoints.eventOrderUrl, { firstFailure: null });
   const crossOrigin = await runScenario(endpoints.crossOriginUrl, { firstFailure: null });
