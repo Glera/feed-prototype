@@ -20,6 +20,7 @@ import CARD_07 from './assets/collections/collection_1/card_07.webp';
 import CARD_08 from './assets/collections/collection_1/card_08.webp';
 import CARD_09 from './assets/collections/collection_1/card_09.webp';
 import CARD_10 from './assets/collections/collection_1/card_10.webp';
+import { userScopedStorageKey } from './user-scope';
 
 export const CARD_BG = BG_CARDS;
 export const CARD_RIBBON = RIBBON;
@@ -90,7 +91,11 @@ export interface CollectionsProgressState {
   byCollection: Record<string, CollectionProgress>;
 }
 
+// Card progress is the player's, not the device's: scoped per user, with no
+// carry-over from the legacy device-wide key (a second account starts from the
+// normal first-run default instead of inheriting someone else's collection).
 const COLLECTIONS_PROGRESS_KEY = 'collections-progress-v1';
+const collectionsProgressStorageKey = (): string => userScopedStorageKey(COLLECTIONS_PROGRESS_KEY);
 const DEMO_COLLECTED: Record<string, number[]> = {
   // A partial state makes both collected and missing treatments visible until
   // real season progress starts arriving from the product/backend.
@@ -137,13 +142,13 @@ function normaliseProgress(value: unknown): CollectionsProgressState {
 
 export function saveCollectionsProgressState(state: CollectionsProgressState): void {
   try {
-    localStorage.setItem(COLLECTIONS_PROGRESS_KEY, JSON.stringify(normaliseProgress(state)));
+    localStorage.setItem(collectionsProgressStorageKey(), JSON.stringify(normaliseProgress(state)));
   } catch { /* storage can be blocked in private/embedded contexts */ }
 }
 
 export function loadCollectionsProgressState(): CollectionsProgressState {
   try {
-    const raw = localStorage.getItem(COLLECTIONS_PROGRESS_KEY);
+    const raw = localStorage.getItem(collectionsProgressStorageKey());
     const state = raw ? normaliseProgress(JSON.parse(raw) as unknown) : defaultCollectionsProgressState();
     // Re-cache the normalised shape so corrupt/old/future entries cannot leak into
     // the runtime state, and the first-run demo progress survives a reload.

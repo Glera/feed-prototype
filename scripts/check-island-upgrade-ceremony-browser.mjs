@@ -3,7 +3,7 @@
  *
  * The server upgrades a house the instant a guest completion claim lands; the
  * ceremony is the OWNER-facing delivery of that fact, gated by the client
- * watermark `island-celebrated-stages-v1`. Proven end to end:
+ * watermark `island-celebrated-stages-v1:<telegram user id>`. Proven end to end:
  *
  *   а. first entry with non-zero stages → NO ceremony, watermark initialised;
  *   б. stage +1 → entry plays exactly ONE ceremony with confetti, watermark advanced;
@@ -17,7 +17,11 @@
  *      before it are never replayed;
  *   и. growth landing while the owner is on the island celebrates without a
  *      re-entry, but never on top of an open building card;
- *   з. a building the server no longer returns leaves the watermark silently.
+ *   з. a building the server no longer returns leaves the watermark silently;
+ *   л. the watermark is scoped to the AUTHENTICATED user: a legacy device-wide
+ *      value is never adopted (and is dropped), and an account switch on the same
+ *      storage gives the newcomer a silent baseline while the first account keeps
+ *      its own history and its own still-owed ceremony.
  *
  * Plus the guest-visit chrome on a friend's island:
  *   а. the tapped friend's avatar leaves the HUD row, lands next to the namebar
@@ -43,7 +47,7 @@ import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const buildRoot = mkdtempSync(path.join(tmpdir(), 'island-upgrade-ceremony-'));
-const port = 5247;
+const port = Number(process.env.CEREMONY_PORT || 5247);
 const origin = `http://127.0.0.1:${port}`;
 const shotDir = process.env.CEREMONY_SHOT_DIR || '';
 if (shotDir) mkdirSync(shotDir, { recursive: true });
@@ -91,9 +95,14 @@ await new Promise((resolve, reject) => {
   server.listen(port, '127.0.0.1', resolve);
 });
 
-const telegramSdk = `
+// The account that is currently launching the app. Switched mid-run to prove the
+// watermark is per PLAYER, not per device.
+const OWNER_A = 79124;
+const OWNER_B = 79125;
+let currentOwner = OWNER_A;
+const telegramSdkFor = (userId) => `
 window.Telegram={WebApp:{
-  initData:'',initDataUnsafe:{user:{id:79124}},platform:'web',
+  initData:'',initDataUnsafe:{user:{id:${userId}}},platform:'web',
   ready(){},expand(){},disableVerticalSwipes(){},enableClosingConfirmation(){},
   setHeaderColor(){},setBackgroundColor(){},lockOrientation(){},onEvent(){},offEvent(){},
   HapticFeedback:{impactOccurred(){},notificationOccurred(){},selectionChanged(){}},
@@ -101,7 +110,10 @@ window.Telegram={WebApp:{
   openTelegramLink(){},close(){}
 }};`;
 
-const WATERMARK_KEY = 'island-celebrated-stages-v1';
+// Device-wide legacy key (pre-scoping). It must never be READ once a user scope
+// exists, and it is dropped as soon as the scoped watermark is written.
+const LEGACY_WATERMARK_KEY = 'island-celebrated-stages-v1';
+const watermarkKeyFor = (userId) => `${LEGACY_WATERMARK_KEY}:${userId}`;
 const HOUSE_A = '11111111-1111-4111-8111-111111111111';   // slot 2
 const HOUSE_B = '22222222-2222-4222-8222-222222222222';   // slot 1
 const HOUSE_C = '44444444-4444-4444-8444-444444444444';   // ladder only
@@ -216,7 +228,8 @@ try {
   await context.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
     status: 200,
     contentType: 'application/javascript',
-    body: telegramSdk,
+    headers: { 'cache-control': 'no-store' },
+    body: telegramSdkFor(currentOwner),
   }));
   await context.route('**/api/**', async (route) => {
     const request = route.request();
@@ -229,7 +242,7 @@ try {
     });
     if (url.pathname === '/api/session') {
       return json({
-        user: { id: 79124, ref_code: 'cer', first_name: 'Cer' },
+        user: { id: currentOwner, ref_code: 'cer', first_name: 'Cer' },
         ref_code: 'cer',
         balance: 0,
         puzzles: 10,
@@ -262,10 +275,12 @@ try {
 
   const metaTab = page.locator('[data-bar-tab="meta"]');
   const islandAlert = page.locator('[data-bar-tab="meta"] .feed-bar__daily-alert');
-  const watermark = () => page.evaluate(
-    (key) => JSON.parse(localStorage.getItem(key) || 'null'),
-    WATERMARK_KEY,
+  const readKey = (key) => page.evaluate(
+    (k) => JSON.parse(localStorage.getItem(k) || 'null'),
+    key,
   );
+  const watermark = (userId = currentOwner) => readKey(watermarkKeyFor(userId));
+  const legacyWatermark = () => readKey(LEGACY_WATERMARK_KEY);
   const scenes = () => page.evaluate(() => window.__ceremonies.map((scene) => ({ ...scene })));
   const confetti = () => page.evaluate(() => window.__confetti);
 
@@ -282,6 +297,16 @@ try {
   /** Wait until the ceremony queue has drained (no scene open, none pending). */
   const settle = async (ms = 2600) => sleep(ms);
 
+  // ── 0. a LEGACY device-wide watermark left behind by another account ──────
+  // Under the old unscoped key this value (every house at stage 0) would have
+  // made the first entry replay a stranger's history as ceremonies. It must be
+  // ignored, not adopted.
+  await page.goto(origin, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(
+    ([key, value]) => localStorage.setItem(key, JSON.stringify(value)),
+    [LEGACY_WATERMARK_KEY, { [HOUSE_A]: 0, [HOUSE_B]: 0 }],
+  );
+
   // ── а. first entry: non-zero stages must NOT celebrate history ─────────────
   await page.goto(`${origin}/?initData=ceremony-browser`, { waitUntil: 'domcontentloaded' });
   await metaTab.waitFor({ state: 'visible', timeout: 20_000 });
@@ -291,6 +316,14 @@ try {
   await settle();
   assert.deepEqual(await scenes(), [], 'а: a first entry must never celebrate historical growth');
   assert.deepEqual(await watermark(), { [HOUSE_A]: 3, [HOUSE_B]: 2 }, 'а: watermark initialised at the current stages');
+  assert.deepEqual(
+    await scenes(), [],
+    'а: a foreign legacy watermark is never adopted — the baseline stays silent',
+  );
+  assert.equal(
+    await legacyWatermark(), null,
+    'а: the ownerless legacy key is dropped once the scoped watermark exists',
+  );
 
   // ── б. +1 on one house → exactly one ceremony, with confetti ───────────────
   // ── ж (part 1). the pending upgrade lights the island tab "!" ──────────────
@@ -624,11 +657,70 @@ try {
   assert.match(frames[frames.length - 1], /scale\(1\)|none/, `morph: it settles on the new size\n${morphInfo}`);
   await settle();
 
+  // ══ account switch on ONE device: the watermark is per PLAYER ═════════════
+  // A shared phone, or an account switch inside a single Telegram WebView. The
+  // newcomer must get the same SILENT baseline a first entry always gets, and
+  // the first account's viewing history must survive untouched.
+  const ownerAWatermark = await watermark(OWNER_A);
+  assert.deepEqual(
+    ownerAWatermark,
+    { [HOUSE_A]: 4, [HOUSE_B]: 5, [HOUSE_C]: 10 },
+    `switch: owner A carries their own watermark (${JSON.stringify(ownerAWatermark)})`,
+  );
+
+  currentOwner = OWNER_B;
+  await enterIsland();
+  assert.equal(
+    await islandAlert.isVisible(), false,
+    'switch: a second account must not inherit a pending-upgrade badge',
+  );
+  await openIsland();
+  await settle();
+  assert.deepEqual(await scenes(), [], "switch: a second account never replays the first account's growth");
+  assert.deepEqual(
+    await watermark(OWNER_B),
+    { [HOUSE_A]: 4, [HOUSE_B]: 5, [HOUSE_C]: 10 },
+    'switch: the newcomer is baselined at the CURRENT stages, silently',
+  );
+  assert.deepEqual(await watermark(OWNER_A), ownerAWatermark, "switch: the first account's watermark is untouched");
+  assert.equal(await legacyWatermark(), null, 'switch: no unscoped watermark is ever written back');
+
+  // Growth is then delivered to each account exactly once, on its own watermark.
+  setStage(HOUSE_A, 6);
+  await enterIsland();
+  await openIsland();
+  await settle();
+  const ownerBScenes = await scenes();
+  assert.equal(ownerBScenes.length, 1, `switch: owner B gets exactly one ceremony (got ${ownerBScenes.length})`);
+  assert.match(ownerBScenes[0].text, /Уровень 4 → 6/, `switch: owner B plaque "${ownerBScenes[0].text}"`);
+  assert.deepEqual(await watermark(OWNER_A), ownerAWatermark, 'switch: owner B celebrating never advances owner A');
+
+  currentOwner = OWNER_A;
+  await enterIsland();
+  await islandAlert.waitFor({ state: 'visible', timeout: 15_000 });
+  await openIsland();
+  await settle();
+  const ownerAScenes = await scenes();
+  assert.equal(ownerAScenes.length, 1, `switch: owner A still owes exactly one ceremony (got ${ownerAScenes.length})`);
+  assert.match(ownerAScenes[0].text, /Уровень 4 → 6/, `switch: owner A plaque "${ownerAScenes[0].text}"`);
+  assert.deepEqual(
+    await watermark(OWNER_A),
+    { [HOUSE_A]: 6, [HOUSE_B]: 5, [HOUSE_C]: 10 },
+    'switch: owner A advanced on their own key',
+  );
+  assert.deepEqual(
+    await watermark(OWNER_B),
+    { [HOUSE_A]: 6, [HOUSE_B]: 5, [HOUSE_C]: 10 },
+    "switch: owner B's key is exactly what owner B celebrated",
+  );
+
   console.log(
     'island upgrade ceremony browser: silent first entry + single/×K scenes + slot-ordered queue + tap skip + '
     + 'silent re-entry + "!" badge lifecycle + mid-scene kill replay + live upgrade behind an open card + '
     + 'removed-building prune + guest avatar flight/bar exit/✕/colour grade/no-series + '
-    + 'house scale ladder 0/5/10 with hitbox and ceremony morph verified',
+    + 'house scale ladder 0/5/10 with hitbox and ceremony morph + per-user watermark scope '
+    + '(legacy device-wide key ignored and dropped, account switch = silent baseline, both '
+    + 'accounts keep their own history) verified',
   );
 } finally {
   await browser?.close();

@@ -8,6 +8,7 @@ import {
   type IslandStoredPack,
 } from './api';
 import { getInitData } from './telegram';
+import { telegramUserId } from './user-scope';
 
 const LEGACY_STATE_KEY = 'island-proto-v1';
 const SYNC_KEY = 'island-proto-v1-sync';
@@ -22,13 +23,6 @@ interface IslandStateHooks {
   read(): IslandPersistedState;
   apply(state: IslandPersistedState): void;
   onHydrated?(): void;
-}
-
-function telegramUserId(): string | null {
-  const id = (window as unknown as {
-    Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
-  }).Telegram?.WebApp?.initDataUnsafe?.user?.id;
-  return Number.isSafeInteger(id) ? String(id) : null;
 }
 
 function storageKeys(): { state: string; sync: string; scoped: boolean } {

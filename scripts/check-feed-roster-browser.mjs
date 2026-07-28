@@ -175,10 +175,14 @@ const initData = new URLSearchParams({
   user: JSON.stringify({ id: 42 }),
   hash: 'roster-browser',
 }).toString();
+// The staged roster is per-user state, so the client namespaces it by the
+// authenticated Telegram id (src/user-scope.ts). Seed and read the exact key the
+// production build uses.
+const ROSTER_SNAPSHOT_KEY = 'swipe_feed_roster_next_session_v1:42';
 const browser = await chromium.launch();
 try {
   const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
-  await page.addInitScript(({ data, snapshot }) => {
+  await page.addInitScript(({ data, snapshot, rosterKey }) => {
     window.Telegram = { WebApp: {
       initData: data,
       initDataUnsafe: { user: { id: 42 }, start_param: null },
@@ -187,10 +191,10 @@ try {
       setHeaderColor() {}, setBackgroundColor() {}, onEvent() {},
     } };
     if (!sessionStorage.getItem('roster_browser_seeded')) {
-      localStorage.setItem('swipe_feed_roster_next_session_v1', JSON.stringify(snapshot));
+      localStorage.setItem(rosterKey, JSON.stringify(snapshot));
       sessionStorage.setItem('roster_browser_seeded', '1');
     }
-  }, { data: initData, snapshot: initialRoster });
+  }, { data: initData, snapshot: initialRoster, rosterKey: ROSTER_SNAPSHOT_KEY });
 
   await page.goto(`${origin}/?initData=${encodeURIComponent(initData)}`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector(`iframe[title="${initialRoster.entries[0].playableId}"]`, { timeout: 5000 });
@@ -199,10 +203,10 @@ try {
     initialRoster.entries[0].playableId,
     'the frozen startup snapshot owns the current session order',
   );
-  await page.waitForFunction((activationId) => {
-    const raw = localStorage.getItem('swipe_feed_roster_next_session_v1');
+  await page.waitForFunction(([activationId, rosterKey]) => {
+    const raw = localStorage.getItem(rosterKey);
     return raw && JSON.parse(raw).activationId === activationId;
-  }, nextRoster.activationId, { timeout: 5000 });
+  }, [nextRoster.activationId, ROSTER_SNAPSHOT_KEY], { timeout: 5000 });
   assert.equal(
     await page.locator('.page--in-viewport iframe').getAttribute('title'),
     initialRoster.entries[0].playableId,
@@ -243,7 +247,7 @@ try {
   // roster which omits its mechanic must not invalidate the issued deep link.
   const challengeContext = await browser.newContext({ viewport: { width: 390, height: 760 } });
   const challengePage = await challengeContext.newPage();
-  await challengePage.addInitScript(({ data, snapshot, challengeStart }) => {
+  await challengePage.addInitScript(({ data, snapshot, challengeStart, rosterKey }) => {
     window.Telegram = { WebApp: {
       initData: data,
       initDataUnsafe: { user: { id: 42 }, start_param: challengeStart },
@@ -251,8 +255,8 @@ try {
       ready() {}, expand() {}, disableVerticalSwipes() {}, lockOrientation() {},
       setHeaderColor() {}, setBackgroundColor() {}, onEvent() {},
     } };
-    localStorage.setItem('swipe_feed_roster_next_session_v1', JSON.stringify(snapshot));
-  }, { data: initData, snapshot: initialRoster, challengeStart: challengeId });
+    localStorage.setItem(rosterKey, JSON.stringify(snapshot));
+  }, { data: initData, snapshot: initialRoster, challengeStart: challengeId, rosterKey: ROSTER_SNAPSHOT_KEY });
   const challengeEventOffset = cpEvents.length;
   const challengeTicketOffset = ticketRequests.length;
   await challengePage.goto(

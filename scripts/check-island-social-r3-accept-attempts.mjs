@@ -30,9 +30,12 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const PY_SCRATCH = process.env.PY_SCRATCH || path.join(root, 'scripts', 'island-e2e-support');
 const PORT = 5214;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
-const KEY = 'island-pending-friend-accept-v1';
 const CAP = 5;
 const GUEST = 700000031; // fresh, not used elsewhere
+// The pending accept is PLAYER state: an invite is landed as the launching
+// account, so the client namespaces it by the authenticated user id
+// (src/user-scope.ts) — here taken from the `user` field of the signed initData.
+const KEY = `island-pending-friend-accept-v1:${GUEST}`;
 const CODE1 = 'STUCK5XXAA';
 const CODE2 = 'NEWCODEBB1';
 

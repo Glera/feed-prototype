@@ -20,6 +20,7 @@ import {
 } from './run-ticket-start-outbox.mjs';
 import { ResultReceiptWaiters } from './result-receipts.mjs';
 import { getInitData } from './telegram';
+import { telegramUserId } from './user-scope';
 
 const LEGACY_KEY = 'swipe_pending_results_v1';
 const LEGACY_EVER_KEY = 'swipe_stars_ever_v1';
@@ -61,13 +62,6 @@ export function onResultTerminal(listener: (event: ResultTerminalEvent) => void)
 
 function settleResultReceipt(receipt: ResultReceipt): void {
   resultReceiptWaiters.settle(receipt);
-}
-
-function telegramUserId(): string | null {
-  const id = (window as unknown as {
-    Telegram?: { WebApp?: { initDataUnsafe?: { user?: { id?: number } } } };
-  }).Telegram?.WebApp?.initDataUnsafe?.user?.id;
-  return Number.isSafeInteger(id) ? String(id) : null;
 }
 
 function storageKeys(): { queue: string; ever: string; scoped: boolean } {

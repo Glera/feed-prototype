@@ -17,8 +17,18 @@
  * nav badge without statically importing the whole island chunk.
  */
 import type { IslandBuildingState } from './api';
+import { userScopedStorageKey } from './user-scope';
 
+/** Legacy, device-wide key. Never read again once a user scope exists: a
+ *  watermark is one PLAYER's viewing history, so inheriting another account's
+ *  value on a shared device would either swallow their ceremonies (foreign
+ *  watermark higher) or replay ours (foreign watermark lower). */
 export const CELEBRATED_STAGE_KEY = 'island-celebrated-stages-v1';
+
+/** Scoped per Telegram user; falls back to the bare key outside Telegram. */
+export function celebratedStageStorageKey(): string {
+  return userScopedStorageKey(CELEBRATED_STAGE_KEY);
+}
 
 /** Server-owned stage 0..10 = min(foreign_claims, 10). If the backend has not
  *  yet attached `stage` we derive it from `foreign_claims`, else 0 — always
@@ -33,9 +43,17 @@ export function houseStage(b: IslandBuildingState): number {
 
 export type CelebratedStages = Record<string, number>;
 
+/**
+ * Read this user's watermark. A missing scoped key is deliberately NOT filled
+ * from the legacy device-wide one: an empty watermark is exactly the "first
+ * entry" state, and `syncStageCeremonies` already initialises every unknown
+ * building at its current stage WITHOUT a ceremony. So a second account on a
+ * shared device gets an honest silent baseline instead of someone else's
+ * history.
+ */
 export function loadCelebratedStages(): CelebratedStages {
   try {
-    const parsed = JSON.parse(localStorage.getItem(CELEBRATED_STAGE_KEY) || '{}') as unknown;
+    const parsed = JSON.parse(localStorage.getItem(celebratedStageStorageKey()) || '{}') as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
     const out: CelebratedStages = {};
     for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
@@ -48,7 +66,13 @@ export function loadCelebratedStages(): CelebratedStages {
 }
 
 export function saveCelebratedStages(map: CelebratedStages): void {
-  try { localStorage.setItem(CELEBRATED_STAGE_KEY, JSON.stringify(map)); } catch { /* private mode */ }
+  try {
+    const key = celebratedStageStorageKey();
+    localStorage.setItem(key, JSON.stringify(map));
+    // The scoped watermark now exists, so the ownerless legacy value can never
+    // be read again — drop it instead of leaving a foreign history on the device.
+    if (key !== CELEBRATED_STAGE_KEY) localStorage.removeItem(CELEBRATED_STAGE_KEY);
+  } catch { /* private mode */ }
 }
 
 export interface StageUpgrade {

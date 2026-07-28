@@ -6,6 +6,7 @@ import { initTelemetry } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 import { loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
+import { userScopedStorage } from './user-scope';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
@@ -58,8 +59,10 @@ async function boot(): Promise<void> {
   // Read exactly once. /session may stage a newer activation later, but a live
   // ring is immutable under the user's finger; that activation starts on the
   // next page/session load.
+  // Per-user storage view: a roster activation is issued to ONE player by
+  // /session, and its mapping ids end up on that player's feed decisions.
   const rosterSnapshot = getInitData()
-    ? await loadVerifiedFeedRosterSessionSnapshot(localStorage)
+    ? await loadVerifiedFeedRosterSessionSnapshot(userScopedStorage(localStorage))
     : null;
   createFeed(viewport, feedEl, challenge, publicIsland, rosterSnapshot, friendAcceptCode);
 }
