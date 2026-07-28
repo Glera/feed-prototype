@@ -2030,6 +2030,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     reportPendingUpgrades();
   }
 
+  // A ceremony is a map scene: it must never cover an open building card or a
+  // running playable, and its tap-to-skip must never steal a tap meant for them.
+  const ceremonyBlocked = (): boolean =>
+    sheet.classList.contains('isl-sheet--show') || Boolean(ov.querySelector('.isl-play'));
+
   async function runCeremonyQueue(): Promise<void> {
     if (ceremonyRunning) return;
     ceremonyRunning = true;
@@ -2037,6 +2042,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       while (ceremonyQueue.length) {
         // Left the island mid-queue: everything still unshown keeps its old
         // watermark and is celebrated on the next entry.
+        if (!ov.isConnected) break;
+        while (ov.isConnected && ceremonyBlocked()) {
+          await new Promise<void>((resolve) => { window.setTimeout(resolve, 400); });
+        }
         if (!ov.isConnected) break;
         const item = ceremonyQueue.shift() as QueuedUpgrade;
         item.started = true;

@@ -317,9 +317,31 @@ try {
   assert.deepEqual(await scenes(), [], 'з: a removed building must not celebrate anything');
   assert.deepEqual(await watermark(), { [HOUSE_A]: 9 }, 'з: the removed building is pruned from the watermark');
 
+  // ── и. growth that lands WHILE the owner is on the island ─────────────────
+  // It celebrates without a re-entry (rule 6), but never on top of an open
+  // building card — the scene waits for the map to be visible again.
+  await enterIsland();
+  await openIsland();
+  await settle(1200);
+  // The house group is an SVG <g> with gaps at its bounding-box centre — dispatch
+  // the same click its handler listens for instead of aiming at a pixel.
+  await page.locator('.island-world svg [data-b="2"]').dispatchEvent('click');
+  await page.locator('.isl-sheet--show').waitFor({ state: 'visible', timeout: 8000 });
+  setStage(HOUSE_A, 10);
+  await sleep(13_000);                     // the island's own 10s state poll pulls it
+  assert.equal(await page.locator('.isl-upgrade').count(), 0, 'и: a ceremony must not cover an open building card');
+  assert.deepEqual(await scenes(), [], 'и: nothing is celebrated while the card is open');
+  await page.locator('.isl-scrim').dispatchEvent('click');   // the tall sheet covers the scrim
+  await page.locator('.isl-upgrade__card').waitFor({ state: 'visible', timeout: 8000 });
+  await settle();
+  const live = await scenes();
+  assert.equal(live.length, 1, `и: exactly one live ceremony (got ${live.length})`);
+  assert.match(live[0].text, /Уровень 9 → 10/, `и: plaque text "${live[0].text}"`);
+  assert.deepEqual(await watermark(), { [HOUSE_A]: 10 }, 'и: the live ceremony advanced the watermark');
+
   console.log(
     'island upgrade ceremony browser: silent first entry + single/×K scenes + slot-ordered queue + tap skip + '
-    + 'silent re-entry + "!" badge lifecycle + removed-building prune verified',
+    + 'silent re-entry + "!" badge lifecycle + removed-building prune + live upgrade behind an open card verified',
   );
 } finally {
   await browser?.close();
