@@ -3257,8 +3257,8 @@ body {
   left: 50%;
   transform: translate(-50%, -150%);
   z-index: 3400;
-  max-width: 68%;
-  padding: 7px 15px;
+  max-width: 74%;
+  padding: 6px 14px;
   border-radius: 999px;
   background: rgba(20, 22, 30, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -3266,7 +3266,15 @@ body {
   color: #fff;
   font: 650 12.5px/1.25 system-ui, -apple-system, sans-serif;
   text-align: center;
-  white-space: nowrap;
+  /* A coalesced line ("X и ещё 3 сыграли в твои механики · 🤖 1") does not fit on
+     one line at this width: wrap to at most two instead of ellipsing the part
+     that carries the meaning. */
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  max-height: 2.8em;   /* two lines exactly: a clamped third must not bleed out */
   overflow: hidden;
   text-overflow: ellipsis;
   opacity: 0;
@@ -3274,6 +3282,9 @@ body {
   transition: transform 0.34s cubic-bezier(0.25, 0.9, 0.3, 1), opacity 0.3s ease;
 }
 .activity-toast--show { transform: translate(-50%, 0); opacity: 1; }
+/* The notification is a shortcut to the island it is about — but only while it
+   is actually on screen, so it never eats a tap meant for the feed. */
+.activity-toast--tappable.activity-toast--show { pointer-events: auto; cursor: pointer; }
 
 .session-auth-banner {
   position: absolute;

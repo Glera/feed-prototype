@@ -214,7 +214,13 @@ const ISLAND_PENDING_ACCEPT_MAX_ATTEMPTS = 5;
 const ISLAND_WRITE_ACCESS_ASKED_KEY = 'island-write-access-asked-v1';
 const ISLAND_WRITE_ACCESS_PENDING_KEY = 'island-write-access-pending-v1';
 const ISLAND_ACTIVITY_CURSOR_KEY = 'island-activity-cursor-v1';
-const ISLAND_ACTIVITY_POLL_MS = 30_000;
+// Live "someone played mine" notifications: a LIGHT background poll of the same
+// owner activity feed the session-start message already reads, plus one extra
+// read at a natural attention pause (the player's own series just ended).
+const ISLAND_ACTIVITY_POLL_MS = 75_000;
+// …and at most ONE toast per this window. Everything that lands inside it is
+// coalesced into a single line, so a busy island can never spam the feed.
+const ISLAND_ACTIVITY_TOAST_GAP_MS = 120_000;
 
 // Mechanics excluded from the ?livein=1 live-iframe-ride experiment (see
 // liveRideOk). Empty: every warm frame paints a start screen since
@@ -596,6 +602,11 @@ export class Feed {
   private islandActivityPollInFlight = false;
   private islandActivityCursor: number | null | undefined;
   private islandActivityUserId: number | null = null;
+  // Claims read but not yet shown: held while the rate-limit window is closed or
+  // while the player is inside a mechanic, then shown as ONE coalesced toast.
+  private islandActivityPending: IslandActivityEvent[] = [];
+  private islandActivityToastAt = 0;
+  private islandActivityFlushTimer: number | null = null;
   private dailyTimerEl: HTMLElement | null = null;
   private dailyTickTimer: number | null = null;
   private dailySyncing = false;
@@ -4448,12 +4459,19 @@ export class Feed {
       window.clearTimeout(this.activityNotifierTimer);
       this.activityNotifierTimer = null;
     }
+    if (this.islandActivityFlushTimer !== null) {
+      window.clearTimeout(this.islandActivityFlushTimer);
+      this.islandActivityFlushTimer = null;
+    }
     this.activityNotifierQueue = [];
     this.activityNotifierActive = false;
     this.activityNotifierEl?.classList.remove('activity-toast--show');
     this.islandActivityPollInFlight = false;
     this.islandActivityCursor = undefined;
     this.islandActivityUserId = null;
+    // Held-but-unshown claims are deliberately dropped, not persisted: their
+    // watermark never advanced, so the next session reads them again.
+    this.islandActivityPending = [];
   }
 
   private islandActivityCursorKey(userId: number): string {
@@ -4477,29 +4495,81 @@ export class Feed {
     } catch { /* in-memory cursor still prevents repeats in private mode */ }
   }
 
-  private islandActivityMessages(events: IslandActivityEvent[]): string[] {
-    const groups = new Map<string, IslandActivityEvent[]>();
-    for (const event of events) {
-      if (
-        !event
-        || !Number.isSafeInteger(event.seq)
-        || event.seq < 0
-        || typeof event.building?.id !== 'string'
-        || typeof event.building?.name !== 'string'
-        || typeof event.actor?.name !== 'string'
-      ) continue;
-      const groupKey = `${event.building.id}:${event.actor.is_bot ? 'bot' : 'human'}`;
-      const group = groups.get(groupKey) ?? [];
-      group.push(event);
-      groups.set(groupKey, group);
+  private validActivityEvents(events: IslandActivityEvent[]): IslandActivityEvent[] {
+    return events.filter((event) => Boolean(event)
+      && Number.isSafeInteger(event.seq)
+      && event.seq >= 0
+      && typeof event.building?.id === 'string'
+      && typeof event.building?.name === 'string'
+      && typeof event.actor?.name === 'string');
+  }
+
+  /** ONE line for a whole batch. A single claim keeps the exact wording the
+   *  session-start message has always used. Human and bot facts stay visibly
+   *  distinct with the SAME markers this notifier already used (👤 / 🤖): the
+   *  headline name is the freshest HUMAN, bots are counted separately, and a
+   *  bots-only batch is headed by the bot marker instead of borrowing a face. */
+  private islandActivityMessage(events: IslandActivityEvent[]): string {
+    const valid = this.validActivityEvents(events);
+    if (!valid.length) return '';
+    if (valid.length === 1) {
+      const only = valid[0];
+      return `${only.actor.is_bot ? '🤖' : '👤'} ${only.actor.name} — новое прохождение «${only.building.name}»`;
     }
-    return [...groups.values()].map((group) => {
-      const first = group[0];
-      const actor = `${first.actor.is_bot ? '🤖' : '👤'} ${first.actor.name}`;
-      return group.length === 1
-        ? `${actor} — новое прохождение «${first.building.name}»`
-        : `${actor} и ещё ${group.length - 1} — новые прохождения «${first.building.name}»`;
-    });
+    const humans = valid.filter((event) => !event.actor.is_bot);
+    const bots = valid.length - humans.length;
+    const led = humans.length ? humans : valid;
+    const lead = led[led.length - 1];
+    let text = `${humans.length ? '👤' : '🤖'} ${lead.actor.name}`;
+    if (led.length > 1) text += ` и ещё ${led.length - 1}`;
+    // Agreement follows the headline count; the lead can stand alone when the
+    // rest of the batch is bots, and the gender is unknown either way.
+    text += led.length > 1 ? ' сыграли в твои механики' : ' сыграл(а) в твои механики';
+    if (humans.length && bots > 0) text += ` · 🤖 ${bots}`;
+    return text;
+  }
+
+  /** A toast must never land on top of a mechanic the player is inside. The
+   *  reward/win screen and the feed itself are fair game — those are the pauses
+   *  this notification is meant for. */
+  private activityToastBlocked(): boolean {
+    if (this.chestEl) return true;
+    const i = this.realIndex();
+    if (!this.manualRuns.has(i)) return false;
+    return !this.stateEls[i]?.classList.contains('game__state--earned');
+  }
+
+  /** Show the held claims as one coalesced toast, or arm the moment when it
+   *  becomes allowed. Called after every read, on every feed state change and
+   *  when the rate-limit window reopens — never on a timer while blocked. */
+  private flushIslandActivityToast(): void {
+    if (!this.islandActivityPending.length) return;
+    const wait = Math.max(0, ISLAND_ACTIVITY_TOAST_GAP_MS - (Date.now() - this.islandActivityToastAt));
+    if (wait > 0) { this.scheduleIslandActivityFlush(wait); return; }
+    if (this.activityToastBlocked()) return;   // applyActiveStates re-tries on return
+    const batch = this.islandActivityPending;
+    this.islandActivityPending = [];
+    const message = this.islandActivityMessage(batch);
+    if (!message) return;
+    this.islandActivityToastAt = Date.now();
+    // Persist ONLY what has actually been shown: a claim read but never toasted
+    // (session ended, still held) comes back on the next launch, and a claim the
+    // player has already seen never does.
+    const userId = this.islandActivityUserId;
+    if (userId !== null) {
+      const shownThrough = batch.reduce((max, event) => Math.max(max, event.seq), 0);
+      const known = this.loadIslandActivityCursor(userId);
+      this.saveIslandActivityCursor(userId, Math.max(known ?? 0, shownThrough));
+    }
+    this.showActivityNotifier(message);
+  }
+
+  private scheduleIslandActivityFlush(delayMs: number): void {
+    if (this.islandActivityFlushTimer !== null) return;
+    this.islandActivityFlushTimer = window.setTimeout(() => {
+      this.islandActivityFlushTimer = null;
+      this.flushIslandActivityToast();
+    }, Math.max(50, delayMs));
   }
 
   private async pollIslandActivity(): Promise<void> {
@@ -4525,15 +4595,25 @@ export class Feed {
         || page.cursor < 0
         || !Array.isArray(page.events)
       ) return;
+      // The fetch cursor advances in memory so the next read only asks for what
+      // is genuinely new; the PERSISTED watermark advances when a toast is shown.
       const nextCursor = Math.max(requestedCursor ?? 0, page.cursor);
       this.islandActivityCursor = nextCursor;
-      this.saveIslandActivityCursor(userId, nextCursor);
       // A missing local cursor is a baseline read by contract: never surface
       // historical bot activity on the first launch of this feature.
-      if (requestedCursor === null) return;
-      for (const message of this.islandActivityMessages(page.events)) {
-        this.showActivityNotifier(message);
+      if (requestedCursor === null) {
+        this.saveIslandActivityCursor(userId, nextCursor);
+        return;
       }
+      const fresh = this.validActivityEvents(page.events)
+        .filter((event) => event.seq > requestedCursor)
+        .sort((a, b) => a.seq - b.seq);
+      if (!fresh.length) return;
+      this.islandActivityPending.push(...fresh);
+      // New claims mean the island has grown — light the existing "!" the same
+      // way the lazy startup probe does, from the same server snapshot.
+      void this.refreshIslandGiftsBadge();
+      this.flushIslandActivityToast();
     } catch {
       // Activity is ambient and must never disrupt gameplay or session sync.
       // The unchanged cursor makes the next foreground/timer edge retry safely.
@@ -4548,6 +4628,17 @@ export class Feed {
     this.presentNextActivityNotifier();
   }
 
+  /** Take the toast off screen immediately (it was acted on). */
+  private hideActivityNotifier(): void {
+    if (this.activityNotifierTimer != null) {
+      window.clearTimeout(this.activityNotifierTimer);
+      this.activityNotifierTimer = null;
+    }
+    this.activityNotifierEl?.classList.remove('activity-toast--show');
+    this.activityNotifierActive = false;
+    this.activityNotifierQueue = [];
+  }
+
   private presentNextActivityNotifier(): void {
     const text = this.activityNotifierQueue.shift();
     if (!text) {
@@ -4558,9 +4649,20 @@ export class Feed {
     let el = this.activityNotifierEl;
     if (!el) {
       el = document.createElement('div');
-      el.className = 'activity-toast';
+      el.className = 'activity-toast activity-toast--tappable';
       el.setAttribute('role', 'status');
       el.setAttribute('aria-live', 'polite');
+      // The toast is about the player's island, so it is the shortest way there:
+      // one tap runs the exact bar-tab chain (close what is open, mark the tab,
+      // open the island) — where the ceremony and the gifts already live.
+      el.addEventListener('pointerdown', (event) => event.stopPropagation());
+      el.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.hideActivityNotifier();
+        const metaTab = this.feedBarEl?.querySelector<HTMLElement>('[data-bar-tab="meta"]');
+        if (metaTab) metaTab.click();
+        else this.openIslandWorld();
+      });
       this.viewport.appendChild(el);
       this.activityNotifierEl = el;
     }
@@ -4796,6 +4898,9 @@ export class Feed {
     this.hudEl?.classList.remove('hud--chest-lift');   // scrim gone → drop the HUD lift
     // A card still in the air keeps the bar in its lifted layer until it lands.
     this.restoreBarAfterCardDrop();
+    // The smart moment: the player's own series just ended, attention is free —
+    // one extra read of the owner activity feed rides that pause.
+    void this.pollIslandActivity();
     this.stopChestSparks();
     const chest = this.chestEl;
     if (chest) {
@@ -6732,6 +6837,9 @@ export class Feed {
   }
 
   private applyActiveStates() {
+    // Returning to browse (or reaching a win screen) is when a held "someone
+    // played yours" toast is finally allowed on screen.
+    this.flushIslandActivityToast();
     this.frames.forEach((_f, i) => {
       this.setFramePaused(i, this.shouldPauseFrame(i));
       this.tryRevealFrame(i);
@@ -6956,6 +7064,9 @@ export class Feed {
       this.pauseAllFrames();
       return;
     }
+    // Back from a pause: exactly ONE catch-up read (the interval keeps its own
+    // rhythm, and nothing is polled while the app is away).
+    void this.pollIslandActivity();
     this.applyActiveStates();
     this.tryRevealFrame(this.realIndex());
     this.scheduleWarmNext();
