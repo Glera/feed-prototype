@@ -506,7 +506,11 @@ export function parseSequencingDebugShadowVsActualV1(value) {
     }
 
     let verdict;
-    if (shadowPlan === null) verdict = 'absent';
+    // The contradiction is decided before `matchesActual` is read at all: a unit
+    // that carries both a plan and a stated absence must never render as
+    // agreement just because the plan happens to claim one.
+    if (shadowPlan !== null && absence !== null) verdict = 'unknown';
+    else if (shadowPlan === null) verdict = 'absent';
     else if (shadowPlan.matchesActual === true) verdict = 'match';
     else if (shadowPlan.matchesActual === false) verdict = 'mismatch';
     else verdict = 'unknown';

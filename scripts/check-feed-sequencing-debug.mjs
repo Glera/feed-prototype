@@ -787,6 +787,14 @@ const vsBoth = parseSequencingDebugShadowVsActualV1({
   units: [{ ...VS_UNIT_MATCH, absence: { reason: 'queued', detail: null } }],
 });
 assert.ok(vsBoth.warnings.some((text) => text.includes('carries both a shadowPlan and an absence')));
+// The unit still says matchesActual: true. A contradictory unit must not be
+// readable as agreement — the drift decides the verdict before the boolean does.
+assert.equal(vsBoth.units[0].shadowPlan.matchesActual, true);
+assert.equal(
+  vsBoth.units[0].verdict,
+  'unknown',
+  'a unit claiming both a verdict and a reason for having none is never a match',
+);
 const vsNeither = parseSequencingDebugShadowVsActualV1({
   ...VS_FULL,
   units: [{ ...VS_UNIT_MATCH, shadowPlan: null, absence: null }],
