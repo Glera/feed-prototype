@@ -889,6 +889,8 @@ body {
 }
 .feed-bar__icon--active svg * { stroke: rgba(255, 255, 255, 0.96); }
 .feed-bar__icon:active { background: rgba(255, 255, 255, 0.18); }
+/* "!" attention badge on a bottom-bar tab (daily rewards ready to claim, island
+   gifts waiting to be collected). One look for every tab that can ask for a tap. */
 .feed-bar__daily-alert {
   position: absolute;
   top: 2px;
@@ -3149,8 +3151,9 @@ body {
   height: 100%;
   object-fit: cover;
 }
-/* The initial sits under the photo; if the photo fails it is removed and the
-   initial shows through (fallback bound in renderFriendsHud). */
+/* Placeholder for a friend with NO photo (or whose photo failed to load — see
+   the fallback bound in renderFriendsHud). It is never drawn over a real photo:
+   the name is already written under the cell. */
 .isln-friend__initial { position: relative; z-index: 0; }
 .isln-friend--bot { border-color: rgba(88, 166, 255, 0.5); box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.28) inset; }
 .isln-friend--empty,

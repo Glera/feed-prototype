@@ -37,12 +37,12 @@ import {
   apiGetCatalogFeedAuthorityRequired,
   apiGetGeneratedOfferRequired,
   apiGetCatalogTicketSpecsRequired, ApiRequestError,
-  apiDailySync, apiDailyClaim, currentTzOffsetMinutes,
+  apiDailySync, apiDailyClaimRequired, currentTzOffsetMinutes,
   apiCreateChallenge, apiAcceptChallenge, apiChallengeInbox,
   apiIslandActivity, apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept,
   apiIslandFriendRemove, apiIslandFriendBlock,
   apiIslandVisitAwardFromChest, apiIslandVisitAwardResolve,
-  apiIslandWriteAccess, apiPublicIsland,
+  apiIslandWriteAccess, apiPublicIsland, apiIslandState,
   type IslandActivityEvent, type IslandFriend, type IslandVisitAward,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
   type CatalogAllocateAuthorizedResultV2,
@@ -294,6 +294,9 @@ function ticketUid(): string {
 }
 
 const ANALYTICS_POLL_MS = 1000;    // fallback for older non-SWIPE exports
+// Backoff for an optimistic daily claim whose response was lost. The endpoint is
+// idempotent by quest id, so a repeat is a re-read, never a second payout.
+const DAILY_CLAIM_RETRY_DELAYS_MS = [1500, 4000, 9000];
 const FRAME_READY_FALLBACK_MS = 900;
 const STAGED_READY_FALLBACK_MS = 7000;
 const FRAME_REVEAL_DELAY_MS = 90;
@@ -597,6 +600,17 @@ export class Feed {
   private dailyClaiming = new Set<string>();
   private dailyNavBtnEl: HTMLButtonElement | null = null;
   private dailyNavAlertEl: HTMLElement | null = null;
+  // Island ("Мета") tab attention badge: set only when the OWNER island has gifts
+  // waiting. Both element refs stay null unless that tab exists in this build,
+  // which is what keeps the badge independent of the island cohort gate.
+  private islandNavBtnEl: HTMLButtonElement | null = null;
+  private islandNavAlertEl: HTMLElement | null = null;
+  private islandGiftsPending = false;
+  private islandGiftsProbing = false;
+  // Optimistic meta rewards: predicted puzzle pieces still flying into the HUD
+  // counter, and the exact server correction waiting for them to land.
+  private metaPuzzleFlights = 0;
+  private pendingMetaPuzzleReconcile = 0;
   // Telemetry (D3) state: which unit is on-screen, since when, and per-show guards.
   private shownIndex = -1;
   private shownAt = 0;
@@ -997,6 +1011,9 @@ export class Feed {
       void this.processPendingFriendAccept();
       this.startIslandActivityPolling();
     }
+    // One lazy probe for the island "!" badge. Independent of the cohort gate
+    // above: it no-ops unless the Meta tab was actually mounted.
+    void this.refreshIslandGiftsBadge();
     this.scheduleGeneratedOfferPrefetch();
   }
 
@@ -2747,6 +2764,41 @@ export class Feed {
     }
   }
 
+  private updateIslandNavAlert(): void {
+    const ready = this.islandGiftsPending;
+    if (this.islandNavAlertEl) this.islandNavAlertEl.hidden = !ready;
+    if (this.islandNavBtnEl) {
+      this.islandNavBtnEl.classList.toggle('feed-bar__icon--attention', ready);
+      this.islandNavBtnEl.setAttribute('aria-label', ready ? 'Мета, есть что собрать' : 'Мета');
+    }
+  }
+
+  private setIslandGiftsPending(pending: boolean): void {
+    if (this.islandGiftsPending === pending) return;
+    this.islandGiftsPending = pending;
+    this.updateIslandNavAlert();
+  }
+
+  /** Cheapest existing way to learn whether the island has anything to collect:
+   *  ONE lazy GET /api/island/state (the same owner snapshot the island itself
+   *  hydrates from — `pending_gifts` is server-owned there). No new route, off
+   *  every hot path, and silent on failure: no network simply means no badge.
+   *  Skipped entirely when this build has no island tab. */
+  private async refreshIslandGiftsBadge(): Promise<void> {
+    if (!this.islandNavAlertEl || !getInitData()) return;
+    if (this.islandGiftsProbing) return;
+    this.islandGiftsProbing = true;
+    try {
+      const snapshot = await apiIslandState();
+      const buildings = snapshot.state?.buildings ?? [];
+      this.setIslandGiftsPending(buildings.some((building) => (building.pending_gifts ?? 0) > 0));
+    } catch {
+      /* offline / not authenticated — leave the badge as it is */
+    } finally {
+      this.islandGiftsProbing = false;
+    }
+  }
+
   private showDailyPanel(): void {
     this.dailyOpen = true;
     this.applyActiveStates();   // freeze + mute the feed mechanic behind daily
@@ -2834,7 +2886,10 @@ export class Feed {
       btn.className = 'daily-panel__claim';
       const claiming = this.dailyClaiming.has(quest.id);
       btn.disabled = !quest.completed || quest.claimed || claiming;
-      btn.textContent = claiming ? 'Начисляем' : quest.claimed ? 'Получено' : quest.completed ? 'Забрать' : 'В процессе';
+      // `claimed` wins over `claiming`: the optimistic claim marks the quest as
+      // taken the instant it is tapped, so the row must read "Получено" while the
+      // request is still in flight rather than flashing an "Начисляем" wait state.
+      btn.textContent = quest.claimed ? 'Получено' : claiming ? 'Начисляем' : quest.completed ? 'Забрать' : 'В процессе';
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         void this.claimDailyQuest(quest.id, btn, reward);
@@ -2866,6 +2921,14 @@ export class Feed {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
 
+  // Optimistic claim (UX): the reward animation and the LOCAL puzzle delta start
+  // in the same tick as the tap, and the claim request runs in parallel with the
+  // animation instead of gating it. The server stays the only authority over the
+  // balance — its answer is a reconcile, not the trigger:
+  //   • success            → adopt the server state/balance silently;
+  //   • determined refusal → undo the local delta and re-render from the server;
+  //   • lost response      → keep the optimistic state and retry (the claim is
+  //                          idempotent by quest id, see apiDailyClaimRequired).
   private async claimDailyQuest(
     questId: string,
     button: HTMLButtonElement,
@@ -2883,24 +2946,115 @@ export class Feed {
       x: sourceRect.left - viewportRect.left + sourceRect.width / 2,
       y: sourceRect.top - viewportRect.top + sourceRect.height / 2,
     };
+    // Double-tap stays impossible on two independent locks: the in-flight set AND
+    // the optimistic `claimed` flag (which makes `reward` 0 on a second entry).
     this.dailyClaiming.add(questId);
     button.disabled = true;
-    button.textContent = 'Начисляем';
-    const state = await apiDailyClaim(questId);
-    if (!state) {
-      this.dailyClaiming.delete(questId);
-      button.textContent = 'Ошибка';
-      window.setTimeout(() => this.renderDailyPanel(), 700);
-      return;
-    }
-    this.dailyState = state;
+    button.textContent = 'Получено';
+    if (before) before.claimed = true;
     this.updateDailyNavAlert();
+
+    let animationDone = false;
+    let deferredReconcile: (() => void) | null = null;
+    // The server answer may land while pieces are still in flight; hold it until
+    // the animation has finished so the counter keeps its landing cadence and the
+    // correction is invisible.
+    const reconcile = (apply: () => void) => {
+      if (animationDone) apply();
+      else deferredReconcile = apply;
+    };
+
+    // Started BEFORE the animation, not after it: the request and the reward fly
+    // together, so the player never waits for the round trip.
+    void this.sendDailyClaim(questId, reward, reconcile);
+
     this.launchDailyPuzzleReward(rewardEl, origin, reward, puzzleBalanceBeforeClaim + reward, () => {
-      this.dailyClaiming.delete(questId);
-      this.applyServerPuzzles(state.puzzle_balance);
-      this.renderDailyPanel();
-      this.updateDailyNavAlert();
+      animationDone = true;
+      const pending = deferredReconcile;
+      deferredReconcile = null;
+      if (pending) pending();
+      else this.renderDailyPanel();
     });
+  }
+
+  private async sendDailyClaim(
+    questId: string,
+    reward: number,
+    reconcile: (apply: () => void) => void,
+  ): Promise<void> {
+    try {
+      const state = await apiDailyClaimRequired(questId);
+      reconcile(() => {
+        this.dailyClaiming.delete(questId);
+        this.dailyState = state;
+        this.applyServerPuzzles(state.puzzle_balance);
+        this.renderDailyPanel();
+        this.updateDailyNavAlert();
+      });
+    } catch (error) {
+      const status = error instanceof ApiRequestError ? error.status : 0;
+      const refused = status >= 400 && status < 500;
+      if (!refused) {
+        // Network / timeout / server fault: nothing is known about the claim, so
+        // the optimistic state stays and the idempotent claim is retried in the
+        // background. If every attempt fails the next /daily/sync reconciles.
+        this.dailyClaiming.delete(questId);
+        this.scheduleDailyClaimRetry(questId, reward);
+        return;
+      }
+      reconcile(() => {
+        this.dailyClaiming.delete(questId);
+        // The server said no. Take the optimistic reward back and re-render from
+        // the server — no rollback animation, just an honest counter and a line
+        // of text about what happened.
+        this.rollbackOptimisticPuzzles(reward);
+        this.showActivityNotifier(this.dailyClaimRefusalText(error));
+        void this.syncDaily(false);
+      });
+    }
+  }
+
+  private dailyClaimRefusalText(error: unknown): string {
+    const status = error instanceof ApiRequestError ? error.status : 0;
+    if (status === 409) return 'Задание ещё не выполнено';
+    if (status === 404) return 'Задание обновилось — награда недоступна';
+    return 'Не удалось забрать награду';
+  }
+
+  /** Silently take back a local reward the server refused. The counter is
+   *  corrected, never animated backwards. */
+  private rollbackOptimisticPuzzles(amount: number): void {
+    const next = Math.max(0, this.totalPuzzles - Math.max(0, Math.round(amount)));
+    if (next === this.totalPuzzles) return;
+    this.totalPuzzles = next;
+    this.updatePuzzleCounter();
+  }
+
+  /** Bounded background retry of a claim whose response was lost. Safe because
+   *  the endpoint is idempotent by quest id — a duplicate claim re-reads the same
+   *  state and the puzzle award is keyed, so it can never pay twice. */
+  private scheduleDailyClaimRetry(questId: string, reward: number, attempt = 0): void {
+    if (attempt >= DAILY_CLAIM_RETRY_DELAYS_MS.length) return;
+    window.setTimeout(() => {
+      void (async () => {
+        try {
+          const state = await apiDailyClaimRequired(questId);
+          this.dailyState = state;
+          this.applyServerPuzzles(state.puzzle_balance);
+          this.renderDailyPanel();
+          this.updateDailyNavAlert();
+        } catch (error) {
+          const status = error instanceof ApiRequestError ? error.status : 0;
+          if (status >= 400 && status < 500) {
+            this.rollbackOptimisticPuzzles(reward);
+            this.showActivityNotifier(this.dailyClaimRefusalText(error));
+            void this.syncDaily(false);
+            return;
+          }
+          this.scheduleDailyClaimRetry(questId, reward, attempt + 1);
+        }
+      })();
+    }, DAILY_CLAIM_RETRY_DELAYS_MS[attempt]);
   }
 
   private launchDailyPuzzleReward(
@@ -4412,8 +4566,35 @@ export class Feed {
     for (let k = 0; k < count; k++) {
       const jx = (Math.random() - 0.5) * 30;
       const jy = (Math.random() - 0.5) * 22;
-      window.setTimeout(() => this.flyOnePuzzle(cx + jx, cy + jy, undefined, true, 3200), k * 85);
+      this.metaPuzzleFlights += 1;
+      window.setTimeout(() => this.flyOnePuzzle(cx + jx, cy + jy, () => {
+        this.metaPuzzleFlights = Math.max(0, this.metaPuzzleFlights - 1);
+        this.flushMetaPuzzleReconcile();
+      }, true, 3200), k * 85);
     }
+  }
+
+  // Server reconcile for an OPTIMISTIC meta reward: `delta` is the exact
+  // difference between what the island predicted locally and what the server
+  // actually granted (0 for a capped/disabled collect, or a different per-gift
+  // rate). It is applied silently and only once no predicted piece is still in
+  // flight, so the correction never fights the landing animation.
+  private reconcilePuzzlesFromMeta(delta: number): void {
+    if (!Number.isFinite(delta)) return;
+    const rounded = Math.round(delta);
+    if (rounded === 0) return;
+    this.pendingMetaPuzzleReconcile += rounded;
+    this.flushMetaPuzzleReconcile();
+  }
+
+  private flushMetaPuzzleReconcile(): void {
+    if (this.metaPuzzleFlights > 0 || this.pendingMetaPuzzleReconcile === 0) return;
+    const delta = this.pendingMetaPuzzleReconcile;
+    this.pendingMetaPuzzleReconcile = 0;
+    const next = Math.max(0, this.totalPuzzles + delta);
+    if (next === this.totalPuzzles) return;
+    this.totalPuzzles = next;
+    this.updatePuzzleCounter();
   }
 
   // Drop one collection card. Like stars/puzzles it pops UP OUT of the gift first
@@ -5234,6 +5415,20 @@ export class Feed {
         this.dailyNavBtnEl = icon;
         this.dailyNavAlertEl = alert;
         this.updateDailyNavAlert();
+      }
+      if (tab.name === 'meta') {
+        // Same "!" as daily, for gifts piled on the player's own island. Bound
+        // here rather than at the gate, so a build without the Meta tab simply
+        // has no badge (and never probes for one).
+        const alert = document.createElement('span');
+        alert.className = 'feed-bar__daily-alert';
+        alert.textContent = '!';
+        alert.hidden = true;
+        alert.setAttribute('aria-hidden', 'true');
+        icon.appendChild(alert);
+        this.islandNavBtnEl = icon;
+        this.islandNavAlertEl = alert;
+        this.updateIslandNavAlert();
       }
       if (tab.name === 'collections') {
         this.collectionsBtnEl = icon;
@@ -7019,6 +7214,12 @@ export class Feed {
       // someone else's — both are the current user's puzzle balance (F009). Owner
       // accrual stays gated to the own island inside collectReward.
       addPuzzles: (n: number, from?: { x: number; y: number }) => this.addPuzzlesFromMeta(n, from),
+      // The optimistic collect predicts the reward locally; this is where the
+      // server's exact amount silently wins.
+      reconcilePuzzles: (delta: number) => this.reconcilePuzzlesFromMeta(delta),
+      // The island already knows the server-owned gift counts it just drew, so
+      // the nav badge follows a collect with no extra request.
+      onPendingGifts: (total: number) => this.setIslandGiftsPending(total > 0),
     }));
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
@@ -7049,12 +7250,15 @@ export class Feed {
     for (const f of shown) {
       const name = f.first_name || f.username || 'Друг';
       const initial = (name.trim()[0] || '?').toUpperCase();
+      // The name is already written under the cell, so a letter over a real photo
+      // is pure noise: the initial is a PLACEHOLDER for a missing photo only, and
+      // it is inserted (below) if the photo fails to load.
       const inner = f.photo_url
-        ? `<img src="${this.esc(f.photo_url)}" alt="" draggable="false"><span class="isln-friend__initial">${this.esc(initial)}</span>`
-        : `<span>${this.esc(initial)}</span>`;
+        ? `<img src="${this.esc(f.photo_url)}" alt="" draggable="false">`
+        : `<span class="isln-friend__initial">${this.esc(initial)}</span>`;
       cells +=
         '<div class="isln-friend-cell">' +
-          `<button type="button" class="isln-friend${f.is_bot ? ' isln-friend--bot' : ''}" data-friend-visit="${f.user_id}" aria-label="${this.esc(name)}">${inner}</button>` +
+          `<button type="button" class="isln-friend${f.is_bot ? ' isln-friend--bot' : ''}" data-friend-visit="${f.user_id}" data-initial="${this.esc(initial)}" aria-label="${this.esc(name)}">${inner}</button>` +
           `<div class="story__name isln-friend__name">${this.esc(name)}</div>` +
         '</div>';
     }
@@ -7081,9 +7285,18 @@ export class Feed {
         '<div class="story__name isln-friend__name" aria-hidden="true">&nbsp;</div>' +
       '</div>';
     el.innerHTML = cells;
-    // Photo fallback: on load error drop the <img> so the initial shows through.
+    // Photo fallback: only when the photo actually fails does the cell fall back
+    // to the initial placeholder.
     el.querySelectorAll<HTMLImageElement>('.isln-friend img').forEach((img) =>
-      img.addEventListener('error', () => img.remove(), { once: true }));
+      img.addEventListener('error', () => {
+        const cell = img.closest<HTMLElement>('.isln-friend');
+        img.remove();
+        if (!cell || cell.querySelector('.isln-friend__initial')) return;
+        const placeholder = document.createElement('span');
+        placeholder.className = 'isln-friend__initial';
+        placeholder.textContent = cell.dataset.initial || '?';
+        cell.appendChild(placeholder);
+      }, { once: true }));
     el.querySelectorAll<HTMLElement>('[data-friend-visit]').forEach((b) =>
       b.addEventListener('click', () => this.openFriendIsland(Number(b.dataset.friendVisit))));
     el.querySelectorAll<HTMLElement>('[data-friend-invite]').forEach((b) =>
@@ -7746,7 +7959,12 @@ export class Feed {
     const ov = this.overlayEl;
     // After leaving a visited (guest) island, the meta tab reopens the OWNER's own
     // island — a runtime friend visit / deep-link must not stick (§4.4).
-    if (ov?.classList.contains('island-world')) this.publicIsland = null;
+    if (ov?.classList.contains('island-world')) {
+      this.publicIsland = null;
+      // Coming back from the island: re-read what is still collectable there so
+      // the "!" badge matches the server rather than the last drawn frame.
+      void this.refreshIslandGiftsBadge();
+    }
     const storyFrame = this.storyFrame;
     if (storyFrame) {
       this.pauseStoryFrame(true);
