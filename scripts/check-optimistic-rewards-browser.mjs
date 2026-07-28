@@ -12,7 +12,9 @@
  *   3. daily claim, response lost (503)  → the optimistic state stays and the
  *      idempotent claim is retried in the background;
  *   4. island collect, server stalls     → the gift badge clears and the puzzles
- *      fly immediately; a smaller server grant (daily_cap) is reconciled down.
+ *      fly immediately; a smaller server grant (daily_cap) is reconciled down,
+ *      and the idempotent claim id is written under the USER-SCOPED key while a
+ *      legacy device-wide map (possibly another account's) is left untouched.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -26,7 +28,7 @@ import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const buildRoot = mkdtempSync(path.join(tmpdir(), 'optimistic-rewards-browser-'));
-const port = 5241;
+const port = Number(process.env.OPTIMISTIC_REWARDS_PORT || 5241);
 const origin = `http://127.0.0.1:${port}`;
 
 const build = spawnSync(
@@ -294,6 +296,17 @@ try {
   assert.equal(backend.puzzleBalance, 14, 'the server must award exactly once across retries');
 
   // ── 4. island collect: instant badge clear + exact server reconcile ────────
+  // A leftover device-wide claim map from BEFORE per-user scoping. Claim ids are
+  // what make a repeated collect a replay of the same append-only receipt, so the
+  // migration here is conservative in the other direction: the legacy map is
+  // never mutated or wholesale-copied (other accounts may still owe a replay).
+  const COLLECT_CLAIM_KEY = 'island-collect-claims-v1';
+  const SCOPED_COLLECT_CLAIM_KEY = `${COLLECT_CLAIM_KEY}:79123`;
+  const FOREIGN_CLAIMS = { 'ffffffff-ffff-4fff-8fff-ffffffffffff': 'someone-elses-claim' };
+  await page.evaluate(
+    ([key, value]) => localStorage.setItem(key, JSON.stringify(value)),
+    [COLLECT_CLAIM_KEY, FOREIGN_CLAIMS],
+  );
   backend.collectDelayMs = 1500;
   backend.collectDisposition = 'daily_cap';
   backend.collectPuzzles = 0;          // capped: the server grants nothing
@@ -337,6 +350,22 @@ try {
   // Nothing left to collect — the badge must clear without another request.
   await islandAlert.waitFor({ state: 'hidden', timeout: 8000 });
 
+  // The claim id was filed under THIS user's key; the legacy device-wide map is
+  // byte-identical to what it was before the collect.
+  const claimStorage = await page.evaluate(
+    ([scoped, legacy]) => ({
+      scoped: localStorage.getItem(scoped),
+      legacy: localStorage.getItem(legacy),
+    }),
+    [SCOPED_COLLECT_CLAIM_KEY, COLLECT_CLAIM_KEY],
+  );
+  assert.notEqual(claimStorage.scoped, null, 'the collect claim id must be stored under the user-scoped key');
+  assert.deepEqual(
+    JSON.parse(claimStorage.legacy),
+    FOREIGN_CLAIMS,
+    'a legacy device-wide claim map must be left untouched, never adopted or cleared',
+  );
+
   // ── 5. friend avatars: a letter is a placeholder, never a photo overlay ────
   await page.locator('[data-bar-tab="feed"]').click();
   await page.locator('.island-world').waitFor({ state: 'detached', timeout: 8000 });
@@ -365,7 +394,7 @@ try {
   );
   assert.equal(await brokenPhoto.locator('img').count(), 0);
 
-  console.log('optimistic rewards browser: instant daily claim + honest refusal rollback + idempotent retry + island collect reconcile + island nav badge + avatar placeholder verified');
+  console.log('optimistic rewards browser: instant daily claim + honest refusal rollback + idempotent retry + island collect reconcile + user-scoped claim id with untouched legacy map + island nav badge + avatar placeholder verified');
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));
