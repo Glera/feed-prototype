@@ -693,6 +693,8 @@ export class Feed {
   // Island Social Core (§4.4): friend HUD cells. Only mounted/loaded under
   // VITE_ISLAND_ENABLED; visible across every view because the HUD is.
   private islandFriends: IslandFriend[] = [];
+  // The friends-row cell whose avatar is currently "away" on a visited island.
+  private guestAvatarCell: HTMLElement | null = null;
   private friendsHudEl: HTMLElement | null = null;
   private friendAcceptCode: string | null = null;
   private storiesMomentumFrame: number | null = null;
@@ -5451,9 +5453,15 @@ export class Feed {
       icon.addEventListener('pointerdown', (e) => e.stopPropagation());
       icon.addEventListener('click', (e) => {
         e.stopPropagation();
-        // Bottom nav stays available on the meta: re-tapping the open meta is a
-        // no-op; tapping any other tab closes the current overlay first, then opens.
-        if (tab.name === 'meta' && this.overlayEl?.classList.contains('island-world')) return;
+        // Bottom nav stays available on the meta: re-tapping the OWN open island
+        // is a no-op; tapping any other tab closes the current overlay first,
+        // then opens. On a friend's island every button — including "Мета" — is
+        // an exit into that tab (there, "Мета" means "back to my own island").
+        if (
+          tab.name === 'meta'
+          && !this.publicIsland
+          && this.overlayEl?.classList.contains('island-world')
+        ) return;
         if (this.overlayOpen) this.closeOverlay();
         switcher.querySelectorAll('.feed-bar__icon--active').forEach((el) => el.classList.remove('feed-bar__icon--active'));
         icon.classList.add('feed-bar__icon--active');
@@ -7213,13 +7221,21 @@ export class Feed {
     if (this.overlayOpen) return;
     this.overlayOpen = true;
     this.applyActiveStates();
+    // A guest is "nowhere" in the bar: visiting a friend belongs to no tab, so
+    // no tab may read as active while their island is up.
+    const guestOwner = this.publicIsland?.owner ?? null;
+    if (guestOwner) {
+      this.feedBarEl?.querySelectorAll('.feed-bar__icon--active')
+        .forEach((el) => el.classList.remove('feed-bar__icon--active'));
+    }
 
     const ov = document.createElement('div');
     ov.className = 'island-world';
     this.viewport.appendChild(ov);
     this.overlayEl = ov;
     const islandLevel = this.levelForStars(this.totalStars);
-    void import('./island').then((m) => m.renderIslandWorld(ov, {
+    void import('./island').then((m) => {
+      m.renderIslandWorld(ov, {
       close: () => this.closeOverlay(),
       level: islandLevel,
       puzzles: () => this.totalPuzzles,
@@ -7237,10 +7253,78 @@ export class Feed {
       onPendingGifts: (total: number) => this.setIslandGiftsPending(total > 0),
       // The island owns the upgrade watermark while it is open: the badge clears
       // as each ceremony is shown, without another /island/state probe.
-      onPendingUpgrades: (total: number) => this.setIslandUpgradesPending(total > 0),
-    }));
+        onPendingUpgrades: (total: number) => this.setIslandUpgradesPending(total > 0),
+      });
+      // The island markup now exists: fly the friend's own avatar out of the
+      // friends row into the namebar so the visit is visibly the same person.
+      if (guestOwner && ov.isConnected) this.flyFriendAvatarToIsland(guestOwner);
+    });
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
+  }
+
+  // ── Guest visit: the friend's avatar travels with the player ───────────────
+  // Tapping a friend cell hands that exact face over to the visited island's
+  // namebar (and hands it back on exit), so "this is the same person" is read
+  // from motion, not from a re-drawn picture. A visit opened from a deep link
+  // has no source cell: the namebar is filled statically and nothing flies.
+  private flyFriendAvatarToIsland(owner: PublicIslandView['owner']): void {
+    const anchor = this.overlayEl?.querySelector<HTMLElement>('[data-guest-ava]');
+    if (!anchor) return;
+    const name = owner.first_name || owner.username || 'Друг';
+    const initial = (name.trim()[0] || '?').toUpperCase();
+    const cell = this.friendsHudEl?.querySelector<HTMLElement>(`[data-friend-visit="${owner.id}"]`) ?? null;
+    anchor.innerHTML = cell
+      ? cell.innerHTML
+      : (owner.photo_url
+        ? `<img src="${this.esc(owner.photo_url)}" alt="" draggable="false">`
+        : `<span class="isln-friend__initial">${this.esc(initial)}</span>`);
+    if (!cell) return;
+    // The row keeps the cell's slot (visibility, not display) so nothing reflows.
+    cell.classList.add('isln-friend--away');
+    this.guestAvatarCell = cell;
+    const from = cell.getBoundingClientRect();
+    const to = anchor.getBoundingClientRect();
+    anchor.style.visibility = 'hidden';
+    this.animateAvatarFlight(anchor.innerHTML, from, to, () => { anchor.style.visibility = ''; });
+  }
+
+  /** Exit from a guest island: the avatar flies back into its row slot. */
+  private returnFriendAvatarFromIsland(): void {
+    const cell = this.guestAvatarCell;
+    this.guestAvatarCell = null;
+    if (!cell) return;
+    const reveal = () => cell.classList.remove('isln-friend--away');
+    const anchor = this.overlayEl?.querySelector<HTMLElement>('[data-guest-ava]');
+    const from = anchor?.getBoundingClientRect();
+    const to = cell.getBoundingClientRect();
+    if (!anchor || !from || !from.width || !to.width) { reveal(); return; }
+    anchor.style.visibility = 'hidden';
+    this.animateAvatarFlight(anchor.innerHTML, from, to, reveal);
+  }
+
+  /** One arced flight of an avatar clone between two viewport rects. The clone
+   *  lives on the viewport layer, so it survives the island overlay's removal. */
+  private animateAvatarFlight(html: string, from: DOMRect, to: DOMRect, onDone: () => void): void {
+    const vp = this.viewport.getBoundingClientRect();
+    const fly = document.createElement('div');
+    fly.className = 'isln-friend isln-friend--fly';
+    fly.innerHTML = html;
+    fly.style.cssText =
+      `position:absolute;left:${from.left - vp.left}px;top:${from.top - vp.top}px;`
+      + `width:${from.width}px;height:${from.height}px;z-index:3400;`;
+    this.viewport.appendChild(fly);
+    const dx = (to.left + to.width / 2) - (from.left + from.width / 2);
+    const dy = (to.top + to.height / 2) - (from.top + from.height / 2);
+    const scale = from.width ? to.width / from.width : 1;
+    const finish = () => { fly.remove(); onDone(); };
+    if (!fly.animate) { finish(); return; }
+    const anim = fly.animate([
+      { transform: 'translate(0px, 0px) scale(1)' },
+      { transform: `translate(${dx * 0.5}px, ${dy * 0.5 - 16}px) scale(${(1 + scale) / 2})`, offset: 0.55 },
+      { transform: `translate(${dx}px, ${dy}px) scale(${scale})` },
+    ], { duration: 440, easing: 'cubic-bezier(0.3, 0.9, 0.3, 1)', fill: 'forwards' });
+    anim.addEventListener('finish', finish, { once: true });
   }
 
   // ── Island Social Core (§4.4): friend HUD cells ───────────────────────────
@@ -7978,6 +8062,9 @@ export class Feed {
     // After leaving a visited (guest) island, the meta tab reopens the OWNER's own
     // island — a runtime friend visit / deep-link must not stick (§4.4).
     if (ov?.classList.contains('island-world')) {
+      // Guest exit: hand the avatar back to its slot in the friends row before
+      // the overlay fades (the flight itself lives on the viewport layer).
+      this.returnFriendAvatarFromIsland();
       this.publicIsland = null;
       // Coming back from the island: re-read what is still collectable there so
       // the "!" badge matches the server rather than the last drawn frame.

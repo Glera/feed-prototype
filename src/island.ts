@@ -1160,9 +1160,21 @@ function board(tpl: TplId, pk: Pack): string {
 const CSS = `
 .island-world{position:absolute;top:var(--top-zone-h);left:0;right:0;bottom:var(--bar-reserve);z-index:3000;display:flex;flex-direction:column;overflow:hidden;
   background:linear-gradient(180deg,#122231 0%,#0d1118 46%,#07090f 100%);color:#fff}
+/* Guest colour grade: the whole scene sits on a violet-shifted sky, so "I am on
+   someone else's island" reads in peripheral vision alone. Own island unchanged. */
+.island-world--guest{background:linear-gradient(180deg,#241a3a 0%,#171125 46%,#0a0712 100%)}
 .isl-head{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:calc(var(--safe-top) + 12px) 14px 8px}
 .isl-namebar{position:relative;flex:0 0 auto;display:flex;justify-content:center;padding:9px 54px 3px}
 .isl-namebar__pill{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:rgba(0,0,0,.38);border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:5px 15px;font-size:12.5px;font-weight:700;color:rgba(255,255,255,.84)}
+/* Guest: the visited friend's avatar, flown in from the feed's friends row. */
+.isl-guest-ava{position:relative;width:26px;height:26px;flex:0 0 26px;margin-right:8px;border-radius:50%;
+  border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.08);overflow:hidden;
+  display:grid;place-items:center;font:900 12px/1 system-ui,sans-serif;color:#fff}
+.isl-guest-ava img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.isl-guest-ava:empty{display:none}
+/* Explicit exit from a guest scene (the bar is the other way out). */
+.isl-guestclose{position:absolute;right:14px;top:6px;width:32px;height:32px;border:1px solid rgba(255,255,255,.14);
+  border-radius:50%;background:rgba(0,0,0,.32);color:#fff;font:700 14px/1 system-ui;display:grid;place-items:center}
 .isl-share{position:absolute;right:14px;top:6px;width:32px;height:32px;border:1px solid rgba(255,255,255,.14);border-radius:50%;background:rgba(0,0,0,.32);color:#fff;font:700 18px/1 system-ui;display:grid;place-items:center}
 .isl-botbadge{margin-left:8px;background:rgba(88,166,255,.16);border:1px solid rgba(88,166,255,.42);border-radius:999px;padding:4px 10px;font-size:11px;font-weight:800;color:#9DC3FF;white-space:nowrap}
 .isl-share:disabled{opacity:.45}
@@ -1204,9 +1216,6 @@ const CSS = `
 .isl-upgrade__t{font-size:15.5px;font-weight:800;display:flex;align-items:center;gap:8px}
 .isl-upgrade__s{font-size:11.5px;font-weight:600;color:rgba(16,34,44,.6)}
 .isl-upgrade__x{background:#E8603C;color:#fff;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:900}
-.isl-cta{position:absolute;left:14px;right:14px;bottom:calc(var(--safe-bottom) + 14px);border:none;border-radius:14px;
-  padding:14px;font:inherit;font-size:15px;font-weight:800;color:#112011;background:linear-gradient(180deg,#8ff0a3,#3ccc78);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.36)}
 .isl-scrim{position:absolute;inset:0;background:rgba(4,8,12,.6);opacity:0;pointer-events:none;transition:opacity .25s;z-index:5}
 .isl-scrim--show{opacity:1;pointer-events:auto}
 .isl-sheet{position:absolute;left:0;right:0;bottom:0;background:#141d28;border-top:1px solid rgba(255,255,255,.1);color:#fff;
@@ -1310,6 +1319,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   ensureStyles();
   const publicIsland = ctx.publicIsland;
   const guest = Boolean(publicIsland);
+  // Peripheral-vision signal that this is somebody else's island (colour grade).
+  ov.classList.toggle('island-world--guest', guest);
   const S: IslandState = publicIsland
     ? {
         tokens: 0,
@@ -1658,9 +1669,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     // they stay put across views. The island only labels itself on a small backing.
     // Bot islands are always labelled as such (§4.3): a guest must be able to
     // tell a "system neighbour" island from a real player's.
-    `<div class="isl-namebar"><span class="isl-namebar__pill">🏝️ ${esc(islandLabel)}</span>${guest && publicIsland?.owner.is_bot ? '<span class="isl-botbadge" title="Системный сосед">🤖 бот</span>' : ''}${guest ? '' : '<button class="isl-share" type="button" data-share-island aria-label="Share island" title="Share island">↗</button>'}</div>` +
+    // Guest: the friend's own avatar flies out of the feed's friends row and
+    // lands in `[data-guest-ava]` next to the pill (feed.ts owns that flight),
+    // so "whose island is this" is the same face the visit was started from.
+    `<div class="isl-namebar">${guest ? '<span class="isl-guest-ava" data-guest-ava aria-hidden="true"></span>' : ''}<span class="isl-namebar__pill">🏝️ ${esc(islandLabel)}</span>${guest && publicIsland?.owner.is_bot ? '<span class="isl-botbadge" title="Системный сосед">🤖 бот</span>' : ''}${guest ? '<button class="isl-guestclose" type="button" data-guest-close aria-label="Выйти с острова">✕</button>' : '<button class="isl-share" type="button" data-share-island aria-label="Share island" title="Share island">↗</button>'}</div>` +
     '<div class="isl-worldbox"><svg viewBox="0 0 390 540" preserveAspectRatio="xMidYMid slice"></svg><div class="isl-legend" data-legend></div></div>' +
-    `<button class="isl-cta" type="button" data-guest-cta${guest ? '' : ' hidden'}>Play a series here</button>` +
     '<div class="isl-scrim" data-scrim></div>' +
     '<div class="isl-sheet" data-sheet></div>' +
     '<div class="isl-toast" data-toast></div>';
@@ -4153,11 +4166,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       if (ov.isConnected) button.disabled = false;
     }
   });
-  ov.querySelector('[data-guest-cta]')?.addEventListener('click', () => {
-    const buildings = visibleBuildings();
-    const b = buildings[Math.floor(Math.random() * buildings.length)];
-    if (b) playSeries(b);
-  });
+  // A guest plays a friend's mechanic by tapping the house / the token bobbing
+  // over it — there is no series on someone else's island, so the old
+  // "Play a series here" CTA is gone (it started a random series).
+  ov.querySelector('[data-guest-close]')?.addEventListener('click', () => ctx.close());
 
   // Paint the local cache immediately, then replace it with the authoritative
   // server snapshot. Polling keeps an already-open island fresh across devices.
