@@ -1,0 +1,188 @@
+{
+  "generatedAt": "2026-07-23T05:40:52.725Z",
+  "commit": "82498a4",
+  "runs": 20,
+  "okRuns": 20,
+  "environment": {
+    "platform": "Darwin 25.5.0 x64",
+    "cpu": "Apple M1 Pro",
+    "node": "v24.7.0",
+    "chromium": "chromium"
+  },
+  "method": {
+    "server": "vite preview (prod dist + mechanic siblings from swipe-platform)",
+    "browser": "headless desktop Chromium via Playwright",
+    "viewport": "390x844",
+    "coldCache": "fresh browser context per run",
+    "externalOriginsBlocked": true,
+    "percentile": "nearest-rank on ascending values"
+  },
+  "metrics": {
+    "fcp": {
+      "n": 20,
+      "min": 104,
+      "p50": 104,
+      "p95": 112,
+      "max": 192,
+      "mean": 110
+    },
+    "firstRenderMark": {
+      "n": 20,
+      "min": 92,
+      "p50": 94,
+      "p95": 101,
+      "max": 173,
+      "mean": 99
+    },
+    "firstCardAutoplay": {
+      "n": 20,
+      "min": 777,
+      "p50": 790,
+      "p95": 815,
+      "max": 1087,
+      "mean": 807
+    }
+  },
+  "rows": [
+    {
+      "fcp": 192,
+      "firstRenderMark": 173.39999999850988,
+      "firstCardAutoplay": 1086.5999999977648,
+      "domContentLoaded": 101.29999999701977,
+      "load": 105.59999999776483
+    },
+    {
+      "fcp": 112,
+      "firstRenderMark": 100,
+      "firstCardAutoplay": 815.1999999992549,
+      "domContentLoaded": 70.40000000223517,
+      "load": 71
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 93.70000000298023,
+      "firstCardAutoplay": 789.6000000014901,
+      "domContentLoaded": 66,
+      "load": 66.60000000149012
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 95.10000000149012,
+      "firstCardAutoplay": 787.9000000022352,
+      "domContentLoaded": 65.30000000074506,
+      "load": 65.90000000223517
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 92.40000000223517,
+      "firstCardAutoplay": 784.5,
+      "domContentLoaded": 64.40000000223517,
+      "load": 65.10000000149012
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 92.5,
+      "firstCardAutoplay": 785.8999999985099,
+      "domContentLoaded": 64.19999999925494,
+      "load": 64.79999999701977
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 93.40000000223517,
+      "firstCardAutoplay": 784.7000000029802,
+      "domContentLoaded": 64.5,
+      "load": 65.10000000149012
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 92,
+      "firstCardAutoplay": 803.1999999992549,
+      "domContentLoaded": 63.69999999925494,
+      "load": 64.29999999701977
+    },
+    {
+      "fcp": 112,
+      "firstRenderMark": 100.90000000223517,
+      "firstCardAutoplay": 785.5,
+      "domContentLoaded": 68.60000000149012,
+      "load": 69.19999999925494
+    },
+    {
+      "fcp": 108,
+      "firstRenderMark": 98.90000000223517,
+      "firstCardAutoplay": 800.3000000007451,
+      "domContentLoaded": 69.90000000223517,
+      "load": 70.60000000149012
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 93.59999999776483,
+      "firstCardAutoplay": 787.5999999977648,
+      "domContentLoaded": 65.30000000074506,
+      "load": 66
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 93.89999999850988,
+      "firstCardAutoplay": 788.7999999970198,
+      "domContentLoaded": 65.39999999850988,
+      "load": 65.89999999850988
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 92.69999999925494,
+      "firstCardAutoplay": 789.5999999977648,
+      "domContentLoaded": 64.89999999850988,
+      "load": 65.59999999776483
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 92.59999999776483,
+      "firstCardAutoplay": 797.5999999977648,
+      "domContentLoaded": 64.5,
+      "load": 65
+    },
+    {
+      "fcp": 108,
+      "firstRenderMark": 97.90000000223517,
+      "firstCardAutoplay": 799,
+      "domContentLoaded": 66.90000000223517,
+      "load": 67.60000000149012
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 92.10000000149012,
+      "firstCardAutoplay": 792.1999999992549,
+      "domContentLoaded": 63.19999999925494,
+      "load": 63.900000002235174
+    },
+    {
+      "fcp": 108,
+      "firstRenderMark": 96.30000000074506,
+      "firstCardAutoplay": 799.4000000022352,
+      "domContentLoaded": 65.10000000149012,
+      "load": 65.90000000223517
+    },
+    {
+      "fcp": 108,
+      "firstRenderMark": 97.69999999925494,
+      "firstCardAutoplay": 776.5,
+      "domContentLoaded": 66.59999999776483,
+      "load": 67.19999999925494
+    },
+    {
+      "fcp": 104,
+      "firstRenderMark": 91.90000000223517,
+      "firstCardAutoplay": 797.7000000029802,
+      "domContentLoaded": 63.900000002235174,
+      "load": 64.60000000149012
+    },
+    {
+      "fcp": 108,
+      "firstRenderMark": 96,
+      "firstCardAutoplay": 789.8999999985099,
+      "domContentLoaded": 67.10000000149012,
+      "load": 67.69999999925494
+    }
+  ]
+}

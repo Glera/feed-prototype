@@ -954,7 +954,20 @@ export class Feed {
     // Debug-panel hook: after seeding a test challenge, refresh the rail in place.
     (window as unknown as { __feedRefreshRail?: () => void }).__feedRefreshRail = () => { void this.refreshChallengeRail(); };
     this.bootServer();
+    // ── Cold-start perf marks (perf-cold-start baseline harness) ─────────────
+    // Passive User Timing marks; no behavioural effect. This one fires on the
+    // first animation frame after the synchronous build/render + preloader are
+    // committed to the DOM → approximates the first painted feed screen. Read
+    // externally via performance.getEntriesByName('perf:feed-first-render').
+    // (Browser First Contentful Paint is captured alongside as the ground truth.)
+    requestAnimationFrame(() => {
+      try { performance.mark('perf:feed-first-render'); } catch { /* no User Timing API */ }
+    });
   }
+
+  // Fires exactly once, when the first CURRENT feed card is revealed and its
+  // autoplay has been kicked off (see tryRevealFrame). Guards the one-shot mark.
+  private firstCardAutoplayMarked = false;
 
   // ── Backend (W1): identity + server-side star balance + telemetry ──────────
   // Seeds totalStars from the server so the counter survives close/reopen. The
@@ -6652,6 +6665,15 @@ export class Feed {
       this.ensureFrameAutoPlay(i);
       this.applyPendingEditor(i);
       if (i === this.realIndex()) {
+        // Cold-start perf: the first current card is now revealed AND its
+        // autoplay has been kicked off (ensureFrameAutoPlay above). Passive
+        // one-shot mark; read via performance.getEntriesByName(
+        // 'perf:first-card-autoplay'). NB: this is the host-issued startAutoPlay
+        // moment, not a verified first animation frame inside the iframe.
+        if (!this.firstCardAutoplayMarked) {
+          this.firstCardAutoplayMarked = true;
+          try { performance.mark('perf:first-card-autoplay'); } catch { /* no User Timing API */ }
+        }
         this.scheduleWarmNext();
         this.markUnitShown(i);   // revealed while current (first load / cold arrival)
         const slot = this.catalogSlotForIndex(i);
