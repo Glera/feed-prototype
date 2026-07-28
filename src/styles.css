@@ -3157,7 +3157,8 @@ body {
 .isln-friend__initial { position: relative; z-index: 0; }
 /* While the player is visiting that friend, their avatar is literally over on
    the island namebar: the row keeps the empty slot (no reflow) and the face
-   flies back into it on exit. */
+   flies back into it on exit. The whole cell hides — a name label under an empty
+   ring reads as a broken row. */
 .isln-friend--away { visibility: hidden; }
 .isln-friend--fly { pointer-events: none; will-change: transform; }
 .isln-friend--bot { border-color: rgba(88, 166, 255, 0.5); box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.28) inset; }

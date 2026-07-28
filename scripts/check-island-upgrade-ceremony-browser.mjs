@@ -440,6 +440,9 @@ try {
   await page.reload({ waitUntil: 'domcontentloaded' });
   const friendCell = page.locator('.isln-friends [data-friend-visit="90001"]');
   const letterCell = page.locator('.isln-friends [data-friend-visit="90002"]');
+  // The whole slot travels: avatar AND the name written under it.
+  const friendName = page.locator('.isln-friends .isln-friend-cell:has([data-friend-visit="90001"]) .isln-friend__name');
+  const letterName = page.locator('.isln-friends .isln-friend-cell:has([data-friend-visit="90002"]) .isln-friend__name');
   const guestAva = page.locator('.island-world [data-guest-ava]');
   const island = page.locator('.island-world');
   await friendCell.waitFor({ state: 'visible', timeout: 20_000 });
@@ -452,7 +455,9 @@ try {
   await guestAva.waitFor({ state: 'visible', timeout: 8000 });
   assert.equal(await guestAva.locator('img').count(), 1, 'а: the friend photo landed in the guest namebar');
   assert.equal(await friendCell.isVisible(), false, 'а: the avatar is away from the row during the visit');
+  assert.equal(await friendName.isVisible(), false, 'а: the name under the empty slot goes with it');
   assert.equal(await letterCell.isVisible(), true, 'а: only the visited friend leaves the row');
+  assert.equal(await letterName.isVisible(), true, 'а: the other friend keeps avatar and name');
   assert.match(
     await page.locator('.isl-namebar__pill').textContent(),
     /Photo's Island/,
@@ -477,6 +482,7 @@ try {
   await page.locator('.island-world [data-guest-close]').click();
   await island.waitFor({ state: 'detached', timeout: 8000 });
   await friendCell.waitFor({ state: 'visible', timeout: 8000 });   // а: the avatar flew home
+  assert.equal(await friendName.isVisible(), true, 'а: the name came back with the avatar');
   assert.ok(await activeTabs() > 0, 'в: leaving a guest island restores a normal active tab');
 
   // б. any bar button is an exit into that tab — including a letter-placeholder friend
@@ -490,6 +496,8 @@ try {
     'а: the letter placeholder is the same one the row shows',
   );
   assert.equal(await letterCell.isVisible(), false, 'а: the letter cell is away too');
+  assert.equal(await letterName.isVisible(), false, 'а: and so is its name');
+  if (shotDir) await page.screenshot({ path: path.join(shotDir, 'guest-row-slot-empty.png') });
   await page.locator('[data-bar-tab="collections"]').click();
   await island.waitFor({ state: 'detached', timeout: 8000 });
   await letterCell.waitFor({ state: 'visible', timeout: 8000 });

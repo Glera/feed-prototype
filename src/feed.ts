@@ -7326,8 +7326,10 @@ export class Feed {
         ? `<img src="${this.esc(owner.photo_url)}" alt="" draggable="false">`
         : `<span class="isln-friend__initial">${this.esc(initial)}</span>`);
     if (!cell) return;
-    // The row keeps the cell's slot (visibility, not display) so nothing reflows.
-    cell.classList.add('isln-friend--away');
+    // The row keeps the slot (visibility, not display) so nothing reflows — but the
+    // WHOLE cell goes, avatar and name together: a name label under an empty ring
+    // reads as a broken row, not as "they are over there".
+    this.setFriendCellAway(cell, true);
     this.guestAvatarCell = cell;
     const from = cell.getBoundingClientRect();
     const to = anchor.getBoundingClientRect();
@@ -7335,12 +7337,20 @@ export class Feed {
     this.animateAvatarFlight(anchor.innerHTML, from, to, () => { anchor.style.visibility = ''; });
   }
 
+  /** Hide/restore a whole friends-row slot (avatar + name) while its owner's
+   *  island is being visited. The button keeps its layout box, so the flight can
+   *  still measure where the avatar has to land. */
+  private setFriendCellAway(cell: HTMLElement, away: boolean): void {
+    const slot = cell.closest<HTMLElement>('.isln-friend-cell') ?? cell;
+    slot.classList.toggle('isln-friend--away', away);
+  }
+
   /** Exit from a guest island: the avatar flies back into its row slot. */
   private returnFriendAvatarFromIsland(): void {
     const cell = this.guestAvatarCell;
     this.guestAvatarCell = null;
     if (!cell) return;
-    const reveal = () => cell.classList.remove('isln-friend--away');
+    const reveal = () => this.setFriendCellAway(cell, false);
     const anchor = this.overlayEl?.querySelector<HTMLElement>('[data-guest-ava]');
     const from = anchor?.getBoundingClientRect();
     const to = cell.getBoundingClientRect();
