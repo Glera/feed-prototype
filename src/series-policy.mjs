@@ -13,3 +13,14 @@ export function seriesLength(mechanicId) {
   if (base.includes('no-orders') || base.includes('second-board')) return 1;
   return 5;
 }
+
+/** Map a 1-based series step to a built-in playable level when the mechanic
+ * owns level-shaped content. `pins-lN` is the first level of a two-level pair. */
+export function seriesGameLevel(mechanicId, seriesLevel) {
+  const base = mechanicBaseId(mechanicId || '');
+  if (base === 'pins') return seriesLevel;
+  const pinsPair = /^pins-l(\d+)$/.exec(base);
+  if (pinsPair) return Number(pinsPair[1]) + seriesLevel - 1;
+  if (base === 'short-drama') return seriesLevel;
+  return null;
+}

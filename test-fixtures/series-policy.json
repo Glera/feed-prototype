@@ -2,6 +2,9 @@
   "vectors": [
     { "mechanic_id": "pins-swipe", "levels": 2 },
     { "mechanic_id": "pins-l3-swipe", "levels": 2 },
+    { "mechanic_id": "pins-l5-swipe", "levels": 2 },
+    { "mechanic_id": "pins-l7-swipe", "levels": 2 },
+    { "mechanic_id": "pins-l9-swipe", "levels": 2 },
     { "mechanic_id": "pins-special-swipe", "levels": 2 },
     { "mechanic_id": "merge-locked-v1-swipe", "levels": 1 },
     { "mechanic_id": "marble-sort-swipe", "levels": 2 },

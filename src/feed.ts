@@ -116,7 +116,7 @@ import {
   queueControlPlaneEvent,
 } from './control-plane';
 import { levelStarReward, seriesRewards } from './rewards.mjs';
-import { seriesLength } from './series-policy.mjs';
+import { seriesGameLevel as resolveSeriesGameLevel, seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
 import { mountIslandVisitAwardCard } from './island-p2-card.mjs';
 import { burstConfetti } from './fx';
@@ -3592,15 +3592,12 @@ export class Feed {
     return true;
   }
 
-  // Which built-in game LEVEL to load for a given 1-based series level. pins maps
-  // series level N → game level N (level 1 tube, level 2 authored). Mechanics that
-  // vary by PARAMS (not levels) return null → no ?level= override.
+  // Which built-in game LEVEL to load for a given 1-based series level.
+  // `pins-lN` names the first game level in a two-level series, so every new
+  // pair follows the same data-shaped rule instead of another hard-coded case.
+  // Mechanics that vary by PARAMS (not levels) return null.
   private seriesGameLevel(mechanicId: string, seriesLevel: number): number | null {
-    const base = (mechanicId || '').replace(/-swipe$/, '');
-    if (base === 'pins-l3') return 2 + seriesLevel;      // series L1 → game level 3, L2 → game level 4
-    if (base === 'pins' || base.startsWith('pins-')) return seriesLevel;
-    if (base === 'short-drama') return seriesLevel;      // series level N → clip N
-    return null;
+    return resolveSeriesGameLevel(mechanicId, seriesLevel);
   }
 
   // First takeover of a mechanic starts its series (level 1 in progress).
@@ -6340,8 +6337,8 @@ export class Feed {
     const seriesParam = this.pendingSeriesParams.get(i);
     this.pendingSeriesParams.delete(i);   // one-shot: consumed by this mount
     // Level for this mount: the pending (series-advance) value, else the mechanic's
-    // DEFAULT game level for series-level 1 — so a fixed-level series (e.g. pins-l3 →
-    // game level 3) loads its level even on the FIRST/preview mount, not level 1.
+    // DEFAULT game level for series-level 1 — so a fixed pair (e.g. pins-l5 →
+    // game level 5) loads its art even on the FIRST/preview mount, not level 1.
     const levelParam = this.pendingLevels.get(i) ?? (this.seriesGameLevel(this.playables[i].id, 1) ?? undefined);
     this.pendingLevels.delete(i);         // one-shot
     frame.src = playableUrl(this.playables[i].id, {
