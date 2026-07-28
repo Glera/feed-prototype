@@ -104,6 +104,7 @@ window.Telegram={WebApp:{
 const WATERMARK_KEY = 'island-celebrated-stages-v1';
 const HOUSE_A = '11111111-1111-4111-8111-111111111111';   // slot 2
 const HOUSE_B = '22222222-2222-4222-8222-222222222222';   // slot 1
+const HOUSE_C = '44444444-4444-4444-8444-444444444444';   // ladder only
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ── mutable stub state: the SERVER stage is the only source of growth ────────
@@ -534,10 +535,100 @@ try {
     await page.screenshot({ path: path.join(shotDir, 'own-island-after.png') });
   }
 
+  // ══ house size grows with the stage (ladder 0 / 5 / 10) ═══════════════════
+  backend.houses = [
+    { buildingId: HOUSE_A, slot: 0, name: 'Ноль', stage: 0 },
+    { buildingId: HOUSE_B, slot: 1, name: 'Пять', stage: 5 },
+    { buildingId: HOUSE_C, slot: 2, name: 'Десять', stage: 10 },
+  ];
+  backend.revision += 1;
+  await enterIsland();
+  await openIsland();
+  await settle(1500);
+  assert.deepEqual(await scenes(), [], 'ladder: re-baselining unknown/walked-back houses is silent');
+  if (shotDir) await page.screenshot({ path: path.join(shotDir, 'house-scale-ladder.png') });
+
+  const ladder = await page.evaluate(() => {
+    const read = (slot) => {
+      const scaled = document.querySelector(`[data-house-scale="${slot}"]`);
+      const house = document.querySelector(`[data-house="${slot}"]`);
+      const transform = scaled?.getAttribute('transform') || '';
+      const match = transform.match(/scale\(([\d.]+)\)/);
+      const rect = house?.getBoundingClientRect();
+      return {
+        scale: match ? Number(match[1]) : null,
+        rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,
+      };
+    };
+    const hit = (x, y, slot) => {
+      const el = document.elementFromPoint(x, y);
+      return Boolean(el && el.closest(`[data-b="${slot}"]`));
+    };
+    const small = read(0);
+    const big = read(2);
+    // A point 12% down from the BIG house's drawn top: it must belong to that
+    // house's tap target. The same client-pixel offset from the small house's
+    // centre lands above its drawn top — and must NOT be tappable there.
+    const bigCx = big.rect.x + big.rect.width / 2;
+    const bigCy = big.rect.y + big.rect.height / 2;
+    const probeY = big.rect.y + big.rect.height * 0.12;
+    const offset = bigCy - probeY;
+    const smallRect = small.rect;
+    const smallCx = smallRect.x + smallRect.width / 2;
+    const smallCy = smallRect.y + smallRect.height / 2;
+    return {
+      slots: [read(0), read(1), read(2)],
+      bigHit: hit(bigCx, probeY, 2),
+      smallHitAtBigOffset: hit(smallCx, smallCy - offset, 0),
+      smallHitInside: hit(smallCx, smallCy - smallRect.height * 0.3, 0),
+      // Neighbouring houses must not touch, even at MAX.
+      overlap01: read(0).rect.x + read(0).rect.width > read(1).rect.x
+        && read(1).rect.x + read(1).rect.width > read(0).rect.x
+        && read(0).rect.y + read(0).rect.height > read(1).rect.y
+        && read(1).rect.y + read(1).rect.height > read(0).rect.y,
+      overlap02: read(0).rect.x + read(0).rect.width > read(2).rect.x
+        && read(2).rect.x + read(2).rect.width > read(0).rect.x
+        && read(0).rect.y + read(0).rect.height > read(2).rect.y
+        && read(2).rect.y + read(2).rect.height > read(0).rect.y,
+    };
+  });
+  const ladderInfo = JSON.stringify(ladder, null, 2);
+  const [s0, s5, s10] = ladder.slots;
+  assert.equal(s0.scale, 1, `ladder: stage 0 is the reference size\n${ladderInfo}`);
+  assert.ok(s5.scale > s0.scale && s10.scale > s5.scale, `ladder: scale grows monotonically\n${ladderInfo}`);
+  assert.ok(s10.scale > 1.24 && s10.scale <= 1.3, `ladder: stage 10 lands in the design range\n${ladderInfo}`);
+  // Ease-out: the first half of the ladder buys more than the second.
+  assert.ok((s5.scale - s0.scale) > (s10.scale - s5.scale), `ladder: early level-ups grow more\n${ladderInfo}`);
+  assert.ok(s5.rect.width > s0.rect.width && s10.rect.width > s5.rect.width, `ladder: drawn size grows too\n${ladderInfo}`);
+  assert.equal(ladder.bigHit, true, `ladder: a grown house is tappable to its drawn edge\n${ladderInfo}`);
+  assert.equal(ladder.smallHitInside, true, `ladder: a small house is tappable inside itself\n${ladderInfo}`);
+  assert.equal(ladder.smallHitAtBigOffset, false, `ladder: the hitbox follows the drawing, not the slot\n${ladderInfo}`);
+  assert.equal(ladder.overlap01, false, `ladder: neighbours do not overlap\n${ladderInfo}`);
+  assert.equal(ladder.overlap02, false, `ladder: neighbours do not overlap\n${ladderInfo}`);
+
+  // The ceremony morphs the house from its old size into the new one.
+  setStage(HOUSE_A, 4);
+  await enterIsland();
+  await openIsland();
+  await page.locator('.isl-upgrade__card').waitFor({ state: 'visible', timeout: 15_000 });
+  const morph = await page.evaluate(() => {
+    const house = document.querySelector('[data-house="0"]');
+    const animations = house ? house.getAnimations() : [];
+    return animations.map((animation) => animation.effect.getKeyframes().map((frame) => frame.transform || ''));
+  });
+  const morphInfo = JSON.stringify(morph);
+  assert.ok(morph.length > 0, `morph: the celebrated house animates its size\n${morphInfo}`);
+  const frames = morph[0];
+  const firstScale = Number((frames[0].match(/scale\(([\d.]+)\)/) || [])[1]);
+  assert.ok(firstScale > 0 && firstScale < 1, `morph: it starts from the OLD, smaller size\n${morphInfo}`);
+  assert.match(frames[frames.length - 1], /scale\(1\)|none/, `morph: it settles on the new size\n${morphInfo}`);
+  await settle();
+
   console.log(
     'island upgrade ceremony browser: silent first entry + single/×K scenes + slot-ordered queue + tap skip + '
     + 'silent re-entry + "!" badge lifecycle + mid-scene kill replay + live upgrade behind an open card + '
-    + 'removed-building prune + guest avatar flight/bar exit/✕/colour grade/no-series verified',
+    + 'removed-building prune + guest avatar flight/bar exit/✕/colour grade/no-series + '
+    + 'house scale ladder 0/5/10 with hitbox and ceremony morph verified',
   );
 } finally {
   await browser?.close();

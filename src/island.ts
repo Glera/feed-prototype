@@ -968,6 +968,30 @@ function stageColor(stage: number): string {
 function stageFillOpacity(stage: number): number {
   return Math.round((0.34 + stage * 0.066) * 100) / 100;
 }
+// ── House size (§4.1 presentation) ──────────────────────────────────────────
+// The house physically GROWS with its server stage. `stageScale` is a pure
+// function of stage 0..10 and the single source used by the owner map, a guest's
+// map and the upgrade ceremony morph, so the same house is never two sizes.
+//
+// Ease-out: the first level-ups are the visible ones (+5.3%, +4.8%, +4.4% …) and
+// the top ones settle down, so growth stays legible without ever running away.
+// The cap is a geometry cap, not a taste one: the outermost stage ring is 48.6
+// from the centre and the closest two slots are 165 apart, so 48.6 × 1.28 = 62.2
+// still leaves ~20px between two maxed neighbours and the tap targets stay apart.
+const HOUSE_RIM = 48.6;                 // outer stage-ring radius incl. its stroke
+const HOUSE_SCALE_SPAN = 0.28;          // 1.0 (stage 0) → 1.28 (stage 10)
+// The house SITS on the ground: it is scaled about its base, growing upward.
+const HOUSE_BASE_OFFSET = HOUSE_RIM;
+function stageScale(stage: number): number {
+  const t = Math.max(0, Math.min(10, stage)) / 10;
+  return 1 + HOUSE_SCALE_SPAN * (1 - (1 - t) ** 2);
+}
+/** Top of the house in world units for a slot centre — the anchor everything
+ *  hovering over it (gift/visit tokens) must follow as it grows. */
+function houseTopY(centreY: number, stage: number): number {
+  const base = centreY + HOUSE_BASE_OFFSET;
+  return base - 2 * HOUSE_RIM * stageScale(stage);
+}
 function polarPoint(cx: number, cy: number, r: number, deg: number): { x: number; y: number } {
   const rad = (deg * Math.PI) / 180;
   return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
@@ -1197,6 +1221,10 @@ const CSS = `
 .isl-legend b{width:8px;height:8px;border-radius:50%;display:inline-block}
 .isl-sector{cursor:pointer}
 .isl-sector--new{transform-box:fill-box;transform-origin:center;animation:isl-pop .55s cubic-bezier(.2,1.4,.4,1)}
+/* The house grows from its BASE (see stageScale): the ceremony morph animates
+   this inner group, while the absolute stage scale lives on the SVG transform
+   attribute of its parent — so the two compose instead of overwriting. */
+.isl-house{transform-box:fill-box;transform-origin:50% 100%}
 @keyframes isl-pop{from{opacity:0;transform:scale(.65)}}
 .isl-plus{animation:isl-puls 2.4s ease-in-out infinite}
 @keyframes isl-puls{0%,100%{opacity:.95}50%{opacity:.55}}
@@ -1877,14 +1905,24 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       // ground-fill density; a "MAX" badge at stage 10. Server-derived; defensive
       // if the backend has not yet attached `stage`.
       const stage = stageOf(b);
-      s += `<g class="isl-sector${b.fresh ? ' isl-sector--new' : ''}" data-b="${i}">
-        ${stageRingsSvg(p.x, p.y, stage)}
-        <circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" fill-opacity="${stageFillOpacity(stage)}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>
-        <text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="19" font-weight="700" fill="${letterFill}">${TPL[b.tpl].label.charAt(0)}</text>`;
+      // The house itself grows with the stage, anchored at its BASE so it rises
+      // out of the ground instead of inflating around its middle. Only the house
+      // scales: the name plate, the ▶/♥ line and the MAX badge stay at their
+      // fixed, readable size. The scale lives on a group INSIDE `[data-b]`, so the
+      // tap target grows with the drawing (SVG hit-testing follows the transform).
+      const scale = stageScale(stage);
+      const baseY = p.y + HOUSE_BASE_OFFSET;
       const dot = busy ? '#EF9F27' : b.publishError ? '#E24B4A' : isLocalExperiment(b) ? '#58A6FF' : hasHostedArtifact(b) ? '#4CC38A' : null;
-      if (dot) {
-        s += `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`;
-      }
+      s += `<g class="isl-sector${b.fresh ? ' isl-sector--new' : ''}" data-b="${i}">`
+        + `<g data-house-scale="${i}" transform="translate(${p.x} ${baseY.toFixed(1)}) scale(${scale.toFixed(4)}) translate(${-p.x} ${(-baseY).toFixed(1)})">`
+        + `<g class="isl-house" data-house="${i}">`
+        + stageRingsSvg(p.x, p.y, stage)
+        + `<circle cx="${p.x}" cy="${p.y}" r="40" fill="${pk.ground}" fill-opacity="${stageFillOpacity(stage)}" stroke="${pk.edge}" stroke-width="1.6"${busy ? ' stroke-dasharray="5 5"' : ''}/>`
+        + `<text x="${p.x}" y="${p.y + 7}" text-anchor="middle" font-size="19" font-weight="700" fill="${letterFill}">${TPL[b.tpl].label.charAt(0)}</text>`
+        + (dot
+          ? `<circle cx="${p.x + 29}" cy="${p.y - 29}" r="6.5" fill="${dot}" stroke="rgba(13,17,24,.9)" stroke-width="2"${busy ? ' class="isl-plus"' : ''}/>`
+          : '')
+        + '</g></g>';
       if (stage >= 10) s += maxBadgeSvg(p.x, p.y);
       s += `<rect x="${p.x - 56}" y="${p.y + 48}" width="112" height="18" rx="9" fill="rgba(255,255,255,.92)"/>
         <text x="${p.x}" y="${p.y + 61}" text-anchor="middle" font-size="10.5" font-weight="600" fill="#26241F">${esc(b.name)}</text>
@@ -1900,7 +1938,10 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       //    (scatter → fly into the shared counter).
       //  • Guest (§4.3): a public building offering a gift today shows a wrapped
       //    "подарочек" hint; tapping the building plays it, which claims the gift.
-      const px = p.x, py = p.y - 52;
+      // The token rides the ROOF, so it rises with the house instead of sinking
+      // into a grown one. The +3.4 keeps the exact placement it has today at
+      // stage 0 (a 15.5px puck resting on the rim, slightly overlapping it).
+      const px = p.x, py = houseTopY(p.y, stage) + 3.4;
       const delay = -((i * 0.67) % 2.4).toFixed(2);   // desync the bob per slot (period = 2.4s, see .isl-puz)
       if (!guest) {
         const rew = b.pending_gifts || 0;
@@ -2142,8 +2183,19 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       await focusSlot(b.slot, fast);
       if (!ov.isConnected) return;
       refreshIsland(false);
-      // The exact visual a house plays when it is built/rebuilt (isl-pop).
+      // The exact visual a house plays when it is built/rebuilt (isl-pop)…
       svg.querySelector<SVGElement>(`[data-b="${b.slot}"]`)?.classList.add('isl-sector--new');
+      // …plus the growth itself: the map already draws the house at its NEW size,
+      // so the morph starts from the OLD one and settles into it — the house is
+      // seen getting bigger, not found bigger.
+      const house = svg.querySelector<SVGElement>(`[data-house="${b.slot}"]`);
+      if (house?.animate) {
+        const shrink = stageScale(item.from) / stageScale(item.to);
+        house.animate(
+          [{ transform: `scale(${shrink.toFixed(4)})` }, { transform: 'scale(1)' }],
+          { duration: fast ? 260 : 620, easing: 'cubic-bezier(.2,1.35,.4,1)', fill: 'backwards' },
+        );
+      }
       const steps = item.to - item.from;
       layer.innerHTML =
         '<div class="isl-upgrade__card">' +
