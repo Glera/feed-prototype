@@ -120,6 +120,7 @@ import { seriesLength } from './series-policy.mjs';
 import { track } from './telemetry';
 import { mountIslandVisitAwardCard } from './island-p2-card.mjs';
 import { burstConfetti } from './fx';
+import { hasPendingStageUpgrade } from './island-celebrations';
 import {
   getStartParam,
   shareChallenge,
@@ -607,6 +608,7 @@ export class Feed {
   private islandNavBtnEl: HTMLButtonElement | null = null;
   private islandNavAlertEl: HTMLElement | null = null;
   private islandGiftsPending = false;
+  private islandUpgradesPending = false;
   private islandGiftsProbing = false;
   // Optimistic meta rewards: predicted puzzle pieces still flying into the HUD
   // counter, and the exact server correction waiting for them to land.
@@ -2765,8 +2767,10 @@ export class Feed {
     }
   }
 
+  // "There is something waiting on the island" = uncollected gifts OR house
+  // growth the owner has not been shown yet (the upgrade ceremony watermark).
   private updateIslandNavAlert(): void {
-    const ready = this.islandGiftsPending;
+    const ready = this.islandGiftsPending || this.islandUpgradesPending;
     if (this.islandNavAlertEl) this.islandNavAlertEl.hidden = !ready;
     if (this.islandNavBtnEl) {
       this.islandNavBtnEl.classList.toggle('feed-bar__icon--attention', ready);
@@ -2780,11 +2784,17 @@ export class Feed {
     this.updateIslandNavAlert();
   }
 
+  private setIslandUpgradesPending(pending: boolean): void {
+    if (this.islandUpgradesPending === pending) return;
+    this.islandUpgradesPending = pending;
+    this.updateIslandNavAlert();
+  }
+
   /** Cheapest existing way to learn whether the island has anything to collect:
    *  ONE lazy GET /api/island/state (the same owner snapshot the island itself
-   *  hydrates from — `pending_gifts` is server-owned there). No new route, off
-   *  every hot path, and silent on failure: no network simply means no badge.
-   *  Skipped entirely when this build has no island tab. */
+   *  hydrates from — `pending_gifts` and `stage` are server-owned there). No new
+   *  route, off every hot path, and silent on failure: no network simply means no
+   *  badge. Skipped entirely when this build has no island tab. */
   private async refreshIslandGiftsBadge(): Promise<void> {
     if (!this.islandNavAlertEl || !getInitData()) return;
     if (this.islandGiftsProbing) return;
@@ -2793,6 +2803,10 @@ export class Feed {
       const snapshot = await apiIslandState();
       const buildings = snapshot.state?.buildings ?? [];
       this.setIslandGiftsPending(buildings.some((building) => (building.pending_gifts ?? 0) > 0));
+      // A building this device has never seen is NOT pending: its watermark is
+      // initialised without a ceremony, so a first launch cannot light the badge
+      // for historical guest activity.
+      this.setIslandUpgradesPending(hasPendingStageUpgrade(buildings));
     } catch {
       /* offline / not authenticated — leave the badge as it is */
     } finally {
@@ -7221,6 +7235,9 @@ export class Feed {
       // The island already knows the server-owned gift counts it just drew, so
       // the nav badge follows a collect with no extra request.
       onPendingGifts: (total: number) => this.setIslandGiftsPending(total > 0),
+      // The island owns the upgrade watermark while it is open: the badge clears
+      // as each ceremony is shown, without another /island/state probe.
+      onPendingUpgrades: (total: number) => this.setIslandUpgradesPending(total > 0),
     }));
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).

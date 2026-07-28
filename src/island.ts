@@ -41,6 +41,13 @@ import {
   type PublicIslandView,
 } from './api';
 import { IslandStateSync, cacheIslandState, loadIslandState, replaceIslandState } from './island-state';
+import {
+  houseStage,
+  loadCelebratedStages,
+  saveCelebratedStages,
+  type StageUpgrade,
+} from './island-celebrations';
+import { burstConfetti } from './fx';
 import { coverUrl, playableUrl, PLAYABLES } from './playables';
 import { shareTelegramLink, showConfirm } from './telegram';
 
@@ -76,6 +83,10 @@ export interface IslandHostCtx {
   // the feed can keep its "there is something to collect" nav badge in sync
   // without a second request.
   onPendingGifts?: (total: number) => void;
+  // House growth the owner has NOT been shown yet (upgrade-ceremony watermark).
+  // Reported on every owner render and after every ceremony, so the feed's "!"
+  // badge means "gifts OR upgrades" without a second request.
+  onPendingUpgrades?: (total: number) => void;
 }
 
 type TplId = IslandTemplateId;
@@ -941,14 +952,9 @@ function luminance(hex: string): number {
 }
 
 // ── Island Social Core: house stages (§4.1) ─────────────────────────────────
-// Server-owned stage 0..10 = min(foreign_claims, 10). If the backend has not yet
-// attached `stage` we derive it from `foreign_claims`, else 0 — always defensive.
-function stageOf(b: IslandBuildingState): number {
-  const raw = typeof b.stage === 'number'
-    ? b.stage
-    : typeof b.foreign_claims === 'number' ? b.foreign_claims : 0;
-  return Math.max(0, Math.min(10, Math.floor(raw)));
-}
+// One shared server-owned stage read (src/island-celebrations.ts) so the map,
+// the upgrade watermark and the feed nav badge can never disagree.
+const stageOf = houseStage;
 // Blueprint colour code per stage: amber → violet → blue → green → gold (MAX).
 function stageColor(stage: number): string {
   if (stage >= 10) return '#FFCE54';
@@ -1186,6 +1192,18 @@ const CSS = `
    per-slot negative animation-delay (inline) so they don't bob in unison. */
 .isl-puz{transform-box:fill-box;transform-origin:center;animation:isl-wobble 2.4s ease-in-out infinite;cursor:pointer}
 @keyframes isl-wobble{0%,100%{transform:translateY(-3px)}50%{transform:translateY(3px)}}
+/* Upgrade ceremony (owner only): a full-view catcher so a tap SKIPS the scene
+   instead of opening the building under it, plus the level plaque. Confetti is
+   the shared feed chest burst (src/fx.ts) and rains over this layer. */
+.isl-upgrade{position:absolute;inset:0;z-index:7;display:flex;align-items:flex-end;justify-content:center;
+  padding-bottom:calc(var(--safe-bottom) + 74px);background:rgba(4,8,12,.28);cursor:pointer;touch-action:none}
+.isl-upgrade__card{display:flex;flex-direction:column;align-items:center;gap:3px;text-align:center;
+  background:rgba(255,255,255,.95);color:#10222C;border-radius:14px;padding:11px 20px;max-width:86%;
+  box-shadow:0 10px 26px rgba(0,0,0,.4);animation:isl-up-in .34s cubic-bezier(.2,1.4,.4,1)}
+@keyframes isl-up-in{from{opacity:0;transform:translateY(14px) scale(.86)}}
+.isl-upgrade__t{font-size:15.5px;font-weight:800;display:flex;align-items:center;gap:8px}
+.isl-upgrade__s{font-size:11.5px;font-weight:600;color:rgba(16,34,44,.6)}
+.isl-upgrade__x{background:#E8603C;color:#fff;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:900}
 .isl-cta{position:absolute;left:14px;right:14px;bottom:calc(var(--safe-bottom) + 14px);border:none;border-radius:14px;
   padding:14px;font:inherit;font-size:15px;font-weight:800;color:#112011;background:linear-gradient(180deg,#8ff0a3,#3ccc78);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.36)}
@@ -1621,6 +1639,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
         replaceIslandState(S, state);
         refreshIsland(false);
         cacheIslandState(S);
+        // Every authoritative snapshot (hydrate, poll, conflict merge, write ack)
+        // is the ONLY evidence of house growth. Entry growth and growth that
+        // happens while the owner is standing on the island run the same path,
+        // so a live upgrade celebrates immediately instead of waiting for a queue.
+        syncStageCeremonies();
       },
       onHydrated: resumePendingBakes,
     });
@@ -1652,6 +1675,16 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
   // two fingers pinch-zoom around their midpoint. panMoved guards tap-through.
   let panX = 0, panY = 0, zoom = 1, panMoved = false;
   const Z_MIN = 0.62, Z_MAX = 2.2;
+  // Shared by the gesture handler and the upgrade ceremony camera.
+  const clampPan = () => {
+    const maxX = WORLD_W - VIEW_W / zoom, maxY = WORLD_H - VIEW_H / zoom;
+    panX = maxX <= 0 ? maxX / 2 : Math.max(0, Math.min(maxX, panX));
+    panY = maxY <= 0 ? maxY / 2 : Math.max(0, Math.min(maxY, panY));
+  };
+  const applyPan = () => {
+    const g = svg.querySelector('[data-pan]');
+    if (g) g.setAttribute('transform', `scale(${zoom.toFixed(3)}) translate(${(-panX).toFixed(1)},${(-panY).toFixed(1)})`);
+  };
   {
     const pts = new Map<number, { x: number; y: number }>();
     let mode: 'idle' | 'pan' | 'pinch' = 'idle';
@@ -1664,15 +1697,8 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
       const { r, s } = disp();
       return { vx: (cx - r.left - (r.width - VIEW_W * s) / 2) / s, vy: (cy - r.top - (r.height - VIEW_H * s) / 2) / s };
     };
-    const clamp = () => {
-      const maxX = WORLD_W - VIEW_W / zoom, maxY = WORLD_H - VIEW_H / zoom;
-      panX = maxX <= 0 ? maxX / 2 : Math.max(0, Math.min(maxX, panX));
-      panY = maxY <= 0 ? maxY / 2 : Math.max(0, Math.min(maxY, panY));
-    };
-    const apply = () => {
-      const g = svg.querySelector('[data-pan]');
-      if (g) g.setAttribute('transform', `scale(${zoom.toFixed(3)}) translate(${(-panX).toFixed(1)},${(-panY).toFixed(1)})`);
-    };
+    const clamp = clampPan;
+    const apply = applyPan;
     const mid = () => { const a = [...pts.values()]; return a.length >= 2 ? { x: (a[0].x + a[1].x) / 2, y: (a[0].y + a[1].y) / 2 } : { x: a[0]?.x || 0, y: a[0]?.y || 0 }; };
     const spread = () => { const a = [...pts.values()]; return a.length >= 2 ? Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y) : 0; };
     const stopInertia = () => { if (raf) cancelAnimationFrame(raf); raf = 0; };
@@ -1909,6 +1935,7 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     // has just drawn the server-owned counts — report them instead of refetching.
     if (!guest) {
       ctx.onPendingGifts?.(buildings.reduce((total, b) => total + Math.max(0, b.pending_gifts || 0), 0));
+      reportPendingUpgrades();
     }
     const likes = buildings.reduce((a, b) => a + b.likes, 0);
     const statEl = ov.querySelector('[data-stat]');
@@ -1917,6 +1944,201 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     if (tokEl) tokEl.textContent = String(ctx.puzzles?.() ?? S.tokens);
     if (localFreshChanged) persistLocalExperiments();
     if (persist) save();
+  }
+
+  // ── House upgrade ceremony (owner only, v1) ────────────────────────────────
+  // The server upgrades a house the instant a guest's completion claim lands;
+  // this is purely the OWNER-FACING delivery of that fact. What the owner has
+  // already been shown lives in the client watermark
+  // (`island-celebrated-stages-v1`, src/island-celebrations.ts):
+  //   • a building seen for the first time is initialised at its CURRENT stage
+  //     with no ceremony — historical guest activity never fakes confetti;
+  //   • growth found on a server snapshot is queued by slot and played one house
+  //     at a time, ONE scene per house (from → to), never one scene per level;
+  //   • the watermark advances with each house's own scene, so an interrupted
+  //     queue replays only what was never shown and no level is celebrated twice;
+  //   • a tap skips the current scene and fast-forwards the rest of the queue.
+  // Detection runs only on SERVER snapshots (IslandStateSync.apply), never on
+  // the local cache: the cache is an instant-paint copy, not evidence of growth.
+  interface QueuedUpgrade extends StageUpgrade { started: boolean }
+  const pendingCeremonies = new Map<string, QueuedUpgrade>();
+  const ceremonyQueue: QueuedUpgrade[] = [];
+  let ceremonyRunning = false;
+  let ceremonyFastForward = false;
+  let ceremonySkip: (() => void) | null = null;
+
+  function reportPendingUpgrades(): void {
+    if (guest) return;
+    const celebrated = loadCelebratedStages();
+    const waiting = visibleBuildings().filter((b) => {
+      const id = b.buildingId;
+      return Boolean(id) && id! in celebrated && stageOf(b) > celebrated[id!];
+    }).length;
+    ctx.onPendingUpgrades?.(waiting);
+  }
+
+  /** Diff a fresh SERVER snapshot against the watermark and enqueue what the
+   *  owner has not been shown. Silent for guests and for unknown buildings. */
+  function syncStageCeremonies(): void {
+    if (guest) return;
+    const buildings = visibleBuildings().filter((b) => Boolean(b.buildingId));
+    const celebrated = loadCelebratedStages();
+    const live = new Set(buildings.map((b) => b.buildingId as string));
+    let dirty = false;
+    // A building the server no longer returns (deleted/taken down) leaves the
+    // watermark silently — it must not resurrect a ceremony if the id comes back.
+    for (const id of Object.keys(celebrated)) {
+      if (!live.has(id)) { delete celebrated[id]; pendingCeremonies.delete(id); dirty = true; }
+    }
+    const fresh: QueuedUpgrade[] = [];
+    for (const b of buildings) {
+      const id = b.buildingId as string;
+      const stage = stageOf(b);
+      if (!(id in celebrated)) { celebrated[id] = stage; dirty = true; continue; }
+      const queued = pendingCeremonies.get(id);
+      const shown = queued ? queued.to : celebrated[id];
+      if (stage > shown) {
+        if (queued && !queued.started) {
+          queued.to = stage;   // grew again before its scene ran → still ONE from→to
+        } else {
+          const item: QueuedUpgrade = { buildingId: id, slot: b.slot, from: shown, to: stage, started: false };
+          pendingCeremonies.set(id, item);
+          fresh.push(item);
+        }
+      } else if (!queued && stage < celebrated[id]) {
+        // The server walked a stage back (recall/moderation): re-baseline quietly.
+        celebrated[id] = stage;
+        dirty = true;
+      }
+    }
+    if (dirty) saveCelebratedStages(celebrated);
+    if (fresh.length) {
+      fresh.sort((a, b) => a.slot - b.slot);
+      ceremonyQueue.push(...fresh);
+      void runCeremonyQueue();
+    }
+    reportPendingUpgrades();
+  }
+
+  function commitCelebrated(item: QueuedUpgrade): void {
+    const celebrated = loadCelebratedStages();
+    if (!(item.buildingId in celebrated) || celebrated[item.buildingId] < item.to) {
+      celebrated[item.buildingId] = item.to;
+      saveCelebratedStages(celebrated);
+    }
+    if (pendingCeremonies.get(item.buildingId) === item) pendingCeremonies.delete(item.buildingId);
+    reportPendingUpgrades();
+  }
+
+  async function runCeremonyQueue(): Promise<void> {
+    if (ceremonyRunning) return;
+    ceremonyRunning = true;
+    try {
+      while (ceremonyQueue.length) {
+        // Left the island mid-queue: everything still unshown keeps its old
+        // watermark and is celebrated on the next entry.
+        if (!ov.isConnected) break;
+        const item = ceremonyQueue.shift() as QueuedUpgrade;
+        item.started = true;
+        await playUpgradeCeremony(item);
+      }
+    } finally {
+      ceremonyRunning = false;
+      ceremonyFastForward = false;
+      ceremonySkip = null;
+    }
+  }
+
+  /** Resolves after `ms`, or immediately when the scene is skipped by a tap. */
+  function ceremonyWait(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        if (ceremonySkip === finish) ceremonySkip = null;
+        resolve();
+      };
+      const timer = window.setTimeout(finish, ms);
+      ceremonySkip = finish;
+    });
+  }
+
+  /** Ease the map camera onto a slot so the celebrated house is what the owner
+   *  is looking at. A skipped/fast-forwarded scene jumps there instantly. */
+  async function focusSlot(slot: number, instant: boolean): Promise<void> {
+    const p = SLOTS[slot];
+    if (!p) return;
+    const z1 = Math.max(Z_MIN, Math.min(Z_MAX, Math.max(zoom, 1.3)));
+    const maxX = WORLD_W - VIEW_W / z1, maxY = WORLD_H - VIEW_H / z1;
+    const rawX = p.x - VIEW_W / (2 * z1), rawY = p.y - VIEW_H / (2 * z1);
+    const x1 = maxX <= 0 ? maxX / 2 : Math.max(0, Math.min(maxX, rawX));
+    const y1 = maxY <= 0 ? maxY / 2 : Math.max(0, Math.min(maxY, rawY));
+    const z0 = zoom, x0 = panX, y0 = panY;
+    if (instant || (Math.abs(x1 - x0) < 0.5 && Math.abs(y1 - y0) < 0.5 && Math.abs(z1 - z0) < 0.01)) {
+      zoom = z1; panX = x1; panY = y1; clampPan(); applyPan();
+      return;
+    }
+    const DUR = 360;
+    await new Promise<void>((resolve) => {
+      const start = performance.now();
+      const step = () => {
+        const t = Math.min(1, (performance.now() - start) / DUR);
+        const e = 1 - Math.pow(1 - t, 3);
+        zoom = z0 + (z1 - z0) * e;
+        panX = x0 + (x1 - x0) * e;
+        panY = y0 + (y1 - y0) * e;
+        clampPan();
+        applyPan();
+        if (t < 1 && ov.isConnected) requestAnimationFrame(step);
+        else resolve();
+      };
+      requestAnimationFrame(step);
+    });
+  }
+
+  /** One house, one scene: camera → the exact build/rebuild pop → chest confetti
+   *  + «Уровень N → M · за плеи гостей» (with a ×K badge for multi-level growth). */
+  async function playUpgradeCeremony(item: QueuedUpgrade): Promise<void> {
+    const b = visibleBuildings().find((x) => x.buildingId === item.buildingId);
+    if (!b) { commitCelebrated(item); return; }
+    // The watermark advances with THIS scene (not at the end of the queue): an
+    // interrupted ceremony can lose its own confetti, but a level can never be
+    // celebrated twice, and every house still unshown replays on the next entry.
+    commitCelebrated(item);
+    const fast = ceremonyFastForward;
+    // Full-view catcher: a tap skips this scene instead of opening the house
+    // under it, and it also swallows pan gestures while the scene runs.
+    const layer = document.createElement('div');
+    layer.className = 'isl-upgrade';
+    layer.setAttribute('data-upgrade', String(item.slot));
+    layer.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      ceremonyFastForward = true;
+      ceremonySkip?.();
+    });
+    ov.appendChild(layer);
+    try {
+      await focusSlot(b.slot, fast);
+      if (!ov.isConnected) return;
+      refreshIsland(false);
+      // The exact visual a house plays when it is built/rebuilt (isl-pop).
+      svg.querySelector<SVGElement>(`[data-b="${b.slot}"]`)?.classList.add('isl-sector--new');
+      const steps = item.to - item.from;
+      layer.innerHTML =
+        '<div class="isl-upgrade__card">' +
+        `<div class="isl-upgrade__t"><span>Уровень ${item.from} → ${item.to}</span>` +
+        (steps > 1 ? `<span class="isl-upgrade__x">×${steps}</span>` : '') +
+        '</div>' +
+        '<div class="isl-upgrade__s">за плеи гостей</div>' +
+        '</div>';
+      burstConfetti(ov, 8);   // shared feed chest FX, raining in front of the plaque
+      await ceremonyWait(ceremonyFastForward ? 420 : 1250);
+    } finally {
+      layer.remove();
+    }
   }
 
   // Collect the gifts bobbing over a mechanic (§4.2) — OPTIMISTICALLY. The gift
