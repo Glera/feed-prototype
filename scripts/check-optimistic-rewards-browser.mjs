@@ -41,8 +41,19 @@ const build = spawnSync(
 );
 assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 
+// Smallest valid PNG, so a friend avatar can actually load in the harness.
+const AVATAR_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
 const server = createServer((request, response) => {
   const url = new URL(request.url || '/', origin);
+  if (url.pathname === '/avatar.png') {
+    response.setHeader('content-type', 'image/png');
+    response.end(AVATAR_PNG);
+    return;
+  }
   if (url.pathname === '/versions.json') {
     response.setHeader('content-type', 'application/json');
     response.end('{}');
@@ -104,6 +115,13 @@ const dailyState = () => ({
     claimed: backend.claimed,
   }],
 });
+
+// One friend with a real photo, one with none, one whose photo 404s.
+const friends = [
+  { user_id: 90001, first_name: 'Photo', username: null, photo_url: `${origin}/avatar.png`, is_bot: false, has_island: true, published_buildings: 1 },
+  { user_id: 90002, first_name: 'Ника', username: null, photo_url: null, is_bot: false, has_island: true, published_buildings: 1 },
+  { user_id: 90003, first_name: 'Broken', username: null, photo_url: `${origin}/missing.png`, is_bot: false, has_island: true, published_buildings: 1 },
+];
 
 const islandState = () => ({
   state: {
@@ -175,7 +193,7 @@ try {
     }
     if (url.pathname === '/api/island/state' && method === 'GET') return json(islandState());
     if (url.pathname === '/api/island/state' && method === 'PUT') return json(islandState());
-    if (url.pathname === '/api/island/friends' && method === 'GET') return json([]);
+    if (url.pathname === '/api/island/friends' && method === 'GET') return json(friends);
     const collect = url.pathname.match(/^\/api\/island\/buildings\/([^/]+)\/collect$/);
     if (collect && method === 'POST') {
       backend.collectCalls.push(request.postDataJSON());
@@ -319,7 +337,35 @@ try {
   // Nothing left to collect — the badge must clear without another request.
   await islandAlert.waitFor({ state: 'hidden', timeout: 8000 });
 
-  console.log('optimistic rewards browser: instant daily claim + honest refusal rollback + idempotent retry + island collect reconcile verified');
+  // ── 5. friend avatars: a letter is a placeholder, never a photo overlay ────
+  await page.locator('[data-bar-tab="feed"]').click();
+  await page.locator('.island-world').waitFor({ state: 'detached', timeout: 8000 });
+  const withPhoto = page.locator('.isln-friends [data-friend-visit="90001"]');
+  const noPhoto = page.locator('.isln-friends [data-friend-visit="90002"]');
+  const brokenPhoto = page.locator('.isln-friends [data-friend-visit="90003"]');
+  await withPhoto.waitFor({ state: 'visible', timeout: 15_000 });
+  assert.equal(await withPhoto.locator('img').count(), 1, 'a real photo must render');
+  assert.equal(
+    await withPhoto.locator('.isln-friend__initial').count(),
+    0,
+    'the initial must not be drawn over a real photo',
+  );
+  assert.equal((await withPhoto.textContent()).trim(), '', 'no letter over the photo');
+  assert.equal(await noPhoto.locator('img').count(), 0);
+  assert.equal(
+    (await noPhoto.locator('.isln-friend__initial').textContent()).trim(),
+    'Н',
+    'a friend without a photo keeps the initial placeholder',
+  );
+  await brokenPhoto.locator('.isln-friend__initial').waitFor({ state: 'visible', timeout: 8000 });
+  assert.equal(
+    (await brokenPhoto.locator('.isln-friend__initial').textContent()).trim(),
+    'B',
+    'a failed photo falls back to the initial placeholder',
+  );
+  assert.equal(await brokenPhoto.locator('img').count(), 0);
+
+  console.log('optimistic rewards browser: instant daily claim + honest refusal rollback + idempotent retry + island collect reconcile + island nav badge + avatar placeholder verified');
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

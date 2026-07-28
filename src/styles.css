@@ -3151,8 +3151,9 @@ body {
   height: 100%;
   object-fit: cover;
 }
-/* The initial sits under the photo; if the photo fails it is removed and the
-   initial shows through (fallback bound in renderFriendsHud). */
+/* Placeholder for a friend with NO photo (or whose photo failed to load — see
+   the fallback bound in renderFriendsHud). It is never drawn over a real photo:
+   the name is already written under the cell. */
 .isln-friend__initial { position: relative; z-index: 0; }
 .isln-friend--bot { border-color: rgba(88, 166, 255, 0.5); box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.28) inset; }
 .isln-friend--empty,

@@ -7250,12 +7250,15 @@ export class Feed {
     for (const f of shown) {
       const name = f.first_name || f.username || 'Друг';
       const initial = (name.trim()[0] || '?').toUpperCase();
+      // The name is already written under the cell, so a letter over a real photo
+      // is pure noise: the initial is a PLACEHOLDER for a missing photo only, and
+      // it is inserted (below) if the photo fails to load.
       const inner = f.photo_url
-        ? `<img src="${this.esc(f.photo_url)}" alt="" draggable="false"><span class="isln-friend__initial">${this.esc(initial)}</span>`
-        : `<span>${this.esc(initial)}</span>`;
+        ? `<img src="${this.esc(f.photo_url)}" alt="" draggable="false">`
+        : `<span class="isln-friend__initial">${this.esc(initial)}</span>`;
       cells +=
         '<div class="isln-friend-cell">' +
-          `<button type="button" class="isln-friend${f.is_bot ? ' isln-friend--bot' : ''}" data-friend-visit="${f.user_id}" aria-label="${this.esc(name)}">${inner}</button>` +
+          `<button type="button" class="isln-friend${f.is_bot ? ' isln-friend--bot' : ''}" data-friend-visit="${f.user_id}" data-initial="${this.esc(initial)}" aria-label="${this.esc(name)}">${inner}</button>` +
           `<div class="story__name isln-friend__name">${this.esc(name)}</div>` +
         '</div>';
     }
@@ -7282,9 +7285,18 @@ export class Feed {
         '<div class="story__name isln-friend__name" aria-hidden="true">&nbsp;</div>' +
       '</div>';
     el.innerHTML = cells;
-    // Photo fallback: on load error drop the <img> so the initial shows through.
+    // Photo fallback: only when the photo actually fails does the cell fall back
+    // to the initial placeholder.
     el.querySelectorAll<HTMLImageElement>('.isln-friend img').forEach((img) =>
-      img.addEventListener('error', () => img.remove(), { once: true }));
+      img.addEventListener('error', () => {
+        const cell = img.closest<HTMLElement>('.isln-friend');
+        img.remove();
+        if (!cell || cell.querySelector('.isln-friend__initial')) return;
+        const placeholder = document.createElement('span');
+        placeholder.className = 'isln-friend__initial';
+        placeholder.textContent = cell.dataset.initial || '?';
+        cell.appendChild(placeholder);
+      }, { once: true }));
     el.querySelectorAll<HTMLElement>('[data-friend-visit]').forEach((b) =>
       b.addEventListener('click', () => this.openFriendIsland(Number(b.dataset.friendVisit))));
     el.querySelectorAll<HTMLElement>('[data-friend-invite]').forEach((b) =>
