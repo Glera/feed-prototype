@@ -72,6 +72,10 @@ export interface IslandHostCtx {
   // `delta` = granted − predicted. Applied silently (no rollback animation), the
   // server staying the only authority over the balance.
   reconcilePuzzles?: (delta: number) => void;
+  // Total gifts still waiting on the OWNER island, reported on every render so
+  // the feed can keep its "there is something to collect" nav badge in sync
+  // without a second request.
+  onPendingGifts?: (total: number) => void;
 }
 
 type TplId = IslandTemplateId;
@@ -1901,6 +1905,11 @@ export function renderIslandWorld(ov: HTMLElement, ctx: IslandHostCtx): void {
     // Guest gift hint: tapping it just plays the building (which claims the gift).
     svg.querySelectorAll<SVGElement>('[data-visit-gift]').forEach((g) =>
       g.addEventListener('click', (e) => { e.stopPropagation(); if (!panMoved) openBuilding(Number(g.dataset.visitGift)); }));
+    // Feed nav badge: the owner island is the only place that knows this, and it
+    // has just drawn the server-owned counts — report them instead of refetching.
+    if (!guest) {
+      ctx.onPendingGifts?.(buildings.reduce((total, b) => total + Math.max(0, b.pending_gifts || 0), 0));
+    }
     const likes = buildings.reduce((a, b) => a + b.likes, 0);
     const statEl = ov.querySelector('[data-stat]');
     if (statEl) statEl.textContent = `♥ ${likes} · ${buildings.length}/${SLOTS.length} mechanics`;

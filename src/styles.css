@@ -889,6 +889,8 @@ body {
 }
 .feed-bar__icon--active svg * { stroke: rgba(255, 255, 255, 0.96); }
 .feed-bar__icon:active { background: rgba(255, 255, 255, 0.18); }
+/* "!" attention badge on a bottom-bar tab (daily rewards ready to claim, island
+   gifts waiting to be collected). One look for every tab that can ask for a tap. */
 .feed-bar__daily-alert {
   position: absolute;
   top: 2px;

@@ -42,7 +42,7 @@ import {
   apiIslandActivity, apiIslandFriends, apiIslandFriendCode, apiIslandFriendAccept,
   apiIslandFriendRemove, apiIslandFriendBlock,
   apiIslandVisitAwardFromChest, apiIslandVisitAwardResolve,
-  apiIslandWriteAccess, apiPublicIsland,
+  apiIslandWriteAccess, apiPublicIsland, apiIslandState,
   type IslandActivityEvent, type IslandFriend, type IslandVisitAward,
   type BuiltinFeedBindingV1, type BuiltinFeedBindingsV1,
   type CatalogAllocateAuthorizedResultV2,
@@ -600,6 +600,13 @@ export class Feed {
   private dailyClaiming = new Set<string>();
   private dailyNavBtnEl: HTMLButtonElement | null = null;
   private dailyNavAlertEl: HTMLElement | null = null;
+  // Island ("Мета") tab attention badge: set only when the OWNER island has gifts
+  // waiting. Both element refs stay null unless that tab exists in this build,
+  // which is what keeps the badge independent of the island cohort gate.
+  private islandNavBtnEl: HTMLButtonElement | null = null;
+  private islandNavAlertEl: HTMLElement | null = null;
+  private islandGiftsPending = false;
+  private islandGiftsProbing = false;
   // Optimistic meta rewards: predicted puzzle pieces still flying into the HUD
   // counter, and the exact server correction waiting for them to land.
   private metaPuzzleFlights = 0;
@@ -1004,6 +1011,9 @@ export class Feed {
       void this.processPendingFriendAccept();
       this.startIslandActivityPolling();
     }
+    // One lazy probe for the island "!" badge. Independent of the cohort gate
+    // above: it no-ops unless the Meta tab was actually mounted.
+    void this.refreshIslandGiftsBadge();
     this.scheduleGeneratedOfferPrefetch();
   }
 
@@ -2751,6 +2761,41 @@ export class Feed {
         'aria-label',
         ready ? 'Ежедневные задания, награда готова' : 'Ежедневные задания',
       );
+    }
+  }
+
+  private updateIslandNavAlert(): void {
+    const ready = this.islandGiftsPending;
+    if (this.islandNavAlertEl) this.islandNavAlertEl.hidden = !ready;
+    if (this.islandNavBtnEl) {
+      this.islandNavBtnEl.classList.toggle('feed-bar__icon--attention', ready);
+      this.islandNavBtnEl.setAttribute('aria-label', ready ? 'Мета, есть что собрать' : 'Мета');
+    }
+  }
+
+  private setIslandGiftsPending(pending: boolean): void {
+    if (this.islandGiftsPending === pending) return;
+    this.islandGiftsPending = pending;
+    this.updateIslandNavAlert();
+  }
+
+  /** Cheapest existing way to learn whether the island has anything to collect:
+   *  ONE lazy GET /api/island/state (the same owner snapshot the island itself
+   *  hydrates from — `pending_gifts` is server-owned there). No new route, off
+   *  every hot path, and silent on failure: no network simply means no badge.
+   *  Skipped entirely when this build has no island tab. */
+  private async refreshIslandGiftsBadge(): Promise<void> {
+    if (!this.islandNavAlertEl || !getInitData()) return;
+    if (this.islandGiftsProbing) return;
+    this.islandGiftsProbing = true;
+    try {
+      const snapshot = await apiIslandState();
+      const buildings = snapshot.state?.buildings ?? [];
+      this.setIslandGiftsPending(buildings.some((building) => (building.pending_gifts ?? 0) > 0));
+    } catch {
+      /* offline / not authenticated — leave the badge as it is */
+    } finally {
+      this.islandGiftsProbing = false;
     }
   }
 
@@ -5371,6 +5416,20 @@ export class Feed {
         this.dailyNavAlertEl = alert;
         this.updateDailyNavAlert();
       }
+      if (tab.name === 'meta') {
+        // Same "!" as daily, for gifts piled on the player's own island. Bound
+        // here rather than at the gate, so a build without the Meta tab simply
+        // has no badge (and never probes for one).
+        const alert = document.createElement('span');
+        alert.className = 'feed-bar__daily-alert';
+        alert.textContent = '!';
+        alert.hidden = true;
+        alert.setAttribute('aria-hidden', 'true');
+        icon.appendChild(alert);
+        this.islandNavBtnEl = icon;
+        this.islandNavAlertEl = alert;
+        this.updateIslandNavAlert();
+      }
       if (tab.name === 'collections') {
         this.collectionsBtnEl = icon;
       }
@@ -7158,6 +7217,9 @@ export class Feed {
       // The optimistic collect predicts the reward locally; this is where the
       // server's exact amount silently wins.
       reconcilePuzzles: (delta: number) => this.reconcilePuzzlesFromMeta(delta),
+      // The island already knows the server-owned gift counts it just drew, so
+      // the nav badge follows a collect with no extra request.
+      onPendingGifts: (total: number) => this.setIslandGiftsPending(total > 0),
     }));
     // No opacity fade-in: the opaque view must cover the feed the instant it mounts,
     // else daily→meta shows the feed mechanic through the fading-in layer (flicker).
@@ -7885,7 +7947,12 @@ export class Feed {
     const ov = this.overlayEl;
     // After leaving a visited (guest) island, the meta tab reopens the OWNER's own
     // island — a runtime friend visit / deep-link must not stick (§4.4).
-    if (ov?.classList.contains('island-world')) this.publicIsland = null;
+    if (ov?.classList.contains('island-world')) {
+      this.publicIsland = null;
+      // Coming back from the island: re-read what is still collectable there so
+      // the "!" badge matches the server rather than the last drawn frame.
+      void this.refreshIslandGiftsBadge();
+    }
     const storyFrame = this.storyFrame;
     if (storyFrame) {
       this.pauseStoryFrame(true);

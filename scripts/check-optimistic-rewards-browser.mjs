@@ -282,6 +282,14 @@ try {
   backend.pendingGifts = 3;
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => Number(document.querySelector('.hud__puzzles-value')?.textContent) === 14);
+  // The island tab carries the same "!" as daily while gifts are waiting there.
+  const islandAlert = page.locator('[data-bar-tab="meta"] .feed-bar__daily-alert');
+  await islandAlert.waitFor({ state: 'visible', timeout: 15_000 });
+  assert.match(
+    await page.locator('[data-bar-tab="meta"]').getAttribute('class'),
+    /feed-bar__icon--attention/,
+    'island tab must read as needing attention while gifts wait',
+  );
   await page.locator('[data-bar-tab="meta"]').click();
   const gift = page.locator('.isl-puz[data-collect]');
   await gift.waitFor({ state: 'visible', timeout: 15_000 });
@@ -308,6 +316,8 @@ try {
     beforeCollect,
     'a capped collect must be reconciled back to the server amount',
   );
+  // Nothing left to collect — the badge must clear without another request.
+  await islandAlert.waitFor({ state: 'hidden', timeout: 8000 });
 
   console.log('optimistic rewards browser: instant daily claim + honest refusal rollback + idempotent retry + island collect reconcile verified');
 } finally {
