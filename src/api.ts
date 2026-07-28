@@ -20,6 +20,8 @@ import type {
   CatalogGeneratedOfferResultV1,
 } from './catalog-feed-authority.mjs';
 import type { FeedRosterSessionV1 } from './feed-roster.mjs';
+import { buildSequencingDebugPath } from './feed-sequencing-debug.mjs';
+import type { SequencingDebugResult } from './feed-sequencing-debug.mjs';
 import type {
   OperatorLevelFlagRequestV1,
   OperatorLevelFlagResponseV1,
@@ -1082,4 +1084,81 @@ export function variantIdForMechanic(mechanicId: string): string {
   }
   const h = hex.join('');
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+// ── feed sequencing debug (§12): read-only, GET only ──
+// Three stored-bytes projections. There is no reset call here on purpose:
+// personalization reset stays an operator CLI act and its receipts are read out
+// of the history projection. `?diag=1` is navigation — the server allowlist is
+// the only authorization, and it answers one deliberately non-leaking 404 both
+// when the feature flag is off and when the caller is not allowlisted.
+
+async function sequencingDebugGet(path: string): Promise<SequencingDebugResult> {
+  let r: Response;
+  try {
+    // No method is named: this is a GET by construction. `no-store` keeps a
+    // stale projection out of the HTTP cache — debug reads must show the
+    // current stored bytes, not a cached copy of an older receipt.
+    r = await fetch(`${API_BASE}${path}`, { headers: headers(), cache: 'no-store' });
+  } catch (e) {
+    return { status: 'error', message: `Network error: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  // Not retried and not explained further: the two causes are indistinguishable
+  // by design, and guessing between them would leak the allowlist.
+  if (r.status === 404) return { status: 'unavailable' };
+  let text: string;
+  try {
+    text = await r.text();
+  } catch (e) {
+    return { status: 'error', message: `Read error: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!r.ok) {
+    const detail = text ? text.slice(0, 200) : r.statusText;
+    return { status: 'error', message: `HTTP ${r.status}: ${detail}` };
+  }
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    return { status: 'error', message: 'Backend returned a non-JSON sequencing debug response' };
+  }
+  return { status: 'ok', body };
+}
+
+function sequencingDebugRequest(
+  kind: 'profile' | 'why-now' | 'history',
+  options: { subject?: string | number | null; limit?: string | number | null } = {},
+): Promise<SequencingDebugResult> {
+  let path: string;
+  try {
+    path = buildSequencingDebugPath(kind, options);
+  } catch (e) {
+    // An unusable subject never falls back to reading the caller instead.
+    return Promise.resolve({
+      status: 'error',
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+  return sequencingDebugGet(path);
+}
+
+/** §12.1 — family states from the last committed episode receipt. */
+export function apiSequencingDebugProfile(
+  subject?: string | number | null,
+): Promise<SequencingDebugResult> {
+  return sequencingDebugRequest('profile', { subject });
+}
+
+/** §12.2 — the last stored plan snapshot, verbatim. */
+export function apiSequencingDebugWhyNow(
+  subject?: string | number | null,
+): Promise<SequencingDebugResult> {
+  return sequencingDebugRequest('why-now', { subject });
+}
+
+/** §12.3 — issued → seen chain, negative receipts and reset receipts. */
+export function apiSequencingDebugHistory(
+  options: { subject?: string | number | null; limit?: string | number | null } = {},
+): Promise<SequencingDebugResult> {
+  return sequencingDebugRequest('history', options);
 }
