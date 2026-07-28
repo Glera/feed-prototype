@@ -1638,7 +1638,7 @@ async function sequencingDebugGet(path: string): Promise<SequencingDebugResult> 
 }
 
 function sequencingDebugRequest(
-  kind: 'profile' | 'why-now' | 'history',
+  kind: 'profile' | 'why-now' | 'history' | 'shadow-vs-actual',
   options: { subject?: string | number | null; limit?: string | number | null } = {},
 ): Promise<SequencingDebugResult> {
   let path: string;
@@ -1673,4 +1673,11 @@ export function apiSequencingDebugHistory(
   options: { subject?: string | number | null; limit?: string | number | null } = {},
 ): Promise<SequencingDebugResult> {
   return sequencingDebugRequest('history', options);
+}
+
+/** Slice 11 — the fact the feed showed next to the shadow verdict for it. */
+export function apiSequencingDebugShadowVsActual(
+  options: { subject?: string | number | null; limit?: string | number | null } = {},
+): Promise<SequencingDebugResult> {
+  return sequencingDebugRequest('shadow-vs-actual', options);
 }

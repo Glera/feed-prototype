@@ -20,7 +20,12 @@ import { chromium } from 'playwright';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const DEBUG_PREFIX = '/api/feed/sequencing/debug';
-const DEBUG_PATHS = [`${DEBUG_PREFIX}/profile`, `${DEBUG_PREFIX}/why-now`, `${DEBUG_PREFIX}/history`];
+const DEBUG_PATHS = [
+  `${DEBUG_PREFIX}/profile`,
+  `${DEBUG_PREFIX}/why-now`,
+  `${DEBUG_PREFIX}/history`,
+  `${DEBUG_PREFIX}/shadow-vs-actual`,
+];
 // One payload, reused in every server-owned string a tab renders. If any of them
 // is ever interpolated as markup this flips the flag or creates an <img>.
 const XSS = '<img src=x onerror="window.__seqPwned=1">';
@@ -147,6 +152,103 @@ const historyBody = (subjectUserId, marker, limit) => ({
   }],
 });
 
+// Slice 11 (`feed.debug-shadow-vs-actual.v1`), shaped exactly as the frozen unit
+// contract in the spec. The four units are the four things an operator must be
+// able to tell apart: agreement, disagreement, a decision the shadow does not
+// plan at all, and a stated absence that carries its terminal error code.
+const shadowVsActualBody = (subjectUserId, marker, limit) => ({
+  ...envelope('feed.debug-shadow-vs-actual.v1', subjectUserId, [{
+    kind: 'sequence_plan_snapshot',
+    id: 'f4d0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+    digest: '7'.repeat(64),
+    asOf: '2026-07-27T06:59:59.000Z',
+  }]),
+  limit,
+  units: [
+    {
+      decisionId: `decision-${marker}`,
+      issuedAt: '2026-07-27T07:00:00.000Z',
+      slotType: 'builtin',
+      mechanicId: 'marble-sort-swipe',
+      builtinMappingId: 'd2b0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+      feedPosition: 3,
+      seen: true,
+      impressionId: 'e3c0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+      revealedAt: '2026-07-27T07:00:01.250Z',
+      actual: { catalogMechanic: 'sort/base', familyId: 'sort' },
+      armId: 'shadow_treatment',
+      shadowPlan: {
+        planId: 'f4d0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+        planDigest: '7'.repeat(64),
+        asOf: '2026-07-27T06:59:59.000Z',
+        chosenSlotType: 'builtin',
+        chosenFamilyId: 'sort',
+        // A server-owned string on the headline the operator actually reads.
+        reason: XSS,
+        matchesActual: true,
+        constraintConflicts: [],
+        coldStart: { active: false, probesSeen: 4, exitReason: 'probe_budget_met' },
+      },
+      absence: null,
+    },
+    {
+      decisionId: 'decision-vs-mismatch',
+      issuedAt: '2026-07-27T06:58:00.000Z',
+      slotType: 'builtin',
+      mechanicId: 'pins-v1',
+      builtinMappingId: 'b6f0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+      feedPosition: 2,
+      seen: false,
+      impressionId: null,
+      revealedAt: null,
+      actual: { catalogMechanic: 'pins/base', familyId: 'pins' },
+      armId: 'shadow_treatment',
+      shadowPlan: {
+        planId: 'c7a0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+        planDigest: '8'.repeat(64),
+        asOf: '2026-07-27T06:57:59.000Z',
+        chosenSlotType: 'builtin',
+        chosenFamilyId: 'sort',
+        reason: 'exploration_floor',
+        matchesActual: false,
+        constraintConflicts: ['satiation_block'],
+        coldStart: { active: true, probesSeen: 1, exitReason: null },
+      },
+      absence: null,
+    },
+    {
+      decisionId: 'decision-vs-out-of-scope',
+      issuedAt: '2026-07-27T06:56:00.000Z',
+      slotType: 'challenge',
+      mechanicId: 'merge-timepress',
+      builtinMappingId: null,
+      feedPosition: 1,
+      seen: true,
+      impressionId: 'e9c0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+      revealedAt: '2026-07-27T06:56:02.000Z',
+      actual: { catalogMechanic: null, familyId: null },
+      armId: 'shadow_treatment',
+      shadowPlan: null,
+      absence: { reason: 'out_of_scope', detail: null },
+    },
+    {
+      decisionId: 'decision-vs-blocked',
+      issuedAt: '2026-07-27T06:55:00.000Z',
+      slotType: 'builtin',
+      mechanicId: 'second-board-v1',
+      builtinMappingId: '0be0d1e2-3a4b-4c5d-8e6f-7a8b9c0d1e2f',
+      feedPosition: null,
+      seen: false,
+      impressionId: null,
+      revealedAt: null,
+      actual: { catalogMechanic: 'second-board/base', familyId: null },
+      armId: null,
+      shadowPlan: null,
+      absence: { reason: 'blocked', detail: 'config_digest_mismatch' },
+    },
+  ],
+});
+
 const requests = [];
 let mode = 'ok';
 let origin = '';
@@ -180,6 +282,13 @@ const server = createServer(async (request, response) => {
       return json(response, profileBody(subject, `FRESH-${subject}-FAMILY`));
     }
     if (url.pathname.endsWith('/why-now')) return json(response, whyNowBody(subject ?? '42'));
+    if (url.pathname.endsWith('/shadow-vs-actual')) {
+      const limit = Number(url.searchParams.get('limit'));
+      return json(
+        response,
+        shadowVsActualBody(subject ?? '42', `VS-LIMIT-${limit}`, limit),
+      );
+    }
     if (url.pathname.endsWith('/history')) {
       const limit = Number(url.searchParams.get('limit'));
       if (limit === 20) {
@@ -339,6 +448,66 @@ try {
   ok(historyText.includes('issued, not seen'), 'an unseen issue stays an open chain');
   ok(historyText.includes('seen: unknown (drift)'), 'a non-boolean seen is drift, not a negative');
 
+  // Vs (slice 11): the fact next to the shadow verdict for the same decision.
+  const vsBefore = requests.length;
+  await page.click('[data-seq-tab="shadow-vs-actual"]');
+  await waitForBody('decision-VS-LIMIT-5');
+  const vsSearch = debugRequests(vsBefore)
+    .find((item) => item.pathname.endsWith('/shadow-vs-actual'))?.search;
+  eq(
+    vsSearch,
+    '?user_id=777&limit=5',
+    'the Vs tab reads the same subject and window the panel is displaying',
+  );
+  const vsRows = page.locator(`${PANEL} [data-seq-vs="unit"]`);
+  eq(await vsRows.count(), 4, 'every decision in the window is listed, in-scope or not');
+  eq(
+    await page.locator(`${PANEL} [data-seq-vs-verdict="match"]`).count(),
+    1,
+    'the agreeing unit carries the match verdict',
+  );
+  eq(
+    await page.locator(`${PANEL} [data-seq-vs-verdict="mismatch"]`).count(),
+    1,
+    'the disagreeing unit carries the mismatch verdict',
+  );
+  eq(
+    await page.locator(`${PANEL} [data-seq-vs-verdict="absent"]`).count(),
+    2,
+    'a unit without a stored plan is never rendered as agreement',
+  );
+  eq(await page.locator(`${PANEL} [data-seq-vs-badge="match"]`).count(), 1);
+  eq(await page.locator(`${PANEL} [data-seq-vs-badge="mismatch"]`).count(), 1);
+  const vsText = await bodyText();
+  ok(vsText.includes('match ✓'), 'the match badge is readable text');
+  ok(vsText.includes('mismatch ✗'), 'the mismatch badge is readable text');
+  ok(
+    vsText.includes('shadow would pick sort'),
+    'the headline says what the shadow would have chosen',
+  );
+  // Absence is stated in words, per stored reason — never silence.
+  ok(
+    vsText.includes('shadow: out of scope — this decision is not a built-in slot the shadow plans'),
+    'an out-of-scope decision says so instead of implying full coverage',
+  );
+  ok(
+    vsText.includes('shadow: no data — blocked (config_digest_mismatch)'),
+    'a blocked item surfaces its terminal error code',
+  );
+  eq(
+    await page.locator(`${PANEL} [data-seq-vs-absence="out_of_scope"]`).count(),
+    1,
+    'the absence row carries its stored reason',
+  );
+  eq(await page.locator(`${PANEL} [data-seq-vs-absence="blocked"]`).count(), 1);
+  ok(vsText.includes('issued, not seen'), 'an unseen decision still carries its shadow verdict');
+  ok(vsText.includes('matchesActual=true'), "the server's own comparison is shown, not re-derived");
+  ok(vsText.includes('raw response'), 'the stored bytes stay reachable verbatim');
+  // (4) the same XSS guard applies to every server string this tab renders.
+  eq(await page.evaluate(() => window.__seqPwned), undefined, 'a Vs string must not execute');
+  eq(await panel.locator('img').count(), 0, 'a Vs string must not create DOM elements');
+  ok(vsText.includes(XSS), 'the Vs payload is displayed verbatim as text');
+
   // Reset: receipts plus the three current epoch scopes, still read-only.
   await page.click('[data-seq-tab="reset"]');
   await waitForBody('reset receipts');
@@ -411,7 +580,7 @@ try {
     0,
     'the single 404 must offer no retry control',
   );
-  for (const tab of ['why-now', 'history']) {
+  for (const tab of ['why-now', 'history', 'shadow-vs-actual']) {
     await page.click(`[data-seq-tab="${tab}"]`);
     await page.waitForSelector(`${PANEL} [data-seq-state="unavailable"]`, { timeout: 15_000 });
     unavailableMessages.push(
@@ -423,6 +592,22 @@ try {
       `the ${tab} 404 must offer no retry control`,
     );
   }
+  // An unavailable tab is a final answer: re-selecting it asks nothing again.
+  const afterUnavailable = requests.length;
+  await page.click('[data-seq-tab="profile"]');
+  await page.click('[data-seq-tab="shadow-vs-actual"]');
+  await page.waitForSelector(`${PANEL} [data-seq-state="unavailable"]`, { timeout: 15_000 });
+  await sleep(300);
+  eq(
+    debugRequests(afterUnavailable).length,
+    0,
+    're-selecting an unavailable tab must issue no further request',
+  );
+  eq(
+    await page.locator(`${PANEL} [data-seq-vs="unit"]`).count(),
+    0,
+    'an unavailable Vs tab renders no unit rows',
+  );
   // The reset tab reuses the history and profile states it already has.
   await page.click('[data-seq-tab="reset"]');
   await sleep(400);

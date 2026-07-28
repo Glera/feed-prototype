@@ -183,13 +183,23 @@ initData/auth, статус `/session`, живой лог событий, сбр
 🏝️ консоль модерации острова.
 
 **Feed sequencing (§12)** — подэкран той же панели (кнопка `⌘ Feed sequencing`,
-последняя из функциональных). Четыре read-only вкладки: `Profile`, `Why now`,
-`History`, `Reset`. Клиент только GET-ит три `/api/feed/sequencing/debug/*`;
-ответ обязан объявлять `readOnly:true` и `recomputed:false`, иначе fail-closed;
+последняя из функциональных). Пять read-only вкладок: `Profile`, `Why now`,
+`History`, `Vs`, `Reset`. Клиент только GET-ит четыре
+`/api/feed/sequencing/debug/*`; ответ обязан объявлять `readOnly:true` и
+`recomputed:false`, иначе fail-closed;
 байты замораживаются и показываются как есть, рядом всегда доступен сырой ответ.
 Сброс персонализации — операторский CLI, панель его не вызывает; `404` одинаков и
 при выключенном флаге, и при неаллоулистнутом аккаунте. Защищено
 `npm run check:feed-sequencing-debug` и `…-browser`.
+
+`Vs` — «факт vs тень» (slice 11, `feed.debug-shadow-vs-actual.v1`): что лента
+показала на самом деле и что для того же решения выбрала бы тень, с бейджем
+`match`/`mismatch` из серверного `matchesActual` (клиент семьи не сравнивает).
+Решения вне контура тени (challenge/catalog и прочее) не прячутся, а показываются
+строкой-причиной (`out_of_scope`, `queued`, `retry_wait`, `leased`, `blocked` +
+`errorCode`, `no_runner_item`, `plan_missing_for_item`) — иначе вкладка создавала
+бы ложное впечатление, будто тень покрывает всю ленту. Окно ограничено тем же
+`history limit`.
 
 Прочее: `?warm=1` + `window.__feedWarm()` — снимок пайплайна прогрева;
 `?perf=1` — оверлей таймингов и длинных тасков; `window.__feedRefreshRail()` —
