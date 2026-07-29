@@ -131,25 +131,6 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
     .join('');
 }
 
-type SpeechRecognitionLike = {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  onresult: ((event: {
-    results: ArrayLike<{
-      isFinal: boolean;
-      0: { transcript: string };
-    }>;
-    resultIndex: number;
-  }) => void) | null;
-  onerror: ((event: { error?: string }) => void) | null;
-  onend: (() => void) | null;
-  start(): void;
-  stop(): void;
-};
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-
 function voiceField(
   labelText: string,
   control: HTMLTextAreaElement,
@@ -159,63 +140,13 @@ function voiceField(
   const controls = element('div', 'mobile-review__voice-controls');
   const status = element('span', 'mobile-review__voice-status', 'Текст можно исправить перед отправкой.');
   const dictate = button('🎙 Надиктовать');
-  let recognition: SpeechRecognitionLike | null = null;
-  let listening = false;
-
-  const Recognition = (
-    window as unknown as {
-      SpeechRecognition?: SpeechRecognitionConstructor;
-      webkitSpeechRecognition?: SpeechRecognitionConstructor;
-    }
-  ).SpeechRecognition || (
-    window as unknown as { webkitSpeechRecognition?: SpeechRecognitionConstructor }
-  ).webkitSpeechRecognition;
 
   dictate.addEventListener('click', () => {
-    if (!Recognition) {
-      control.focus();
-      status.textContent = 'Используйте микрофон клавиатуры Telegram — надиктованный текст останется редактируемым.';
-      return;
-    }
-    if (listening) {
-      recognition?.stop();
-      return;
-    }
-    recognition = new Recognition();
-    recognition.lang = 'ru-RU';
-    recognition.continuous = true;
-    recognition.interimResults = false;
-    recognition.onresult = (event) => {
-      let addition = '';
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        if (event.results[index].isFinal) addition += `${event.results[index][0].transcript} `;
-      }
-      const clean = addition.trim();
-      if (!clean) return;
-      const separator = control.value && !/\s$/.test(control.value) ? ' ' : '';
-      control.value = `${control.value}${separator}${clean}`.slice(0, control.maxLength || 2000);
-      control.dispatchEvent(new Event('input', { bubbles: true }));
-      status.textContent = 'Текст распознан. Проверьте его перед отправкой.';
-    };
-    recognition.onerror = (event) => {
-      status.textContent = event.error === 'not-allowed'
-        ? 'Telegram не дал доступ к микрофону. Используйте микрофон клавиатуры.'
-        : 'Диктовка прервалась. Уже распознанный текст сохранён.';
-    };
-    recognition.onend = () => {
-      listening = false;
-      dictate.textContent = '🎙 Надиктовать';
-    };
-    listening = true;
-    dictate.textContent = '■ Остановить';
-    status.textContent = 'Слушаю… после остановки текст можно исправить.';
-    try {
-      recognition.start();
-    } catch {
-      listening = false;
-      dictate.textContent = '🎙 Надиктовать';
-      status.textContent = 'Не удалось запустить диктовку. Используйте микрофон клавиатуры.';
-    }
+    // Deliberately use the Telegram/system keyboard microphone rather than
+    // Web Speech. The app never requests, captures, uploads or persists audio;
+    // the resulting text follows the same local draft and explicit-submit path.
+    control.focus();
+    status.textContent = 'Нажмите микрофон на клавиатуре Telegram. Текст сохранится как редактируемый черновик.';
   });
   control.addEventListener('input', onValue);
   controls.append(dictate, status);

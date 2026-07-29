@@ -312,7 +312,7 @@ try {
     /connect-src 'none'/,
   );
   await prototypePage.getByRole('button', { name: /Надиктовать/ }).click();
-  await prototypePage.getByText(/микрофон клавиатуры Telegram/).waitFor();
+  await prototypePage.getByText(/микрофон на клавиатуре Telegram/).waitFor();
   const feedback = 'Оставить идею reveal, упростить первый жест';
   await prototypePage.getByLabel('Комментарий').fill(feedback);
   await prototypePage.reload({ waitUntil: 'networkidle' });
