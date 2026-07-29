@@ -29,8 +29,8 @@ Vanilla TS + Vite, single-file сборка.
 
 ## Состав ленты
 
-Ростер — [src/playables.ts](src/playables.ts), сейчас **13 юнитов** в порядке
-ленты: `merge-locked-v1`, `marble-sort`, `pins`, `merge-timepress-v1`,
+Ростер — [src/playables.ts](src/playables.ts), сейчас **14 юнитов** в порядке
+ленты: `merge-locked-v1`, `marble-sort`, `pins`, `arrows-v1`, `merge-timepress-v1`,
 `merge-timepress-v2`, `merge-timepress-no-orders-v1`, `pins-l3`, `short-drama`,
 `pins-l5`, `merge-second-board-v1`, `pins-l7`, `merge-second-board-v2`, `pins-l9`.
 
@@ -50,7 +50,9 @@ Vanilla TS + Vite, single-file сборка.
   Pins-пары, `marble-sort` и `merge-timepress-v1` → 2 уровня, `short-drama` → 6,
   `merge-locked-v1` / `merge-timepress-v2` / `no-orders` / `second-board` → 1,
   неизвестная механика → 5. Та же таблица решает, кто умеет встроенные уровни
-  (`?level=`): `pins`, `pins-lN` и `short-drama`, остальные варьируются
+  (`?level=`): `arrows-v1` идёт в порядке `11 → 12 → 13 → 10 → 14`;
+  `pins`, `pins-lN` и `short-drama` используют свой последовательный порядок,
+  остальные варьируются
   параметрами. Источник истины — [src/series-policy.mjs](src/series-policy.mjs),
   защищено `npm run check:series`.
 - **Награды.** Победа на уровне = 1–5⭐, сундук серии = 3–9⭐ **и 1–5 пазлов**;

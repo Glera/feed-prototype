@@ -18,6 +18,9 @@ export function seriesLength(mechanicId) {
  * owns level-shaped content. `pins-lN` is the first level of a two-level pair. */
 export function seriesGameLevel(mechanicId, seriesLevel) {
   const base = mechanicBaseId(mechanicId || '');
+  if (base === 'arrows-v1') {
+    return [11, 12, 13, 10, 14][seriesLevel - 1] ?? null;
+  }
   if (base === 'pins') return seriesLevel;
   const pinsPair = /^pins-l(\d+)$/.exec(base);
   if (pinsPair) return Number(pinsPair[1]) + seriesLevel - 1;
