@@ -1,9 +1,10 @@
 import {
+  API_BASE,
   ApiRequestError,
   apiCatalogLabDecision,
   apiCatalogLabLookup,
   apiMobileReview,
-  apiMobileReviewArtifact,
+  apiMobileReviewPreview,
   apiMobileReviewDecision,
   apiMobileReviewInbox,
   type MobileReviewView,
@@ -140,64 +141,6 @@ function submissionFor(
   }
 }
 
-function readStartTag(
-  html: string,
-  offset: number,
-  expectedName: string,
-): number {
-  const prefix = `<${expectedName}`;
-  if (html.slice(offset, offset + prefix.length).toLowerCase() !== prefix) {
-    throw new Error(`Exact-прототип не содержит canonical <${expectedName}>.`);
-  }
-  const boundary = html[offset + prefix.length];
-  if (boundary !== '>' && !/\s/.test(boundary || '')) {
-    throw new Error(`Exact-прототип содержит недопустимый <${expectedName}>.`);
-  }
-  let quote = '';
-  for (let index = offset + prefix.length; index < html.length; index += 1) {
-    const char = html[index];
-    if (quote) {
-      if (char === quote) quote = '';
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === '>') return index + 1;
-    if (char === '<' || char === '\u0000') {
-      throw new Error(`Exact-прототип содержит недопустимый <${expectedName}>.`);
-    }
-  }
-  throw new Error(`Exact-прототип содержит незакрытый <${expectedName}>.`);
-}
-
-function skipWhitespace(html: string, offset: number): number {
-  let cursor = offset;
-  while (cursor < html.length && /\s/.test(html[cursor])) cursor += 1;
-  return cursor;
-}
-
-export function hardenExactPrototypeHtml(exactHtml: string, policyMeta: string): string {
-  // This is intentionally a narrow parser, not a regex replacement.  Exact
-  // prototype artifacts must have a canonical document prefix; comments,
-  // scripts or attacker-controlled text before the real head are rejected.
-  // The policy is therefore the first node inside the only accepted <head>.
-  let cursor = exactHtml.charCodeAt(0) === 0xfeff ? 1 : 0;
-  cursor = skipWhitespace(exactHtml, cursor);
-  if (exactHtml.slice(cursor, cursor + 9).toLowerCase() === '<!doctype') {
-    const end = exactHtml.indexOf('>', cursor + 9);
-    if (end < 0 || !/^<!doctype\s+html\s*>$/i.test(exactHtml.slice(cursor, end + 1))) {
-      throw new Error('Exact-прототип содержит недопустимый doctype.');
-    }
-    cursor = skipWhitespace(exactHtml, end + 1);
-  }
-  cursor = readStartTag(exactHtml, cursor, 'html');
-  cursor = skipWhitespace(exactHtml, cursor);
-  const headEnd = readStartTag(exactHtml, cursor, 'head');
-  return `${exactHtml.slice(0, headEnd)}\n${policyMeta}${exactHtml.slice(headEnd)}`;
-}
-
 function sameDigest(left: string, right: string): boolean {
   return left.replace(/^sha256:/, '') === right.replace(/^sha256:/, '');
 }
@@ -234,11 +177,12 @@ function voiceField(
 
 function mountRuntimePreview(
   parent: HTMLElement,
+  bundleId: string,
   runtime: MobileRuntime,
   onConfigured: (preview: ConfiguredPreview | null) => void,
 ): void {
   if (runtime.schema === 'operator.mobile-html-runtime.v1') {
-    mountHtmlRuntimePreview(parent, runtime.previews, onConfigured);
+    mountHtmlRuntimePreview(parent, bundleId, runtime.previews, onConfigured);
     return;
   }
   const previews = runtime.previews;
@@ -361,6 +305,7 @@ function mountRuntimePreview(
 
 function mountHtmlRuntimePreview(
   parent: HTMLElement,
+  bundleId: string,
   previews: HtmlRuntimePreview[],
   onConfigured: (preview: ConfiguredPreview | null) => void,
 ): void {
@@ -371,13 +316,10 @@ function mountHtmlRuntimePreview(
   const selector = element('div', 'mobile-review__preview-tabs');
   const stage = element('div', 'mobile-review__preview-stage');
   let epoch = 0;
-  let artifactUrl: string | null = null;
 
   const stop = (): void => {
     epoch += 1;
     stage.replaceChildren();
-    if (artifactUrl) URL.revokeObjectURL(artifactUrl);
-    artifactUrl = null;
   };
 
   const launch = async (preview: HtmlRuntimePreview): Promise<void> => {
@@ -385,7 +327,10 @@ function mountHtmlRuntimePreview(
     const currentEpoch = epoch;
     status.textContent = `Загружаем ${preview.label}…`;
     try {
-      const artifact = await apiMobileReviewArtifact(preview.artifactDigest);
+      const artifact = await apiMobileReviewPreview(
+        bundleId,
+        preview.artifactDigest,
+      );
       if (currentEpoch !== epoch) return;
       if (artifact.bytes.byteLength !== preview.byteLength) {
         throw new Error('Размер exact-прототипа не совпал.');
@@ -395,36 +340,16 @@ function mountHtmlRuntimePreview(
       if (actual !== preview.artifactDigest || artifact.artifactDigest !== actual) {
         throw new Error('SHA-256 exact-прототипа не совпал.');
       }
-      const exactHtml = new TextDecoder('utf-8', {
-        fatal: true,
-        ignoreBOM: true,
-      }).decode(artifact.bytes);
-      // Blob responses do not inherit the backend response CSP. Inject the
-      // deterministic execution policy inside the existing head only after
-      // raw bytes passed SHA-256. Keeping the doctype first preserves standards
-      // mode while the parent page's frame-src blocks cross-origin navigation.
-      const csp = [
-        "default-src 'none'",
-        "script-src 'unsafe-inline' blob:",
-        "style-src 'unsafe-inline'",
-        'img-src data: blob:',
-        'media-src data: blob:',
-        'font-src data:',
-        "connect-src 'none'",
-        'worker-src blob:',
-        "object-src 'none'",
-        "base-uri 'none'",
-        "form-action 'none'",
-      ].join('; ');
-      const policyMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
-      const hardenedHtml = hardenExactPrototypeHtml(exactHtml, policyMeta);
-      artifactUrl = URL.createObjectURL(new Blob([hardenedHtml], { type: 'text/html' }));
       const frame = document.createElement('iframe');
       frame.className = 'mobile-review__frame mobile-review__frame--prototype';
       frame.title = preview.label;
       frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
       frame.setAttribute('allow', 'autoplay');
-      frame.src = artifactUrl;
+      // The exact bytes are served again from the same short-lived signed URL.
+      // Unlike a Blob URL this navigation preserves the backend's real HTTP
+      // Content-Security-Policy header; HTML parsing is no longer a security
+      // boundary.
+      frame.src = artifact.previewUrl;
       let loaded = false;
       frame.addEventListener('load', () => {
         if (currentEpoch !== epoch) return;
@@ -468,7 +393,8 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
   // entry path only and install it before any artifact iframe is created.
   const reviewCsp = document.createElement('meta');
   reviewCsp.httpEquiv = 'Content-Security-Policy';
-  reviewCsp.content = "frame-src 'self' blob:";
+  const previewOrigin = new URL(API_BASE, location.href).origin;
+  reviewCsp.content = `frame-src 'self' ${previewOrigin}`;
   document.head.append(reviewCsp);
   document.body.classList.add('mobile-review-open');
   const root = element('main', 'mobile-review');
@@ -960,6 +886,17 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
 
   function renderPublicationPreparation(view: MobileReviewView, body: HTMLElement): void {
     const publication = view.bundle.review.publication as Record<string, unknown> | undefined;
+    const previousFailure = view.bundle.review.previousFailure as
+      | Record<string, unknown>
+      | null
+      | undefined;
+    if (previousFailure?.message) {
+      body.append(element(
+        'p',
+        'mobile-review__error',
+        String(previousFailure.message),
+      ));
+    }
     body.append(
       element(
         'p',
@@ -1005,10 +942,15 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     notice.dataset.mobileReviewNotice = '';
     body.append(notice);
     if (view.bundle.runtime?.previews?.length) {
-      mountRuntimePreview(body, view.bundle.runtime, (preview) => {
+      mountRuntimePreview(
+        body,
+        view.bundle.bundleId,
+        view.bundle.runtime,
+        (preview) => {
         configuredPreview = preview;
         runtimeBlocked = preview === null;
-      });
+        },
+      );
     }
     switch (view.bundle.action.kind) {
       case 'exact_approval': {

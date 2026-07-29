@@ -25,10 +25,25 @@ let sessionRequests = 0;
 let decisionBody = null;
 const levelDecisionBodies = [];
 let exactDecisionSaved = false;
+let inboxRequests = 0;
 const decisionDelayMs = 500;
 let escapeRequests = 0;
 const catalogLabDecisions = [];
-
+const previewRequests = new Map();
+let cspCorpusRequests = 0;
+const previewCsp = [
+  'sandbox allow-scripts allow-pointer-lock',
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  'img-src data: blob:',
+  'media-src data: blob:',
+  'font-src data:',
+  "connect-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ');
 const escapeServer = createServer((_request, response) => {
   escapeRequests += 1;
   response.end('escaped');
@@ -38,6 +53,12 @@ await new Promise((resolve, reject) => {
   escapeServer.listen(0, '127.0.0.1', resolve);
 });
 const escapeOrigin = `http://127.0.0.1:${escapeServer.address().port}`;
+const cspCorpusDocuments = Array.from({ length: 45 }, (_unused, index) => (
+  `<!doctype html><html data-vector="${index}"><head>`
+  + `<script src="${escapeOrigin}/corpus-script-${index}.js"></script>`
+  + `</head><body><img src="${escapeOrigin}/corpus-image-${index}.png">`
+  + `<script>document.body.dataset.inline='${index}'</script></body></html>`
+));
 
 assert.deepEqual(mobileReviewNavigation({ startParam: `review_${bundleId.replaceAll('-', '')}` }), {
   requested: true,
@@ -130,16 +151,16 @@ levelView.bundle.runtime = {
   }],
 };
 
-const prototypeHtml = Buffer.from(`<!doctype html><html><head>
-<meta http-equiv="refresh" content="1;url=${escapeOrigin}/escaped">
-</head><body>
+const prototypeHtml = Buffer.from(`<!doctype html><html><head></head><body>
 <button id="play">Prototype ready</button>
 <script>document.querySelector('#play').onclick=()=>document.body.dataset.played='1'</script>
 </body></html>`);
 const prototypeDigest = `sha256:${createHash('sha256').update(prototypeHtml).digest('hex')}`;
 const maliciousPrototypeHtml = Buffer.from(`<!doctype html><!-- <head> -->
 <html><head><script src="${escapeOrigin}/remote.js"></script></head>
-<body><img src="${escapeOrigin}/pixel.png"></body></html>`);
+<body><img src="${escapeOrigin}/pixel.png">
+<script>setTimeout(()=>{location.href='/csp-corpus-host'},1500)</script>
+</body></html>`);
 const maliciousPrototypeDigest = `sha256:${createHash('sha256').update(maliciousPrototypeHtml).digest('hex')}`;
 const prototypeView = structuredClone(view);
 prototypeView.bundle.bundleId = prototypeBundleId;
@@ -286,6 +307,26 @@ const server = createServer((request, response) => {
     sessionRequests += 1;
     return json(response, {});
   }
+  const corpus = /^\/csp-corpus\/([0-9]+)$/.exec(url.pathname);
+  if (request.method === 'GET' && corpus) {
+    const document = cspCorpusDocuments[Number(corpus[1])];
+    if (document == null) {
+      response.statusCode = 404;
+      response.end();
+      return;
+    }
+    cspCorpusRequests += 1;
+    response.statusCode = 200;
+    response.setHeader('content-type', 'text/html; charset=utf-8');
+    response.setHeader('Content-Security-Policy', previewCsp);
+    response.end(document);
+    return;
+  }
+  if (request.method === 'GET' && url.pathname === '/csp-corpus-host') {
+    response.setHeader('content-type', 'text/html; charset=utf-8');
+    response.end('<!doctype html><html><body></body></html>');
+    return;
+  }
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${bundleId}`) {
     return json(response, view);
   }
@@ -323,23 +364,49 @@ const server = createServer((request, response) => {
     });
     return;
   }
+  const ticket = /^\/api\/operator\/mobile-reviews\/([a-f0-9-]{36})\/artifacts\/([a-f0-9]{64})\/preview-tickets$/.exec(url.pathname);
+  if (request.method === 'POST' && ticket) {
+    const artifact = ticket[2] === prototypeDigest.slice(7)
+      ? prototypeDigest
+      : ticket[2] === maliciousPrototypeDigest.slice(7)
+        ? maliciousPrototypeDigest
+        : null;
+    if (!artifact) return json(response, { code: 'mobile_review_not_found' }, 404);
+    return json(response, {
+      schema: 'operator.mobile-review-preview-ticket.v1',
+      bundleId: ticket[1],
+      artifactDigest: artifact,
+      expiresAtEpoch: 2_000_000_000,
+      signature: 'a'.repeat(64),
+      previewPath: `/api/operator/mobile-reviews/artifacts/${ticket[2]}/preview`
+        + `?bundleId=${ticket[1]}&expires=2000000000&signature=${'a'.repeat(64)}`,
+    });
+  }
   if (request.method === 'GET'
-    && url.pathname === `/api/operator/mobile-reviews/artifacts/${prototypeDigest.slice(7)}`) {
+    && url.pathname === `/api/operator/mobile-reviews/artifacts/${prototypeDigest.slice(7)}/preview`) {
+    previewRequests.set(prototypeDigest, (previewRequests.get(prototypeDigest) || 0) + 1);
     response.statusCode = 200;
     response.setHeader('content-type', 'text/html');
     response.setHeader('X-Content-SHA256', prototypeDigest);
+    response.setHeader('Content-Security-Policy', previewCsp);
     response.end(prototypeHtml);
     return;
   }
   if (request.method === 'GET'
-    && url.pathname === `/api/operator/mobile-reviews/artifacts/${maliciousPrototypeDigest.slice(7)}`) {
+    && url.pathname === `/api/operator/mobile-reviews/artifacts/${maliciousPrototypeDigest.slice(7)}/preview`) {
+    previewRequests.set(
+      maliciousPrototypeDigest,
+      (previewRequests.get(maliciousPrototypeDigest) || 0) + 1,
+    );
     response.statusCode = 200;
     response.setHeader('content-type', 'text/html');
     response.setHeader('X-Content-SHA256', maliciousPrototypeDigest);
+    response.setHeader('Content-Security-Policy', previewCsp);
     response.end(maliciousPrototypeHtml);
     return;
   }
   if (request.method === 'GET' && url.pathname === '/api/operator/mobile-reviews') {
+    inboxRequests += 1;
     return json(response, {
       schema: 'operator.mobile-review-inbox.v1',
       reviews: exactDecisionSaved ? [levelView] : [view],
@@ -431,10 +498,15 @@ try {
   assert.match(clickAck.notice, /Сохраняем решение/, 'effectful action must acknowledge synchronously');
   assert.ok(clickAck.durationMs <= 100, `click acknowledgement exceeded 100 ms: ${clickAck.durationMs}`);
   await page.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  await page.waitForTimeout(2_500);
+  await page.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  assert.match(page.url(), new RegExp(bundleId), 'saved decision must not auto-follow');
+  assert.equal(inboxRequests, 0, 'saved decision must not poll/follow the inbox');
   assert.equal(decisionBody?.decision?.schema, 'operator.mobile-order-approval-decision.v1');
   assert.equal(decisionBody?.decision?.choice, 'approve');
   assert.match(decisionBody?.mutationId || '', /^[a-f0-9-]{36}$/);
   await page.getByRole('button', { name: 'Проверить следующие шаги' }).click();
+  assert.equal(inboxRequests, 1, 'only the explicit next button may follow the inbox');
   await page.getByRole('button', { name: /Отсмотреть уровень/ }).click();
   await page.getByRole('heading', { name: 'Exact level' }).waitFor({ timeout: 4_000 });
 
@@ -455,9 +527,30 @@ try {
   assert.equal(levelDecisionBodies.length, 2);
   assert.equal(levelDecisionBodies[1].mutationId, levelDecisionBodies[0].mutationId);
   assert.deepEqual(levelDecisionBodies[1].decision, levelDecisionBodies[0].decision);
+  levelView.bundle.bundleDigest = `sha256:${'c'.repeat(64)}`;
+  await levelPage.reload({ waitUntil: 'networkidle' });
+  await levelPage.getByText('Exact preview подтверждён для всех уровней.').waitFor();
+  await levelPage.getByRole('button', { name: 'Подходит' }).click();
+  await levelPage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  assert.notEqual(
+    levelDecisionBodies[2].mutationId,
+    levelDecisionBodies[1].mutationId,
+    'a new exact bundle digest must receive a new mutation identity',
+  );
 
   decisionBody = null;
-  const prototypePage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  const prototypeContext = await browser.newContext({
+    viewport: { width: 390, height: 760 },
+  });
+  let prototypePage = await prototypeContext.newPage();
+  const observedPrototypeCsp = [];
+  prototypePage.on('response', async (response) => {
+    if (response.url().includes(`/artifacts/${prototypeDigest.slice(7)}/preview?`)) {
+      observedPrototypeCsp.push(
+        await response.headerValue('content-security-policy'),
+      );
+    }
+  });
   await prototypePage.addInitScript(() => {
     Object.defineProperty(window, 'SpeechRecognition', {
       configurable: true,
@@ -471,41 +564,87 @@ try {
   await prototypePage.goto(`${origin}/?mobileReview=${prototypeBundleId}`, { waitUntil: 'networkidle' });
   await prototypePage.getByText('Exact-прототип загружен.').waitFor();
   const prototypeFrame = prototypePage.frames().find(
-    (frame) => frame !== prototypePage.mainFrame() && frame.url().startsWith('blob:'),
+    (frame) => frame !== prototypePage.mainFrame() && frame.url().includes('/preview?'),
   );
-  assert.ok(prototypeFrame, 'sandbox prototype frame must be mounted from verified blob bytes');
+  assert.ok(prototypeFrame, 'sandbox prototype frame must use signed backend bytes');
   assert.equal(await prototypeFrame.evaluate(() => document.compatMode), 'CSS1Compat');
-  assert.match(
-    await prototypeFrame.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute('content'),
-    /connect-src 'none'/,
+  assert.equal(previewRequests.get(prototypeDigest), 2, 'verify + iframe must read one signed URL');
+  assert.deepEqual(
+    observedPrototypeCsp,
+    [previewCsp, previewCsp],
+    'both verification and iframe responses must carry the real HTTP CSP',
   );
   await prototypePage.getByRole('button', { name: /Надиктовать/ }).click();
   await prototypePage.getByText(/микрофон на клавиатуре Telegram/).waitFor();
   const feedback = 'Оставить идею reveal, упростить первый жест';
   await prototypePage.getByLabel('Комментарий').fill(feedback);
-  await prototypePage.reload({ waitUntil: 'networkidle' });
+  await prototypePage.close();
+  prototypePage = await prototypeContext.newPage();
+  await prototypePage.goto(
+    `${origin}/?mobileReview=${prototypeBundleId}`,
+    { waitUntil: 'networkidle' },
+  );
   await prototypePage.getByText('Exact-прототип загружен.').waitFor();
-  assert.equal(await prototypePage.getByLabel('Комментарий').inputValue(), feedback);
-  await prototypePage.getByText(/попытался покинуть exact sandbox/).waitFor();
+  assert.equal(
+    await prototypePage.getByLabel('Комментарий').inputValue(),
+    feedback,
+    'draft must survive a new WebView/tab, not only a reload in sessionStorage',
+  );
+  await prototypePage.waitForTimeout(1_250);
   assert.equal(escapeRequests, 0, 'parent frame-src must block meta-refresh navigation');
-  assert.equal(await prototypePage.locator('iframe').count(), 0);
+  assert.equal(await prototypePage.locator('iframe').count(), 1);
   await prototypePage.getByRole('button', { name: 'Перспективно' }).click();
-  await prototypePage.getByText(/Решение не отправлено/).waitFor();
+  await prototypePage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  await prototypeContext.close();
 
   const maliciousPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
-  await maliciousPage.goto(`${origin}/?mobileReview=${maliciousPrototypeBundleId}`, { waitUntil: 'networkidle' });
-  await maliciousPage.getByText(/canonical <html>/).waitFor();
-  assert.equal(await maliciousPage.locator('iframe').count(), 0);
-  assert.equal(escapeRequests, 0, 'comment-before-head must not bypass the sandbox CSP');
+  await maliciousPage.goto(
+    `${origin}/?mobileReview=${maliciousPrototypeBundleId}`,
+    { waitUntil: 'domcontentloaded' },
+  );
+  await maliciousPage.getByText('Exact-прототип загружен.').waitFor();
+  assert.equal(await maliciousPage.locator('iframe').count(), 1);
+  assert.equal(previewRequests.get(maliciousPrototypeDigest), 2);
+  assert.equal(escapeRequests, 0, 'real response CSP must block remote scripts and images');
+  await maliciousPage.getByText(/попытался покинуть exact sandbox/).waitFor();
+  assert.equal(
+    await maliciousPage.locator('iframe').count(),
+    0,
+    'a same-origin second navigation must invalidate exact prototype evidence',
+  );
+
+  const corpusPage = await browser.newPage();
+  await corpusPage.goto(`${origin}/csp-corpus-host`, { waitUntil: 'networkidle' });
+  await corpusPage.evaluate((count) => {
+    for (let index = 0; index < count; index += 1) {
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
+      frame.src = `/csp-corpus/${index}`;
+      document.body.append(frame);
+    }
+  }, cspCorpusDocuments.length);
+  await corpusPage.locator('iframe').nth(cspCorpusDocuments.length - 1).waitFor();
+  await corpusPage.waitForTimeout(500);
+  assert.equal(cspCorpusRequests, 45);
+  assert.equal(
+    escapeRequests,
+    0,
+    'all 45 valid attack documents must be inert under response-header CSP',
+  );
 
   const factoryPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await factoryPage.goto(`${origin}/?mobileReview=${factoryBundleId}`, { waitUntil: 'networkidle' });
   const factoryChecks = factoryPage.locator('input[type="checkbox"]');
-  await factoryChecks.nth(0).evaluate((node) => node.click());
-  await factoryChecks.nth(3).evaluate((node) => node.click());
+  for (let index = 0; index < 5; index += 1) {
+    await factoryChecks.nth(index).click();
+  }
   await factoryPage.reload({ waitUntil: 'networkidle' });
-  assert.equal(await factoryPage.locator('input[type="checkbox"]').nth(0).isChecked(), true);
-  assert.equal(await factoryPage.locator('input[type="checkbox"]').nth(3).isChecked(), true);
+  for (let index = 0; index < 5; index += 1) {
+    assert.equal(
+      await factoryPage.locator('input[type="checkbox"]').nth(index).isChecked(),
+      true,
+    );
+  }
 
   decisionBody = null;
   const preparePage = await browser.newPage({ viewport: { width: 390, height: 760 } });

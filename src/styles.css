@@ -3983,9 +3983,6 @@ body.mobile-review-open {
 }
 
 .mobile-review__header {
-  position: sticky;
-  z-index: 3;
-  top: max(8px, env(safe-area-inset-top));
   padding: 18px;
   margin-bottom: 14px;
 }

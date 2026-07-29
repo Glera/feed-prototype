@@ -1601,17 +1601,37 @@ export async function apiMobileReviewInbox(): Promise<MobileReviewView[]> {
   return response.reviews;
 }
 
-export async function apiMobileReviewArtifact(
+export async function apiMobileReviewPreview(
+  bundleId: string,
   artifactDigest: string,
-): Promise<{ bytes: ArrayBuffer; artifactDigest: string }> {
+): Promise<{ bytes: ArrayBuffer; artifactDigest: string; previewUrl: string }> {
   const match = /^sha256:([a-f0-9]{64})$/.exec(artifactDigest);
   if (!match) throw new ApiRequestError(0, 'Invalid mobile review artifact digest');
+  const ticket = await postRequired<{
+    schema: 'operator.mobile-review-preview-ticket.v1';
+    bundleId: string;
+    artifactDigest: string;
+    expiresAtEpoch: number;
+    signature: string;
+    previewPath: string;
+  }>(
+    `/api/operator/mobile-reviews/${encodeURIComponent(bundleId)}/artifacts/`
+      + `${match[1]}/preview-tickets`,
+    undefined,
+    15_000,
+  );
+  if (ticket.bundleId !== bundleId
+    || ticket.artifactDigest !== artifactDigest
+    || !ticket.previewPath.startsWith('/api/operator/mobile-reviews/artifacts/')) {
+    throw new ApiRequestError(0, 'Backend returned an invalid mobile review preview ticket');
+  }
+  const previewUrl = new URL(ticket.previewPath, `${API_BASE}/`).toString();
   let response: Response;
   try {
     response = await withRequestTimeout(
       (signal) => fetch(
-        `${API_BASE}/api/operator/mobile-reviews/artifacts/${match[1]}`,
-        { headers: headers(), signal },
+        previewUrl,
+        { signal },
       ),
       20_000,
     );
@@ -1638,7 +1658,7 @@ export async function apiMobileReviewArtifact(
   if (echoedDigest !== artifactDigest || bytes.byteLength < 1 || bytes.byteLength > 4 * 1024 * 1024) {
     throw new ApiRequestError(0, 'Backend returned an invalid mobile review artifact');
   }
-  return { bytes, artifactDigest: echoedDigest };
+  return { bytes, artifactDigest: echoedDigest, previewUrl };
 }
 
 export function apiMobileReviewDecision(
