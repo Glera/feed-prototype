@@ -1529,6 +1529,175 @@ export interface CatalogLabGrantView {
   active: boolean;
 }
 
+export interface MobileReviewView {
+  schema: 'operator.mobile-review-view.v1';
+  bundle: {
+    schema: 'operator.mobile-review-bundle.v1';
+    bundleId: string;
+    bundleDigest: string;
+    order: {
+      orderId: string;
+      orderHash: string;
+      eventId: string;
+      packetDigest: string;
+      title: string;
+      brief: string;
+    };
+    action: {
+      kind: string;
+      identity: string;
+      label: string;
+      sequence: { completed: number; total: number };
+    };
+    presentation: {
+      subject: string;
+      title: string;
+      summary: string;
+      technicalDetails: Record<string, unknown>;
+    };
+    review: Record<string, any>;
+    runtime: null | (
+      {
+        schema: 'operator.mobile-review-runtime.v1';
+        previews: Array<{
+          reviewTargetId: string;
+          label: string;
+          playableId: string;
+          runtimeContractDigest: string;
+          runtimeArtifactDigest: string;
+          levels: Array<{ ordinal: number; spec: Record<string, unknown>; specHash: string }>;
+          skin: Record<string, unknown> | null;
+        }>;
+      }
+      | {
+        schema: 'operator.mobile-html-runtime.v1';
+        previews: Array<{
+          reviewTargetId: string;
+          label: string;
+          artifactDigest: string;
+          byteLength: number;
+          contentType: 'text/html';
+        }>;
+      }
+    );
+    createdAt: string;
+  };
+  state: 'current' | 'superseded' | 'decided' | 'consumed';
+  decision: null | Record<string, unknown>;
+  telegramUrl: string;
+}
+
+export function apiMobileReview(bundleId: string): Promise<MobileReviewView> {
+  return getRequired<MobileReviewView>(
+    `/api/operator/mobile-reviews/${encodeURIComponent(bundleId)}`,
+  );
+}
+
+export async function apiMobileReviewInbox(): Promise<MobileReviewView[]> {
+  const response = await getRequired<{
+    schema: 'operator.mobile-review-inbox.v1';
+    reviews: MobileReviewView[];
+  }>('/api/operator/mobile-reviews?limit=100');
+  return response.reviews;
+}
+
+export async function apiMobileReviewPreview(
+  bundleId: string,
+  artifactDigest: string,
+): Promise<{ bytes: ArrayBuffer; artifactDigest: string }> {
+  const expectedCsp = [
+    'sandbox allow-scripts allow-pointer-lock',
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline'",
+    'img-src data: blob:',
+    'media-src data: blob:',
+    'font-src data:',
+    "connect-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    'frame-ancestors *',
+  ].join('; ');
+  const match = /^sha256:([a-f0-9]{64})$/.exec(artifactDigest);
+  if (!match) throw new ApiRequestError(0, 'Invalid mobile review artifact digest');
+  const ticket = await postRequired<{
+    schema: 'operator.mobile-review-preview-ticket.v1';
+    bundleId: string;
+    artifactDigest: string;
+    expiresAtEpoch: number;
+    signature: string;
+    previewPath: string;
+  }>(
+    `/api/operator/mobile-reviews/${encodeURIComponent(bundleId)}/artifacts/`
+      + `${match[1]}/preview-tickets`,
+    undefined,
+    15_000,
+  );
+  if (ticket.bundleId !== bundleId
+    || ticket.artifactDigest !== artifactDigest
+    || !ticket.previewPath.startsWith('/api/operator/mobile-reviews/artifacts/')) {
+    throw new ApiRequestError(0, 'Backend returned an invalid mobile review preview ticket');
+  }
+  const previewUrl = new URL(ticket.previewPath, `${API_BASE}/`).toString();
+  const expectedUrl = new URL(previewUrl).toString();
+  let response: Response;
+  try {
+    response = await withRequestTimeout(
+      (signal) => fetch(
+        previewUrl,
+        { signal },
+      ),
+      20_000,
+    );
+  } catch (error) {
+    if (error instanceof ApiRequestError) throw error;
+    throw new ApiRequestError(
+      0,
+      `Network error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    let data: unknown = null;
+    try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
+    const detail = (data as any)?.detail ?? (data as any)?.error ?? text ?? response.statusText;
+    throw new ApiRequestError(
+      response.status,
+      `HTTP ${response.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+      backendErrorCode(data),
+    );
+  }
+  const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+  const responseCsp = response.headers.get('content-security-policy') || '';
+  if (response.redirected
+    || response.url !== expectedUrl
+    || !/^text\/html(?:\s*;|$)/.test(contentType)
+    || responseCsp !== expectedCsp) {
+    throw new ApiRequestError(
+      0,
+      'Backend returned an invalid mobile review preview response',
+    );
+  }
+  const echoedDigest = response.headers.get('X-Content-SHA256') || '';
+  const bytes = await response.arrayBuffer();
+  if (echoedDigest !== artifactDigest || bytes.byteLength < 1 || bytes.byteLength > 4 * 1024 * 1024) {
+    throw new ApiRequestError(0, 'Backend returned an invalid mobile review artifact');
+  }
+  return { bytes, artifactDigest: echoedDigest };
+}
+
+export function apiMobileReviewDecision(
+  bundleId: string,
+  command: Record<string, unknown>,
+): Promise<MobileReviewView> {
+  return postRequired<MobileReviewView>(
+    `/api/operator/mobile-reviews/${encodeURIComponent(bundleId)}/decisions`,
+    command,
+    15_000,
+  );
+}
+
 /** Resolve a short user code entered by an allowlisted Telegram dev. */
 export function apiCatalogLabLookup(userCode: string): Promise<CatalogLabDeviceAuthorization> {
   return postRequired<CatalogLabDeviceAuthorization>('/api/admin/device-auth/lookup', { userCode });

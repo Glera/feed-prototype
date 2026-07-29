@@ -827,8 +827,15 @@ parent.postMessage({source:'playable',type:'completed',success:true,outcome:'won
     // The external Telegram SDK is a blocking head script and replaces
     // `window.Telegram` in a plain browser. Install the harness identity after
     // it, but still before the bundled module, so user-scoped durable queues do
-    // not silently fall back to a shared anonymous localStorage key.
-    response.end(source.replace('</head>', `${injectedBootstrap(instanceToken, scenario, harnessTab)}</head>`));
+    // not silently fall back to a shared anonymous localStorage key. A
+    // single-file bundle may itself contain the literal "</head>" as data, so
+    // only the document's final closing tag is an injection boundary.
+    const closingHead = source.lastIndexOf('</head>');
+    if (closingHead < 0) return json(response, { code: 'harness_head_boundary_missing' }, 500);
+    response.end(
+      `${source.slice(0, closingHead)}${injectedBootstrap(instanceToken, scenario, harnessTab)}`
+      + source.slice(closingHead),
+    );
     return;
   }
   if (request.method === 'GET' && url.pathname === '/__harness/state') {
