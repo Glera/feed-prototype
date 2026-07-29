@@ -79,8 +79,9 @@ function technicalDetails(view: MobileReviewView): HTMLDetailsElement {
     bundleDigest: view.bundle.bundleDigest,
     orderHash: view.bundle.order.orderHash,
     eventId: view.bundle.order.eventId,
-    action: view.bundle.action,
-    ...view.bundle.presentation.technicalDetails,
+    actionKind: view.bundle.action.kind,
+    actionIdentity: view.bundle.action.identity,
+    packetDigest: view.bundle.order.packetDigest,
   }, null, 2);
   details.append(summary, pre);
   return details;
@@ -106,17 +107,33 @@ function patchDraft(bundleId: string, value: Record<string, unknown>): void {
   writeDraft(bundleId, { ...readDraft(bundleId), ...value });
 }
 
-function mutationFor(bundleId: string, decision: Record<string, unknown>): string {
+function submissionFor(
+  bundleId: string,
+  decision: Record<string, unknown>,
+): { mutationId: string; decision: Record<string, unknown> } {
   const key = `mobile-review-mutation:${bundleId}`;
-  const bytes = JSON.stringify(decision);
+  const semanticDecision = structuredClone(decision);
+  // Elapsed play time is evidence captured on the first submit, not a reason
+  // to mint a new semantic mutation when the HTTP response is lost.
+  delete semanticDecision.playedMs;
+  const semanticBytes = JSON.stringify(semanticDecision);
   try {
     const prior = JSON.parse(sessionStorage.getItem(key) || 'null');
-    if (prior?.bytes === bytes && typeof prior?.mutationId === 'string') return prior.mutationId;
+    if (prior?.semanticBytes === semanticBytes
+      && typeof prior?.mutationId === 'string'
+      && prior?.decision && typeof prior.decision === 'object') {
+      return { mutationId: prior.mutationId, decision: prior.decision };
+    }
     const mutationId = crypto.randomUUID();
-    sessionStorage.setItem(key, JSON.stringify({ bytes, mutationId }));
-    return mutationId;
+    const frozenDecision = structuredClone(decision);
+    sessionStorage.setItem(key, JSON.stringify({
+      semanticBytes,
+      mutationId,
+      decision: frozenDecision,
+    }));
+    return { mutationId, decision: frozenDecision };
   } catch {
-    return crypto.randomUUID();
+    return { mutationId: crypto.randomUUID(), decision };
   }
 }
 
@@ -157,7 +174,7 @@ function voiceField(
 function mountRuntimePreview(
   parent: HTMLElement,
   runtime: MobileRuntime,
-  onConfigured: (preview: ConfiguredPreview) => void,
+  onConfigured: (preview: ConfiguredPreview | null) => void,
 ): void {
   if (runtime.schema === 'operator.mobile-html-runtime.v1') {
     mountHtmlRuntimePreview(parent, runtime.previews, onConfigured);
@@ -284,7 +301,7 @@ function mountRuntimePreview(
 function mountHtmlRuntimePreview(
   parent: HTMLElement,
   previews: HtmlRuntimePreview[],
-  onConfigured: (preview: ConfiguredPreview) => void,
+  onConfigured: (preview: ConfiguredPreview | null) => void,
 ): void {
   if (!previews.length) return;
   const shell = element('section', 'mobile-review__preview');
@@ -317,11 +334,14 @@ function mountHtmlRuntimePreview(
       if (actual !== preview.artifactDigest || artifact.artifactDigest !== actual) {
         throw new Error('SHA-256 exact-прототипа не совпал.');
       }
-      const exactHtml = new TextDecoder('utf-8', { fatal: true }).decode(artifact.bytes);
-      // Blob responses do not inherit the backend response CSP. Prefix a
-      // deterministic policy only after the raw bytes passed SHA-256; this keeps
-      // the reviewed artifact identity exact while executing a network-isolated
-      // projection of it on the phone.
+      const exactHtml = new TextDecoder('utf-8', {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(artifact.bytes);
+      // Blob responses do not inherit the backend response CSP. Inject the
+      // deterministic execution policy inside the existing head only after
+      // raw bytes passed SHA-256. Keeping the doctype first preserves standards
+      // mode while the parent page's frame-src blocks cross-origin navigation.
       const csp = [
         "default-src 'none'",
         "script-src 'unsafe-inline' blob:",
@@ -335,7 +355,18 @@ function mountHtmlRuntimePreview(
         "base-uri 'none'",
         "form-action 'none'",
       ].join('; ');
-      const hardenedHtml = `<meta http-equiv="Content-Security-Policy" content="${csp}">${exactHtml}`;
+      const policyMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
+      const hardenedHtml = /<head(?:\s[^>]*)?>/i.test(exactHtml)
+        ? exactHtml.replace(
+          /<head(\s[^>]*)?>/i,
+          (head) => `${head}\n${policyMeta}`,
+        )
+        : /<html(?:\s[^>]*)?>/i.test(exactHtml)
+          ? exactHtml.replace(
+            /<html(\s[^>]*)?>/i,
+            (html) => `${html}\n<head>${policyMeta}</head>`,
+          )
+          : (() => { throw new Error('Exact-прототип не содержит допустимый HTML root.'); })();
       artifactUrl = URL.createObjectURL(new Blob([hardenedHtml], { type: 'text/html' }));
       const frame = document.createElement('iframe');
       frame.className = 'mobile-review__frame mobile-review__frame--prototype';
@@ -343,14 +374,22 @@ function mountHtmlRuntimePreview(
       frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
       frame.setAttribute('allow', 'autoplay');
       frame.src = artifactUrl;
+      let loaded = false;
       frame.addEventListener('load', () => {
         if (currentEpoch !== epoch) return;
+        if (loaded) {
+          onConfigured(null);
+          status.textContent = 'Прототип попытался покинуть exact sandbox. Отсмотр заблокирован.';
+          stage.replaceChildren();
+          return;
+        }
+        loaded = true;
         status.textContent = 'Exact-прототип загружен. Поиграйте и сохраните решение ниже.';
         onConfigured({
           reviewTargetId: preview.reviewTargetId,
           runtimeArtifactDigest: preview.artifactDigest,
         });
-      }, { once: true });
+      });
       stage.append(frame);
     } catch (error) {
       if (currentEpoch === epoch) status.textContent = errorMessage(error);
@@ -373,6 +412,13 @@ function mountHtmlRuntimePreview(
 }
 
 export async function mountMobileReview(initialBundleId: string | null): Promise<void> {
+  // This SPA also hosts the player feed, whose verified runtimes can live on a
+  // separate origin. Scope the stricter parent policy to the mobile-review
+  // entry path only and install it before any artifact iframe is created.
+  const reviewCsp = document.createElement('meta');
+  reviewCsp.httpEquiv = 'Content-Security-Policy';
+  reviewCsp.content = "frame-src 'self' blob:";
+  document.head.append(reviewCsp);
   document.body.classList.add('mobile-review-open');
   const root = element('main', 'mobile-review');
   root.setAttribute('aria-label', 'Отсмотр заказа');
@@ -380,23 +426,30 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
 
   let current: MobileReviewView | null = null;
   let configuredPreview: ConfiguredPreview | null = null;
+  let runtimeBlocked = false;
   let startedAt = Date.now();
   let followEpoch = 0;
 
   async function submit(decision: Record<string, unknown>): Promise<void> {
     if (!current) return;
+    if (runtimeBlocked) {
+      const notice = root.querySelector<HTMLElement>('[data-mobile-review-notice]');
+      if (notice) notice.textContent = 'Этот preview нарушил sandbox. Решение не отправлено.';
+      return;
+    }
     const submitters = [...root.querySelectorAll<HTMLButtonElement>('button')];
     submitters.forEach((node) => { node.disabled = true; });
     const notice = root.querySelector<HTMLElement>('[data-mobile-review-notice]');
     if (notice) notice.textContent = 'Сохраняем решение… повторно нажимать не нужно.';
     try {
+      const submission = submissionFor(current.bundle.bundleId, decision);
       const command = {
         schema: 'operator.mobile-review-decision-command.v1',
         bundleId: current.bundle.bundleId,
         bundleDigest: current.bundle.bundleDigest,
         actionIdentity: current.bundle.action.identity,
-        mutationId: mutationFor(current.bundle.bundleId, decision),
-        decision,
+        mutationId: submission.mutationId,
+        decision: submission.decision,
       };
       current = await apiMobileReviewDecision(current.bundle.bundleId, command);
       try { localStorage.removeItem(draftKey(current.bundle.bundleId)); } catch { /* no-op */ }
@@ -462,7 +515,7 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
           const following = reviews.find((item) => (
             item.bundle.order.orderId === completed.bundle.order.orderId
             && item.bundle.bundleId !== completed.bundle.bundleId
-          )) || reviews.find((item) => item.bundle.bundleId !== completed.bundle.bundleId);
+          ));
           if (following) {
             followEpoch += 1;
             renderView(following);
@@ -490,6 +543,14 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
       input.type = 'checkbox';
       input.name = key;
       input.checked = Boolean((draft.assessment as Record<string, boolean> | undefined)?.[key]);
+      input.addEventListener('change', () => {
+        patchDraft(view.bundle.bundleId, {
+          assessment: {
+            ...((readDraft(view.bundle.bundleId).assessment as Record<string, boolean> | undefined) || {}),
+            [key]: input.checked,
+          },
+        });
+      });
       label.append(input, document.createTextNode(labelText));
       form.append(label);
     }
@@ -847,10 +908,33 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     body.append(action);
   }
 
+  function renderPublicationPreparation(view: MobileReviewView, body: HTMLElement): void {
+    const publication = view.bundle.review.publication as Record<string, unknown> | undefined;
+    body.append(
+      element(
+        'p',
+        '',
+        'Система подготовит exact preview и отдельное content-bound подтверждение. Это ещё не публикует серию.',
+      ),
+      element(
+        'p',
+        'mobile-review__status',
+        `Черновик ${String(publication?.draftId || '')} · revision ${String(publication?.revision || '')}`,
+      ),
+    );
+    const action = button('Подготовить exact-публикацию', true);
+    action.addEventListener('click', () => void submit({
+      schema: 'operator.mobile-publication-preparation-decision.v1',
+      choice: 'prepare',
+    }));
+    body.append(action);
+  }
+
   function renderView(view: MobileReviewView): void {
     followEpoch += 1;
     current = view;
     configuredPreview = null;
+    runtimeBlocked = false;
     startedAt = Date.now();
     root.replaceChildren(heading(view));
     if (view.state !== 'current') {
@@ -873,6 +957,7 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     if (view.bundle.runtime?.previews?.length) {
       mountRuntimePreview(body, view.bundle.runtime, (preview) => {
         configuredPreview = preview;
+        runtimeBlocked = preview === null;
       });
     }
     switch (view.bundle.action.kind) {
@@ -893,6 +978,7 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
       case 'experiment_review': renderTaste(view, body); break;
       case 'prototype_review': renderPrototype(view, body); break;
       case 'expert_resolution': renderExpert(view, body); break;
+      case 'publication_prepare': renderPublicationPreparation(view, body); break;
       case 'telegram_approve': renderPublication(view, body); break;
       default: notice.textContent = 'Этот тип шага пока нельзя обработать с телефона.';
     }

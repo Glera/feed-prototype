@@ -16,11 +16,25 @@ const buildRoot = mkdtempSync(path.join(tmpdir(), 'mobile-review-browser-'));
 const bundleId = '11111111-1111-4111-8111-111111111111';
 const levelBundleId = '44444444-4444-4444-8444-444444444444';
 const prototypeBundleId = '55555555-5555-4555-8555-555555555555';
+const factoryBundleId = '66666666-6666-4666-8666-666666666666';
+const publicationPrepareBundleId = '77777777-7777-4777-8777-777777777777';
 let origin = '';
 let sessionRequests = 0;
 let decisionBody = null;
+const levelDecisionBodies = [];
 let exactDecisionSaved = false;
 const decisionDelayMs = 500;
+let escapeRequests = 0;
+
+const escapeServer = createServer((_request, response) => {
+  escapeRequests += 1;
+  response.end('escaped');
+});
+await new Promise((resolve, reject) => {
+  escapeServer.once('error', reject);
+  escapeServer.listen(0, '127.0.0.1', resolve);
+});
+const escapeOrigin = `http://127.0.0.1:${escapeServer.address().port}`;
 
 assert.deepEqual(mobileReviewNavigation({ startParam: `review_${bundleId.replaceAll('-', '')}` }), {
   requested: true,
@@ -56,7 +70,11 @@ const view = {
       subject: 'order',
       title: 'Проверка заказа',
       summary: 'Проверьте название, brief и точные параметры.',
-      technicalDetails: { hidden: 'until-expanded' },
+      technicalDetails: {
+        hidden: 'until-expanded',
+        provider: 'must-never-enter-the-dom',
+        model: 'must-never-enter-the-dom',
+      },
     },
     review: {
       schema: 'operator.mobile-order-approval.v1',
@@ -109,7 +127,9 @@ levelView.bundle.runtime = {
   }],
 };
 
-const prototypeHtml = Buffer.from(`<!doctype html><html><body>
+const prototypeHtml = Buffer.from(`<!doctype html><html><head>
+<meta http-equiv="refresh" content="1;url=${escapeOrigin}/escaped">
+</head><body>
 <button id="play">Prototype ready</button>
 <script>document.querySelector('#play').onclick=()=>document.body.dataset.played='1'</script>
 </body></html>`);
@@ -144,6 +164,57 @@ prototypeView.bundle.runtime = {
     contentType: 'text/html',
   }],
 };
+
+const factoryView = structuredClone(view);
+factoryView.bundle.bundleId = factoryBundleId;
+factoryView.bundle.bundleDigest = `sha256:${'6'.repeat(64)}`;
+factoryView.bundle.action = {
+  kind: 'factory_review',
+  identity: 'f'.repeat(64),
+  label: 'Отсмотреть proof фабрики',
+  sequence: { completed: 0, total: 1 },
+};
+factoryView.bundle.presentation = {
+  subject: 'level_factory',
+  title: 'Factory proof',
+  summary: 'Check the exact factory sample.',
+  technicalDetails: {},
+};
+factoryView.bundle.review = {
+  schema: 'operator.mobile-factory-proof.v1',
+  factoryHash: 'f'.repeat(64),
+  lane: 'level_design',
+  proof: {
+    projection: { metrics: { successes: 2, attemptsTotal: 2 } },
+  },
+};
+factoryView.bundle.runtime = null;
+
+const publicationPrepareView = structuredClone(view);
+publicationPrepareView.bundle.bundleId = publicationPrepareBundleId;
+publicationPrepareView.bundle.bundleDigest = `sha256:${'7'.repeat(64)}`;
+publicationPrepareView.bundle.action = {
+  kind: 'publication_prepare',
+  identity: 'a'.repeat(64),
+  label: 'Подготовить exact-публикацию',
+  sequence: { completed: 0, total: 1 },
+};
+publicationPrepareView.bundle.presentation = {
+  subject: 'publication',
+  title: 'Подготовить публикацию',
+  summary: 'Create the exact content-bound Telegram confirmation.',
+  technicalDetails: {},
+};
+publicationPrepareView.bundle.review = {
+  schema: 'operator.mobile-publication-preparation.v1',
+  publication: {
+    draftId: '88888888-8888-4888-8888-888888888888',
+    revision: 1,
+    bindingHash: 'a'.repeat(64),
+  },
+  choices: ['prepare'],
+};
+publicationPrepareView.bundle.runtime = null;
 
 const fakeRuntime = `<!doctype html><html><body><canvas></canvas><script>
 const contract = '${'7'.repeat(64)}';
@@ -186,6 +257,12 @@ const server = createServer((request, response) => {
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${prototypeBundleId}`) {
     return json(response, prototypeView);
   }
+  if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${factoryBundleId}`) {
+    return json(response, factoryView);
+  }
+  if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${publicationPrepareBundleId}`) {
+    return json(response, publicationPrepareView);
+  }
   if (request.method === 'GET'
     && url.pathname === `/api/operator/mobile-reviews/artifacts/${prototypeDigest.slice(7)}`) {
     response.statusCode = 200;
@@ -207,8 +284,18 @@ const server = createServer((request, response) => {
       decisionBody = JSON.parse(body);
       const source = url.pathname.includes(levelBundleId)
         ? levelView
-        : url.pathname.includes(prototypeBundleId) ? prototypeView : view;
+        : url.pathname.includes(prototypeBundleId)
+          ? prototypeView
+          : url.pathname.includes(publicationPrepareBundleId)
+            ? publicationPrepareView
+            : view;
       if (source === view) exactDecisionSaved = true;
+      if (source === levelView) {
+        levelDecisionBodies.push(decisionBody);
+        if (levelDecisionBodies.length === 1) {
+          return json(response, { code: 'response_lost_after_commit' }, 503);
+        }
+      }
       setTimeout(() => {
         json(response, { ...source, state: 'decided', decision: { document: decisionBody } });
       }, decisionDelayMs);
@@ -245,6 +332,7 @@ const build = spawnSync('npx', [
 });
 if (build.status !== 0) {
   await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => escapeServer.close(resolve));
   rmSync(buildRoot, { recursive: true, force: true });
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 }
@@ -257,6 +345,8 @@ try {
   await page.getByRole('heading', { name: 'Phone-native order' }).waitFor();
   await assert.doesNotReject(() => page.getByText('Three short levels in a calm neon world.').waitFor());
   assert.equal(await page.getByText('hidden: until-expanded').count(), 0);
+  assert.equal((await page.locator('body').evaluate((body) => body.innerHTML)).includes('provider'), false);
+  assert.equal((await page.locator('body').evaluate((body) => body.innerHTML)).includes('must-never-enter-the-dom'), false);
   assert.equal(sessionRequests, 0, 'mobile review route must not boot the playable feed');
   const clickAck = await page.evaluate(() => {
     const action = [...document.querySelectorAll('button')]
@@ -282,12 +372,18 @@ try {
   const levelPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await levelPage.goto(`${origin}/?mobileReview=${levelBundleId}`, { waitUntil: 'networkidle' });
   await levelPage.getByText('Exact preview подтверждён для всех уровней.').waitFor();
-  assert.equal((await levelPage.locator('body').innerText()).includes('provider'), false);
+  assert.equal((await levelPage.locator('body').evaluate((body) => body.innerHTML)).includes('provider'), false);
+  await levelPage.getByRole('button', { name: 'Подходит' }).click();
+  await levelPage.getByText(/HTTP 503/).waitFor();
+  await new Promise((resolve) => setTimeout(resolve, 50));
   await levelPage.getByRole('button', { name: 'Подходит' }).click();
   await levelPage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
   assert.equal(decisionBody?.decision?.schema, 'operator.mobile-taste-review-decision.v1');
   assert.equal(decisionBody?.decision?.preview?.configured, true);
   assert.equal(decisionBody?.decision?.preview?.reviewTargetId, levelView.bundle.action.identity);
+  assert.equal(levelDecisionBodies.length, 2);
+  assert.equal(levelDecisionBodies[1].mutationId, levelDecisionBodies[0].mutationId);
+  assert.deepEqual(levelDecisionBodies[1].decision, levelDecisionBodies[0].decision);
 
   decisionBody = null;
   const prototypePage = await browser.newPage({ viewport: { width: 390, height: 760 } });
@@ -307,6 +403,7 @@ try {
     (frame) => frame !== prototypePage.mainFrame() && frame.url().startsWith('blob:'),
   );
   assert.ok(prototypeFrame, 'sandbox prototype frame must be mounted from verified blob bytes');
+  assert.equal(await prototypeFrame.evaluate(() => document.compatMode), 'CSS1Compat');
   assert.match(
     await prototypeFrame.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute('content'),
     /connect-src 'none'/,
@@ -318,13 +415,35 @@ try {
   await prototypePage.reload({ waitUntil: 'networkidle' });
   await prototypePage.getByText('Exact-прототип загружен.').waitFor();
   assert.equal(await prototypePage.getByLabel('Комментарий').inputValue(), feedback);
+  await prototypePage.getByText(/попытался покинуть exact sandbox/).waitFor();
+  assert.equal(escapeRequests, 0, 'parent frame-src must block meta-refresh navigation');
+  assert.equal(await prototypePage.locator('iframe').count(), 0);
   await prototypePage.getByRole('button', { name: 'Перспективно' }).click();
-  await prototypePage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
-  assert.equal(decisionBody?.decision?.schema, 'operator.mobile-prototype-review-decision.v1');
-  assert.equal(decisionBody?.decision?.comment, feedback);
+  await prototypePage.getByText(/Решение не отправлено/).waitFor();
+
+  const factoryPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await factoryPage.goto(`${origin}/?mobileReview=${factoryBundleId}`, { waitUntil: 'networkidle' });
+  const factoryChecks = factoryPage.locator('input[type="checkbox"]');
+  await factoryChecks.nth(0).evaluate((node) => node.click());
+  await factoryChecks.nth(3).evaluate((node) => node.click());
+  await factoryPage.reload({ waitUntil: 'networkidle' });
+  assert.equal(await factoryPage.locator('input[type="checkbox"]').nth(0).isChecked(), true);
+  assert.equal(await factoryPage.locator('input[type="checkbox"]').nth(3).isChecked(), true);
+
+  decisionBody = null;
+  const preparePage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await preparePage.goto(`${origin}/?mobileReview=${publicationPrepareBundleId}`, { waitUntil: 'networkidle' });
+  await preparePage.getByText(/Это ещё не публикует серию/).waitFor();
+  await preparePage.getByRole('button', { name: 'Подготовить exact-публикацию' }).click();
+  await preparePage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  assert.deepEqual(decisionBody?.decision, {
+    schema: 'operator.mobile-publication-preparation-decision.v1',
+    choice: 'prepare',
+  });
 } finally {
   if (browser) await browser.close();
   await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => escapeServer.close(resolve));
   rmSync(buildRoot, { recursive: true, force: true });
 }
 
