@@ -4069,6 +4069,31 @@ body.mobile-review-open {
   gap: 6px;
 }
 
+.mobile-review__voice-field {
+  display: grid;
+  gap: 8px;
+}
+
+.mobile-review__voice-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mobile-review__voice-controls .mobile-review__button {
+  width: auto;
+  min-height: 40px;
+  padding: 8px 12px;
+}
+
+.mobile-review__voice-status {
+  flex: 1 1 180px;
+  color: rgba(255, 255, 255, .64);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .mobile-review__field-label {
   color: #b7c0cc;
   font-size: 13px;
@@ -4168,6 +4193,10 @@ body.mobile-review-open {
   width: 100%;
   height: min(70vh, 620px);
   border: 0;
+}
+
+.mobile-review__frame--prototype {
+  height: min(76vh, 720px);
 }
 
 .mobile-review__status,

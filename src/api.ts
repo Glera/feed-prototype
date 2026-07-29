@@ -1556,18 +1556,30 @@ export interface MobileReviewView {
       technicalDetails: Record<string, unknown>;
     };
     review: Record<string, any>;
-    runtime: null | {
-      schema: 'operator.mobile-review-runtime.v1';
-      previews: Array<{
-        reviewTargetId: string;
-        label: string;
-        playableId: string;
-        runtimeContractDigest: string;
-        runtimeArtifactDigest: string;
-        levels: Array<{ ordinal: number; spec: Record<string, unknown>; specHash: string }>;
-        skin: Record<string, unknown> | null;
-      }>;
-    };
+    runtime: null | (
+      {
+        schema: 'operator.mobile-review-runtime.v1';
+        previews: Array<{
+          reviewTargetId: string;
+          label: string;
+          playableId: string;
+          runtimeContractDigest: string;
+          runtimeArtifactDigest: string;
+          levels: Array<{ ordinal: number; spec: Record<string, unknown>; specHash: string }>;
+          skin: Record<string, unknown> | null;
+        }>;
+      }
+      | {
+        schema: 'operator.mobile-html-runtime.v1';
+        previews: Array<{
+          reviewTargetId: string;
+          label: string;
+          artifactDigest: string;
+          byteLength: number;
+          contentType: 'text/html';
+        }>;
+      }
+    );
     createdAt: string;
   };
   state: 'current' | 'superseded' | 'decided' | 'consumed';
@@ -1585,8 +1597,48 @@ export async function apiMobileReviewInbox(): Promise<MobileReviewView[]> {
   const response = await getRequired<{
     schema: 'operator.mobile-review-inbox.v1';
     reviews: MobileReviewView[];
-  }>('/api/operator/mobile-reviews?limit=20');
+  }>('/api/operator/mobile-reviews?limit=100');
   return response.reviews;
+}
+
+export async function apiMobileReviewArtifact(
+  artifactDigest: string,
+): Promise<{ bytes: ArrayBuffer; artifactDigest: string }> {
+  const match = /^sha256:([a-f0-9]{64})$/.exec(artifactDigest);
+  if (!match) throw new ApiRequestError(0, 'Invalid mobile review artifact digest');
+  let response: Response;
+  try {
+    response = await withRequestTimeout(
+      (signal) => fetch(
+        `${API_BASE}/api/operator/mobile-reviews/artifacts/${match[1]}`,
+        { headers: headers(), signal },
+      ),
+      20_000,
+    );
+  } catch (error) {
+    if (error instanceof ApiRequestError) throw error;
+    throw new ApiRequestError(
+      0,
+      `Network error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    let data: unknown = null;
+    try { data = text ? JSON.parse(text) : null; } catch { /* keep raw response */ }
+    const detail = (data as any)?.detail ?? (data as any)?.error ?? text ?? response.statusText;
+    throw new ApiRequestError(
+      response.status,
+      `HTTP ${response.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+      backendErrorCode(data),
+    );
+  }
+  const echoedDigest = response.headers.get('X-Content-SHA256') || '';
+  const bytes = await response.arrayBuffer();
+  if (echoedDigest !== artifactDigest || bytes.byteLength < 1 || bytes.byteLength > 4 * 1024 * 1024) {
+    throw new ApiRequestError(0, 'Backend returned an invalid mobile review artifact');
+  }
+  return { bytes, artifactDigest: echoedDigest };
 }
 
 export function apiMobileReviewDecision(

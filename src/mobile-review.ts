@@ -3,13 +3,22 @@ import {
   apiCatalogLabDecision,
   apiCatalogLabLookup,
   apiMobileReview,
+  apiMobileReviewArtifact,
   apiMobileReviewDecision,
   apiMobileReviewInbox,
   type MobileReviewView,
 } from './api';
 import { showConfirm } from './telegram';
 
-type RuntimePreview = NonNullable<MobileReviewView['bundle']['runtime']>['previews'][number];
+type MobileRuntime = NonNullable<MobileReviewView['bundle']['runtime']>;
+type SortRuntime = Extract<MobileRuntime, { schema: 'operator.mobile-review-runtime.v1' }>;
+type HtmlRuntime = Extract<MobileRuntime, { schema: 'operator.mobile-html-runtime.v1' }>;
+type SortRuntimePreview = SortRuntime['previews'][number];
+type HtmlRuntimePreview = HtmlRuntime['previews'][number];
+type ConfiguredPreview = {
+  reviewTargetId: string;
+  runtimeArtifactDigest: string;
+};
 
 const FACTORY_CHECKS = [
   ['reproducibility', 'Повтор даёт те же результаты'],
@@ -93,6 +102,10 @@ function writeDraft(bundleId: string, value: Record<string, unknown>): void {
   try { localStorage.setItem(draftKey(bundleId), JSON.stringify(value)); } catch { /* memoryless fallback */ }
 }
 
+function patchDraft(bundleId: string, value: Record<string, unknown>): void {
+  writeDraft(bundleId, { ...readDraft(bundleId), ...value });
+}
+
 function mutationFor(bundleId: string, decision: Record<string, unknown>): string {
   const key = `mobile-review-mutation:${bundleId}`;
   const bytes = JSON.stringify(decision);
@@ -111,11 +124,115 @@ function sameDigest(left: string, right: string): boolean {
   return left.replace(/^sha256:/, '') === right.replace(/^sha256:/, '');
 }
 
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const hashed = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(hashed)]
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onresult: ((event: {
+    results: ArrayLike<{
+      isFinal: boolean;
+      0: { transcript: string };
+    }>;
+    resultIndex: number;
+  }) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+  start(): void;
+  stop(): void;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+function voiceField(
+  labelText: string,
+  control: HTMLTextAreaElement,
+  onValue: () => void,
+): HTMLElement {
+  const wrapper = element('div', 'mobile-review__voice-field');
+  const controls = element('div', 'mobile-review__voice-controls');
+  const status = element('span', 'mobile-review__voice-status', 'Текст можно исправить перед отправкой.');
+  const dictate = button('🎙 Надиктовать');
+  let recognition: SpeechRecognitionLike | null = null;
+  let listening = false;
+
+  const Recognition = (
+    window as unknown as {
+      SpeechRecognition?: SpeechRecognitionConstructor;
+      webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    }
+  ).SpeechRecognition || (
+    window as unknown as { webkitSpeechRecognition?: SpeechRecognitionConstructor }
+  ).webkitSpeechRecognition;
+
+  dictate.addEventListener('click', () => {
+    if (!Recognition) {
+      control.focus();
+      status.textContent = 'Используйте микрофон клавиатуры Telegram — надиктованный текст останется редактируемым.';
+      return;
+    }
+    if (listening) {
+      recognition?.stop();
+      return;
+    }
+    recognition = new Recognition();
+    recognition.lang = 'ru-RU';
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.onresult = (event) => {
+      let addition = '';
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        if (event.results[index].isFinal) addition += `${event.results[index][0].transcript} `;
+      }
+      const clean = addition.trim();
+      if (!clean) return;
+      const separator = control.value && !/\s$/.test(control.value) ? ' ' : '';
+      control.value = `${control.value}${separator}${clean}`.slice(0, control.maxLength || 2000);
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+      status.textContent = 'Текст распознан. Проверьте его перед отправкой.';
+    };
+    recognition.onerror = (event) => {
+      status.textContent = event.error === 'not-allowed'
+        ? 'Telegram не дал доступ к микрофону. Используйте микрофон клавиатуры.'
+        : 'Диктовка прервалась. Уже распознанный текст сохранён.';
+    };
+    recognition.onend = () => {
+      listening = false;
+      dictate.textContent = '🎙 Надиктовать';
+    };
+    listening = true;
+    dictate.textContent = '■ Остановить';
+    status.textContent = 'Слушаю… после остановки текст можно исправить.';
+    try {
+      recognition.start();
+    } catch {
+      listening = false;
+      dictate.textContent = '🎙 Надиктовать';
+      status.textContent = 'Не удалось запустить диктовку. Используйте микрофон клавиатуры.';
+    }
+  });
+  control.addEventListener('input', onValue);
+  controls.append(dictate, status);
+  wrapper.append(field(labelText, control), controls);
+  return wrapper;
+}
+
 function mountRuntimePreview(
   parent: HTMLElement,
-  previews: RuntimePreview[],
-  onConfigured: (preview: RuntimePreview) => void,
+  runtime: MobileRuntime,
+  onConfigured: (preview: ConfiguredPreview) => void,
 ): void {
+  if (runtime.schema === 'operator.mobile-html-runtime.v1') {
+    mountHtmlRuntimePreview(parent, runtime.previews, onConfigured);
+    return;
+  }
+  const previews = runtime.previews;
   if (!previews.length) return;
   const shell = element('section', 'mobile-review__preview');
   const title = element('h2', '', 'Точный интерактивный preview');
@@ -124,7 +241,7 @@ function mountRuntimePreview(
   const stage = element('div', 'mobile-review__preview-stage');
   const levelNav = element('div', 'mobile-review__preview-levels');
   let frame: HTMLIFrameElement | null = null;
-  let activePreview = previews[0];
+  let activePreview: SortRuntimePreview = previews[0];
   let levelIndex = 0;
   let epoch = 0;
   let cleanupMessage: (() => void) | null = null;
@@ -193,7 +310,10 @@ function mountRuntimePreview(
         renderLevelNav();
         if (configuredLevels.size === activePreview.levels.length) {
           status.textContent = 'Exact preview подтверждён для всех уровней.';
-          onConfigured(activePreview);
+          onConfigured({
+            reviewTargetId: activePreview.reviewTargetId,
+            runtimeArtifactDigest: activePreview.runtimeArtifactDigest,
+          });
         } else {
           status.textContent = 'Уровень подтверждён. Откройте следующий.';
         }
@@ -230,6 +350,97 @@ function mountRuntimePreview(
   launch();
 }
 
+function mountHtmlRuntimePreview(
+  parent: HTMLElement,
+  previews: HtmlRuntimePreview[],
+  onConfigured: (preview: ConfiguredPreview) => void,
+): void {
+  if (!previews.length) return;
+  const shell = element('section', 'mobile-review__preview');
+  const title = element('h2', '', 'Точный интерактивный preview');
+  const status = element('p', 'mobile-review__status', 'Выберите прототип для запуска.');
+  const selector = element('div', 'mobile-review__preview-tabs');
+  const stage = element('div', 'mobile-review__preview-stage');
+  let epoch = 0;
+  let artifactUrl: string | null = null;
+
+  const stop = (): void => {
+    epoch += 1;
+    stage.replaceChildren();
+    if (artifactUrl) URL.revokeObjectURL(artifactUrl);
+    artifactUrl = null;
+  };
+
+  const launch = async (preview: HtmlRuntimePreview): Promise<void> => {
+    stop();
+    const currentEpoch = epoch;
+    status.textContent = `Загружаем ${preview.label}…`;
+    try {
+      const artifact = await apiMobileReviewArtifact(preview.artifactDigest);
+      if (currentEpoch !== epoch) return;
+      if (artifact.bytes.byteLength !== preview.byteLength) {
+        throw new Error('Размер exact-прототипа не совпал.');
+      }
+      const actual = `sha256:${await sha256Hex(artifact.bytes)}`;
+      if (currentEpoch !== epoch) return;
+      if (actual !== preview.artifactDigest || artifact.artifactDigest !== actual) {
+        throw new Error('SHA-256 exact-прототипа не совпал.');
+      }
+      const exactHtml = new TextDecoder('utf-8', { fatal: true }).decode(artifact.bytes);
+      // Blob responses do not inherit the backend response CSP. Prefix a
+      // deterministic policy only after the raw bytes passed SHA-256; this keeps
+      // the reviewed artifact identity exact while executing a network-isolated
+      // projection of it on the phone.
+      const csp = [
+        "default-src 'none'",
+        "script-src 'unsafe-inline' blob:",
+        "style-src 'unsafe-inline'",
+        'img-src data: blob:',
+        'media-src data: blob:',
+        'font-src data:',
+        "connect-src 'none'",
+        'worker-src blob:',
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+      ].join('; ');
+      const hardenedHtml = `<meta http-equiv="Content-Security-Policy" content="${csp}">${exactHtml}`;
+      artifactUrl = URL.createObjectURL(new Blob([hardenedHtml], { type: 'text/html' }));
+      const frame = document.createElement('iframe');
+      frame.className = 'mobile-review__frame mobile-review__frame--prototype';
+      frame.title = preview.label;
+      frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
+      frame.setAttribute('allow', 'autoplay');
+      frame.src = artifactUrl;
+      frame.addEventListener('load', () => {
+        if (currentEpoch !== epoch) return;
+        status.textContent = 'Exact-прототип загружен. Поиграйте и сохраните решение ниже.';
+        onConfigured({
+          reviewTargetId: preview.reviewTargetId,
+          runtimeArtifactDigest: preview.artifactDigest,
+        });
+      }, { once: true });
+      stage.append(frame);
+    } catch (error) {
+      if (currentEpoch === epoch) status.textContent = errorMessage(error);
+    }
+  };
+
+  for (const preview of previews) {
+    const item = button(preview.label);
+    item.addEventListener('click', () => {
+      [...selector.children].forEach((child) => child.classList.remove('is-active'));
+      item.classList.add('is-active');
+      void launch(preview);
+    });
+    selector.append(item);
+  }
+  selector.firstElementChild?.classList.add('is-active');
+  shell.append(title, selector, status, stage);
+  parent.append(shell);
+  void launch(previews[0]);
+}
+
 export async function mountMobileReview(initialBundleId: string | null): Promise<void> {
   document.body.classList.add('mobile-review-open');
   const root = element('main', 'mobile-review');
@@ -237,7 +448,7 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
   document.body.replaceChildren(root);
 
   let current: MobileReviewView | null = null;
-  let configuredPreview: RuntimePreview | null = null;
+  let configuredPreview: ConfiguredPreview | null = null;
   let startedAt = Date.now();
   let followEpoch = 0;
 
@@ -320,7 +531,7 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
           const following = reviews.find((item) => (
             item.bundle.order.orderId === completed.bundle.order.orderId
             && item.bundle.bundleId !== completed.bundle.bundleId
-          ));
+          )) || reviews.find((item) => item.bundle.bundleId !== completed.bundle.bundleId);
           if (following) {
             followEpoch += 1;
             renderView(following);
@@ -355,7 +566,9 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     instruction.maxLength = 2000;
     instruction.placeholder = 'Что нужно изменить (для доработки или закрытия)';
     instruction.value = String(draft.instruction || '');
-    form.append(field('Комментарий', instruction));
+    form.append(voiceField('Комментарий', instruction, () => {
+      patchDraft(view.bundle.bundleId, { instruction: instruction.value });
+    }));
     const actions = element('div', 'mobile-review__actions');
     for (const [verdict, labelText, primary] of [
       ['good', 'Фабрика подходит', true],
@@ -411,7 +624,7 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
       radio.checked = selected === radio.value;
       radio.addEventListener('change', () => {
         selected = radio.value;
-        writeDraft(view.bundle.bundleId, { reviewTargetId: selected });
+        patchDraft(view.bundle.bundleId, { reviewTargetId: selected });
       });
       card.append(
         radio,
@@ -449,11 +662,25 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     similar.value = String((draft.taste as any)?.too_similar || 'unknown');
     payoff.value = String((draft.taste as any)?.payoff_quality || 'unknown');
     form.append(
-      field('Комментарий', comment),
+      voiceField('Комментарий', comment, () => {
+        patchDraft(view.bundle.bundleId, { comment: comment.value });
+      }),
       field('Интерес', interesting),
       field('Новизна', similar),
       field('Payoff', payoff),
     );
+    const persistTaste = (): void => {
+      patchDraft(view.bundle.bundleId, {
+        taste: {
+          interesting: interesting.value,
+          too_similar: similar.value,
+          payoff_quality: payoff.value,
+        },
+      });
+    };
+    interesting.addEventListener('change', persistTaste);
+    similar.addEventListener('change', persistTaste);
+    payoff.addEventListener('change', persistTaste);
 
     let seriesAssessment: Record<string, HTMLSelectElement> | null = null;
     if (view.bundle.action.kind === 'series_review') {
@@ -474,7 +701,18 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
         cohesion: select(choices),
       };
       const prior = (draft.seriesAssessment || {}) as Record<string, string>;
-      for (const [key, node] of Object.entries(seriesAssessment)) node.value = prior[key] || 'unknown';
+      for (const [key, node] of Object.entries(seriesAssessment)) {
+        node.value = prior[key] || 'unknown';
+        node.addEventListener('change', () => {
+          patchDraft(view.bundle.bundleId, {
+            seriesAssessment: Object.fromEntries(
+              Object.entries(seriesAssessment || {}).map(
+                ([assessmentKey, assessmentNode]) => [assessmentKey, assessmentNode.value],
+              ),
+            ),
+          });
+        });
+      }
       form.append(
         field('Темп серии', seriesAssessment.pacing),
         field('Рост сложности', seriesAssessment.difficulty_progression),
@@ -487,6 +725,9 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     const override = document.createElement('input');
     override.type = 'checkbox';
     override.checked = Boolean(draft.seriesCompletionOverride);
+    override.addEventListener('change', () => {
+      patchDraft(view.bundle.bundleId, { seriesCompletionOverride: override.checked });
+    });
     overrideLabel.append(override, document.createTextNode('Одобрить на свой риск без полного прохождения серии'));
     if (view.bundle.action.kind === 'series_review') form.append(overrideLabel);
 
@@ -494,7 +735,12 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     rework.maxLength = 2000;
     rework.placeholder = 'Что именно доработать';
     rework.value = String(draft.reworkInstruction || '');
-    if (view.bundle.action.kind === 'level_review') form.append(field('Инструкция для доработки', rework));
+    const reworkAvailable = view.bundle.review.rework?.mode === 'server_recommended';
+    if (['level_review', 'experiment_review'].includes(view.bundle.action.kind)) {
+      form.append(voiceField('Инструкция для доработки', rework, () => {
+        patchDraft(view.bundle.bundleId, { reworkInstruction: rework.value });
+      }));
+    }
 
     const actions = element('div', 'mobile-review__actions');
     for (const verdict of view.bundle.review.choices || []) {
@@ -522,10 +768,18 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
           seriesAssessment: assessment,
           seriesCompletionOverride: override.checked,
           reworkInstruction: rework.value,
+          // The phone records only the taste decision. Generator resolves its
+          // current server-owned recommended profile after the verdict, so no
+          // provider/model identity is delivered to the author-blind client.
+          reworkSelection: null,
         };
         writeDraft(view.bundle.bundleId, saved);
         if (verdict === 'rework' && !rework.value.trim()) {
           body.querySelector<HTMLElement>('[data-mobile-review-notice]')!.textContent = 'Опишите, что именно нужно доработать.';
+          return;
+        }
+        if (verdict === 'rework' && !reworkAvailable) {
+          body.querySelector<HTMLElement>('[data-mobile-review-notice]')!.textContent = 'Сейчас нет доступного исполнителя доработки.';
           return;
         }
         if (verdict === 'good' && view.bundle.action.kind === 'setting_review'
@@ -549,15 +803,49 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
           comment: comment.value.trim(),
           tags: [],
           taste,
-          seriesAssessment: assessment,
+          seriesAssessment: assessment || null,
           seriesCompletionOverride: view.bundle.action.kind === 'series_review' && override.checked,
           reworkInstruction: verdict === 'rework' ? rework.value.trim() : null,
+          reworkSelection: verdict === 'rework' ? saved.reworkSelection : null,
           playedMs: Math.max(0, Date.now() - startedAt),
           preview: configuredPreview ? {
             configured: true,
             reviewTargetId: configuredPreview.reviewTargetId,
             runtimeArtifactDigest: configuredPreview.runtimeArtifactDigest,
           } : { configured: false },
+        });
+      });
+      actions.append(action);
+    }
+    form.append(actions);
+    body.append(form);
+  }
+
+  function renderPrototype(view: MobileReviewView, body: HTMLElement): void {
+    const form = element('div', 'mobile-review__form');
+    const draft = readDraft(view.bundle.bundleId);
+    const comment = element('textarea', 'mobile-review__textarea') as HTMLTextAreaElement;
+    comment.maxLength = 2000;
+    comment.placeholder = 'Какой инсайт дал прототип? Что попробовать дальше?';
+    comment.value = String(draft.comment || '');
+    form.append(voiceField('Комментарий', comment, () => {
+      patchDraft(view.bundle.bundleId, { comment: comment.value });
+    }));
+    const actions = element('div', 'mobile-review__actions');
+    const labels: Record<string, string> = {
+      promising: 'Перспективно',
+      insight_only: 'Сохранить как инсайт',
+      no_signal: 'Нет сигнала',
+      retired: 'Закрыть',
+    };
+    for (const verdict of view.bundle.review.choices || []) {
+      const action = button(labels[verdict] || verdict, verdict === 'promising');
+      action.addEventListener('click', () => {
+        patchDraft(view.bundle.bundleId, { comment: comment.value });
+        void submit({
+          schema: 'operator.mobile-prototype-review-decision.v1',
+          verdict,
+          comment: comment.value.trim(),
         });
       });
       actions.append(action);
@@ -652,7 +940,7 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     notice.dataset.mobileReviewNotice = '';
     body.append(notice);
     if (view.bundle.runtime?.previews?.length) {
-      mountRuntimePreview(body, view.bundle.runtime.previews, (preview) => {
+      mountRuntimePreview(body, view.bundle.runtime, (preview) => {
         configuredPreview = preview;
       });
     }
@@ -670,7 +958,9 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
       case 'setting_selection': renderSettingSelection(view, body); break;
       case 'setting_review':
       case 'level_review':
-      case 'series_review': renderTaste(view, body); break;
+      case 'series_review':
+      case 'experiment_review': renderTaste(view, body); break;
+      case 'prototype_review': renderPrototype(view, body); break;
       case 'expert_resolution': renderExpert(view, body); break;
       case 'telegram_approve': renderPublication(view, body); break;
       default: notice.textContent = 'Этот тип шага пока нельзя обработать с телефона.';

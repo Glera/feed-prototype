@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const buildRoot = mkdtempSync(path.join(tmpdir(), 'mobile-review-browser-'));
 const bundleId = '11111111-1111-4111-8111-111111111111';
 const levelBundleId = '44444444-4444-4444-8444-444444444444';
+const prototypeBundleId = '55555555-5555-4555-8555-555555555555';
 let origin = '';
 let sessionRequests = 0;
 let decisionBody = null;
@@ -88,6 +90,7 @@ levelView.bundle.review = {
   schema: 'operator.mobile-level-output.v1',
   output: { reviewTargetId: levelView.bundle.action.identity },
   choices: ['good', 'problem', 'rework', 'retired'],
+  rework: { mode: 'server_recommended' },
 };
 levelView.bundle.runtime = {
   schema: 'operator.mobile-review-runtime.v1',
@@ -103,6 +106,42 @@ levelView.bundle.runtime = {
       specHash: '9'.repeat(64),
     }],
     skin: null,
+  }],
+};
+
+const prototypeHtml = Buffer.from(`<!doctype html><html><body>
+<button id="play">Prototype ready</button>
+<script>document.querySelector('#play').onclick=()=>document.body.dataset.played='1'</script>
+</body></html>`);
+const prototypeDigest = `sha256:${createHash('sha256').update(prototypeHtml).digest('hex')}`;
+const prototypeView = structuredClone(view);
+prototypeView.bundle.bundleId = prototypeBundleId;
+prototypeView.bundle.bundleDigest = `sha256:${'5'.repeat(64)}`;
+prototypeView.bundle.action = {
+  kind: 'prototype_review',
+  identity: 'wild-sort-mobile',
+  label: 'Оценить экспериментальный прототип',
+  sequence: { completed: 0, total: 1 },
+};
+prototypeView.bundle.presentation = {
+  subject: 'prototype',
+  title: 'Wild Sort prototype',
+  summary: 'Play freely and dictate the insight.',
+  technicalDetails: { source: 'lab_backlog' },
+};
+prototypeView.bundle.review = {
+  schema: 'operator.mobile-prototype-output.v1',
+  output: { prototypeId: 'wild-sort-mobile' },
+  choices: ['promising', 'insight_only', 'no_signal', 'retired'],
+};
+prototypeView.bundle.runtime = {
+  schema: 'operator.mobile-html-runtime.v1',
+  previews: [{
+    reviewTargetId: 'wild-sort-mobile',
+    label: 'Wild Sort',
+    artifactDigest: prototypeDigest,
+    byteLength: prototypeHtml.length,
+    contentType: 'text/html',
   }],
 };
 
@@ -144,6 +183,17 @@ const server = createServer((request, response) => {
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${levelBundleId}`) {
     return json(response, levelView);
   }
+  if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${prototypeBundleId}`) {
+    return json(response, prototypeView);
+  }
+  if (request.method === 'GET'
+    && url.pathname === `/api/operator/mobile-reviews/artifacts/${prototypeDigest.slice(7)}`) {
+    response.statusCode = 200;
+    response.setHeader('content-type', 'text/html');
+    response.setHeader('X-Content-SHA256', prototypeDigest);
+    response.end(prototypeHtml);
+    return;
+  }
   if (request.method === 'GET' && url.pathname === '/api/operator/mobile-reviews') {
     return json(response, {
       schema: 'operator.mobile-review-inbox.v1',
@@ -155,7 +205,9 @@ const server = createServer((request, response) => {
     request.on('data', (chunk) => { body += chunk; });
     request.on('end', () => {
       decisionBody = JSON.parse(body);
-      const source = url.pathname.includes(levelBundleId) ? levelView : view;
+      const source = url.pathname.includes(levelBundleId)
+        ? levelView
+        : url.pathname.includes(prototypeBundleId) ? prototypeView : view;
       if (source === view) exactDecisionSaved = true;
       setTimeout(() => {
         json(response, { ...source, state: 'decided', decision: { document: decisionBody } });
@@ -230,15 +282,50 @@ try {
   const levelPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await levelPage.goto(`${origin}/?mobileReview=${levelBundleId}`, { waitUntil: 'networkidle' });
   await levelPage.getByText('Exact preview подтверждён для всех уровней.').waitFor();
+  assert.equal((await levelPage.locator('body').innerText()).includes('provider'), false);
   await levelPage.getByRole('button', { name: 'Подходит' }).click();
   await levelPage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
   assert.equal(decisionBody?.decision?.schema, 'operator.mobile-taste-review-decision.v1');
   assert.equal(decisionBody?.decision?.preview?.configured, true);
   assert.equal(decisionBody?.decision?.preview?.reviewTargetId, levelView.bundle.action.identity);
+
+  decisionBody = null;
+  const prototypePage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await prototypePage.addInitScript(() => {
+    Object.defineProperty(window, 'SpeechRecognition', {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(window, 'webkitSpeechRecognition', {
+      configurable: true,
+      value: undefined,
+    });
+  });
+  await prototypePage.goto(`${origin}/?mobileReview=${prototypeBundleId}`, { waitUntil: 'networkidle' });
+  await prototypePage.getByText('Exact-прототип загружен.').waitFor();
+  const prototypeFrame = prototypePage.frames().find(
+    (frame) => frame !== prototypePage.mainFrame() && frame.url().startsWith('blob:'),
+  );
+  assert.ok(prototypeFrame, 'sandbox prototype frame must be mounted from verified blob bytes');
+  assert.match(
+    await prototypeFrame.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute('content'),
+    /connect-src 'none'/,
+  );
+  await prototypePage.getByRole('button', { name: /Надиктовать/ }).click();
+  await prototypePage.getByText(/микрофон клавиатуры Telegram/).waitFor();
+  const feedback = 'Оставить идею reveal, упростить первый жест';
+  await prototypePage.getByLabel('Комментарий').fill(feedback);
+  await prototypePage.reload({ waitUntil: 'networkidle' });
+  await prototypePage.getByText('Exact-прототип загружен.').waitFor();
+  assert.equal(await prototypePage.getByLabel('Комментарий').inputValue(), feedback);
+  await prototypePage.getByRole('button', { name: 'Перспективно' }).click();
+  await prototypePage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  assert.equal(decisionBody?.decision?.schema, 'operator.mobile-prototype-review-decision.v1');
+  assert.equal(decisionBody?.decision?.comment, feedback);
 } finally {
   if (browser) await browser.close();
   await new Promise((resolve) => server.close(resolve));
   rmSync(buildRoot, { recursive: true, force: true });
 }
 
-console.log('mobile review browser: isolated TMA route, human copy, hidden technical identity and exact decision verified');
+console.log('mobile review browser: queue, exact sort + sandbox HTML, editable voice fallback and decisions verified');
