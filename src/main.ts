@@ -5,6 +5,7 @@ import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, islandF
 import { initTelemetry } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
+import { mobileReviewNavigation } from './mobile-review-navigation.mjs';
 import { loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 import { userScopedStorage } from './user-scope';
 
@@ -69,8 +70,18 @@ async function boot(): Promise<void> {
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
 const labAuthLaunch = catalogLabAuthRequested({ search: location.search, startParam });
+const mobileReviewLaunch = mobileReviewNavigation({
+  search: location.search,
+  startParam,
+});
 
-if (labAuthLaunch) {
+if (mobileReviewLaunch.requested) {
+  // A focused phone review must not boot the feed underneath the exact
+  // authority surface. Telegram initData still gates every backend read/write.
+  void import('./mobile-review').then((module) => (
+    module.mountMobileReview(mobileReviewLaunch.bundleId)
+  ));
+} else if (labAuthLaunch) {
   // Focused device approval flow: do not mount or warm the playable feed under
   // a security decision. The backend remains the authority for dev allowlisting
   // and feature availability.
@@ -84,6 +95,7 @@ if (labAuthLaunch) {
 // right on screen (no desktop console in Telegram).
 // Debug panel lives on the feed bar (right of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
-if (!labAuthLaunch && (query.get('diag') === '1' || startParam === 'diag')) {
+if (!mobileReviewLaunch.requested && !labAuthLaunch
+  && (query.get('diag') === '1' || startParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
 }

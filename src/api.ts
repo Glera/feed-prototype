@@ -1529,6 +1529,77 @@ export interface CatalogLabGrantView {
   active: boolean;
 }
 
+export interface MobileReviewView {
+  schema: 'operator.mobile-review-view.v1';
+  bundle: {
+    schema: 'operator.mobile-review-bundle.v1';
+    bundleId: string;
+    bundleDigest: string;
+    order: {
+      orderId: string;
+      orderHash: string;
+      eventId: string;
+      packetDigest: string;
+      title: string;
+      brief: string;
+    };
+    action: {
+      kind: string;
+      identity: string;
+      label: string;
+      sequence: { completed: number; total: number };
+    };
+    presentation: {
+      subject: string;
+      title: string;
+      summary: string;
+      technicalDetails: Record<string, unknown>;
+    };
+    review: Record<string, any>;
+    runtime: null | {
+      schema: 'operator.mobile-review-runtime.v1';
+      previews: Array<{
+        reviewTargetId: string;
+        label: string;
+        playableId: string;
+        runtimeContractDigest: string;
+        runtimeArtifactDigest: string;
+        levels: Array<{ ordinal: number; spec: Record<string, unknown>; specHash: string }>;
+        skin: Record<string, unknown> | null;
+      }>;
+    };
+    createdAt: string;
+  };
+  state: 'current' | 'superseded' | 'decided' | 'consumed';
+  decision: null | Record<string, unknown>;
+  telegramUrl: string;
+}
+
+export function apiMobileReview(bundleId: string): Promise<MobileReviewView> {
+  return getRequired<MobileReviewView>(
+    `/api/operator/mobile-reviews/${encodeURIComponent(bundleId)}`,
+  );
+}
+
+export async function apiMobileReviewInbox(): Promise<MobileReviewView[]> {
+  const response = await getRequired<{
+    schema: 'operator.mobile-review-inbox.v1';
+    reviews: MobileReviewView[];
+  }>('/api/operator/mobile-reviews?limit=20');
+  return response.reviews;
+}
+
+export function apiMobileReviewDecision(
+  bundleId: string,
+  command: Record<string, unknown>,
+): Promise<MobileReviewView> {
+  return postRequired<MobileReviewView>(
+    `/api/operator/mobile-reviews/${encodeURIComponent(bundleId)}/decisions`,
+    command,
+    15_000,
+  );
+}
+
 /** Resolve a short user code entered by an allowlisted Telegram dev. */
 export function apiCatalogLabLookup(userCode: string): Promise<CatalogLabDeviceAuthorization> {
   return postRequired<CatalogLabDeviceAuthorization>('/api/admin/device-auth/lookup', { userCode });
