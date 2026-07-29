@@ -17,6 +17,9 @@ const bundleId = '11111111-1111-4111-8111-111111111111';
 const levelBundleId = '44444444-4444-4444-8444-444444444444';
 const prototypeBundleId = '55555555-5555-4555-8555-555555555555';
 const maliciousPrototypeBundleId = '99999999-9999-4999-8999-999999999999';
+const expiredPrototypeBundleId = '12121212-1212-4121-8121-121212121212';
+const redirectedPrototypeBundleId = '13131313-1313-4131-8131-131313131313';
+const cspMissingPrototypeBundleId = '14141414-1414-4141-8141-141414141414';
 const factoryBundleId = '66666666-6666-4666-8666-666666666666';
 const publicationPrepareBundleId = '77777777-7777-4777-8777-777777777777';
 const publicationApproveBundleId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -43,7 +46,34 @@ const previewCsp = [
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",
+  'frame-ancestors *',
 ].join('; ');
+const artifactCsp = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  'img-src data: blob:',
+  'media-src data: blob:',
+  'font-src data:',
+  "connect-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ');
+const mobileReviewBridge = [
+  `<meta http-equiv="Content-Security-Policy" content="${artifactCsp}">`,
+  '<script data-p4g-mobile-review-bridge="v1">',
+  "(()=>{addEventListener('message',event=>{",
+  "const value=event.data;if(event.source!==parent||!value||typeof value!=='object'",
+  "||Array.isArray(value)||value.schema!=='p4g.mobile-review-preview-challenge.v1'",
+  "||typeof value.nonce!=='string'||!/^[a-f0-9-]{36}$/.test(value.nonce))return;",
+  "parent.postMessage({schema:'p4g.mobile-review-preview-receipt.v1',nonce:value.nonce},'*');",
+  '});})();',
+  '</script>',
+].join('');
+const mobileArtifact = (html) => Buffer.from(
+  html.replace(/^(?:\uFEFF)?<!doctype[^>]*>/i, (doctype) => `${doctype}${mobileReviewBridge}`),
+);
 const escapeServer = createServer((_request, response) => {
   escapeRequests += 1;
   response.end('escaped');
@@ -151,12 +181,12 @@ levelView.bundle.runtime = {
   }],
 };
 
-const prototypeHtml = Buffer.from(`<!doctype html><html><head></head><body>
+const prototypeHtml = mobileArtifact(`<!doctype html><html><head></head><body>
 <button id="play">Prototype ready</button>
 <script>document.querySelector('#play').onclick=()=>document.body.dataset.played='1'</script>
 </body></html>`);
 const prototypeDigest = `sha256:${createHash('sha256').update(prototypeHtml).digest('hex')}`;
-const maliciousPrototypeHtml = Buffer.from(`<!doctype html><!-- <head> -->
+const maliciousPrototypeHtml = mobileArtifact(`<!doctype html><!-- <head> -->
 <html><head><script src="${escapeOrigin}/remote.js"></script></head>
 <body><img src="${escapeOrigin}/pixel.png">
 <script>setTimeout(()=>{location.href='/csp-corpus-host'},1500)</script>
@@ -197,6 +227,16 @@ maliciousPrototypeView.bundle.bundleId = maliciousPrototypeBundleId;
 maliciousPrototypeView.bundle.bundleDigest = `sha256:${'9'.repeat(64)}`;
 maliciousPrototypeView.bundle.runtime.previews[0].artifactDigest = maliciousPrototypeDigest;
 maliciousPrototypeView.bundle.runtime.previews[0].byteLength = maliciousPrototypeHtml.length;
+const faultPrototypeViews = new Map([
+  [expiredPrototypeBundleId, 'expired'],
+  [redirectedPrototypeBundleId, 'redirected'],
+  [cspMissingPrototypeBundleId, 'missing-csp'],
+].map(([bundle, reason]) => {
+  const value = structuredClone(prototypeView);
+  value.bundle.bundleId = bundle;
+  value.bundle.bundleDigest = `sha256:${reason.charCodeAt(0).toString(16).padStart(2, '0').repeat(32)}`;
+  return [bundle, value];
+}));
 
 const factoryView = structuredClone(view);
 factoryView.bundle.bundleId = factoryBundleId;
@@ -339,6 +379,12 @@ const server = createServer((request, response) => {
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${maliciousPrototypeBundleId}`) {
     return json(response, maliciousPrototypeView);
   }
+  for (const [faultBundleId, faultView] of faultPrototypeViews) {
+    if (request.method === 'GET'
+      && url.pathname === `/api/operator/mobile-reviews/${faultBundleId}`) {
+      return json(response, faultView);
+    }
+  }
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${factoryBundleId}`) {
     return json(response, factoryView);
   }
@@ -385,10 +431,22 @@ const server = createServer((request, response) => {
   if (request.method === 'GET'
     && url.pathname === `/api/operator/mobile-reviews/artifacts/${prototypeDigest.slice(7)}/preview`) {
     previewRequests.set(prototypeDigest, (previewRequests.get(prototypeDigest) || 0) + 1);
+    const ticketBundleId = url.searchParams.get('bundleId');
+    if (ticketBundleId === expiredPrototypeBundleId) {
+      return json(response, { code: 'mobile_review_preview_ticket_expired' }, 403);
+    }
+    if (ticketBundleId === redirectedPrototypeBundleId) {
+      response.statusCode = 302;
+      response.setHeader('location', `${escapeOrigin}/redirected-preview`);
+      response.end();
+      return;
+    }
     response.statusCode = 200;
     response.setHeader('content-type', 'text/html');
     response.setHeader('X-Content-SHA256', prototypeDigest);
-    response.setHeader('Content-Security-Policy', previewCsp);
+    if (ticketBundleId !== cspMissingPrototypeBundleId) {
+      response.setHeader('Content-Security-Policy', previewCsp);
+    }
     response.end(prototypeHtml);
     return;
   }
@@ -511,7 +569,8 @@ try {
   await page.getByRole('heading', { name: 'Exact level' }).waitFor({ timeout: 4_000 });
 
   decisionBody = null;
-  const levelPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  const levelContext = await browser.newContext({ viewport: { width: 390, height: 760 } });
+  const levelPage = await levelContext.newPage();
   await levelPage.goto(`${origin}/?mobileReview=${levelBundleId}`, { waitUntil: 'networkidle' });
   await levelPage.getByText('Exact preview подтверждён для всех уровней.').waitFor();
   assert.equal((await levelPage.locator('body').evaluate((body) => body.innerHTML)).includes('provider'), false);
@@ -527,6 +586,8 @@ try {
   assert.equal(levelDecisionBodies.length, 2);
   assert.equal(levelDecisionBodies[1].mutationId, levelDecisionBodies[0].mutationId);
   assert.deepEqual(levelDecisionBodies[1].decision, levelDecisionBodies[0].decision);
+  const originalLevelBundleDigest = levelView.bundle.bundleDigest;
+  const originalLevelMutationId = levelDecisionBodies[0].mutationId;
   levelView.bundle.bundleDigest = `sha256:${'c'.repeat(64)}`;
   await levelPage.reload({ waitUntil: 'networkidle' });
   await levelPage.getByText('Exact preview подтверждён для всех уровней.').waitFor();
@@ -537,6 +598,23 @@ try {
     levelDecisionBodies[1].mutationId,
     'a new exact bundle digest must receive a new mutation identity',
   );
+  levelView.bundle.bundleDigest = originalLevelBundleDigest;
+  await levelPage.close();
+  const levelReplayPage = await levelContext.newPage();
+  await levelReplayPage.goto(
+    `${origin}/?mobileReview=${levelBundleId}`,
+    { waitUntil: 'networkidle' },
+  );
+  await levelReplayPage.getByText('Exact preview подтверждён для всех уровней.').waitFor();
+  await levelReplayPage.getByRole('button', { name: 'Подходит' }).click();
+  await levelReplayPage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  assert.equal(
+    levelDecisionBodies[3].mutationId,
+    originalLevelMutationId,
+    'A → B → A in a new page must replay A’s original mutation identity',
+  );
+  await levelReplayPage.close();
+  await levelContext.close();
 
   decisionBody = null;
   const prototypeContext = await browser.newContext({
@@ -564,15 +642,25 @@ try {
   await prototypePage.goto(`${origin}/?mobileReview=${prototypeBundleId}`, { waitUntil: 'networkidle' });
   await prototypePage.getByText('Exact-прототип загружен.').waitFor();
   const prototypeFrame = prototypePage.frames().find(
-    (frame) => frame !== prototypePage.mainFrame() && frame.url().includes('/preview?'),
+    (frame) => frame !== prototypePage.mainFrame()
+      && frame.url() === 'about:srcdoc',
   );
-  assert.ok(prototypeFrame, 'sandbox prototype frame must use signed backend bytes');
+  assert.ok(prototypeFrame, 'sandbox prototype frame must use the verified srcdoc bytes');
   assert.equal(await prototypeFrame.evaluate(() => document.compatMode), 'CSS1Compat');
-  assert.equal(previewRequests.get(prototypeDigest), 2, 'verify + iframe must read one signed URL');
+  assert.equal(previewRequests.get(prototypeDigest), 1, 'verified bytes must be fetched exactly once');
   assert.deepEqual(
     observedPrototypeCsp,
-    [previewCsp, previewCsp],
-    'both verification and iframe responses must carry the real HTTP CSP',
+    [previewCsp],
+    'the one backend verification response must carry the real HTTP CSP',
+  );
+  await prototypeFrame.evaluate(() => location.reload());
+  await prototypePage.waitForTimeout(1_000);
+  await prototypePage.getByText('Exact-прототип загружен.').waitFor();
+  assert.equal(await prototypePage.locator('iframe').count(), 1);
+  assert.equal(
+    previewRequests.get(prototypeDigest),
+    1,
+    'an engine reload must replay the same staged exact bytes, not fetch the backend again',
   );
   await prototypePage.getByRole('button', { name: /Надиктовать/ }).click();
   await prototypePage.getByText(/микрофон на клавиатуре Telegram/).waitFor();
@@ -604,7 +692,7 @@ try {
   );
   await maliciousPage.getByText('Exact-прототип загружен.').waitFor();
   assert.equal(await maliciousPage.locator('iframe').count(), 1);
-  assert.equal(previewRequests.get(maliciousPrototypeDigest), 2);
+  assert.equal(previewRequests.get(maliciousPrototypeDigest), 1);
   assert.equal(escapeRequests, 0, 'real response CSP must block remote scripts and images');
   await maliciousPage.getByText(/попытался покинуть exact sandbox/).waitFor();
   assert.equal(
@@ -613,6 +701,26 @@ try {
     'a same-origin second navigation must invalidate exact prototype evidence',
   );
 
+  for (const [faultBundleId] of faultPrototypeViews) {
+    decisionBody = null;
+    const faultPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+    await faultPage.goto(
+      `${origin}/?mobileReview=${faultBundleId}`,
+      { waitUntil: 'networkidle' },
+    );
+    await faultPage.getByText(/Нет связи с сервером|HTTP 403/).waitFor();
+    assert.equal(
+      await faultPage.getByText('Exact-прототип загружен.').count(),
+      0,
+      'an invalid delivery must never surface configured evidence',
+    );
+    await faultPage.getByRole('button', { name: 'Перспективно' }).click();
+    await faultPage.getByText(/нарушил sandbox/).waitFor();
+    assert.equal(decisionBody, null, 'an invalid preview delivery must block the decision POST');
+    await faultPage.close();
+  }
+
+  const escapeRequestsBeforeCorpus = escapeRequests;
   const corpusPage = await browser.newPage();
   await corpusPage.goto(`${origin}/csp-corpus-host`, { waitUntil: 'networkidle' });
   await corpusPage.evaluate((count) => {
@@ -628,7 +736,7 @@ try {
   assert.equal(cspCorpusRequests, 45);
   assert.equal(
     escapeRequests,
-    0,
+    escapeRequestsBeforeCorpus,
     'all 45 valid attack documents must be inert under response-header CSP',
   );
 

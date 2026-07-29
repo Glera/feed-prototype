@@ -316,9 +316,25 @@ function mountHtmlRuntimePreview(
   const selector = element('div', 'mobile-review__preview-tabs');
   const stage = element('div', 'mobile-review__preview-stage');
   let epoch = 0;
+  let removeDeliveryListener: (() => void) | null = null;
+
+  const previewCsp = [
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline'",
+    'img-src data: blob:',
+    'media-src data: blob:',
+    'font-src data:',
+    "connect-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ].join('; ');
 
   const stop = (): void => {
     epoch += 1;
+    removeDeliveryListener?.();
+    removeDeliveryListener = null;
     stage.replaceChildren();
   };
 
@@ -340,35 +356,75 @@ function mountHtmlRuntimePreview(
       if (actual !== preview.artifactDigest || artifact.artifactDigest !== actual) {
         throw new Error('SHA-256 exact-прототипа не совпал.');
       }
+      const exactHtml = new TextDecoder('utf-8', { fatal: true }).decode(artifact.bytes);
       const frame = document.createElement('iframe');
       frame.className = 'mobile-review__frame mobile-review__frame--prototype';
       frame.title = preview.label;
       frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
       frame.setAttribute('allow', 'autoplay');
-      // The exact bytes are served again from the same short-lived signed URL.
-      // Unlike a Blob URL this navigation preserves the backend's real HTTP
-      // Content-Security-Policy header; HTML parsing is no longer a security
-      // boundary.
-      frame.src = artifact.previewUrl;
-      let loaded = false;
+      // Chromium enforces iframe[csp] before parsing srcdoc. The same frozen
+      // policy is also the first token after the doctype inside the hashed
+      // mobile-only artifact so WebKit receives an equivalent fail-closed
+      // boundary without a second network request.
+      frame.setAttribute('csp', previewCsp);
+      let blockTimer: number | null = null;
+      let configured = false;
+      let challengeNonce: string | null = null;
+
+      const blockUnverifiedNavigation = (nonce: string): void => {
+        if (currentEpoch !== epoch || challengeNonce !== nonce) return;
+        onConfigured(null);
+        configured = false;
+        status.textContent = 'Прототип попытался покинуть exact sandbox. Отсмотр заблокирован.';
+        stage.replaceChildren();
+      };
+
+      const receiveDelivery = (event: MessageEvent): void => {
+        const receipt = event.data as Record<string, unknown> | null;
+        if (event.source !== frame.contentWindow
+          || receipt?.schema !== 'p4g.mobile-review-preview-receipt.v1'
+          || receipt.nonce !== challengeNonce) return;
+        if (blockTimer !== null) window.clearTimeout(blockTimer);
+        blockTimer = null;
+        challengeNonce = null;
+        status.textContent = 'Exact-прототип загружен. Поиграйте и сохраните решение ниже.';
+        if (!configured) {
+          configured = true;
+          onConfigured({
+            reviewTargetId: preview.reviewTargetId,
+            runtimeArtifactDigest: preview.artifactDigest,
+          });
+        }
+      };
+      window.addEventListener('message', receiveDelivery);
+      removeDeliveryListener = () => {
+        window.removeEventListener('message', receiveDelivery);
+        if (blockTimer !== null) window.clearTimeout(blockTimer);
+      };
       frame.addEventListener('load', () => {
         if (currentEpoch !== epoch) return;
-        if (loaded) {
-          onConfigured(null);
-          status.textContent = 'Прототип попытался покинуть exact sandbox. Отсмотр заблокирован.';
-          stage.replaceChildren();
-          return;
-        }
-        loaded = true;
-        status.textContent = 'Exact-прототип загружен. Поиграйте и сохраните решение ниже.';
-        onConfigured({
-          reviewTargetId: preview.reviewTargetId,
-          runtimeArtifactDigest: preview.artifactDigest,
-        });
+        configured = false;
+        onConfigured(null);
+        status.textContent = 'Проверяем exact-квитанцию прототипа…';
+        const nonce = crypto.randomUUID();
+        challengeNonce = nonce;
+        frame.contentWindow?.postMessage({
+          schema: 'p4g.mobile-review-preview-challenge.v1',
+          nonce,
+        }, '*');
+        if (blockTimer !== null) window.clearTimeout(blockTimer);
+        blockTimer = window.setTimeout(
+          () => blockUnverifiedNavigation(nonce),
+          750,
+        );
       });
+      frame.srcdoc = exactHtml;
       stage.append(frame);
     } catch (error) {
-      if (currentEpoch === epoch) status.textContent = errorMessage(error);
+      if (currentEpoch === epoch) {
+        onConfigured(null);
+        status.textContent = errorMessage(error);
+      }
     }
   };
 

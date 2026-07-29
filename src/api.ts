@@ -1604,7 +1604,21 @@ export async function apiMobileReviewInbox(): Promise<MobileReviewView[]> {
 export async function apiMobileReviewPreview(
   bundleId: string,
   artifactDigest: string,
-): Promise<{ bytes: ArrayBuffer; artifactDigest: string; previewUrl: string }> {
+): Promise<{ bytes: ArrayBuffer; artifactDigest: string }> {
+  const expectedCsp = [
+    'sandbox allow-scripts allow-pointer-lock',
+    "default-src 'none'",
+    "script-src 'unsafe-inline'",
+    "style-src 'unsafe-inline'",
+    'img-src data: blob:',
+    'media-src data: blob:',
+    'font-src data:',
+    "connect-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    'frame-ancestors *',
+  ].join('; ');
   const match = /^sha256:([a-f0-9]{64})$/.exec(artifactDigest);
   if (!match) throw new ApiRequestError(0, 'Invalid mobile review artifact digest');
   const ticket = await postRequired<{
@@ -1626,6 +1640,7 @@ export async function apiMobileReviewPreview(
     throw new ApiRequestError(0, 'Backend returned an invalid mobile review preview ticket');
   }
   const previewUrl = new URL(ticket.previewPath, `${API_BASE}/`).toString();
+  const expectedUrl = new URL(previewUrl).toString();
   let response: Response;
   try {
     response = await withRequestTimeout(
@@ -1653,12 +1668,23 @@ export async function apiMobileReviewPreview(
       backendErrorCode(data),
     );
   }
+  const contentType = response.headers.get('content-type')?.toLowerCase() || '';
+  const responseCsp = response.headers.get('content-security-policy') || '';
+  if (response.redirected
+    || response.url !== expectedUrl
+    || !/^text\/html(?:\s*;|$)/.test(contentType)
+    || responseCsp !== expectedCsp) {
+    throw new ApiRequestError(
+      0,
+      'Backend returned an invalid mobile review preview response',
+    );
+  }
   const echoedDigest = response.headers.get('X-Content-SHA256') || '';
   const bytes = await response.arrayBuffer();
   if (echoedDigest !== artifactDigest || bytes.byteLength < 1 || bytes.byteLength > 4 * 1024 * 1024) {
     throw new ApiRequestError(0, 'Backend returned an invalid mobile review artifact');
   }
-  return { bytes, artifactDigest: echoedDigest, previewUrl };
+  return { bytes, artifactDigest: echoedDigest };
 }
 
 export function apiMobileReviewDecision(
