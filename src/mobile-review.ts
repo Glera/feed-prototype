@@ -109,24 +109,27 @@ function patchDraft(bundleId: string, value: Record<string, unknown>): void {
 
 function submissionFor(
   bundleId: string,
+  bundleDigest: string,
   decision: Record<string, unknown>,
 ): { mutationId: string; decision: Record<string, unknown> } {
-  const key = `mobile-review-mutation:${bundleId}`;
+  const key = `mobile-review-mutation:${bundleId}:${bundleDigest}`;
   const semanticDecision = structuredClone(decision);
   // Elapsed play time is evidence captured on the first submit, not a reason
   // to mint a new semantic mutation when the HTTP response is lost.
   delete semanticDecision.playedMs;
   const semanticBytes = JSON.stringify(semanticDecision);
   try {
-    const prior = JSON.parse(sessionStorage.getItem(key) || 'null');
+    const prior = JSON.parse(localStorage.getItem(key) || 'null');
     if (prior?.semanticBytes === semanticBytes
+      && prior?.bundleDigest === bundleDigest
       && typeof prior?.mutationId === 'string'
       && prior?.decision && typeof prior.decision === 'object') {
       return { mutationId: prior.mutationId, decision: prior.decision };
     }
     const mutationId = crypto.randomUUID();
     const frozenDecision = structuredClone(decision);
-    sessionStorage.setItem(key, JSON.stringify({
+    localStorage.setItem(key, JSON.stringify({
+      bundleDigest,
       semanticBytes,
       mutationId,
       decision: frozenDecision,
@@ -135,6 +138,64 @@ function submissionFor(
   } catch {
     return { mutationId: crypto.randomUUID(), decision };
   }
+}
+
+function readStartTag(
+  html: string,
+  offset: number,
+  expectedName: string,
+): number {
+  const prefix = `<${expectedName}`;
+  if (html.slice(offset, offset + prefix.length).toLowerCase() !== prefix) {
+    throw new Error(`Exact-прототип не содержит canonical <${expectedName}>.`);
+  }
+  const boundary = html[offset + prefix.length];
+  if (boundary !== '>' && !/\s/.test(boundary || '')) {
+    throw new Error(`Exact-прототип содержит недопустимый <${expectedName}>.`);
+  }
+  let quote = '';
+  for (let index = offset + prefix.length; index < html.length; index += 1) {
+    const char = html[index];
+    if (quote) {
+      if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '>') return index + 1;
+    if (char === '<' || char === '\u0000') {
+      throw new Error(`Exact-прототип содержит недопустимый <${expectedName}>.`);
+    }
+  }
+  throw new Error(`Exact-прототип содержит незакрытый <${expectedName}>.`);
+}
+
+function skipWhitespace(html: string, offset: number): number {
+  let cursor = offset;
+  while (cursor < html.length && /\s/.test(html[cursor])) cursor += 1;
+  return cursor;
+}
+
+export function hardenExactPrototypeHtml(exactHtml: string, policyMeta: string): string {
+  // This is intentionally a narrow parser, not a regex replacement.  Exact
+  // prototype artifacts must have a canonical document prefix; comments,
+  // scripts or attacker-controlled text before the real head are rejected.
+  // The policy is therefore the first node inside the only accepted <head>.
+  let cursor = exactHtml.charCodeAt(0) === 0xfeff ? 1 : 0;
+  cursor = skipWhitespace(exactHtml, cursor);
+  if (exactHtml.slice(cursor, cursor + 9).toLowerCase() === '<!doctype') {
+    const end = exactHtml.indexOf('>', cursor + 9);
+    if (end < 0 || !/^<!doctype\s+html\s*>$/i.test(exactHtml.slice(cursor, end + 1))) {
+      throw new Error('Exact-прототип содержит недопустимый doctype.');
+    }
+    cursor = skipWhitespace(exactHtml, end + 1);
+  }
+  cursor = readStartTag(exactHtml, cursor, 'html');
+  cursor = skipWhitespace(exactHtml, cursor);
+  const headEnd = readStartTag(exactHtml, cursor, 'head');
+  return `${exactHtml.slice(0, headEnd)}\n${policyMeta}${exactHtml.slice(headEnd)}`;
 }
 
 function sameDigest(left: string, right: string): boolean {
@@ -356,17 +417,7 @@ function mountHtmlRuntimePreview(
         "form-action 'none'",
       ].join('; ');
       const policyMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
-      const hardenedHtml = /<head(?:\s[^>]*)?>/i.test(exactHtml)
-        ? exactHtml.replace(
-          /<head(\s[^>]*)?>/i,
-          (head) => `${head}\n${policyMeta}`,
-        )
-        : /<html(?:\s[^>]*)?>/i.test(exactHtml)
-          ? exactHtml.replace(
-            /<html(\s[^>]*)?>/i,
-            (html) => `${html}\n<head>${policyMeta}</head>`,
-          )
-          : (() => { throw new Error('Exact-прототип не содержит допустимый HTML root.'); })();
+      const hardenedHtml = hardenExactPrototypeHtml(exactHtml, policyMeta);
       artifactUrl = URL.createObjectURL(new Blob([hardenedHtml], { type: 'text/html' }));
       const frame = document.createElement('iframe');
       frame.className = 'mobile-review__frame mobile-review__frame--prototype';
@@ -442,7 +493,11 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     const notice = root.querySelector<HTMLElement>('[data-mobile-review-notice]');
     if (notice) notice.textContent = 'Сохраняем решение… повторно нажимать не нужно.';
     try {
-      const submission = submissionFor(current.bundle.bundleId, decision);
+      const submission = submissionFor(
+        current.bundle.bundleId,
+        current.bundle.bundleDigest,
+        decision,
+      );
       const command = {
         schema: 'operator.mobile-review-decision-command.v1',
         bundleId: current.bundle.bundleId,
@@ -484,14 +539,13 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
 
   function renderDone(): void {
     if (!current) return;
-    const completed = current;
-    const epoch = ++followEpoch;
+    followEpoch += 1;
     root.replaceChildren(heading(current));
     const card = element('section', 'mobile-review__card mobile-review__success');
     const status = element(
       'p',
       'mobile-review__status',
-      'Система продолжает заказ. Следующий обязательный шаг откроется здесь автоматически.',
+      'Система продолжает заказ в фоне. Когда будете готовы, проверьте следующий обязательный шаг.',
     );
     card.append(
       element('h2', '', 'Решение сохранено'),
@@ -505,31 +559,6 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     card.append(next);
     root.append(card, technicalDetails(current));
 
-    void (async () => {
-      const deadline = Date.now() + 90_000;
-      while (epoch === followEpoch && Date.now() < deadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1_000));
-        try {
-          const reviews = await apiMobileReviewInbox();
-          if (epoch !== followEpoch) return;
-          const following = reviews.find((item) => (
-            item.bundle.order.orderId === completed.bundle.order.orderId
-            && item.bundle.bundleId !== completed.bundle.bundleId
-          ));
-          if (following) {
-            followEpoch += 1;
-            renderView(following);
-            return;
-          }
-          status.textContent = 'Технические шаги выполняются. Окно можно закрыть — следующий отсмотр останется во входящих.';
-        } catch {
-          status.textContent = 'Ждём следующий шаг. Связь временно недоступна; можно закрыть окно и открыть сообщение позже.';
-        }
-      }
-      if (epoch === followEpoch) {
-        status.textContent = 'Следующего обязательного шага пока нет. Заказ продолжится в фоне; можно закрыть окно.';
-      }
-    })();
   }
 
   function renderFactory(view: MobileReviewView, body: HTMLElement): void {
@@ -905,7 +934,28 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
         action.disabled = false;
       }
     });
-    body.append(action);
+    const cancel = button('Отменить публикацию');
+    cancel.addEventListener('click', async () => {
+      action.disabled = true;
+      cancel.disabled = true;
+      const notice = body.querySelector<HTMLElement>('[data-mobile-review-notice]')!;
+      notice.textContent = 'Отменяем exact-публикацию…';
+      try {
+        const authorization = await apiCatalogLabLookup(userCode);
+        await apiCatalogLabDecision({
+          authorizationId: authorization.authorizationId,
+          userCode,
+          expectedDecisionVersion: authorization.decisionVersion,
+          decision: 'deny',
+        });
+        notice.textContent = 'Публикация отменена. Серия не будет опубликована.';
+      } catch (error) {
+        notice.textContent = errorMessage(error);
+        action.disabled = false;
+        cancel.disabled = false;
+      }
+    });
+    body.append(action, cancel);
   }
 
   function renderPublicationPreparation(view: MobileReviewView, body: HTMLElement): void {

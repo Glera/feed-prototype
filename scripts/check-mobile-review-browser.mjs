@@ -16,8 +16,10 @@ const buildRoot = mkdtempSync(path.join(tmpdir(), 'mobile-review-browser-'));
 const bundleId = '11111111-1111-4111-8111-111111111111';
 const levelBundleId = '44444444-4444-4444-8444-444444444444';
 const prototypeBundleId = '55555555-5555-4555-8555-555555555555';
+const maliciousPrototypeBundleId = '99999999-9999-4999-8999-999999999999';
 const factoryBundleId = '66666666-6666-4666-8666-666666666666';
 const publicationPrepareBundleId = '77777777-7777-4777-8777-777777777777';
+const publicationApproveBundleId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 let origin = '';
 let sessionRequests = 0;
 let decisionBody = null;
@@ -25,6 +27,7 @@ const levelDecisionBodies = [];
 let exactDecisionSaved = false;
 const decisionDelayMs = 500;
 let escapeRequests = 0;
+const catalogLabDecisions = [];
 
 const escapeServer = createServer((_request, response) => {
   escapeRequests += 1;
@@ -134,6 +137,10 @@ const prototypeHtml = Buffer.from(`<!doctype html><html><head>
 <script>document.querySelector('#play').onclick=()=>document.body.dataset.played='1'</script>
 </body></html>`);
 const prototypeDigest = `sha256:${createHash('sha256').update(prototypeHtml).digest('hex')}`;
+const maliciousPrototypeHtml = Buffer.from(`<!doctype html><!-- <head> -->
+<html><head><script src="${escapeOrigin}/remote.js"></script></head>
+<body><img src="${escapeOrigin}/pixel.png"></body></html>`);
+const maliciousPrototypeDigest = `sha256:${createHash('sha256').update(maliciousPrototypeHtml).digest('hex')}`;
 const prototypeView = structuredClone(view);
 prototypeView.bundle.bundleId = prototypeBundleId;
 prototypeView.bundle.bundleDigest = `sha256:${'5'.repeat(64)}`;
@@ -164,6 +171,11 @@ prototypeView.bundle.runtime = {
     contentType: 'text/html',
   }],
 };
+const maliciousPrototypeView = structuredClone(prototypeView);
+maliciousPrototypeView.bundle.bundleId = maliciousPrototypeBundleId;
+maliciousPrototypeView.bundle.bundleDigest = `sha256:${'9'.repeat(64)}`;
+maliciousPrototypeView.bundle.runtime.previews[0].artifactDigest = maliciousPrototypeDigest;
+maliciousPrototypeView.bundle.runtime.previews[0].byteLength = maliciousPrototypeHtml.length;
 
 const factoryView = structuredClone(view);
 factoryView.bundle.bundleId = factoryBundleId;
@@ -216,6 +228,32 @@ publicationPrepareView.bundle.review = {
 };
 publicationPrepareView.bundle.runtime = null;
 
+const publicationApproveView = structuredClone(view);
+publicationApproveView.bundle.bundleId = publicationApproveBundleId;
+publicationApproveView.bundle.bundleDigest = `sha256:${'8'.repeat(64)}`;
+publicationApproveView.bundle.action = {
+  kind: 'telegram_approve',
+  identity: 'b'.repeat(64),
+  label: 'Подтвердить exact-публикацию',
+  sequence: { completed: 0, total: 1 },
+};
+publicationApproveView.bundle.presentation = {
+  subject: 'publication',
+  title: 'Exact publication',
+  summary: 'Approve only these exact bytes.',
+  technicalDetails: {},
+};
+publicationApproveView.bundle.review = {
+  schema: 'operator.mobile-publication-approval.v1',
+  publication: {
+    flow: {
+      state: 'pending',
+      auth: { userCode: 'ABCD-EFGH' },
+    },
+  },
+};
+publicationApproveView.bundle.runtime = null;
+
 const fakeRuntime = `<!doctype html><html><body><canvas></canvas><script>
 const contract = '${'7'.repeat(64)}';
 const artifact = 'sha256:${'8'.repeat(64)}';
@@ -257,11 +295,33 @@ const server = createServer((request, response) => {
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${prototypeBundleId}`) {
     return json(response, prototypeView);
   }
+  if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${maliciousPrototypeBundleId}`) {
+    return json(response, maliciousPrototypeView);
+  }
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${factoryBundleId}`) {
     return json(response, factoryView);
   }
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${publicationPrepareBundleId}`) {
     return json(response, publicationPrepareView);
+  }
+  if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${publicationApproveBundleId}`) {
+    return json(response, publicationApproveView);
+  }
+  if (request.method === 'POST' && url.pathname === '/api/admin/device-auth/lookup') {
+    return json(response, {
+      authorizationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      userCode: 'ABCD-EFGH',
+      decisionVersion: 1,
+    });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/admin/device-auth/decision') {
+    let body = '';
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      catalogLabDecisions.push(JSON.parse(body));
+      json(response, { state: 'denied', decisionVersion: 2 });
+    });
+    return;
   }
   if (request.method === 'GET'
     && url.pathname === `/api/operator/mobile-reviews/artifacts/${prototypeDigest.slice(7)}`) {
@@ -269,6 +329,14 @@ const server = createServer((request, response) => {
     response.setHeader('content-type', 'text/html');
     response.setHeader('X-Content-SHA256', prototypeDigest);
     response.end(prototypeHtml);
+    return;
+  }
+  if (request.method === 'GET'
+    && url.pathname === `/api/operator/mobile-reviews/artifacts/${maliciousPrototypeDigest.slice(7)}`) {
+    response.statusCode = 200;
+    response.setHeader('content-type', 'text/html');
+    response.setHeader('X-Content-SHA256', maliciousPrototypeDigest);
+    response.end(maliciousPrototypeHtml);
     return;
   }
   if (request.method === 'GET' && url.pathname === '/api/operator/mobile-reviews') {
@@ -366,6 +434,8 @@ try {
   assert.equal(decisionBody?.decision?.schema, 'operator.mobile-order-approval-decision.v1');
   assert.equal(decisionBody?.decision?.choice, 'approve');
   assert.match(decisionBody?.mutationId || '', /^[a-f0-9-]{36}$/);
+  await page.getByRole('button', { name: 'Проверить следующие шаги' }).click();
+  await page.getByRole('button', { name: /Отсмотреть уровень/ }).click();
   await page.getByRole('heading', { name: 'Exact level' }).waitFor({ timeout: 4_000 });
 
   decisionBody = null;
@@ -375,7 +445,8 @@ try {
   assert.equal((await levelPage.locator('body').evaluate((body) => body.innerHTML)).includes('provider'), false);
   await levelPage.getByRole('button', { name: 'Подходит' }).click();
   await levelPage.getByText(/HTTP 503/).waitFor();
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await levelPage.reload({ waitUntil: 'networkidle' });
+  await levelPage.getByText('Exact preview подтверждён для всех уровней.').waitFor();
   await levelPage.getByRole('button', { name: 'Подходит' }).click();
   await levelPage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
   assert.equal(decisionBody?.decision?.schema, 'operator.mobile-taste-review-decision.v1');
@@ -421,6 +492,12 @@ try {
   await prototypePage.getByRole('button', { name: 'Перспективно' }).click();
   await prototypePage.getByText(/Решение не отправлено/).waitFor();
 
+  const maliciousPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await maliciousPage.goto(`${origin}/?mobileReview=${maliciousPrototypeBundleId}`, { waitUntil: 'networkidle' });
+  await maliciousPage.getByText(/canonical <html>/).waitFor();
+  assert.equal(await maliciousPage.locator('iframe').count(), 0);
+  assert.equal(escapeRequests, 0, 'comment-before-head must not bypass the sandbox CSP');
+
   const factoryPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await factoryPage.goto(`${origin}/?mobileReview=${factoryBundleId}`, { waitUntil: 'networkidle' });
   const factoryChecks = factoryPage.locator('input[type="checkbox"]');
@@ -440,6 +517,17 @@ try {
     schema: 'operator.mobile-publication-preparation-decision.v1',
     choice: 'prepare',
   });
+
+  const cancelPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await cancelPage.goto(`${origin}/?mobileReview=${publicationApproveBundleId}`, { waitUntil: 'networkidle' });
+  await cancelPage.getByRole('button', { name: 'Отменить публикацию' }).click();
+  await cancelPage.getByText('Публикация отменена. Серия не будет опубликована.').waitFor();
+  assert.deepEqual(catalogLabDecisions, [{
+    authorizationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    userCode: 'ABCD-EFGH',
+    expectedDecisionVersion: 1,
+    decision: 'deny',
+  }]);
 } finally {
   if (browser) await browser.close();
   await new Promise((resolve) => server.close(resolve));
