@@ -18,6 +18,7 @@ let origin = '';
 let sessionRequests = 0;
 let decisionBody = null;
 let exactDecisionSaved = false;
+const decisionDelayMs = 500;
 
 assert.deepEqual(mobileReviewNavigation({ startParam: `review_${bundleId.replaceAll('-', '')}` }), {
   requested: true,
@@ -156,7 +157,9 @@ const server = createServer((request, response) => {
       decisionBody = JSON.parse(body);
       const source = url.pathname.includes(levelBundleId) ? levelView : view;
       if (source === view) exactDecisionSaved = true;
-      json(response, { ...source, state: 'decided', decision: { document: decisionBody } });
+      setTimeout(() => {
+        json(response, { ...source, state: 'decided', decision: { document: decisionBody } });
+      }, decisionDelayMs);
     });
     return;
   }
@@ -203,7 +206,20 @@ try {
   await assert.doesNotReject(() => page.getByText('Three short levels in a calm neon world.').waitFor());
   assert.equal(await page.getByText('hidden: until-expanded').count(), 0);
   assert.equal(sessionRequests, 0, 'mobile review route must not boot the playable feed');
-  await page.getByRole('button', { name: 'Подтвердить exact шаг' }).click();
+  const clickAck = await page.evaluate(() => {
+    const action = [...document.querySelectorAll('button')]
+      .find((node) => node.textContent?.includes('Подтвердить exact шаг'));
+    const started = performance.now();
+    action.click();
+    return {
+      durationMs: performance.now() - started,
+      disabled: action.disabled,
+      notice: document.querySelector('[data-mobile-review-notice]')?.textContent || '',
+    };
+  });
+  assert.equal(clickAck.disabled, true, 'effectful action must disable synchronously');
+  assert.match(clickAck.notice, /Сохраняем решение/, 'effectful action must acknowledge synchronously');
+  assert.ok(clickAck.durationMs <= 100, `click acknowledgement exceeded 100 ms: ${clickAck.durationMs}`);
   await page.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
   assert.equal(decisionBody?.decision?.schema, 'operator.mobile-order-approval-decision.v1');
   assert.equal(decisionBody?.decision?.choice, 'approve');
