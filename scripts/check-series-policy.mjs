@@ -36,7 +36,7 @@ assert.deepEqual(
     { length: seriesLength('arrows-v1-swipe') },
     (_, index) => seriesGameLevel('arrows-v1-swipe', index + 1),
   ),
-  [11, 12, 13, 10, 14],
+  [11, 12, 13, 14, 10],
   'arrows-v1-swipe level routing',
 );
 

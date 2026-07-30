@@ -19,7 +19,7 @@ export function seriesLength(mechanicId) {
 export function seriesGameLevel(mechanicId, seriesLevel) {
   const base = mechanicBaseId(mechanicId || '');
   if (base === 'arrows-v1') {
-    return [11, 12, 13, 10, 14][seriesLevel - 1] ?? null;
+    return [11, 12, 13, 14, 10][seriesLevel - 1] ?? null;
   }
   if (base === 'pins') return seriesLevel;
   const pinsPair = /^pins-l(\d+)$/.exec(base);

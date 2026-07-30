@@ -50,7 +50,7 @@ Vanilla TS + Vite, single-file сборка.
   Pins-пары, `marble-sort` и `merge-timepress-v1` → 2 уровня, `short-drama` → 6,
   `merge-locked-v1` / `merge-timepress-v2` / `no-orders` / `second-board` → 1,
   неизвестная механика → 5. Та же таблица решает, кто умеет встроенные уровни
-  (`?level=`): `arrows-v1` идёт в порядке `11 → 12 → 13 → 10 → 14`;
+  (`?level=`): `arrows-v1` идёт в порядке `11 → 12 → 13 → 14 → 10`;
   `pins`, `pins-lN` и `short-drama` используют свой последовательный порядок,
   остальные варьируются
   параметрами. Источник истины — [src/series-policy.mjs](src/series-policy.mjs),
