@@ -37,7 +37,29 @@ export interface MergeRasterLevelSpecV1 {
   };
 }
 
-export type CatalogLevelSpec = SortLevelSpecV1 | MergeRasterLevelSpecV1;
+export interface ArrowsLevelSpecV1 {
+  schema: 'p4g.arrows.level';
+  version: 1;
+  id: string;
+  seed: string;
+  lives: 3;
+  bounds: { cols: number; rows: number };
+  generator: {
+    recipe: string;
+    targetBand: 'reference-10-15';
+    version: string;
+  };
+  arrows: Array<{
+    id: string;
+    exitDir: 'up' | 'right' | 'down' | 'left';
+    path: Array<[number, number]>;
+  }>;
+}
+
+export type CatalogLevelSpec =
+  | SortLevelSpecV1
+  | MergeRasterLevelSpecV1
+  | ArrowsLevelSpecV1;
 
 export interface CatalogRuntimeIdentityV1 {
   releaseId: string;

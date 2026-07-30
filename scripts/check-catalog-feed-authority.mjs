@@ -593,7 +593,11 @@ equal(generatedProvenanceLabel(1), 'GENERATED LEVEL',
   'single generated content is labelled as one level');
 equal(generatedProvenanceLabel(3), 'GENERATED SERIES · 3 LEVELS',
   'multi-level generated content exposes its series size');
+equal(generatedProvenanceLabel(10), 'GENERATED SERIES · 10 LEVELS',
+  'the complete ten-level series exposes its exact size');
 throws(() => generatedProvenanceLabel(0), /level count is invalid/,
   'empty generated content cannot render misleading provenance');
+throws(() => generatedProvenanceLabel(11), /level count is invalid/,
+  'generated provenance stays capped at the delivery contract');
 
 console.log(`catalog feed authority: ${assertions} assertions passed`);

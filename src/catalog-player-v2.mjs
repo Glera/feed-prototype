@@ -4,7 +4,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const PLAYABLE_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const NONCE_RE = /^[0-9a-f]{32}$/;
 const FAILURE_REASONS = new Set(['timeout', 'digest', 'origin', 'runtime', 'contract', 'mount']);
-const MAX_LEVELS = 6;
+const MAX_LEVELS = 10;
+const ARROWS_RUNTIME_CONTRACT_DIGEST = '3005fe7d2025f270c3f88555d43ca9a008b8bb8cb284c2c2ce55fd1d4645d8fb';
+const ARROWS_STABLE_ID_RE = /^[a-z0-9][a-z0-9._:-]{0,255}$/;
+const ARROWS_DIRECTIONS = new Set(['up', 'right', 'down', 'left']);
+const ARROWS_STEPS = {
+  up: [0, -1],
+  right: [1, 0],
+  down: [0, 1],
+  left: [-1, 0],
+};
 
 export const CATALOG_FRAME_REFERRER_POLICY = 'origin';
 
@@ -167,10 +176,102 @@ function validateMergeRasterLevelSpec(value) {
   return value;
 }
 
+function validateArrowsLevelSpec(value) {
+  if (!exactKeys(value, [
+    'schema', 'version', 'id', 'seed', 'lives', 'bounds', 'generator', 'arrows',
+  ]) || value.schema !== 'p4g.arrows.level' || value.version !== 1) {
+    fail('invalid_spec', 'Arrows LevelSpec has an unsupported shape or version');
+  }
+  if (!ARROWS_STABLE_ID_RE.test(value.id)
+    || typeof value.seed !== 'string'
+    || value.seed.length < 1
+    || value.seed.length > 4096
+    || value.lives !== 3) {
+    fail('invalid_spec', 'Arrows LevelSpec identity, seed or lives is invalid');
+  }
+  if (!exactKeys(value.bounds, ['cols', 'rows'])
+    || !Number.isInteger(value.bounds.cols)
+    || !Number.isInteger(value.bounds.rows)
+    || value.bounds.cols < 2
+    || value.bounds.cols > 64
+    || value.bounds.rows < 2
+    || value.bounds.rows > 64) {
+    fail('invalid_spec', 'Arrows LevelSpec bounds must be integers in 2..64');
+  }
+  if (!exactKeys(value.generator, ['recipe', 'targetBand', 'version'])
+    || !ARROWS_STABLE_ID_RE.test(value.generator.recipe)
+    || !ARROWS_STABLE_ID_RE.test(value.generator.version)
+    || value.generator.targetBand !== 'reference-10-15') {
+    fail('invalid_spec', 'Arrows LevelSpec generator identity is unsupported');
+  }
+  if (!denseArray(value.arrows) || value.arrows.length < 1 || value.arrows.length > 64) {
+    fail('invalid_spec', 'Arrows LevelSpec must contain 1..64 arrows');
+  }
+  const ids = new Set();
+  const occupiedVertices = new Set();
+  const occupiedEdges = new Set();
+  for (const arrow of value.arrows) {
+    if (!exactKeys(arrow, ['id', 'exitDir', 'path'])
+      || !ARROWS_STABLE_ID_RE.test(arrow.id)
+      || ids.has(arrow.id)
+      || !ARROWS_DIRECTIONS.has(arrow.exitDir)
+      || !denseArray(arrow.path)
+      || arrow.path.length < 2
+      || arrow.path.length > 256) {
+      fail('invalid_spec', 'Arrows LevelSpec arrow identity or path is invalid');
+    }
+    ids.add(arrow.id);
+    const ownVertices = new Set();
+    let finalStep = null;
+    for (let index = 0; index < arrow.path.length; index += 1) {
+      const point = arrow.path[index];
+      if (!denseArray(point)
+        || point.length !== 2
+        || !Number.isInteger(point[0])
+        || !Number.isInteger(point[1])
+        || point[0] < 0
+        || point[0] >= value.bounds.cols
+        || point[1] < 0
+        || point[1] >= value.bounds.rows) {
+        fail('invalid_spec', 'Arrows LevelSpec path point is invalid');
+      }
+      const vertex = `${point[0]},${point[1]}`;
+      if (ownVertices.has(vertex) || occupiedVertices.has(vertex)) {
+        fail('invalid_spec', 'Arrows LevelSpec paths cannot share or repeat vertices');
+      }
+      ownVertices.add(vertex);
+      occupiedVertices.add(vertex);
+      if (index === 0) continue;
+      const previous = arrow.path[index - 1];
+      const step = [point[0] - previous[0], point[1] - previous[1]];
+      if (Math.abs(step[0]) + Math.abs(step[1]) !== 1) {
+        fail('invalid_spec', 'Arrows LevelSpec paths must use cardinal unit steps');
+      }
+      finalStep = step;
+      const left = `${previous[0]},${previous[1]}`;
+      const right = vertex;
+      const edge = left < right ? `${left}|${right}` : `${right}|${left}`;
+      if (occupiedEdges.has(edge)) {
+        fail('invalid_spec', 'Arrows LevelSpec paths cannot share edges');
+      }
+      occupiedEdges.add(edge);
+    }
+    const expectedStep = ARROWS_STEPS[arrow.exitDir];
+    if (finalStep[0] !== expectedStep[0] || finalStep[1] !== expectedStep[1]) {
+      fail('invalid_spec', 'Arrows LevelSpec exitDir must continue its final segment');
+    }
+  }
+  return value;
+}
+
 function validateLevelSpec(value) {
-  return value?.schema === 'merge.raster-level-spec.v1'
-    ? validateMergeRasterLevelSpec(value)
-    : validateSortLevelSpec(value);
+  if (value?.schema === 'merge.raster-level-spec.v1') {
+    return validateMergeRasterLevelSpec(value);
+  }
+  if (value?.schema === 'p4g.arrows.level') {
+    return validateArrowsLevelSpec(value);
+  }
+  return validateSortLevelSpec(value);
 }
 
 function validateSortSkinSpec(value) {
@@ -256,15 +357,18 @@ export function validateCatalogTicketLevelSpecBundle(value) {
     }
   }
   if (!denseArray(value.levels) || value.levels.length < 1 || value.levels.length > MAX_LEVELS) {
-    fail('invalid_bundle', 'bundle.levels must contain 1..6 levels');
+    fail('invalid_bundle', `bundle.levels must contain 1..${MAX_LEVELS} levels`);
   }
   value.levels.forEach((level, index) => {
     if (!exactKeys(level, ['ordinal', 'specHash', 'spec'])) fail('invalid_bundle', 'bundle level has extra or missing fields');
     if (level.ordinal !== index + 1) fail('invalid_bundle', 'bundle levels must be contiguous and 1-based');
     hash(level.specHash, `bundle.levels[${index}].specHash`);
     validateLevelSpec(level.spec);
-    if (level.specHash !== level.spec.specHash) fail('invalid_bundle', 'bundle level hash differs from embedded LevelSpec');
-    if (level.spec.runtimeContractDigest !== value.runtime.runtimeContractDigest) {
+    if ('specHash' in level.spec && level.specHash !== level.spec.specHash) {
+      fail('invalid_bundle', 'bundle level hash differs from embedded LevelSpec');
+    }
+    if ('runtimeContractDigest' in level.spec
+      && level.spec.runtimeContractDigest !== value.runtime.runtimeContractDigest) {
       fail('invalid_bundle', 'LevelSpec runtime contract differs from the ticket runtime');
     }
   });
@@ -273,6 +377,15 @@ export function validateCatalogTicketLevelSpecBundle(value) {
     || !value.levels.every(level => level.spec.schema === 'merge.raster-level-spec.v1')
     || value.runtime.capabilities.mergeRasterArtV1 !== true)) {
     fail('invalid_bundle', 'Merge raster bundle must be one exact level on a capable runtime');
+  }
+  const arrows = value.levels.some(level => level.spec.schema === 'p4g.arrows.level');
+  if (arrows && (skinBearing
+    || !value.levels.every(level => level.spec.schema === 'p4g.arrows.level')
+    || value.runtime.playableId !== 'arrows-v1'
+    || value.runtime.runtimeContractDigest !== ARROWS_RUNTIME_CONTRACT_DIGEST
+    || value.runtime.capabilities.arrowsLevelV1 !== true
+    || value.runtime.capabilities.catalogRequiredHandshake !== true)) {
+    fail('invalid_bundle', 'Arrows bundle must use the exact capable Arrows runtime');
   }
   return frozenClone(value);
 }

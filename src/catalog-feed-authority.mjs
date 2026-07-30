@@ -107,7 +107,7 @@ export function catalogCanaryAllocationFailureFallsThrough(status) {
 }
 
 export function generatedProvenanceLabel(levelCount) {
-  if (!Number.isInteger(levelCount) || levelCount < 1 || levelCount > 6) {
+  if (!Number.isInteger(levelCount) || levelCount < 1 || levelCount > 10) {
     fail('invalid_generated_offer', 'generated provenance level count is invalid');
   }
   return levelCount === 1
@@ -440,7 +440,7 @@ function validateGeneratedAllocation(value, request) {
         'gameplayFingerprint', 'presentationFingerprint']
       : ['schema', 'contentHash', 'seriesFingerprint', 'fingerprintVersion', 'levels'];
   if (!exactKeys(value.manifest, manifestKeys) || !Array.isArray(value.manifest.levels)
-    || value.manifest.levels.length < 1 || value.manifest.levels.length > 6
+    || value.manifest.levels.length < 1 || value.manifest.levels.length > 10
     || value.manifest.levels.some((item, index) => !exactKeys(item, ['ordinal', 'specHash'])
       || item.ordinal !== index + 1 || typeof item.specHash !== 'string' || !HASH_RE.test(item.specHash))) {
     fail('invalid_generated_offer', 'generated manifest levels are invalid');
