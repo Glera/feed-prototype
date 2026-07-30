@@ -73,7 +73,7 @@ const mobileReviewBridge = [
   "||Array.isArray(value)||value.schema!=='p4g.mobile-review-preview-challenge.v1'",
   "||typeof value.nonce!=='string'||!/^[a-f0-9-]{36}$/.test(value.nonce))return;",
   "parent.postMessage({schema:'p4g.mobile-review-preview-receipt.v1',nonce:value.nonce},'*');",
-  '});})();',
+  '},true);})();',
   '</script>',
 ].join('');
 const mobileArtifact = (html) => Buffer.from(
@@ -91,9 +91,22 @@ const escapeOrigin = `http://127.0.0.1:${escapeServer.address().port}`;
 const cspCorpusDocuments = Array.from({ length: 45 }, (_unused, index) => (
   `<!doctype html><html data-vector="${index}"><head>`
   + `<script src="${escapeOrigin}/corpus-script-${index}.js"></script>`
+  + `<script>try{void parent.localStorage;parent.fetch(`
+  + `${JSON.stringify(`${escapeOrigin}/parent-fetch-${index}`)})}catch{}</script>`
   + `</head><body><img src="${escapeOrigin}/corpus-image-${index}.png">`
   + `<script>document.body.dataset.inline='${index}'</script></body></html>`
 ));
+const cspCorpusArtifacts = cspCorpusDocuments.map((document, index) => {
+  const bytes = mobileArtifact(document);
+  return {
+    index,
+    bytes,
+    digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+  };
+});
+const cspCorpusArtifactsByDigest = new Map(
+  cspCorpusArtifacts.map((item) => [item.digest, item]),
+);
 
 assert.deepEqual(mobileReviewNavigation({ startParam: `review_${bundleId.replaceAll('-', '')}` }), {
   requested: true,
@@ -199,7 +212,7 @@ const maliciousPrototypeHtml = mobileArtifact(`<!doctype html><!-- <head> -->
 <script>addEventListener('message',event=>event.stopImmediatePropagation(),true)</script>
 <script src="${escapeOrigin}/remote.js"></script></head>
 <body><img src="${escapeOrigin}/pixel.png">
-<script>setTimeout(()=>{location.href=${JSON.stringify(`${escapeOrigin}/navigation-escape`)}},1500)</script>
+<script>setTimeout(()=>{location.href='about:blank'},50)</script>
 </body></html>`);
 const maliciousPrototypeDigest = `sha256:${createHash('sha256').update(maliciousPrototypeHtml).digest('hex')}`;
 const prototypeView = structuredClone(view);
@@ -245,6 +258,28 @@ const faultPrototypeViews = new Map([
   const value = structuredClone(prototypeView);
   value.bundle.bundleId = bundle;
   value.bundle.bundleDigest = `sha256:${reason.charCodeAt(0).toString(16).padStart(2, '0').repeat(32)}`;
+  return [bundle, value];
+}));
+const cspCorpusBundleIds = [
+  '15151515-1515-4515-8515-151515151515',
+  '16161616-1616-4616-8616-161616161616',
+  '17171717-1717-4717-8717-171717171717',
+];
+const cspCorpusViews = new Map(cspCorpusBundleIds.map((bundle, batch) => {
+  const value = structuredClone(prototypeView);
+  value.bundle.bundleId = bundle;
+  value.bundle.bundleDigest = `sha256:${String(batch + 1).repeat(64)}`;
+  value.bundle.action.identity = `csp-corpus-${batch * 15}`;
+  value.bundle.review.output.prototypeId = value.bundle.action.identity;
+  value.bundle.runtime.previews = cspCorpusArtifacts
+    .slice(batch * 15, (batch + 1) * 15)
+    .map((artifact) => ({
+      reviewTargetId: `csp-corpus-${artifact.index}`,
+      label: `Corpus ${artifact.index + 1}`,
+      artifactDigest: artifact.digest,
+      byteLength: artifact.bytes.length,
+      contentType: 'text/html',
+    }));
   return [bundle, value];
 }));
 
@@ -389,6 +424,12 @@ const server = createServer((request, response) => {
   if (request.method === 'GET' && url.pathname === `/api/operator/mobile-reviews/${maliciousPrototypeBundleId}`) {
     return json(response, maliciousPrototypeView);
   }
+  for (const [corpusBundleId, corpusView] of cspCorpusViews) {
+    if (request.method === 'GET'
+      && url.pathname === `/api/operator/mobile-reviews/${corpusBundleId}`) {
+      return json(response, corpusView);
+    }
+  }
   for (const [faultBundleId, faultView] of faultPrototypeViews) {
     if (request.method === 'GET'
       && url.pathname === `/api/operator/mobile-reviews/${faultBundleId}`) {
@@ -422,11 +463,14 @@ const server = createServer((request, response) => {
   }
   const ticket = /^\/api\/operator\/mobile-reviews\/([a-f0-9-]{36})\/artifacts\/([a-f0-9]{64})\/preview-tickets$/.exec(url.pathname);
   if (request.method === 'POST' && ticket) {
+    const requestedDigest = `sha256:${ticket[2]}`;
     const artifact = ticket[2] === prototypeDigest.slice(7)
       ? prototypeDigest
       : ticket[2] === maliciousPrototypeDigest.slice(7)
         ? maliciousPrototypeDigest
-        : null;
+        : cspCorpusArtifactsByDigest.has(requestedDigest)
+          ? requestedDigest
+          : null;
     if (!artifact) return json(response, { code: 'mobile_review_not_found' }, 404);
     return json(response, {
       schema: 'operator.mobile-review-preview-ticket.v1',
@@ -476,6 +520,20 @@ const server = createServer((request, response) => {
     response.setHeader('Content-Security-Policy', previewCsp);
     response.end(maliciousPrototypeHtml);
     return;
+  }
+  const corpusPreview = /^\/api\/operator\/mobile-reviews\/artifacts\/([a-f0-9]{64})\/preview$/.exec(
+    url.pathname,
+  );
+  if (request.method === 'GET' && corpusPreview) {
+    const artifact = cspCorpusArtifactsByDigest.get(`sha256:${corpusPreview[1]}`);
+    if (artifact) {
+      response.statusCode = 200;
+      response.setHeader('content-type', 'text/html');
+      response.setHeader('X-Content-SHA256', artifact.digest);
+      response.setHeader('Content-Security-Policy', previewCsp);
+      response.end(artifact.bytes);
+      return;
+    }
   }
   if (request.method === 'GET' && url.pathname === '/api/operator/mobile-reviews') {
     inboxRequests += 1;
@@ -659,10 +717,17 @@ try {
   });
   prototypePreviewDelayMs = 1_500;
   await prototypePage.goto(`${origin}/?mobileReview=${prototypeBundleId}`, { waitUntil: 'domcontentloaded' });
-  await prototypePage.getByRole('button', { name: 'Перспективно' }).click();
-  await prototypePage.getByText(/Дождитесь проверки прототипа/).waitFor();
+  assert.equal(
+    await prototypePage.getByRole('button', { name: 'Перспективно' }).isDisabled(),
+    true,
+    'prototype verdicts must be visibly disabled until exact preview evidence exists',
+  );
   assert.equal(decisionBody, null, 'prototype verdict must wait for exact preview evidence');
   await prototypePage.getByText('Exact-прототип загружен.').waitFor();
+  assert.equal(
+    await prototypePage.getByRole('button', { name: 'Перспективно' }).isEnabled(),
+    true,
+  );
   prototypePreviewDelayMs = 0;
   const prototypeFrame = prototypePage.frames().find(
     (frame) => frame !== prototypePage.mainFrame()
@@ -738,6 +803,50 @@ try {
   inboxReviewsOverride = null;
   await switchPage.close();
 
+  decisionBody = null;
+  inboxReviewsOverride = [prototypeView];
+  const abandonedMountPage = await browser.newPage({
+    viewport: { width: 390, height: 760 },
+  });
+  await abandonedMountPage.goto(
+    `${origin}/?mobileReview=${maliciousPrototypeBundleId}`,
+    { waitUntil: 'domcontentloaded' },
+  );
+  await abandonedMountPage.locator('iframe').waitFor();
+  // Let the exact artifact self-navigate to about:blank so the parent has an
+  // active 8-second receipt deadline with no bridge. We then abandon that
+  // mount while the deadline is live.
+  await abandonedMountPage.waitForTimeout(250);
+  await abandonedMountPage.getByRole('button', { name: 'Все отсмотры' }).evaluate(
+    (node) => node.click(),
+  );
+  await abandonedMountPage.getByRole(
+    'button',
+    { name: /Оценить экспериментальный прототип/ },
+  ).click();
+  await abandonedMountPage.getByText('Exact-прототип загружен.').waitFor();
+  await abandonedMountPage.waitForTimeout(8_500);
+  await abandonedMountPage.getByLabel('Комментарий').fill(
+    'The current exact prototype stayed responsive.',
+  );
+  await abandonedMountPage.getByRole('button', { name: 'Перспективно' }).click();
+  await abandonedMountPage.getByRole(
+    'heading',
+    { name: 'Решение сохранено' },
+  ).waitFor();
+  assert.deepEqual(
+    decisionBody?.decision?.preview,
+    {
+      configured: true,
+      reviewTargetId: prototypeView.bundle.action.identity,
+      runtimeArtifactDigest: prototypeDigest,
+    },
+    'an abandoned preview deadline must not overwrite current bundle evidence',
+  );
+  inboxReviewsOverride = null;
+  await abandonedMountPage.close();
+
+  const maliciousRequestsBefore = previewRequests.get(maliciousPrototypeDigest) || 0;
   const maliciousPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await maliciousPage.goto(
     `${origin}/?mobileReview=${maliciousPrototypeBundleId}`,
@@ -745,7 +854,10 @@ try {
   );
   await maliciousPage.locator('iframe').waitFor();
   assert.equal(await maliciousPage.locator('iframe').count(), 1);
-  assert.equal(previewRequests.get(maliciousPrototypeDigest), 1);
+  assert.equal(
+    previewRequests.get(maliciousPrototypeDigest),
+    maliciousRequestsBefore + 1,
+  );
   await maliciousPage.getByText(/не отвечает на проверку/).waitFor({ timeout: 12_000 });
   assert.equal(
     escapeRequests,
@@ -786,6 +898,43 @@ try {
     );
     await faultPage.close();
   }
+
+  const productionCorpusEscapeBefore = escapeRequests;
+  for (const [corpusBundleId, corpusView] of cspCorpusViews) {
+    const productionCorpusPage = await browser.newPage({
+      viewport: { width: 390, height: 760 },
+    });
+    await productionCorpusPage.goto(
+      `${origin}/?mobileReview=${corpusBundleId}`,
+      { waitUntil: 'domcontentloaded' },
+    );
+    for (const preview of corpusView.bundle.runtime.previews) {
+      if (preview !== corpusView.bundle.runtime.previews[0]) {
+        await productionCorpusPage.getByRole(
+          'button',
+          { name: preview.label },
+        ).click();
+      }
+      await productionCorpusPage.getByText('Exact-прототип загружен.').waitFor();
+      const mountedFrame = productionCorpusPage.locator('iframe');
+      assert.equal(
+        await mountedFrame.getAttribute('sandbox'),
+        'allow-scripts allow-pointer-lock',
+        'the production mount must never gain same-origin parent authority',
+      );
+      assert.equal(
+        await mountedFrame.getAttribute('csp'),
+        artifactCsp,
+        'the production mount must retain the Chromium policy layer',
+      );
+    }
+    await productionCorpusPage.close();
+  }
+  assert.equal(
+    escapeRequests,
+    productionCorpusEscapeBefore,
+    'all 45 adversarial documents must stay contained on the real mount path',
+  );
 
   const embeddedCorpus = cspCorpusDocuments.map(
     (document) => mobileArtifact(document).toString('utf8'),

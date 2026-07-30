@@ -29,6 +29,7 @@ type BlockedPreview = {
 };
 type PreviewEvidence = ConfiguredPreview | BlockedPreview;
 type PreviewCleanup = () => void;
+const HTML_PREVIEW_SANDBOX = 'allow-scripts allow-pointer-lock';
 
 const FACTORY_CHECKS = [
   ['reproducibility', 'Повтор даёт те же результаты'],
@@ -399,7 +400,9 @@ function mountHtmlRuntimePreview(
       const frame = document.createElement('iframe');
       frame.className = 'mobile-review__frame mobile-review__frame--prototype';
       frame.title = preview.label;
-      frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
+      // Exact literal: adding allow-same-origin would let a srcdoc artifact
+      // reach the TMA parent and bypass its own CSP through parent.fetch.
+      frame.setAttribute('sandbox', HTML_PREVIEW_SANDBOX);
       frame.setAttribute('allow', 'autoplay');
       // Chromium enforces iframe[csp] before parsing srcdoc. The same frozen
       // policy is also the first token after the doctype inside the hashed
@@ -901,6 +904,8 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     };
     for (const verdict of view.bundle.review.choices || []) {
       const action = button(labels[verdict] || verdict, verdict === 'promising');
+      action.dataset.requiresPreview = '';
+      action.disabled = previewEvidence === null;
       action.addEventListener('click', () => {
         patchDraft(view.bundle.bundleId, { comment: comment.value });
         if (!previewEvidence) {
@@ -1069,6 +1074,10 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
         view.bundle.runtime,
         (preview) => {
           previewEvidence = preview;
+          body.querySelectorAll<HTMLButtonElement>('[data-requires-preview]')
+            .forEach((action) => {
+              action.disabled = preview === null;
+            });
         },
       );
     }

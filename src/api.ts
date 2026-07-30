@@ -1666,7 +1666,7 @@ export async function apiMobileReviewPreview(
     response = await withRequestTimeout(
       (signal) => fetch(
         previewUrl,
-        { signal },
+        { signal, headers: headers() },
       ),
       20_000,
       signal,
