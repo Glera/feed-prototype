@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { chromium } from 'playwright';
+import { chromium, webkit } from 'playwright';
 
 import { mobileReviewNavigation } from '../src/mobile-review-navigation.mjs';
 
@@ -34,6 +34,11 @@ let escapeRequests = 0;
 const catalogLabDecisions = [];
 const previewRequests = new Map();
 let cspCorpusRequests = 0;
+let prototypePreviewDelayMs = 0;
+let inboxReviewsOverride = null;
+const browserName = process.env.MOBILE_REVIEW_BROWSER || 'chromium';
+assert.ok(['chromium', 'webkit'].includes(browserName), 'MOBILE_REVIEW_BROWSER must be chromium or webkit');
+const browserType = browserName === 'webkit' ? webkit : chromium;
 const previewCsp = [
   'sandbox allow-scripts allow-pointer-lock',
   "default-src 'none'",
@@ -183,13 +188,18 @@ levelView.bundle.runtime = {
 
 const prototypeHtml = mobileArtifact(`<!doctype html><html><head></head><body>
 <button id="play">Prototype ready</button>
-<script>document.querySelector('#play').onclick=()=>document.body.dataset.played='1'</script>
+<script>
+document.querySelector('#play').onclick=()=>document.body.dataset.played='1';
+setTimeout(()=>{const until=performance.now()+1100;while(performance.now()<until){}},0);
+</script>
 </body></html>`);
 const prototypeDigest = `sha256:${createHash('sha256').update(prototypeHtml).digest('hex')}`;
 const maliciousPrototypeHtml = mobileArtifact(`<!doctype html><!-- <head> -->
-<html><head><script src="${escapeOrigin}/remote.js"></script></head>
+<html><head>
+<script>addEventListener('message',event=>event.stopImmediatePropagation(),true)</script>
+<script src="${escapeOrigin}/remote.js"></script></head>
 <body><img src="${escapeOrigin}/pixel.png">
-<script>setTimeout(()=>{location.href='/csp-corpus-host'},1500)</script>
+<script>setTimeout(()=>{location.href=${JSON.stringify(`${escapeOrigin}/navigation-escape`)}},1500)</script>
 </body></html>`);
 const maliciousPrototypeDigest = `sha256:${createHash('sha256').update(maliciousPrototypeHtml).digest('hex')}`;
 const prototypeView = structuredClone(view);
@@ -447,7 +457,11 @@ const server = createServer((request, response) => {
     if (ticketBundleId !== cspMissingPrototypeBundleId) {
       response.setHeader('Content-Security-Policy', previewCsp);
     }
-    response.end(prototypeHtml);
+    if (prototypePreviewDelayMs > 0) {
+      setTimeout(() => response.end(prototypeHtml), prototypePreviewDelayMs);
+    } else {
+      response.end(prototypeHtml);
+    }
     return;
   }
   if (request.method === 'GET'
@@ -467,7 +481,7 @@ const server = createServer((request, response) => {
     inboxRequests += 1;
     return json(response, {
       schema: 'operator.mobile-review-inbox.v1',
-      reviews: exactDecisionSaved ? [levelView] : [view],
+      reviews: inboxReviewsOverride || (exactDecisionSaved ? [levelView] : [view]),
     });
   }
   if (request.method === 'POST' && /^\/api\/operator\/mobile-reviews\/[a-f0-9-]{36}\/decisions$/.test(url.pathname)) {
@@ -475,10 +489,14 @@ const server = createServer((request, response) => {
     request.on('data', (chunk) => { body += chunk; });
     request.on('end', () => {
       decisionBody = JSON.parse(body);
+      const faultSource = [...faultPrototypeViews.entries()]
+        .find(([candidate]) => url.pathname.includes(candidate))?.[1];
       const source = url.pathname.includes(levelBundleId)
         ? levelView
         : url.pathname.includes(prototypeBundleId)
           ? prototypeView
+          : faultSource
+            ? faultSource
           : url.pathname.includes(publicationPrepareBundleId)
             ? publicationPrepareView
             : view;
@@ -532,7 +550,7 @@ if (build.status !== 0) {
 
 let browser = null;
 try {
-  browser = await chromium.launch();
+  browser = await browserType.launch();
   const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await page.goto(`${origin}/?mobileReview=${bundleId}`, { waitUntil: 'networkidle' });
   await page.getByRole('heading', { name: 'Phone-native order' }).waitFor();
@@ -639,8 +657,13 @@ try {
       value: undefined,
     });
   });
-  await prototypePage.goto(`${origin}/?mobileReview=${prototypeBundleId}`, { waitUntil: 'networkidle' });
+  prototypePreviewDelayMs = 1_500;
+  await prototypePage.goto(`${origin}/?mobileReview=${prototypeBundleId}`, { waitUntil: 'domcontentloaded' });
+  await prototypePage.getByRole('button', { name: 'Перспективно' }).click();
+  await prototypePage.getByText(/Дождитесь проверки прототипа/).waitFor();
+  assert.equal(decisionBody, null, 'prototype verdict must wait for exact preview evidence');
   await prototypePage.getByText('Exact-прототип загружен.').waitFor();
+  prototypePreviewDelayMs = 0;
   const prototypeFrame = prototypePage.frames().find(
     (frame) => frame !== prototypePage.mainFrame()
       && frame.url() === 'about:srcdoc',
@@ -683,22 +706,56 @@ try {
   assert.equal(await prototypePage.locator('iframe').count(), 1);
   await prototypePage.getByRole('button', { name: 'Перспективно' }).click();
   await prototypePage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  assert.deepEqual(decisionBody?.decision?.preview, {
+    configured: true,
+    reviewTargetId: prototypeView.bundle.runtime.previews[0].reviewTargetId,
+    runtimeArtifactDigest: prototypeDigest,
+  });
   await prototypeContext.close();
+
+  decisionBody = null;
+  inboxReviewsOverride = [levelView];
+  prototypePreviewDelayMs = 1_500;
+  const switchPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await switchPage.goto(
+    `${origin}/?mobileReview=${prototypeBundleId}`,
+    { waitUntil: 'domcontentloaded' },
+  );
+  await switchPage.getByRole('button', { name: 'Все отсмотры' }).evaluate(
+    (node) => node.click(),
+  );
+  await switchPage.getByRole('button', { name: /Отсмотреть уровень/ }).click();
+  await switchPage.getByText('Exact preview подтверждён для всех уровней.').waitFor();
+  prototypePreviewDelayMs = 0;
+  await switchPage.waitForTimeout(1_800);
+  await switchPage.getByRole('button', { name: 'Подходит' }).click();
+  await switchPage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+  assert.equal(
+    decisionBody?.decision?.preview?.reviewTargetId,
+    levelView.bundle.action.identity,
+    'a late unmounted prototype fetch must not clear the current bundle evidence',
+  );
+  inboxReviewsOverride = null;
+  await switchPage.close();
 
   const maliciousPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await maliciousPage.goto(
     `${origin}/?mobileReview=${maliciousPrototypeBundleId}`,
     { waitUntil: 'domcontentloaded' },
   );
-  await maliciousPage.getByText('Exact-прототип загружен.').waitFor();
+  await maliciousPage.locator('iframe').waitFor();
   assert.equal(await maliciousPage.locator('iframe').count(), 1);
   assert.equal(previewRequests.get(maliciousPrototypeDigest), 1);
-  assert.equal(escapeRequests, 0, 'real response CSP must block remote scripts and images');
-  await maliciousPage.getByText(/попытался покинуть exact sandbox/).waitFor();
+  await maliciousPage.getByText(/не отвечает на проверку/).waitFor({ timeout: 12_000 });
+  assert.equal(
+    escapeRequests,
+    0,
+    'embedded CSP and parent frame-src must block remote loads and navigation',
+  );
   assert.equal(
     await maliciousPage.locator('iframe').count(),
     0,
-    'a same-origin second navigation must invalidate exact prototype evidence',
+    'an unresponsive exact artifact must be removed before a blocked verdict is available',
   );
 
   for (const [faultBundleId] of faultPrototypeViews) {
@@ -714,31 +771,75 @@ try {
       0,
       'an invalid delivery must never surface configured evidence',
     );
-    await faultPage.getByRole('button', { name: 'Перспективно' }).click();
-    await faultPage.getByText(/нарушил sandbox/).waitFor();
-    assert.equal(decisionBody, null, 'an invalid preview delivery must block the decision POST');
+    await faultPage.getByRole('button', { name: 'Нет сигнала' }).click();
+    await faultPage.getByRole('heading', { name: 'Решение сохранено' }).waitFor();
+    assert.equal(decisionBody?.decision?.preview?.configured, false);
+    assert.equal(
+      decisionBody?.decision?.preview?.runtimeArtifactDigest,
+      prototypeDigest,
+    );
+    assert.ok(
+      ['delivery_failed', 'response_invalid'].includes(
+        decisionBody?.decision?.preview?.blockedReason,
+      ),
+      'a failed preview must persist its bounded block evidence',
+    );
     await faultPage.close();
   }
 
-  const escapeRequestsBeforeCorpus = escapeRequests;
+  const embeddedCorpus = cspCorpusDocuments.map(
+    (document) => mobileArtifact(document).toString('utf8'),
+  );
   const corpusPage = await browser.newPage();
   await corpusPage.goto(`${origin}/csp-corpus-host`, { waitUntil: 'networkidle' });
-  await corpusPage.evaluate((count) => {
-    for (let index = 0; index < count; index += 1) {
-      const frame = document.createElement('iframe');
-      frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
-      frame.src = `/csp-corpus/${index}`;
-      document.body.append(frame);
-    }
-  }, cspCorpusDocuments.length);
-  await corpusPage.locator('iframe').nth(cspCorpusDocuments.length - 1).waitFor();
-  await corpusPage.waitForTimeout(500);
-  assert.equal(cspCorpusRequests, 45);
+  const runSrcdocCorpus = async (documents, withAttribute) => {
+    await corpusPage.evaluate(({ values, csp, attribute }) => {
+      document.body.replaceChildren();
+      for (const value of values) {
+        const frame = document.createElement('iframe');
+        frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
+        if (attribute) frame.setAttribute('csp', csp);
+        frame.srcdoc = value;
+        document.body.append(frame);
+      }
+    }, {
+      values: documents,
+      csp: artifactCsp,
+      attribute: withAttribute,
+    });
+    await corpusPage.locator('iframe').nth(documents.length - 1).waitFor();
+    await corpusPage.waitForTimeout(700);
+  };
+  const embeddedBefore = escapeRequests;
+  await runSrcdocCorpus(embeddedCorpus, false);
   assert.equal(
     escapeRequests,
-    escapeRequestsBeforeCorpus,
-    'all 45 valid attack documents must be inert under response-header CSP',
+    embeddedBefore,
+    'the embedded hashed policy must independently contain every srcdoc vector',
   );
+  const attributeBefore = escapeRequests;
+  await runSrcdocCorpus(cspCorpusDocuments, true);
+  if (browserName === 'chromium') {
+    assert.equal(
+      escapeRequests,
+      attributeBefore,
+      'Chromium iframe[csp] must independently contain every srcdoc vector',
+    );
+  } else {
+    assert.ok(
+      escapeRequests > attributeBefore,
+      'WebKit control must prove iframe[csp] is not the embedded-policy boundary',
+    );
+  }
+  await corpusPage.evaluate(() => {
+    document.body.replaceChildren();
+    for (let index = 0; index < 2; index += 1) {
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
+      frame.srcdoc = '<!doctype html><html><body>cleanup</body></html>';
+      document.body.append(frame);
+    }
+  });
 
   const factoryPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await factoryPage.goto(`${origin}/?mobileReview=${factoryBundleId}`, { waitUntil: 'networkidle' });

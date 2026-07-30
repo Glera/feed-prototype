@@ -10,6 +10,7 @@
     "check:telegram-start-param": "node scripts/check-telegram-start-param.mjs",
     "check:catalog-lab-navigation": "node scripts/check-catalog-lab-navigation.mjs",
     "check:mobile-review-browser": "node scripts/check-mobile-review-browser.mjs",
+    "check:mobile-review-browser:webkit": "MOBILE_REVIEW_BROWSER=webkit node scripts/check-mobile-review-browser.mjs",
     "check:operator-debug-entry": "node scripts/check-operator-debug-entry.mjs",
     "check:operator-debug-entry-browser": "node scripts/check-operator-debug-entry-browser.mjs",
     "check:rewards": "node scripts/check-reward-vectors.mjs",

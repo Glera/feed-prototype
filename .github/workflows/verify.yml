@@ -53,13 +53,17 @@ jobs:
       - name: Install exact dependencies
         run: npm ci
 
-      # lint runs tsc --noEmit plus 20 check scripts; 7 launch chromium via
-      # playwright (pinned to the exact version in package-lock.json).
-      - name: Install Playwright chromium
-        run: npx playwright install --with-deps chromium
+      # The operator reviews from Telegram on iOS. Chromium remains the broad
+      # browser suite, while the mobile-review security path is also executed
+      # on the exact pinned WebKit engine.
+      - name: Install Playwright Chromium and WebKit
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Lint (tsc --noEmit + contract check scripts)
         run: npm run lint
+
+      - name: Mobile review security and lifecycle on WebKit
+        run: npm run check:mobile-review-browser:webkit
 
       - name: Build (tsc + vite build)
         run: npm run build

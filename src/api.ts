@@ -112,19 +112,33 @@ const OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS = Number.isFinite(configuredOutboxReque
 async function withRequestTimeout<T>(
   operation: (signal: AbortSignal | undefined) => Promise<T>,
   timeoutMs?: number,
+  outerSignal?: AbortSignal,
 ): Promise<T> {
-  if (!timeoutMs || timeoutMs <= 0) return operation(undefined);
+  if ((!timeoutMs || timeoutMs <= 0) && !outerSignal) return operation(undefined);
   const controller = new AbortController();
+  const abortFromOuter = (): void => controller.abort();
+  if (outerSignal?.aborted) controller.abort();
+  else outerSignal?.addEventListener('abort', abortFromOuter, { once: true });
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let rejectFromOuter: (() => void) | null = null;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new ApiRequestError(
-        0,
-        `Request timed out after ${timeoutMs}ms`,
-        'request_timeout',
-      ));
-    }, timeoutMs);
+    if (timeoutMs && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new ApiRequestError(
+          0,
+          `Request timed out after ${timeoutMs}ms`,
+          'request_timeout',
+        ));
+      }, timeoutMs);
+    }
+    if (outerSignal) {
+      rejectFromOuter = () => {
+        reject(new ApiRequestError(0, 'Request was cancelled', 'request_cancelled'));
+      };
+      if (outerSignal.aborted) rejectFromOuter();
+      else outerSignal.addEventListener('abort', rejectFromOuter, { once: true });
+    }
   });
   try {
     // The explicit race also makes the deadline effective in test doubles which
@@ -136,6 +150,8 @@ async function withRequestTimeout<T>(
     ]);
   } finally {
     if (timer != null) clearTimeout(timer);
+    outerSignal?.removeEventListener('abort', abortFromOuter);
+    if (rejectFromOuter) outerSignal?.removeEventListener('abort', rejectFromOuter);
   }
 }
 
@@ -165,6 +181,7 @@ async function postRequired<T>(
   body?: unknown,
   timeoutMs?: number,
   extraHeaders?: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const stall = devApiDelay();
   if (stall) await stall;
@@ -179,7 +196,7 @@ async function postRequired<T>(
         signal,
       });
       return { response, text: await response.text() };
-    }, timeoutMs));
+    }, timeoutMs, signal));
   } catch (e) {
     if (e instanceof ApiRequestError) throw e;
     throw new ApiRequestError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
@@ -1604,6 +1621,7 @@ export async function apiMobileReviewInbox(): Promise<MobileReviewView[]> {
 export async function apiMobileReviewPreview(
   bundleId: string,
   artifactDigest: string,
+  signal?: AbortSignal,
 ): Promise<{ bytes: ArrayBuffer; artifactDigest: string }> {
   const expectedCsp = [
     'sandbox allow-scripts allow-pointer-lock',
@@ -1633,6 +1651,8 @@ export async function apiMobileReviewPreview(
       + `${match[1]}/preview-tickets`,
     undefined,
     15_000,
+    undefined,
+    signal,
   );
   if (ticket.bundleId !== bundleId
     || ticket.artifactDigest !== artifactDigest
@@ -1649,6 +1669,7 @@ export async function apiMobileReviewPreview(
         { signal },
       ),
       20_000,
+      signal,
     );
   } catch (error) {
     if (error instanceof ApiRequestError) throw error;

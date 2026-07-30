@@ -17,9 +17,18 @@ type HtmlRuntime = Extract<MobileRuntime, { schema: 'operator.mobile-html-runtim
 type SortRuntimePreview = SortRuntime['previews'][number];
 type HtmlRuntimePreview = HtmlRuntime['previews'][number];
 type ConfiguredPreview = {
+  configured: true;
   reviewTargetId: string;
   runtimeArtifactDigest: string;
 };
+type BlockedPreview = {
+  configured: false;
+  reviewTargetId: string;
+  runtimeArtifactDigest: string;
+  blockedReason: 'delivery_failed' | 'digest_mismatch' | 'response_invalid' | 'unresponsive';
+};
+type PreviewEvidence = ConfiguredPreview | BlockedPreview;
+type PreviewCleanup = () => void;
 
 const FACTORY_CHECKS = [
   ['reproducibility', 'Повтор даёт те же результаты'],
@@ -179,14 +188,13 @@ function mountRuntimePreview(
   parent: HTMLElement,
   bundleId: string,
   runtime: MobileRuntime,
-  onConfigured: (preview: ConfiguredPreview | null) => void,
-): void {
+  onEvidence: (preview: PreviewEvidence | null) => void,
+): PreviewCleanup {
   if (runtime.schema === 'operator.mobile-html-runtime.v1') {
-    mountHtmlRuntimePreview(parent, bundleId, runtime.previews, onConfigured);
-    return;
+    return mountHtmlRuntimePreview(parent, bundleId, runtime.previews, onEvidence);
   }
   const previews = runtime.previews;
-  if (!previews.length) return;
+  if (!previews.length) return () => {};
   const shell = element('section', 'mobile-review__preview');
   const title = element('h2', '', 'Точный интерактивный preview');
   const status = element('p', 'mobile-review__status', 'Выберите пример для запуска.');
@@ -263,7 +271,8 @@ function mountRuntimePreview(
         renderLevelNav();
         if (configuredLevels.size === activePreview.levels.length) {
           status.textContent = 'Exact preview подтверждён для всех уровней.';
-          onConfigured({
+          onEvidence({
+            configured: true,
             reviewTargetId: activePreview.reviewTargetId,
             runtimeArtifactDigest: activePreview.runtimeArtifactDigest,
           });
@@ -301,22 +310,27 @@ function mountRuntimePreview(
   shell.append(title, selector, levelNav, status, stage);
   parent.append(shell);
   launch();
+  return stopFrame;
 }
 
 function mountHtmlRuntimePreview(
   parent: HTMLElement,
   bundleId: string,
   previews: HtmlRuntimePreview[],
-  onConfigured: (preview: ConfiguredPreview | null) => void,
-): void {
-  if (!previews.length) return;
+  onEvidence: (preview: PreviewEvidence | null) => void,
+): PreviewCleanup {
+  if (!previews.length) return () => {};
   const shell = element('section', 'mobile-review__preview');
   const title = element('h2', '', 'Точный интерактивный preview');
   const status = element('p', 'mobile-review__status', 'Выберите прототип для запуска.');
   const selector = element('div', 'mobile-review__preview-tabs');
   const stage = element('div', 'mobile-review__preview-stage');
+  const retry = button('Повторить загрузку', true);
+  retry.hidden = true;
   let epoch = 0;
   let removeDeliveryListener: (() => void) | null = null;
+  let abortDelivery: AbortController | null = null;
+  let activePreview: HtmlRuntimePreview = previews[0];
 
   const previewCsp = [
     "default-src 'none'",
@@ -333,28 +347,53 @@ function mountHtmlRuntimePreview(
 
   const stop = (): void => {
     epoch += 1;
+    abortDelivery?.abort();
+    abortDelivery = null;
     removeDeliveryListener?.();
     removeDeliveryListener = null;
+    retry.hidden = true;
     stage.replaceChildren();
   };
 
   const launch = async (preview: HtmlRuntimePreview): Promise<void> => {
     stop();
+    activePreview = preview;
     const currentEpoch = epoch;
+    const controller = new AbortController();
+    abortDelivery = controller;
+    onEvidence(null);
     status.textContent = `Загружаем ${preview.label}…`;
+    const block = (
+      blockedReason: BlockedPreview['blockedReason'],
+      message: string,
+    ): void => {
+      if (currentEpoch !== epoch) return;
+      onEvidence({
+        configured: false,
+        reviewTargetId: preview.reviewTargetId,
+        runtimeArtifactDigest: preview.artifactDigest,
+        blockedReason,
+      });
+      status.textContent = message;
+      retry.hidden = false;
+      stage.replaceChildren();
+    };
     try {
       const artifact = await apiMobileReviewPreview(
         bundleId,
         preview.artifactDigest,
+        controller.signal,
       );
       if (currentEpoch !== epoch) return;
       if (artifact.bytes.byteLength !== preview.byteLength) {
-        throw new Error('Размер exact-прототипа не совпал.');
+        block('digest_mismatch', 'Размер exact-прототипа не совпал. Повторите загрузку.');
+        return;
       }
       const actual = `sha256:${await sha256Hex(artifact.bytes)}`;
       if (currentEpoch !== epoch) return;
       if (actual !== preview.artifactDigest || artifact.artifactDigest !== actual) {
-        throw new Error('SHA-256 exact-прототипа не совпал.');
+        block('digest_mismatch', 'SHA-256 exact-прототипа не совпал. Повторите загрузку.');
+        return;
       }
       const exactHtml = new TextDecoder('utf-8', { fatal: true }).decode(artifact.bytes);
       const frame = document.createElement('iframe');
@@ -367,16 +406,26 @@ function mountHtmlRuntimePreview(
       // mobile-only artifact so WebKit receives an equivalent fail-closed
       // boundary without a second network request.
       frame.setAttribute('csp', previewCsp);
-      let blockTimer: number | null = null;
+      let challengeTimer: number | null = null;
+      let deadlineTimer: number | null = null;
       let configured = false;
       let challengeNonce: string | null = null;
 
-      const blockUnverifiedNavigation = (nonce: string): void => {
+      const clearHandshake = (): void => {
+        if (challengeTimer !== null) window.clearInterval(challengeTimer);
+        if (deadlineTimer !== null) window.clearTimeout(deadlineTimer);
+        challengeTimer = null;
+        deadlineTimer = null;
+        challengeNonce = null;
+      };
+      const blockUnresponsive = (nonce: string): void => {
         if (currentEpoch !== epoch || challengeNonce !== nonce) return;
-        onConfigured(null);
+        clearHandshake();
         configured = false;
-        status.textContent = 'Прототип попытался покинуть exact sandbox. Отсмотр заблокирован.';
-        stage.replaceChildren();
+        block(
+          'unresponsive',
+          'Прототип не отвечает на проверку. Повторите загрузку; решение пока не отправлено.',
+        );
       };
 
       const receiveDelivery = (event: MessageEvent): void => {
@@ -384,13 +433,13 @@ function mountHtmlRuntimePreview(
         if (event.source !== frame.contentWindow
           || receipt?.schema !== 'p4g.mobile-review-preview-receipt.v1'
           || receipt.nonce !== challengeNonce) return;
-        if (blockTimer !== null) window.clearTimeout(blockTimer);
-        blockTimer = null;
-        challengeNonce = null;
+        clearHandshake();
         status.textContent = 'Exact-прототип загружен. Поиграйте и сохраните решение ниже.';
+        retry.hidden = true;
         if (!configured) {
           configured = true;
-          onConfigured({
+          onEvidence({
+            configured: true,
             reviewTargetId: preview.reviewTargetId,
             runtimeArtifactDigest: preview.artifactDigest,
           });
@@ -399,35 +448,44 @@ function mountHtmlRuntimePreview(
       window.addEventListener('message', receiveDelivery);
       removeDeliveryListener = () => {
         window.removeEventListener('message', receiveDelivery);
-        if (blockTimer !== null) window.clearTimeout(blockTimer);
+        clearHandshake();
       };
       frame.addEventListener('load', () => {
         if (currentEpoch !== epoch) return;
+        clearHandshake();
         configured = false;
-        onConfigured(null);
+        onEvidence(null);
         status.textContent = 'Проверяем exact-квитанцию прототипа…';
         const nonce = crypto.randomUUID();
         challengeNonce = nonce;
-        frame.contentWindow?.postMessage({
-          schema: 'p4g.mobile-review-preview-challenge.v1',
-          nonce,
-        }, '*');
-        if (blockTimer !== null) window.clearTimeout(blockTimer);
-        blockTimer = window.setTimeout(
-          () => blockUnverifiedNavigation(nonce),
-          750,
+        const challenge = (): void => {
+          if (currentEpoch !== epoch || challengeNonce !== nonce) return;
+          frame.contentWindow?.postMessage({
+            schema: 'p4g.mobile-review-preview-challenge.v1',
+            nonce,
+          }, '*');
+        };
+        challenge();
+        challengeTimer = window.setInterval(challenge, 500);
+        deadlineTimer = window.setTimeout(
+          () => blockUnresponsive(nonce),
+          8_000,
         );
       });
       frame.srcdoc = exactHtml;
       stage.append(frame);
     } catch (error) {
-      if (currentEpoch === epoch) {
-        onConfigured(null);
-        status.textContent = errorMessage(error);
-      }
+      if (currentEpoch !== epoch || controller.signal.aborted) return;
+      block(
+        error instanceof ApiRequestError && error.status > 0 && error.status < 500
+          ? 'response_invalid'
+          : 'delivery_failed',
+        `${errorMessage(error)} Повторите загрузку.`,
+      );
     }
   };
 
+  retry.addEventListener('click', () => void launch(activePreview));
   for (const preview of previews) {
     const item = button(preview.label);
     item.addEventListener('click', () => {
@@ -438,9 +496,10 @@ function mountHtmlRuntimePreview(
     selector.append(item);
   }
   selector.firstElementChild?.classList.add('is-active');
-  shell.append(title, selector, status, stage);
+  shell.append(title, selector, status, retry, stage);
   parent.append(shell);
   void launch(previews[0]);
+  return stop;
 }
 
 export async function mountMobileReview(initialBundleId: string | null): Promise<void> {
@@ -458,18 +517,13 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
   document.body.replaceChildren(root);
 
   let current: MobileReviewView | null = null;
-  let configuredPreview: ConfiguredPreview | null = null;
-  let runtimeBlocked = false;
+  let previewEvidence: PreviewEvidence | null = null;
+  let unmountRuntime: PreviewCleanup = () => {};
   let startedAt = Date.now();
   let followEpoch = 0;
 
   async function submit(decision: Record<string, unknown>): Promise<void> {
     if (!current) return;
-    if (runtimeBlocked) {
-      const notice = root.querySelector<HTMLElement>('[data-mobile-review-notice]');
-      if (notice) notice.textContent = 'Этот preview нарушил sandbox. Решение не отправлено.';
-      return;
-    }
     const submitters = [...root.querySelectorAll<HTMLButtonElement>('button')];
     submitters.forEach((node) => { node.disabled = true; });
     const notice = root.querySelector<HTMLElement>('[data-mobile-review-notice]');
@@ -509,18 +563,22 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     );
     const title = element('h1', '', view.bundle.order.title);
     const brief = element('p', 'mobile-review__brief', view.bundle.order.brief || 'Описание заказа не добавлено.');
+    const inbox = button('Все отсмотры');
+    inbox.addEventListener('click', () => void loadInbox());
     const action = element('div', 'mobile-review__action');
     action.append(
       element('span', 'mobile-review__eyebrow', 'Сейчас от вас'),
       element('strong', '', view.bundle.action.label),
       element('p', '', view.bundle.presentation.summary),
     );
-    header.append(brand, progress, title, brief, action);
+    header.append(brand, progress, title, brief, action, inbox);
     return header;
   }
 
   function renderDone(): void {
     if (!current) return;
+    unmountRuntime();
+    unmountRuntime = () => {};
     followEpoch += 1;
     root.replaceChildren(heading(current));
     const card = element('section', 'mobile-review__card mobile-review__success');
@@ -795,7 +853,7 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
           body.querySelector<HTMLElement>('[data-mobile-review-notice]')!.textContent = 'Заполните четыре оценки серии.';
           return;
         }
-        if (verdict === 'good' && !configuredPreview
+        if (verdict === 'good' && previewEvidence?.configured !== true
           && !(view.bundle.action.kind === 'series_review' && override.checked)) {
           body.querySelector<HTMLElement>('[data-mobile-review-notice]')!.textContent = 'Сначала дождитесь exact preview или явно примите риск для серии.';
           return;
@@ -811,10 +869,10 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
           reworkInstruction: verdict === 'rework' ? rework.value.trim() : null,
           reworkSelection: verdict === 'rework' ? saved.reworkSelection : null,
           playedMs: Math.max(0, Date.now() - startedAt),
-          preview: configuredPreview ? {
+          preview: previewEvidence?.configured === true ? {
             configured: true,
-            reviewTargetId: configuredPreview.reviewTargetId,
-            runtimeArtifactDigest: configuredPreview.runtimeArtifactDigest,
+            reviewTargetId: previewEvidence.reviewTargetId,
+            runtimeArtifactDigest: previewEvidence.runtimeArtifactDigest,
           } : { configured: false },
         });
       });
@@ -845,10 +903,16 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
       const action = button(labels[verdict] || verdict, verdict === 'promising');
       action.addEventListener('click', () => {
         patchDraft(view.bundle.bundleId, { comment: comment.value });
+        if (!previewEvidence) {
+          body.querySelector<HTMLElement>('[data-mobile-review-notice]')!.textContent =
+            'Дождитесь проверки прототипа или явного сообщения о блокировке.';
+          return;
+        }
         void submit({
           schema: 'operator.mobile-prototype-review-decision.v1',
           verdict,
           comment: comment.value.trim(),
+          preview: previewEvidence,
         });
       });
       actions.append(action);
@@ -975,9 +1039,10 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
 
   function renderView(view: MobileReviewView): void {
     followEpoch += 1;
+    unmountRuntime();
+    unmountRuntime = () => {};
     current = view;
-    configuredPreview = null;
-    runtimeBlocked = false;
+    previewEvidence = null;
     startedAt = Date.now();
     root.replaceChildren(heading(view));
     if (view.state !== 'current') {
@@ -998,13 +1063,12 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
     notice.dataset.mobileReviewNotice = '';
     body.append(notice);
     if (view.bundle.runtime?.previews?.length) {
-      mountRuntimePreview(
+      unmountRuntime = mountRuntimePreview(
         body,
         view.bundle.bundleId,
         view.bundle.runtime,
         (preview) => {
-        configuredPreview = preview;
-        runtimeBlocked = preview === null;
+          previewEvidence = preview;
         },
       );
     }
@@ -1035,6 +1099,8 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
 
   async function load(bundleId: string): Promise<void> {
     followEpoch += 1;
+    unmountRuntime();
+    unmountRuntime = () => {};
     root.replaceChildren(element('p', 'mobile-review__loading', 'Загружаем актуальный отсмотр…'));
     try {
       renderView(await apiMobileReview(bundleId));
@@ -1048,6 +1114,8 @@ export async function mountMobileReview(initialBundleId: string | null): Promise
 
   async function loadInbox(): Promise<void> {
     followEpoch += 1;
+    unmountRuntime();
+    unmountRuntime = () => {};
     root.replaceChildren(element('p', 'mobile-review__loading', 'Загружаем входящие отсмотры…'));
     try {
       const reviews = await apiMobileReviewInbox();
