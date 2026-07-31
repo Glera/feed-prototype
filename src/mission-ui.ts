@@ -97,22 +97,50 @@ export function updateMissionHudBar(bar: HTMLElement, state: MissionHudState): v
   if (fill) fill.style.width = `${missionBarPercent(state.progress, state.tokenGoal)}%`;
 }
 
+/** The only badge attribute the mission mutates, remembered per element. */
+const BADGE_LABELS = new WeakMap<HTMLElement, string | null>();
+
 /**
- * Retheme the puzzle badge into the paw badge. The puzzle BALANCE only leaves
- * the surface — `feed.ts` keeps counting it and the server ledger is untouched.
+ * Retheme the puzzle badge into the paw badge — ADDITIVELY.
+ *
+ * The pre-mission children are never removed or rebuilt: `data-mission` makes
+ * CSS hide them, and the paw is a sibling. That matters twice. The capability
+ * can be revoked by the very next `/session`, and a teardown that had to
+ * reconstruct markup could only ever restore a copy; here the original nodes
+ * were never detached, so the restore is exact by construction. And `feed.ts`
+ * holds a live reference to `.hud__puzzles-value` — replacing it would leave
+ * that reference pointing at a detached node, freezing the puzzle counter after
+ * a revoke. The puzzle balance keeps being counted and painted; it only leaves
+ * the SURFACE, which is what the operator decision asked for.
  */
 export function applyMissionPawBadge(badge: HTMLElement, myTokens: number): void {
-  badge.dataset.mission = '1';
+  if (badge.querySelector('.hud__mission-paw')) {
+    updateMissionPawBadge(badge, myTokens);
+    return;
+  }
+  if (!BADGE_LABELS.has(badge)) BADGE_LABELS.set(badge, badge.getAttribute('aria-label'));
+  const paw = el('span', 'hud__mission-paw');
+  paw.innerHTML = MISSION_PAW_SVG;
+  paw.appendChild(el('span', 'hud__mission-paw-value', String(myTokens)));
+  badge.appendChild(paw);
   badge.setAttribute('aria-label', 'Мои лапки');
-  badge.replaceChildren();
-  const icon = el('span', 'hud__puzzles-icon');
-  icon.innerHTML = MISSION_PAW_SVG;
-  badge.append(icon, el('span', 'hud__puzzles-value', String(myTokens)));
+  badge.dataset.mission = '1';
 }
 
 export function updateMissionPawBadge(badge: HTMLElement, myTokens: number): void {
-  const value = badge.querySelector<HTMLElement>('.hud__puzzles-value');
+  const value = badge.querySelector<HTMLElement>('.hud__mission-paw-value');
   if (value) value.textContent = String(myTokens);
+}
+
+/** Undo the retheme exactly: drop the added node and put the label back. */
+export function restoreMissionBadge(badge: HTMLElement): void {
+  badge.querySelector('.hud__mission-paw')?.remove();
+  delete badge.dataset.mission;
+  if (!BADGE_LABELS.has(badge)) return;
+  const label = BADGE_LABELS.get(badge) ?? null;
+  BADGE_LABELS.delete(badge);
+  if (label === null) badge.removeAttribute('aria-label');
+  else badge.setAttribute('aria-label', label);
 }
 
 // ── contribution ceremony ───────────────────────────────────────────────────
@@ -245,9 +273,10 @@ export function buildMissionFulfilledCeremony(options: {
 }
 
 // ── case screen ─────────────────────────────────────────────────────────────
-function tile(label: string, value: string): HTMLElement {
+function tile(label: string, value: string, detail?: string): HTMLElement {
   const node = el('div', 'mission-tile');
   node.append(el('span', 'mission-tile__label', label), el('strong', 'mission-tile__value', value));
+  if (detail) node.append(el('span', 'mission-tile__detail', detail));
   return node;
 }
 
@@ -374,10 +403,20 @@ export function buildMissionCaseScreen(options: {
   );
   screen.appendChild(meter);
 
+  // The four obligatory numbers: community tokens (the bar above), the promised
+  // guarantee, the money the pool ACTUALLY holds against it (reserved + whatever
+  // a crossing opened), and money that has really left — from fulfillment
+  // receipts alone. The play-opened part is a detail INSIDE the reserved tile so
+  // the promise is never visually confused with the held amount. «Мои лапки» is
+  // the extra personal number the operator asked to keep in the 2×2.
   const tiles = el('section', 'mission-tiles');
   tiles.append(
     tile('Гарантировано', formatMissionMoney(active.money.guaranteedCents, currency)),
-    tile('Открыто игрой', `+${formatMissionMoney(missionOpenedByPlayCents(active.money), currency)}`),
+    tile(
+      'Зарезервировано и открыто',
+      formatMissionMoney(active.money.reservedAndOpenedCents, currency),
+      `+${formatMissionMoney(missionOpenedByPlayCents(active.money), currency)} открыто игрой`,
+    ),
     tile('Мои лапки', String(view.myContribution.caseTokens)),
     tile(
       'Передано',

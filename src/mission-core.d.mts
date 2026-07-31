@@ -128,3 +128,9 @@ export function appendMissionHistory(
   limit?: number,
 ): MissionHistoryEntry[];
 export function parseMissionHistory(value: unknown): MissionHistoryEntry[];
+export function isContributionPresented(presented: readonly number[] | null | undefined, seq: unknown): boolean;
+export function rememberPresentedContribution(
+  presented: readonly number[] | null | undefined,
+  seq: unknown,
+  limit?: number,
+): number[];

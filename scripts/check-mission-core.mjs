@@ -19,6 +19,8 @@ import {
   advanceMissionWatermark,
   appendMissionHistory,
   formatMissionMoney,
+  isContributionPresented,
+  rememberPresentedContribution,
   missionBarPercent,
   missionCaseSubtitle,
   missionCaseTitle,
@@ -268,6 +270,43 @@ deep(bounded.map((row) => row.seq), [20, 19, 18], 'history stays bounded, newest
 deep(parseMissionHistory('nope'), [], 'a corrupted stored history degrades to empty');
 deep(parseMissionHistory([{ seq: 5, source: 'daily', amount: 1 }, null, 3]).length, 1, 'broken rows are dropped');
 
+// ── exactly one ceremony per contribution, whichever door it arrives through ──
+// The daily claim can succeed on the FIRST answer, or only on a background retry
+// after a lost response / the mandatory retryable 503 of an empty case queue; a
+// series result can additionally be replayed by the outbox. All three carry the
+// same committed receipt, and the immutable seq is what makes them one fact.
+const DAILY_RECEIPT = {
+  ...RECEIPT,
+  seq: 7,
+  source: 'daily',
+  sourceRef: 'login',
+  idempotencyKey: 'mcd:4242424242:2026-08-01:login',
+  amount: 1,
+};
+const replayed = parseMissionContributionReceipt(DAILY_RECEIPT);
+const retried = parseMissionContributionReceipt({ ...DAILY_RECEIPT });
+eq(replayed.seq, retried.seq, 'a retry answer replays the same committed contribution seq');
+
+let shown = [];
+eq(isContributionPresented(shown, replayed.seq), false, 'the first success owes a ceremony');
+shown = rememberPresentedContribution(shown, replayed.seq);
+eq(isContributionPresented(shown, retried.seq), true, 'the retry/replay of the same contribution owes nothing');
+eq(shown.length, 1, 'the retry does not record a second presentation');
+// …and the history row is deduplicated by exactly the same identity.
+let dailyHistory = appendMissionHistory([], { seq: replayed.seq, source: 'daily', amount: 1 });
+dailyHistory = appendMissionHistory(dailyHistory, { seq: retried.seq, source: 'daily', amount: 1 });
+eq(dailyHistory.length, 1, '503 → replay must leave exactly one history row');
+
+const NEXT_DAY = 8;
+eq(isContributionPresented(shown, NEXT_DAY), false, 'a genuinely new contribution is a new ceremony');
+eq(isContributionPresented(shown, undefined), false, 'an unparseable seq is never «already shown»');
+eq(rememberPresentedContribution(shown, 'x').length, 1, 'an unparseable seq is not recorded');
+eq(rememberPresentedContribution(null, 3)[0], 3, 'a missing list starts clean');
+let ring = [];
+for (let seq = 1; seq <= 40; seq += 1) ring = rememberPresentedContribution(ring, seq, 5);
+deep(ring, [36, 37, 38, 39, 40], 'the presented ring stays bounded, newest kept');
+eq(isContributionPresented(ring, 1), false, 'an evicted seq is forgotten (bounded memory, not a leak)');
+
 // ── structural: nothing mounts without the gate ─────────────────────────────
 const missionSource = readFileSync(path.join(root, 'src/mission.ts'), 'utf8');
 const GATES = ['MISSION_FLAG_ENABLED', 'missionActive()'];
@@ -316,16 +355,58 @@ assert.ok(
   'the only /api/mission/* call must sit behind missionActive()',
 );
 
+// The single ceremony presenter must be reached from EVERY daily-claim success,
+// not only the first answer (R1 finding 4).
+assertions += 1;
+assert.ok(
+  /function showContributionCard[\s\S]*?isContributionPresented\(presented, receipt\.seq\)/.test(missionSource),
+  'both contribution paths must share one presenter, deduplicated by the immutable seq',
+);
+// The revoked capability must restore the badge (R1 finding 6).
+assertions += 1;
+assert.ok(
+  /function teardownMissionSurface[\s\S]*?restoreMissionBadge\(badgeEl\)/.test(missionSource),
+  'teardown must restore the HUD badge, not only remove the bar/screen/ceremony',
+);
+
+const uiSource = readFileSync(path.join(root, 'src/mission-ui.ts'), 'utf8');
+// The retheme must be additive, so the restore is exact by construction and the
+// puzzle-value node feed.ts holds is never detached.
+assertions += 1;
+assert.ok(
+  /export function applyMissionPawBadge[\s\S]*?badge\.appendChild\(paw\)/.test(uiSource)
+    && !/export function applyMissionPawBadge[\s\S]*?badge\.replaceChildren\(\)/.test(uiSource),
+  'the paw retheme must append, never replace, the badge children',
+);
+// The four obligatory money numbers (R1 finding 5): the community bar, the
+// guarantee, what the pool actually holds, and what really left.
+assertions += 1;
+assert.ok(
+  /tile\(\s*'Зарезервировано и открыто',\s*formatMissionMoney\(active\.money\.reservedAndOpenedCents/.test(uiSource),
+  'the case screen must show the full reservedAndOpened amount, not only the delta',
+);
+for (const label of ['Гарантировано', 'Передано', 'Мои лапки', 'лапок сообщества', 'открыто игрой']) {
+  assertions += 1;
+  assert.ok(uiSource.includes(label), `the case screen must keep the «${label}» number`);
+}
+
 const feedSource = readFileSync(path.join(root, 'src/feed.ts'), 'utf8');
 assertions += 1;
 assert.ok(
   !/from '\.\/mission-ui'/.test(feedSource) && !/from '\.\/mission-core\.mjs'/.test(feedSource),
   'feed.ts must reach the mission only through src/mission.ts — no markup, no parsing',
 );
+const claimSuccesses = feedSource.match(/const state = await apiDailyClaimRequired\([\s\S]{0,600}?presentMissionDaily/g) ?? [];
+assertions += 1;
+assert.equal(
+  claimSuccesses.length,
+  (feedSource.match(/await apiDailyClaimRequired\(/g) ?? []).length,
+  'every daily-claim success path — first answer AND background retry — must reach the presenter',
+);
 assertions += 1;
 assert.ok(
-  /if \(missionOwnsHudBadge\(\)\) return;/.test(feedSource),
-  'the puzzle counter must stand down while the paw badge owns the HUD counter',
+  !/missionOwnsHudBadge/.test(feedSource),
+  'the puzzle counter no longer needs a mission gate: the retheme hides, never replaces',
 );
 
 const islandDiff = readFileSync(path.join(root, 'src/island.ts'), 'utf8');

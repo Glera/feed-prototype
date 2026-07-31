@@ -334,3 +334,27 @@ export function parseMissionHistory(value) {
   for (const item of [...value].reverse()) out = appendMissionHistory(out, item);
   return out;
 }
+
+// ── «exactly one ceremony per contribution» ─────────────────────────────────
+/**
+ * A contribution reaches the client through more than one door: the first
+ * `/daily/claim` answer, the answer to a background retry after a lost response
+ * or the mandatory retryable 503 of an empty case queue, and — on the series
+ * path — an outbox replay that returns the same committed bytes. All of them
+ * must run through the same presenter, and the player must still see exactly one
+ * ceremony. The immutable contribution `seq` is what makes those the same fact.
+ */
+export function isContributionPresented(presented, seq) {
+  const value = intOf(seq);
+  if (value === null) return false;
+  return Array.isArray(presented) && presented.some((item) => intOf(item) === value);
+}
+
+/** Append (oldest dropped first). Returns the same list when already present, so
+ *  a caller can treat an unchanged length as «already shown». */
+export function rememberPresentedContribution(presented, seq, limit = 32) {
+  const list = Array.isArray(presented) ? presented.map((item) => intOf(item)).filter((item) => item !== null) : [];
+  const value = intOf(seq);
+  if (value === null || list.includes(value)) return list;
+  return [...list, value].slice(-Math.max(1, limit));
+}

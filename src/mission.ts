@@ -23,6 +23,7 @@ import { apiMissionCase } from './api';
 import {
   advanceMissionWatermark,
   appendMissionHistory,
+  isContributionPresented,
   missionCaseTitle,
   missionSurfaceEnabled,
   normaliseMissionWatermark,
@@ -30,6 +31,7 @@ import {
   parseMissionContributionReceipt,
   parseMissionHistory,
   pendingMissionCeremonies,
+  rememberPresentedContribution,
   type MissionCaseView,
   type MissionContributionReceipt,
   type MissionHistoryEntry,
@@ -42,6 +44,7 @@ import {
   buildMissionFulfilledCeremony,
   buildMissionHudBar,
   buildMissionUnlockedCeremony,
+  restoreMissionBadge,
   updateMissionHudBar,
   updateMissionPawBadge,
 } from './mission-ui';
@@ -73,6 +76,9 @@ let outboxBound = false;
 
 const receipts = new Map<string, MissionContributionReceipt>();
 const waiters = new Map<string, Set<(receipt: MissionContributionReceipt | null) => void>>();
+/** Contribution seqs already celebrated — one ceremony per contribution, no
+ *  matter which door the receipt came through (first answer, retry, replay). */
+let presented: number[] = [];
 
 // ── gating ──────────────────────────────────────────────────────────────────
 /** The build flag alone. Exposed so diagnostics can tell «off» from «not enrolled». */
@@ -100,12 +106,6 @@ export function applyMissionCapability(available: unknown): void {
   }
   bindOutbox();
   syncMissionSurface();
-}
-
-/** True while the paw badge owns the HUD counter, so the puzzle balance — which
- *  keeps accruing server-side — stops being painted over it. */
-export function missionOwnsHudBadge(): boolean {
-  return missionActive() && badgeEl?.dataset.mission === '1';
 }
 
 // ── storage (user-scoped, fail-quiet) ───────────────────────────────────────
@@ -155,9 +155,7 @@ function syncMissionSurface(): void {
     barEl = buildMissionHudBar(openMissionCaseScreen);
     stories.appendChild(barEl);
   }
-  if (badgeEl && badgeEl.dataset.mission !== '1') {
-    applyMissionPawBadge(badgeEl, view?.myContribution.caseTokens ?? 0);
-  }
+  if (badgeEl) applyMissionPawBadge(badgeEl, view?.myContribution.caseTokens ?? 0);
   renderMissionHud();
 }
 
@@ -176,10 +174,16 @@ function renderMissionHud(): void {
   }
 }
 
+/**
+ * A revoked capability must leave the HUD exactly as the pre-mission build
+ * renders it — the second half of the double gate. The badge restore is exact
+ * because the retheme was additive: the original nodes never left the DOM.
+ */
 function teardownMissionSurface(): void {
   hudEl?.classList.remove('hud--mission');
   barEl?.remove();
   barEl = null;
+  if (badgeEl) restoreMissionBadge(badgeEl);
   screenEl?.remove();
   screenEl = null;
   ceremonyEl?.remove();
@@ -339,6 +343,20 @@ function awaitContribution(runId: string): Promise<MissionContributionReceipt | 
 }
 
 /**
+ * The single presenter. Every door a contribution can arrive through ends here,
+ * and the immutable contribution `seq` makes «the same fact» recognisable: a
+ * retried claim, a replayed outbox result and the first answer all describe one
+ * contribution and owe the player exactly one ceremony.
+ */
+function showContributionCard(receipt: MissionContributionReceipt, parent: HTMLElement | null): void {
+  if (!parent || isContributionPresented(presented, receipt.seq)) return;
+  presented = rememberPresentedContribution(presented, receipt.seq);
+  // A card left over from an earlier contribution is replaced, not stacked.
+  parent.querySelector('.mission-card')?.remove();
+  parent.prepend(buildMissionContributionCard(receipt));
+}
+
+/**
  * The series-win contribution ceremony. Mounted INTO the reward overlay and
  * prepended, so it sits above the challenge pill in the CTA stack, and only once
  * the exact run's receipt has come back through the outbox.
@@ -351,9 +369,7 @@ export function presentMissionContribution(options: {
   if (!missionActive()) return Promise.resolve();
   return awaitContribution(options.runId).then((receipt) => {
     if (!receipt || !options.alive()) return;
-    const parent = options.parent();
-    if (!parent || parent.querySelector('.mission-card')) return;
-    parent.prepend(buildMissionContributionCard(receipt));
+    showContributionCard(receipt, options.parent());
   });
 }
 
@@ -361,6 +377,12 @@ export function presentMissionContribution(options: {
  * The daily-claim contribution ceremony. That path has no outbox, so the receipt
  * is read inline from the claim response — the same committed bytes, and the
  * reward line speaks paws instead of puzzles.
+ *
+ * Must be called on EVERY success of the claim, not only the first one: after a
+ * lost response, or after the mandatory retryable 503 of an empty case queue,
+ * the contribution is committed by a later background retry and its receipt
+ * arrives only there. The seq dedupe above is what keeps that from celebrating
+ * a contribution the player has already seen.
  */
 export function presentMissionDailyContribution(response: unknown, parent: HTMLElement | null): void {
   if (!missionActive() || !parent) return;
@@ -368,6 +390,5 @@ export function presentMissionDailyContribution(response: unknown, parent: HTMLE
   const receipt = parseMissionContributionReceipt(block);
   if (!receipt) return;
   recordContribution(receipt);
-  parent.querySelector('.mission-card')?.remove();
-  parent.prepend(buildMissionContributionCard(receipt));
+  showContributionCard(receipt, parent);
 }

@@ -4013,7 +4013,9 @@ body {
   transition: width 0.5s cubic-bezier(0.3, 0.9, 0.35, 1);
 }
 
-/* Paw badge: the rethemed puzzle counter (same shell, inline glyph, no asset). */
+/* Paw badge: the rethemed puzzle counter (same shell, inline glyph, no asset).
+   The retheme is ADDITIVE — the puzzle children are hidden, never removed — so a
+   revoked capability restores the original badge exactly by dropping one node. */
 .mission-paw {
   width: 30px;
   height: 30px;
@@ -4021,8 +4023,15 @@ body {
   fill: #ffd07a;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
 }
-.hud__puzzles-icon { display: block; }
+.hud__puzzles[data-mission="1"] > :not(.hud__mission-paw) { display: none; }
 .hud__puzzles[data-mission="1"] { padding: 0 13px 0 9px; }
+.hud__mission-paw { display: flex; align-items: center; gap: 6px; }
+.hud__mission-paw-value {
+  font: 900 19px/1 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
 
 /* Contribution ceremony — inside the win overlay, above the challenge pill. */
 .mission-card {
@@ -4165,6 +4174,7 @@ body {
 }
 .mission-tile__label { color: #aeb8c9; font: 750 11.5px/1.2 system-ui, sans-serif; }
 .mission-tile__value { font: 900 17px/1.1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+.mission-tile__detail { color: #8fd8c2; font: 800 11px/1.2 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
 
 /* «Контракт кейса» — the full public contract plus its resolved money policy. */
 .mission-contract {

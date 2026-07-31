@@ -126,7 +126,6 @@ import { hasPendingStageUpgrade } from './island-celebrations';
 // stay inert (and mount nothing) in the production build.
 import {
   applyMissionCapability,
-  missionOwnsHudBadge,
   mountMissionHud,
   presentMissionContribution,
   presentMissionDailyContribution,
@@ -3081,9 +3080,7 @@ export class Feed {
         this.applyServerPuzzles(state.puzzle_balance);
         this.renderDailyPanel();
         this.updateDailyNavAlert();
-        // Same ceremony as the series chest, read from this response's committed
-        // receipt: the reward line speaks paws, not puzzles.
-        presentMissionDailyContribution(state, this.dailyPanelEl?.querySelector('.daily-panel__list') ?? null);
+        this.presentMissionDaily(state);
       });
     } catch (error) {
       const status = error instanceof ApiRequestError ? error.status : 0;
@@ -3106,6 +3103,16 @@ export class Feed {
         void this.syncDaily(false);
       });
     }
+  }
+
+  /** Every SUCCESS of the daily claim — the first answer and every background
+   *  retry — goes through this one presenter. After a lost response or the
+   *  retryable 503 of an empty case queue the contribution is committed later,
+   *  and its receipt exists only on that retry's answer. `mission.ts`
+   *  deduplicates by the immutable contribution seq, so this is still exactly
+   *  one ceremony (and one history row) per contribution. */
+  private presentMissionDaily(state: DailyStateResp): void {
+    presentMissionDailyContribution(state, this.dailyPanelEl?.querySelector('.daily-panel__list') ?? null);
   }
 
   private dailyClaimRefusalText(error: unknown): string {
@@ -3137,6 +3144,7 @@ export class Feed {
           this.applyServerPuzzles(state.puzzle_balance);
           this.renderDailyPanel();
           this.updateDailyNavAlert();
+          this.presentMissionDaily(state);
         } catch (error) {
           const status = error instanceof ApiRequestError ? error.status : 0;
           if (status >= 400 && status < 500) {
@@ -10115,10 +10123,6 @@ export class Feed {
   // Puzzle counter (top-right): value + a squash pulse when a puzzle lands, matching
   // the level badge's absorb reaction.
   private updatePuzzleCounter() {
-    // Mission dogfood retheme: the badge now shows MY paws for the active case
-    // (server-derived). The puzzle balance keeps accruing — it just leaves the
-    // surface instead of overwriting the paw value.
-    if (missionOwnsHudBadge()) return;
     if (this.puzzleValueEl) this.puzzleValueEl.textContent = String(this.totalPuzzles);
   }
 
