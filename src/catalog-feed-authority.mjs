@@ -355,11 +355,11 @@ function validateGeneratedSelection(value) {
     'schema', 'mode', 'reason', 'asOf', 'affinityConfig', 'slotConfig', 'runwayConfig',
     'affinitySnapshotId', 'preferredMechanic', 'poolKind', 'poolDigest', 'tieDigest',
   ]) || value.schema !== 'feed.generated-offer-selection.v1'
-    || !['affinity', 'fallback_any'].includes(value.mode)
-    || !['favorite_eligible', 'insufficient_affinity', 'affinity_stale', 'preferred_runway_empty']
+    || !['affinity', 'fallback_any', 'operator_test'].includes(value.mode)
+    || !['favorite_eligible', 'insufficient_affinity', 'affinity_stale', 'preferred_runway_empty', 'operator_requested']
       .includes(value.reason)
     || typeof value.asOf !== 'string' || !ISO_MILLIS_RE.test(value.asOf)
-    || !['unseen', 'released_repeat'].includes(value.poolKind)) {
+    || !['unseen', 'released_repeat', 'operator_exact'].includes(value.poolKind)) {
     fail('invalid_generated_offer', 'generated offer selection is invalid');
   }
   generatedConfigRef(value.affinityConfig, 'affinity', 'selection.affinityConfig');
@@ -383,6 +383,13 @@ function validateGeneratedSelection(value) {
   }
   if (value.mode === 'fallback_any' && value.reason === 'favorite_eligible') {
     fail('invalid_generated_offer', 'fallback_any cannot claim favorite selection');
+  }
+  if (value.mode === 'operator_test') {
+    if (value.reason !== 'operator_requested' || value.poolKind !== 'operator_exact' || hasAffinity) {
+      fail('invalid_generated_offer', 'operator test requires exact operator evidence');
+    }
+  } else if (value.reason === 'operator_requested' || value.poolKind === 'operator_exact') {
+    fail('invalid_generated_offer', 'operator test evidence requires operator mode');
   }
 }
 
@@ -474,7 +481,7 @@ export function validateCatalogGeneratedOfferResult(value, request) {
       fail('invalid_generated_offer', 'no_offer cannot expose selection or allocation');
     }
   } else if (value.outcome === 'allocated') {
-    if (!['affinity', 'fallback_any'].includes(value.selectionMode)
+    if (!['affinity', 'fallback_any', 'operator_test'].includes(value.selectionMode)
       || typeof value.selectionReason !== 'string' || !plainObject(value.allocation)) {
       fail('invalid_generated_offer', 'allocated offer is missing selection evidence');
     }

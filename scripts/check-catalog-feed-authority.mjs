@@ -380,6 +380,33 @@ equal(generatedOffer.allocation.allocationId, ids.request,
   'the selector allocation is bound directly to the request replay identity');
 equal(Object.isFrozen(generatedOffer.allocation.offerSelection), true,
   'nested server-owned selection evidence is immutable after validation');
+const operatorSelection = {
+  ...generatedSelection,
+  mode: 'operator_test',
+  reason: 'operator_requested',
+  poolKind: 'operator_exact',
+};
+const operatorOffer = validateCatalogGeneratedOfferResult({
+  schema: 'feed.generated-offer-result.v1',
+  requestId: ids.request,
+  outcome: 'allocated',
+  selectionMode: 'operator_test',
+  selectionReason: 'operator_requested',
+  allocation: { ...generatedAllocation, offerSelection: operatorSelection },
+}, offerRequest);
+equal(operatorOffer.allocation.offerSelection.poolKind, 'operator_exact',
+  'one-shot personal delivery keeps its exact operator evidence');
+throws(
+  () => validateCatalogGeneratedOfferResult({
+    ...operatorOffer,
+    allocation: {
+      ...generatedAllocation,
+      offerSelection: { ...operatorSelection, poolKind: 'unseen' },
+    },
+  }, offerRequest),
+  /operator test requires exact operator evidence/,
+  'operator mode cannot fall through to a normal pool silently',
+);
 const rasterOffer = validateCatalogGeneratedOfferResult({
   schema: 'feed.generated-offer-result.v1',
   requestId: ids.request,

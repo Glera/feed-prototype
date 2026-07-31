@@ -450,16 +450,16 @@ export type CatalogAllocationDecisionResultV2 = CatalogAllocationDecisionResultB
 
 export interface CatalogGeneratedOfferSelectionV1 {
   schema: 'feed.generated-offer-selection.v1';
-  mode: 'affinity' | 'fallback_any';
+  mode: 'affinity' | 'fallback_any' | 'operator_test';
   reason: 'favorite_eligible' | 'insufficient_affinity' | 'affinity_stale'
-    | 'preferred_runway_empty';
+    | 'preferred_runway_empty' | 'operator_requested';
   asOf: string;
   affinityConfig: { kind: 'affinity'; version: string; digest: string };
   slotConfig: { kind: 'slot'; version: string; digest: string };
   runwayConfig: { kind: 'runway'; version: string; digest: string };
   affinitySnapshotId: string | null;
   preferredMechanic: string | null;
-  poolKind: 'unseen' | 'released_repeat';
+  poolKind: 'unseen' | 'released_repeat' | 'operator_exact';
   poolDigest: string;
   tieDigest: string;
 }
