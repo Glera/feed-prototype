@@ -62,7 +62,7 @@ import {
 } from './outbox';
 import { ActiveDwellAccumulator } from './active-dwell.mjs';
 import { catalogResultAllowsProgress } from './result-receipts.mjs';
-import { loadCatalogGeneratedPreview } from './catalog-generated-preview.mjs';
+import { loadCatalogGeneratedPreviewOptional } from './catalog-generated-preview.mjs';
 import {
   CatalogPlayerV2Session,
   buildCatalogLevelImpression,
@@ -1148,25 +1148,41 @@ export class Feed {
       contentHash: allocation.manifest.contentHash,
       runtimeArtifactDigest: allocation.runtime.runtimeArtifactDigest,
     });
-    const preview = await loadCatalogGeneratedPreview({
+    const loaded = await loadCatalogGeneratedPreviewOptional({
       baseUrl: this.generatedPreviewBaseUrl(),
       contentHash: allocation.manifest.contentHash,
       runtimeArtifactDigest: allocation.runtime.runtimeArtifactDigest,
     });
-    const objectUrl = (bytes: Uint8Array) => URL.createObjectURL(new Blob(
-      [bytes.slice().buffer],
-      { type: 'image/jpeg' },
-    ));
+    if (loaded.outcome === 'verified') {
+      const preview = loaded.preview;
+      const objectUrl = (bytes: Uint8Array) => URL.createObjectURL(new Blob(
+        [bytes.slice().buffer],
+        { type: 'image/jpeg' },
+      ));
+      return Object.freeze({
+        mobile: objectUrl(preview.mobile.bytes),
+        compact: objectUrl(preview.compact.bytes),
+      });
+    }
+    // Preview art is presentation, never delivery authority. A missing bake
+    // used to consume the allocation (including a Labs one-shot) and then
+    // hide the series forever behind a failed prefetch. Keep the exact
+    // allocation/ticket/spec closure and show the standard host poster; the
+    // generated badge remains visible until the exact runtime is configured.
+    track('generated_preview_fallback', {
+      reason: loaded.reason,
+      catalog_entry_id: allocation.catalog.entryId,
+    });
     return Object.freeze({
-      mobile: objectUrl(preview.mobile.bytes),
-      compact: objectUrl(preview.compact.bytes),
+      mobile: RIDE_PLACEHOLDER_SRC,
+      compact: RIDE_PLACEHOLDER_SRC,
     });
   }
 
   private releaseGeneratedPreview(offer: PreparedGeneratedOffer | null): void {
     if (!offer) return;
-    URL.revokeObjectURL(offer.previewUrls.mobile);
-    URL.revokeObjectURL(offer.previewUrls.compact);
+    if (offer.previewUrls.mobile.startsWith('blob:')) URL.revokeObjectURL(offer.previewUrls.mobile);
+    if (offer.previewUrls.compact.startsWith('blob:')) URL.revokeObjectURL(offer.previewUrls.compact);
   }
 
   private retireGeneratedSlot(i: number): void {
