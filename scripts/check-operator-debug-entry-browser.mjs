@@ -204,7 +204,8 @@ try {
   const shownIndexBefore = await operator.evaluate(() =>
     document.querySelectorAll('.feed-bar__icon--active').length);
   await operator.locator(debugSelector).click();
-  await operator.locator(panelSelector).waitFor({ state: 'visible' });
+  await operator.locator(panelSelector).filter({ hasText: 'SWIPE DIAG' })
+    .waitFor({ state: 'visible' });
   assert.equal(await operator.locator(panelSelector).count(), 1);
   assert.match((await operator.locator(panelSelector).textContent()) || '', /SWIPE DIAG/);
 
