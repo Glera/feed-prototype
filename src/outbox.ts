@@ -37,6 +37,11 @@ export interface ConfirmedBalances {
   stars: number;
   puzzles: number | null;
   challenge?: ChallengeComplete;
+  /** Mission slice v0: the `mission_contribution` receipt the server committed
+   *  in the same transaction as this result. Carried through the durable outbox
+   *  so the contribution ceremony survives a reload or a retry — it is rendered
+   *  from these committed bytes, never from a local estimate. */
+  mission?: unknown;
 }
 
 export interface ResultTerminalEvent {
@@ -47,12 +52,15 @@ export interface ResultTerminalEvent {
   code: string | null;
 }
 
+export type ConfirmedResultReceipt = { runId: string; status: 'confirmed'; balances: ConfirmedBalances };
+
 export type ResultReceipt =
-  | { runId: string; status: 'confirmed'; balances: ConfirmedBalances }
+  | ConfirmedResultReceipt
   | { runId: string; status: 'rejected'; code: string | null; httpStatus: number }
   | { runId: string; status: 'storage_error'; code: 'result_not_persisted' };
 
 const resultTerminalListeners = new Set<(event: ResultTerminalEvent) => void>();
+const resultConfirmedListeners = new Set<(receipt: ConfirmedResultReceipt) => void>();
 const resultReceiptWaiters = new ResultReceiptWaiters<ResultReceipt>();
 
 export function onResultTerminal(listener: (event: ResultTerminalEvent) => void): () => void {
@@ -60,8 +68,20 @@ export function onResultTerminal(listener: (event: ResultTerminalEvent) => void)
   return () => resultTerminalListeners.delete(listener);
 }
 
+/** Every confirmed result, including the ones no caller awaited by run id. The
+ *  mission contribution ceremony subscribes here so it reads exactly the receipt
+ *  the outbox durably confirmed. */
+export function onResultConfirmed(listener: (receipt: ConfirmedResultReceipt) => void): () => void {
+  resultConfirmedListeners.add(listener);
+  return () => resultConfirmedListeners.delete(listener);
+}
+
 function settleResultReceipt(receipt: ResultReceipt): void {
   resultReceiptWaiters.settle(receipt);
+  if (receipt.status !== 'confirmed') return;
+  for (const listener of resultConfirmedListeners) {
+    try { listener(receipt); } catch { /* presentation must not block the queue */ }
+  }
 }
 
 function storageKeys(): { queue: string; ever: string; scoped: boolean } {
@@ -361,6 +381,7 @@ async function flushLoop(): Promise<ConfirmedBalances | null> {
     confirmed = {
       stars: response.balance,
       puzzles: typeof response.puzzle_balance === 'number' ? response.puzzle_balance : null,
+      mission: response.mission_contribution,
     };
     if (result.complete_challenge_id) {
       let challenge;
@@ -374,6 +395,7 @@ async function flushLoop(): Promise<ConfirmedBalances | null> {
         stars: challenge.balance,
         puzzles: confirmed.puzzles,
         challenge,
+        mission: confirmed.mission,
       };
     }
     settleResultReceipt({ runId: result.run_id, status: 'confirmed', balances: confirmed });

@@ -121,6 +121,17 @@ import { track } from './telemetry';
 import { mountIslandVisitAwardCard } from './island-p2-card.mjs';
 import { burstConfetti } from './fx';
 import { hasPendingStageUpgrade } from './island-celebrations';
+// Mission slice v0. Every entry point is a no-op unless VITE_MISSION_ENABLED and
+// the /session `mission_dogfood` capability are both present, so the calls below
+// stay inert (and mount nothing) in the production build.
+import {
+  applyMissionCapability,
+  missionOwnsHudBadge,
+  mountMissionHud,
+  presentMissionContribution,
+  presentMissionDailyContribution,
+  refreshMissionCase,
+} from './mission';
 import { userScopedStorage, userScopedStorageKey } from './user-scope';
 import {
   getStartParam,
@@ -1056,6 +1067,11 @@ export class Feed {
     this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
     this.applyOperatorDebugEntryCapability(session.catalog_lab_authorization_available);
     this.applyOperatorLevelFlaggingCapability(session.operator_level_flagging_available);
+    // Boot AND every foreground land here, which is exactly where the UNLOCKED /
+    // FULFILLED ceremonies are owed from the read API (each shown once, by
+    // watermark).
+    applyMissionCapability(session.mission_dogfood);
+    void refreshMissionCase();
     this.applyServerBalance(session.balance);
     if (typeof session.puzzles === 'number') this.applyServerPuzzles(session.puzzles);
     await this.syncDaily(false);
@@ -3065,6 +3081,9 @@ export class Feed {
         this.applyServerPuzzles(state.puzzle_balance);
         this.renderDailyPanel();
         this.updateDailyNavAlert();
+        // Same ceremony as the series chest, read from this response's committed
+        // receipt: the reward line speaks paws, not puzzles.
+        presentMissionDailyContribution(state, this.dailyPanelEl?.querySelector('.daily-panel__list') ?? null);
       });
     } catch (error) {
       const status = error instanceof ApiRequestError ? error.status : 0;
@@ -4996,6 +5015,16 @@ export class Feed {
     const payoutRunId = this.series?.payoutRunId ?? null;
     const lastRunId = this.series?.lastRunId ?? null;
     const catalogSeries = Boolean(this.series?.catalog);
+    // Mission contribution ceremony — first in the CTA stack, above the challenge
+    // pill. It waits for THIS run's outbox receipt and renders only the committed
+    // `mission_contribution` bytes, so a slow/retried result simply arrives later.
+    if (payoutRunId) {
+      void presentMissionContribution({
+        runId: payoutRunId,
+        parent: () => this.stateEls[i]?.querySelector<HTMLElement>('.reward') ?? null,
+        alive: () => this.seriesWinShown.has(i) && this.series?.payoutRunId === payoutRunId,
+      });
+    }
     const showFallbackPrompt = () => {
       if (
         lastRunId
@@ -5969,6 +5998,10 @@ export class Feed {
       this.friendsHudEl = cluster;
       this.renderFriendsHud();   // empty cells now; the network refresh runs post-/session
     }
+    // Mission: the case bar joins the same single row (centre), and the puzzle
+    // badge is rethemed into the paw badge — but only after /session proves the
+    // capability, so nothing is inserted here for anybody else.
+    mountMissionHud(hud, this.viewport);
   }
 
 
@@ -10082,6 +10115,10 @@ export class Feed {
   // Puzzle counter (top-right): value + a squash pulse when a puzzle lands, matching
   // the level badge's absorb reaction.
   private updatePuzzleCounter() {
+    // Mission dogfood retheme: the badge now shows MY paws for the active case
+    // (server-derived). The puzzle balance keeps accruing — it just leaves the
+    // surface instead of overwriting the paw value.
+    if (missionOwnsHudBadge()) return;
     if (this.puzzleValueEl) this.puzzleValueEl.textContent = String(this.totalPuzzles);
   }
 

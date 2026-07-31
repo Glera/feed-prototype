@@ -3954,3 +3954,263 @@ body {
   .collection-tile__preview:nth-child(3) { transform: translate(-24%, -45%) rotate(11deg) scale(0.7); }
   .collection-card-grid { gap: 10px 8px; }
 }
+
+/* ── Mission slice v0 (Play for Good) ────────────────────────────────────────
+   Default-off surface: none of these classes appear unless VITE_MISSION_ENABLED
+   AND the /session `mission_dogfood` capability are both present. Visual
+   language is the existing one — the HUD badge shell, the daily-panel screen
+   shell, and the .isln-award card shell. */
+
+/* The HUD becomes one row: level ring · case bar · paw badge. The stories rail
+   stops scrolling (with islands off it holds only the ring) and reserves the
+   badge on the right. */
+.hud--mission .stories {
+  overflow-x: hidden;
+  padding-right: 104px;
+}
+.hud__mission {
+  flex: 1 1 auto;
+  align-self: flex-start;
+  min-width: 0;
+  height: 40px;
+  margin-top: calc((var(--story-size) - 40px) / 2);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 8px;
+  padding: 5px 12px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(38, 44, 60, 0.94), rgba(16, 19, 28, 0.94));
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  color: #fff;
+  text-align: left;
+  pointer-events: auto;
+}
+.hud__mission-title {
+  overflow: hidden;
+  font: 850 12.5px/1.15 system-ui, -apple-system, sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hud__mission-count {
+  color: #c9d3e4;
+  font: 800 11px/1.15 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.hud__mission-track {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+.hud__mission-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #58d58f, #ffd86a);
+  transition: width 0.5s cubic-bezier(0.3, 0.9, 0.35, 1);
+}
+
+/* Paw badge: the rethemed puzzle counter (same shell, inline glyph, no asset). */
+.mission-paw {
+  width: 30px;
+  height: 30px;
+  display: block;
+  fill: #ffd07a;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
+}
+.hud__puzzles-icon { display: block; }
+.hud__puzzles[data-mission="1"] { padding: 0 13px 0 9px; }
+
+/* Contribution ceremony — inside the win overlay, above the challenge pill. */
+.mission-card {
+  width: min(360px, calc(100vw - 36px));
+  margin: 0 auto 12px;
+  padding: 13px;
+  border: 1px solid rgba(255, 208, 122, 0.42);
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(69, 55, 32, 0.95), rgba(21, 24, 34, 0.97));
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
+  color: #fff;
+  text-align: left;
+  pointer-events: auto;
+}
+.mission-card__head { display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: center; }
+.mission-card__icon { display: grid; place-items: center; }
+.mission-card__icon .mission-paw { width: 38px; height: 38px; }
+.mission-card__copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.mission-card__title { font: 900 16px/1.2 system-ui, -apple-system, sans-serif; }
+.mission-card__sub { color: rgba(255, 255, 255, 0.74); font: 600 12px/1.35 system-ui, sans-serif; }
+.mission-card__meter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: center; margin-top: 11px; }
+.mission-card__track { height: 6px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.14); }
+.mission-card__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #58d58f, #ffd86a); transition: width 0.6s cubic-bezier(0.3, 0.9, 0.35, 1); }
+.mission-card__count { color: #d9e2f0; font: 800 12px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+.daily-panel .mission-card { margin-bottom: 14px; }
+
+/* UNLOCKED / FULFILLED ceremonies — one at a time, watermark-gated. */
+.mission-ceremony {
+  position: absolute;
+  inset: 0;
+  z-index: 3000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(6, 8, 14, 0.74);
+  pointer-events: auto;
+}
+.mission-ceremony__card {
+  width: min(380px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 22px 20px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 22px;
+  background: linear-gradient(160deg, #1b2133 0%, #0d1017 100%);
+  box-shadow: 0 26px 60px rgba(0, 0, 0, 0.5);
+  color: #fff;
+  text-align: center;
+}
+.mission-ceremony--unlocked .mission-ceremony__card { border-color: rgba(255, 216, 106, 0.4); }
+.mission-ceremony--fulfilled .mission-ceremony__card { border-color: rgba(143, 216, 194, 0.42); }
+.mission-ceremony__emoji { font-size: 40px; line-height: 1; }
+.mission-ceremony__title { margin-top: 10px; font: 900 22px/1.15 system-ui, -apple-system, sans-serif; }
+.mission-ceremony__sub { margin-top: 6px; color: #c9d3e4; font: 750 13px/1.4 system-ui, sans-serif; }
+.mission-ceremony__sums { display: grid; gap: 7px; margin-top: 16px; text-align: left; }
+.mission-sum {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.055);
+}
+.mission-sum--accent { border-color: rgba(255, 216, 106, 0.36); background: rgba(255, 216, 106, 0.12); }
+.mission-sum__label { color: #aeb8c9; font: 750 12.5px/1.2 system-ui, sans-serif; }
+.mission-sum__value { color: #fff; font: 900 15px/1.1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+.mission-ceremony__next { margin-top: 14px; color: #ffd86a; font: 800 13px/1.35 system-ui, sans-serif; }
+.mission-ceremony--fulfilled .mission-ceremony__next { color: #8fd8c2; }
+.mission-ceremony__ref { margin-top: 6px; color: #7f8b9e; font: 650 11px/1.3 system-ui, sans-serif; }
+.mission-ceremony__actions { margin-top: 18px; }
+.mission-ceremony__btn {
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-radius: 14px;
+  background: #4CC38A;
+  color: #08251b;
+  font: 900 14px/1 system-ui, sans-serif;
+}
+
+/* Photo placeholder — the case has no artwork until the shelter report lands. */
+.mission-photo {
+  position: relative;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  min-height: 132px;
+  border-radius: 18px;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  background: linear-gradient(150deg, rgba(60, 52, 32, 0.7), rgba(20, 24, 34, 0.9));
+}
+.mission-photo .mission-paw { width: 46px; height: 46px; opacity: 0.85; }
+.mission-photo__hint { color: rgba(255, 255, 255, 0.5); font: 700 11.5px/1.2 system-ui, sans-serif; }
+.mission-photo--ceremony { min-height: 110px; margin-bottom: 4px; }
+
+/* Case screen — the daily-panel shell plus a close control. */
+.mission-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 3000;
+  padding: calc(var(--top-zone-pad-top) + 34px) 14px calc(var(--bar-reserve) + 16px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: linear-gradient(180deg, #111526 0%, #090b13 55%, #07090f 100%);
+  color: #fff;
+  pointer-events: auto;
+}
+.mission-screen::-webkit-scrollbar { display: none; }
+.mission-screen__close {
+  position: absolute;
+  top: var(--top-zone-pad-top);
+  right: 14px;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font: 900 20px/32px system-ui, sans-serif;
+  text-align: center;
+}
+.mission-screen__empty { padding: 40px 0; text-align: center; color: #aeb8c9; font: 800 14px/1.3 system-ui, sans-serif; }
+.mission-screen__head { margin-top: 14px; }
+.mission-screen__title { margin: 0; font: 900 20px/1.2 system-ui, -apple-system, sans-serif; }
+.mission-screen__sub { margin-top: 4px; color: #aeb8c9; font: 750 12.5px/1.3 system-ui, sans-serif; }
+.mission-meter { margin-top: 14px; }
+.mission-meter__track { height: 12px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.12); }
+.mission-meter__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #58d58f, #ffd86a); transition: width 0.6s cubic-bezier(0.3, 0.9, 0.35, 1); }
+.mission-meter__count { margin-top: 7px; color: #c9d3e4; font: 800 12px/1.2 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+.mission-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+.mission-tile {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.055);
+}
+.mission-tile__label { color: #aeb8c9; font: 750 11.5px/1.2 system-ui, sans-serif; }
+.mission-tile__value { font: 900 17px/1.1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+
+/* «Контракт кейса» — the full public contract plus its resolved money policy. */
+.mission-contract {
+  margin-top: 14px;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.mission-contract__summary { cursor: pointer; font: 850 13.5px/1.2 system-ui, sans-serif; list-style: none; }
+.mission-contract__summary::-webkit-details-marker { display: none; }
+.mission-contract__summary::after { content: ' ›'; color: #7f8b9e; }
+.mission-contract[open] .mission-contract__summary::after { content: ' ⌄'; }
+.mission-contract__empty { margin-top: 8px; color: #7f8b9e; font: 700 12px/1.3 system-ui, sans-serif; }
+.mission-defs { display: grid; gap: 6px; margin-top: 10px; }
+.mission-defs__head { color: #ffd86a; font: 850 12px/1.2 system-ui, sans-serif; }
+.mission-def { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.mission-def__term { color: #7f8b9e; font: 750 11.5px/1.35 system-ui, sans-serif; }
+.mission-def__value { color: #dfe6f2; font: 650 11.5px/1.35 system-ui, sans-serif; overflow-wrap: anywhere; }
+.mission-contract__raw { margin-top: 10px; color: #7f8b9e; font: 700 11.5px/1.2 system-ui, sans-serif; }
+.mission-contract__json {
+  max-height: 240px;
+  margin: 8px 0 0;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #c9d3e4;
+  font: 500 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* My own contribution receipts — client-owned, and labelled as mine. */
+.mission-history { margin-top: 14px; }
+.mission-history__head { color: #aeb8c9; font: 850 12.5px/1.2 system-ui, sans-serif; }
+.mission-history__empty { margin-top: 8px; color: #7f8b9e; font: 700 12px/1.35 system-ui, sans-serif; }
+.mission-history__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 9px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.mission-history__source { color: #c9d3e4; font: 700 12px/1.2 system-ui, sans-serif; }
+.mission-history__amount { color: #ffd07a; font: 900 13px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
