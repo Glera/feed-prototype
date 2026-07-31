@@ -41,6 +41,7 @@ const specHash1 = '1'.repeat(64);
 const specHash2 = '2'.repeat(64);
 const skinHash = '5'.repeat(64);
 const skinContractDigest = '6'.repeat(64);
+const arrowsContractDigest = '3005fe7d2025f270c3f88555d43ca9a008b8bb8cb284c2c2ce55fd1d4645d8fb';
 
 function spec(specHash, seed) {
   return {
@@ -148,6 +149,43 @@ function mergeRasterBundle() {
   return value;
 }
 
+function arrowsSpec(index) {
+  return {
+    schema: 'p4g.arrows.level',
+    version: 1,
+    id: `arrows-catalog-${index}`,
+    seed: `catalog-seed-${index}`,
+    lives: 3,
+    bounds: { cols: 3, rows: 3 },
+    generator: {
+      recipe: 'arrows-production-v1',
+      targetBand: 'reference-10-15',
+      version: 'arrows-factory-v4',
+    },
+    arrows: [
+      { id: `a${index}`, exitDir: 'right', path: [[0, 0], [1, 0]] },
+    ],
+  };
+}
+
+function arrowsBundle(levelCount = 10) {
+  const value = bundle();
+  value.runtime.playableId = 'arrows-v1';
+  value.runtime.runtimeContractDigest = arrowsContractDigest;
+  value.runtime.capabilities = {
+    arrowsLevelV1: true,
+    catalogRequiredHandshake: true,
+  };
+  value.runtime.indexLocator = `runtime-releases/arrows-v1/${'d'.repeat(64)}/index.html`;
+  value.runtime.sidecarLocator = `runtime-releases/arrows-v1/${'d'.repeat(64)}/runtime-artifact.json`;
+  value.levels = Array.from({ length: levelCount }, (_, index) => ({
+    ordinal: index + 1,
+    specHash: (index + 1).toString(16).repeat(64),
+    spec: arrowsSpec(index + 1),
+  }));
+  return value;
+}
+
 equal(catalogPlayerV2Enabled({}, true, true), false, 'catalog is off by default');
 equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, false, true), false, 'CP is a second gate');
 equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, true, false), false,
@@ -162,6 +200,17 @@ const mutatedInput = bundle();
 const validated = validateCatalogTicketLevelSpecBundle(mutatedInput);
 mutatedInput.runtime.playableId = 'changed';
 equal(validated.runtime.playableId, 'marble-sort-swipe', 'validated wire is cloned');
+const tenLevelBundle = bundle();
+tenLevelBundle.levels = Array.from({ length: 10 }, (_, index) => {
+  const exactSpecHash = (index + 1).toString(16).repeat(64);
+  return {
+    ordinal: index + 1,
+    specHash: exactSpecHash,
+    spec: spec(exactSpecHash, index + 11),
+  };
+});
+equal(validateCatalogTicketLevelSpecBundle(tenLevelBundle).levels.length, 10,
+  'catalog player accepts the complete ten-level series');
 
 const extra = bundle();
 extra.untrusted = true;
@@ -198,6 +247,25 @@ throws(() => validateCatalogTicketLevelSpecBundle(multiRaster), /one exact level
 const rasterBinding = buildCatalogPlayerLevelBinding(mergeRasterBundle(), 1, 23);
 equal(rasterBinding.playableId, 'merge-locked-v1-swipe');
 equal(rasterBinding.skinHash, null);
+
+const frozenArrowsBundle = validateCatalogTicketLevelSpecBundle(arrowsBundle());
+equal(frozenArrowsBundle.levels.length, 10, 'Arrows delivers the complete ten-level series');
+equal(frozenArrowsBundle.levels[9].spec.schema, 'p4g.arrows.level');
+const elevenArrows = arrowsBundle(11);
+throws(() => validateCatalogTicketLevelSpecBundle(elevenArrows), /1\.\.10 levels/);
+const missingArrowsCapability = arrowsBundle();
+delete missingArrowsCapability.runtime.capabilities.arrowsLevelV1;
+throws(() => validateCatalogTicketLevelSpecBundle(missingArrowsCapability), /exact capable Arrows runtime/);
+const crossedArrowsContract = arrowsBundle();
+crossedArrowsContract.runtime.runtimeContractDigest = contractDigest;
+throws(() => validateCatalogTicketLevelSpecBundle(crossedArrowsContract), /exact capable Arrows runtime/);
+const mixedArrows = arrowsBundle();
+mixedArrows.levels[1].spec = spec(mixedArrows.levels[1].specHash, 12);
+mixedArrows.levels[1].spec.runtimeContractDigest = arrowsContractDigest;
+throws(() => validateCatalogTicketLevelSpecBundle(mixedArrows), /exact capable Arrows runtime/);
+const arrowsBinding = buildCatalogPlayerLevelBinding(arrowsBundle(), 10, 24);
+equal(arrowsBinding.playableId, 'arrows-v1');
+equal(arrowsBinding.spec.schema, 'p4g.arrows.level');
 
 const binding = buildCatalogPlayerLevelBinding(bundle(), 1, 7);
 equal(binding.ordinal, 1);
@@ -287,6 +355,29 @@ equal(ready.effects[0].type, 'post_configure_level');
 equal(ready.effects[0].targetOrigin, 'https://feed.example.test');
 equal(ready.effects[0].message.nonce, 'a'.repeat(32));
 equal(ready.effects[0].message.spec.specHash, specHash1);
+
+const arrowsFrameSource = {};
+const arrowsSession = new CatalogPlayerV2Session({
+  bundle: arrowsBundle(),
+  ordinal: 10,
+  frameEpoch: 10,
+  frameSource: arrowsFrameSource,
+  baseUrl: 'https://feed.example.test/app',
+});
+const arrowsReady = arrowsSession.handleMessage({
+  source: arrowsFrameSource,
+  origin: 'https://feed.example.test',
+  data: {
+    type: 'configure_ready',
+    nonce: 'b'.repeat(32),
+    runtimeContractDigest: arrowsContractDigest,
+    runtimeArtifactDigest: artifactDigest,
+  },
+}, 10);
+equal(arrowsReady.status, 'accepted');
+equal(arrowsReady.effects[0].message.spec.schema, 'p4g.arrows.level');
+equal('specHash' in arrowsReady.effects[0].message.spec, false,
+  'Arrows keeps its approved raw LevelSpec bytes without a synthetic envelope');
 
 const configuredData = {
   type: 'configured',
