@@ -15,3 +15,7 @@ export function loadCatalogGeneratedPreview(options: {
   mobile: CatalogGeneratedPreviewBucket;
   compact: CatalogGeneratedPreviewBucket;
 }>>;
+export function loadCatalogGeneratedPreviewOptional(options: Parameters<typeof loadCatalogGeneratedPreview>[0]): Promise<Readonly<
+  | { outcome: 'verified'; preview: Awaited<ReturnType<typeof loadCatalogGeneratedPreview>>; reason: null }
+  | { outcome: 'unavailable'; preview: null; reason: string }
+>>;

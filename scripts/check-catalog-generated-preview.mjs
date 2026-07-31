@@ -4,6 +4,7 @@ import { createHash, webcrypto } from 'node:crypto';
 import {
   CatalogGeneratedPreviewError,
   loadCatalogGeneratedPreview,
+  loadCatalogGeneratedPreviewOptional,
 } from '../src/catalog-generated-preview.mjs';
 
 const contentHash = 'a'.repeat(64);
@@ -71,4 +72,26 @@ await assert.rejects(
   }),
   (error) => error instanceof CatalogGeneratedPreviewError && error.code === 'invalid_preview_manifest',
 );
+const optionalMissing = await loadCatalogGeneratedPreviewOptional({
+  baseUrl: 'https://platform.example/', contentHash, runtimeArtifactDigest,
+  fetchImpl: async () => ({
+    ok: false,
+    redirected: false,
+    headers: { get: () => null },
+    arrayBuffer: async () => new ArrayBuffer(0),
+  }),
+  cryptoImpl: webcrypto,
+});
+assert.deepEqual(optionalMissing, {
+  outcome: 'unavailable',
+  preview: null,
+  reason: 'preview_manifest_unavailable',
+});
+const optionalTransport = await loadCatalogGeneratedPreviewOptional({
+  baseUrl: 'https://platform.example/', contentHash, runtimeArtifactDigest,
+  fetchImpl: async () => { throw new Error('network down'); },
+  cryptoImpl: webcrypto,
+});
+assert.equal(optionalTransport.outcome, 'unavailable');
+assert.equal(optionalTransport.reason, 'preview_transport_failure');
 console.log('catalog generated preview: exact manifest and both image digests verified');

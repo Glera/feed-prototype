@@ -396,6 +396,26 @@ const operatorOffer = validateCatalogGeneratedOfferResult({
 }, offerRequest);
 equal(operatorOffer.allocation.offerSelection.poolKind, 'operator_exact',
   'one-shot personal delivery keeps its exact operator evidence');
+const tenLevelOperatorOffer = validateCatalogGeneratedOfferResult({
+  schema: 'feed.generated-offer-result.v1',
+  requestId: ids.request,
+  outcome: 'allocated',
+  selectionMode: 'operator_test',
+  selectionReason: 'operator_requested',
+  allocation: {
+    ...generatedAllocation,
+    manifest: {
+      ...generatedAllocation.manifest,
+      levels: Array.from({ length: 10 }, (_, index) => ({
+        ordinal: index + 1,
+        specHash: (index + 1).toString(16).repeat(64),
+      })),
+    },
+    offerSelection: operatorSelection,
+  },
+}, offerRequest);
+equal(tenLevelOperatorOffer.allocation.manifest.levels.length, 10,
+  'the exact Labs path preserves all ten generated levels');
 throws(
   () => validateCatalogGeneratedOfferResult({
     ...operatorOffer,
