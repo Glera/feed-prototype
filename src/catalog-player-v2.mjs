@@ -7,6 +7,7 @@ const FAILURE_REASONS = new Set(['timeout', 'digest', 'origin', 'runtime', 'cont
 const MAX_LEVELS = 10;
 const ARROWS_RUNTIME_CONTRACT_DIGEST = '3005fe7d2025f270c3f88555d43ca9a008b8bb8cb284c2c2ce55fd1d4645d8fb';
 const ARROWS_STABLE_ID_RE = /^[a-z0-9][a-z0-9._:-]{0,255}$/;
+const ARROWS_TARGET_BANDS = new Set(['reference-10-15', 'progression-1-10']);
 const ARROWS_DIRECTIONS = new Set(['up', 'right', 'down', 'left']);
 const ARROWS_STEPS = {
   up: [0, -1],
@@ -201,7 +202,7 @@ function validateArrowsLevelSpec(value) {
   if (!exactKeys(value.generator, ['recipe', 'targetBand', 'version'])
     || !ARROWS_STABLE_ID_RE.test(value.generator.recipe)
     || !ARROWS_STABLE_ID_RE.test(value.generator.version)
-    || value.generator.targetBand !== 'reference-10-15') {
+    || !ARROWS_TARGET_BANDS.has(value.generator.targetBand)) {
     fail('invalid_spec', 'Arrows LevelSpec generator identity is unsupported');
   }
   if (!denseArray(value.arrows) || value.arrows.length < 1 || value.arrows.length > 64) {
@@ -379,6 +380,10 @@ export function validateCatalogTicketLevelSpecBundle(value) {
     fail('invalid_bundle', 'Merge raster bundle must be one exact level on a capable runtime');
   }
   const arrows = value.levels.some(level => level.spec.schema === 'p4g.arrows.level');
+  const arrowsProgression = arrows && value.levels.some(
+    level => level.spec.schema === 'p4g.arrows.level'
+      && level.spec.generator.targetBand === 'progression-1-10',
+  );
   if (arrows && (skinBearing
     || !value.levels.every(level => level.spec.schema === 'p4g.arrows.level')
     || value.runtime.playableId !== 'arrows-v1'
@@ -386,6 +391,9 @@ export function validateCatalogTicketLevelSpecBundle(value) {
     || value.runtime.capabilities.arrowsLevelV1 !== true
     || value.runtime.capabilities.catalogRequiredHandshake !== true)) {
     fail('invalid_bundle', 'Arrows bundle must use the exact capable Arrows runtime');
+  }
+  if (arrowsProgression && value.runtime.capabilities.arrowsProgression1To10 !== true) {
+    fail('invalid_bundle', 'generated Arrows progression requires its explicit runtime capability');
   }
   return frozenClone(value);
 }
