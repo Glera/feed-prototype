@@ -121,6 +121,17 @@ function v2View(received, state = 'active') {
   };
 }
 
+function withLevelCount(view, count) {
+  return {
+    ...view,
+    levels: Array.from({ length: count }, (_, index) => ({
+      ordinal: index + 1,
+      spec_hash: String((index % 9) + 1).repeat(64),
+    })),
+    expected_levels: count,
+  };
+}
+
 function v3View(received, state = 'active') {
   return {
     ...v2View(received, state),
@@ -157,6 +168,25 @@ assert.equal(v2Confirmed.status, 'ok');
 assert.equal(v2Confirmed.confirmed, 1);
 assert.equal(v2Confirmed.latest.schema, 'run.ticket.v2');
 assert.equal(v2Confirmed.latest.levels[1].ordinal, 2);
+
+// The catalog/player contract supports series of up to 10 levels. This is the
+// production Labs shape and must not remain queued as an invalid response.
+const tenLevelStorage = new MemoryStorage();
+const tenLevelOutbox = new DurableRunTicketStartOutbox({
+  storage: tenLevelStorage,
+  queueKey: 'ten-level-queue',
+  deadLetterKey: 'ten-level-dead',
+  startRun: async (received) => withLevelCount(v2View(received), 10),
+});
+tenLevelOutbox.enqueue({
+  ...v2Request,
+  ticket_id: '00000000-0000-4000-8000-000000000041',
+  run_id: 'catalog-ten-level-root',
+});
+const tenLevelConfirmed = await tenLevelOutbox.flush();
+assert.equal(tenLevelConfirmed.status, 'ok');
+assert.equal(tenLevelConfirmed.pending, 0);
+assert.equal(tenLevelConfirmed.latest.levels.length, 10);
 
 const v3Storage = new MemoryStorage();
 let v3Invalid = false;
