@@ -58,8 +58,8 @@ export function validateOperatorLevelFlagOccurrence(value) {
   uuid(value.contentImpressionId, 'contentImpressionId');
   uuid(value.catalogEntryId, 'catalogEntryId');
   uuid(value.seriesId, 'seriesId');
-  if (!Number.isInteger(value.ordinal) || value.ordinal < 1 || value.ordinal > 6) {
-    fail('invalid_ordinal', 'ordinal must be 1..6');
+  if (!Number.isInteger(value.ordinal) || value.ordinal < 1 || value.ordinal > 10) {
+    fail('invalid_ordinal', 'ordinal must be 1..10');
   }
   hash(value.levelSpecHash, 'levelSpecHash');
   hash(value.skinHash, 'skinHash', true);

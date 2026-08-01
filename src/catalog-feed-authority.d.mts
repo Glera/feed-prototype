@@ -59,9 +59,9 @@ export type CatalogGeneratedOfferResultV1 = {
   }
   | {
     outcome: 'allocated';
-    selectionMode: 'affinity' | 'fallback_any';
+    selectionMode: 'affinity' | 'fallback_any' | 'operator_test';
     selectionReason: 'favorite_eligible' | 'insufficient_affinity' | 'affinity_stale'
-      | 'preferred_runway_empty';
+      | 'preferred_runway_empty' | 'operator_requested';
     allocation: import('./api').CatalogAllocationDecisionResultV3;
   }
 );

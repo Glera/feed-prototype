@@ -4,7 +4,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const PLAYABLE_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const NONCE_RE = /^[0-9a-f]{32}$/;
 const FAILURE_REASONS = new Set(['timeout', 'digest', 'origin', 'runtime', 'contract', 'mount']);
-const MAX_LEVELS = 6;
+const MAX_LEVELS = 10;
 
 export const CATALOG_FRAME_REFERRER_POLICY = 'origin';
 
@@ -256,7 +256,7 @@ export function validateCatalogTicketLevelSpecBundle(value) {
     }
   }
   if (!denseArray(value.levels) || value.levels.length < 1 || value.levels.length > MAX_LEVELS) {
-    fail('invalid_bundle', 'bundle.levels must contain 1..6 levels');
+    fail('invalid_bundle', 'bundle.levels must contain 1..10 levels');
   }
   value.levels.forEach((level, index) => {
     if (!exactKeys(level, ['ordinal', 'specHash', 'spec'])) fail('invalid_bundle', 'bundle level has extra or missing fields');

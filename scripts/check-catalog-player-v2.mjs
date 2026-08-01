@@ -162,6 +162,24 @@ const mutatedInput = bundle();
 const validated = validateCatalogTicketLevelSpecBundle(mutatedInput);
 mutatedInput.runtime.playableId = 'changed';
 equal(validated.runtime.playableId, 'marble-sort-swipe', 'validated wire is cloned');
+const tenLevelBundle = bundle();
+tenLevelBundle.levels = Array.from({ length: 10 }, (_, index) => {
+  const exactSpecHash = (index + 1).toString(16).repeat(64);
+  return {
+    ordinal: index + 1,
+    specHash: exactSpecHash,
+    spec: spec(exactSpecHash, index + 11),
+  };
+});
+equal(validateCatalogTicketLevelSpecBundle(tenLevelBundle).levels.length, 10,
+  'catalog player accepts the complete ten-level series');
+const elevenLevelBundle = structuredClone(tenLevelBundle);
+elevenLevelBundle.levels.push({
+  ordinal: 11,
+  specHash: 'b'.repeat(64),
+  spec: spec('b'.repeat(64), 21),
+});
+throws(() => validateCatalogTicketLevelSpecBundle(elevenLevelBundle), /1\.\.10 levels/);
 
 const extra = bundle();
 extra.untrusted = true;

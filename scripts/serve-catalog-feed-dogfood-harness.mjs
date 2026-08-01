@@ -23,8 +23,8 @@ const artifactHex = artifactDigest.replace(/^sha256:/, '');
 const previewJpeg = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABAf/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPxB//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPxB//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxB//9k=', 'base64');
 const previewDigest = `sha256:${createHash('sha256').update(previewJpeg).digest('hex')}`;
 const configuredLevelCount = Number(process.env.CATALOG_DOGFOOD_LEVEL_COUNT ?? '3');
-if (!Number.isInteger(configuredLevelCount) || configuredLevelCount < 1 || configuredLevelCount > 6) {
-  throw new Error('CATALOG_DOGFOOD_LEVEL_COUNT must be an integer from 1 to 6');
+if (!Number.isInteger(configuredLevelCount) || configuredLevelCount < 1 || configuredLevelCount > 10) {
+  throw new Error('CATALOG_DOGFOOD_LEVEL_COUNT must be an integer from 1 to 10');
 }
 if (configuredLevelCount !== EXACT_THREE_LEVEL_SPEC_HASHES.length) {
   throw new Error('the exact production audit fixture requires CATALOG_DOGFOOD_LEVEL_COUNT=3');
