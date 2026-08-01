@@ -129,7 +129,20 @@ const VIEW = {
         guaranteedDeliverable: '10 kg of food',
         currency: 'EUR',
       },
-      fundingPolicy: { version: 'mission-funding.v1', digest: 'c'.repeat(64), document: { rounding: 'floor_to_cent' } },
+      // EXACT wire of the closed, executable schema (swipe-backend `b63b26e`).
+      fundingPolicy: {
+        version: 'mission-funding.v1',
+        digest: 'c'.repeat(64),
+        document: {
+          schema: 'mission.funding-policy.v1',
+          currency: 'EUR',
+          rounding: 'floor-cents',
+          giftFormula: 'guaranteed-plus-floor-proportional-share-v1',
+          snapshotRule: 'ledger-seq-alloc-cutoff-v1',
+          poolConsumption: 'eligible-ledger-fifo-by-seq-v1',
+          eligiblePool: { sources: ['seed', 'revenue_share'] },
+        },
+      },
     },
   },
   myContribution: { caseTokens: 2, totalTokens: 6 },
@@ -389,6 +402,36 @@ for (const label of ['Гарантировано', 'Передано', 'Мои �
   assertions += 1;
   assert.ok(uiSource.includes(label), `the case screen must keep the «${label}» number`);
 }
+
+// «Контракт в один тап» must follow the CLOSED policy schema (R2 finding 2).
+// The rows are driven by the document's own keys, so a wire change surfaces as a
+// failing key-set assertion in the browser check instead of a silently shorter
+// screen — which is exactly how the previous drift went unnoticed.
+assertions += 1;
+assert.ok(
+  /function policySection[\s\S]*?Object\.keys\(doc\)\.filter\(\(key\) => key !== 'schema'\)/.test(uiSource),
+  'the one-tap policy view must be driven by the document keys, not a hand-written list',
+);
+assertions += 1;
+assert.ok(
+  !/giftFormula\s*\?\?\s*\{\}/.test(uiSource)
+    && !/formula\.(unlockShare|expression)/.test(uiSource)
+    && !/pool\.definition/.test(uiSource),
+  'no field of the closed policy schema may be cast back to the old prose objects',
+);
+for (const field of ['currency', 'rounding', 'giftFormula', 'snapshotRule', 'poolConsumption', 'eligiblePool']) {
+  assertions += 1;
+  assert.ok(
+    new RegExp(`^\\s{2}${field}:`, 'm').test(uiSource),
+    `the one-tap view must label the money-semantic field «${field}»`,
+  );
+}
+assertions += 1;
+assert.ok(
+  /POLICY_LABELS\[key\] \?\? key/.test(uiSource)
+    && /const meaning = POLICY_ENUM_MEANINGS\[value\];\s*\n\s*return meaning \? `\$\{value\} — \$\{meaning\}` : value;/.test(uiSource),
+  'an enum value this build does not know must still be shown raw, never hidden',
+);
 
 const feedSource = readFileSync(path.join(root, 'src/feed.ts'), 'utf8');
 assertions += 1;

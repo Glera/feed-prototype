@@ -10,6 +10,8 @@
  *       one history row from that later answer;
  *   F5  the case screen shows the full `reservedAndOpenedCents` the pool really
  *       holds — not only the delta a crossing opened;
+ *   R2/2 «the contract in one tap» renders every money-bearing field of the CLOSED
+ *       funding-policy schema, against the exact document the backend sends;
  *   F6  a `/session` that no longer carries `mission_dogfood` restores the HUD
  *       badge exactly, so the double gate really closes.
  *
@@ -79,6 +81,29 @@ const CONTRIBUTION = {
   bar: { caseId: 'case-2', contractVersion: 'v1', progress: 5, tokenGoal: 50 },
 };
 
+/**
+ * EXACT wire, copied from swipe-backend `b63b26e`
+ * (`tests/test_mission_migration_postgres.py:FUNDING_POLICY`, the constants in
+ * `app/mission_contracts.py`). `mission_api._contract_view` returns
+ * `dict(policy.document)` with no adaptation, so what the client receives is
+ * these bytes.
+ *
+ * The schema is CLOSED and executable: every money-bearing field is an enum with
+ * exactly one legal value naming the behaviour the runtime implements. Keeping a
+ * hand-written prose copy here is what let the client's «contract in one tap»
+ * drift out of the wire unnoticed — so this object, and the assertion that every
+ * one of its keys is rendered, are the anti-drift pair.
+ */
+const FUNDING_POLICY_DOCUMENT = {
+  schema: 'mission.funding-policy.v1',
+  currency: 'EUR',
+  rounding: 'floor-cents',
+  giftFormula: 'guaranteed-plus-floor-proportional-share-v1',
+  snapshotRule: 'ledger-seq-alloc-cutoff-v1',
+  poolConsumption: 'eligible-ledger-fifo-by-seq-v1',
+  eligiblePool: { sources: ['seed', 'revenue_share'] },
+};
+
 const caseView = () => ({
   schema: 'mission.case-view.v1',
   activeCase: {
@@ -115,6 +140,8 @@ const caseView = () => ({
         stretchCapCents: 20_000,
         tokenGoal: 50,
         unlockShare: 'proportional',
+        // Executable since backend R1/F2: UNLOCK is refused before this instant.
+        unlockCutoffAt: '2026-09-01T00:00:00+00:00',
         latestFulfillmentAt: '2026-09-15T00:00:00+00:00',
         queuePosition: 1,
         fundingPolicy: { version: 'mission-funding.v1', digest: 'c'.repeat(64) },
@@ -122,13 +149,7 @@ const caseView = () => ({
       fundingPolicy: {
         version: 'mission-funding.v1',
         digest: 'c'.repeat(64),
-        document: {
-          schema: 'mission.funding-policy.v1',
-          currency: 'EUR',
-          rounding: 'floor_to_cent',
-          eligiblePool: { sources: ['seed'], definition: 'settled ledger at pool_cursor' },
-          giftFormula: { unlockShare: 'min(progress / token_goal, 1)', expression: 'min(...)' },
-        },
+        document: FUNDING_POLICY_DOCUMENT,
       },
     },
   },
@@ -309,10 +330,43 @@ try {
   );
   assert.deepEqual(await tileByLabel('Мои лапки'), { value: '2', detail: null });
   assert.deepEqual(await tileByLabel('Передано'), { value: 'ждём', detail: null });
-  // «Контракт кейса» resolves the pinned money policy in one tap.
+  // «Контракт кейса» resolves the pinned money policy in ONE tap.
   await screen.locator('.mission-contract__summary').click();
   assert.match(await screen.locator('.mission-defs').first().textContent(), /Приют «Лапа»/);
-  assert.match(await screen.locator('.mission-defs').nth(1).textContent(), /floor_to_cent/);
+  assert.match(
+    await screen.locator('.mission-defs').first().textContent(),
+    /2026-09-01/,
+    'the published unlock cutoff is now an executable promise and belongs in the contract',
+  );
+  // Anti-drift: one tap must render EVERY key of the policy wire document, by
+  // the document's own keys — not by a hand-written list that can silently fall
+  // behind the next closed-schema change.
+  const policyKeys = Object.keys(FUNDING_POLICY_DOCUMENT).filter((key) => key !== 'schema');
+  const renderedKeys = await screen.locator('.mission-policy .mission-def').evaluateAll(
+    (nodes) => nodes.map((node) => node.dataset.policyKey),
+  );
+  assert.deepEqual(
+    [...renderedKeys].sort(),
+    [...policyKeys].sort(),
+    'one tap must render exactly the policy document keys the backend sends',
+  );
+  // …and each one by its EXACT wire value, so a renamed enum cannot hide behind
+  // a friendly label.
+  const policyText = await screen.locator('.mission-policy').textContent();
+  for (const key of policyKeys) {
+    const value = FUNDING_POLICY_DOCUMENT[key];
+    const wireValues = typeof value === 'string' ? [value] : value.sources;
+    for (const wire of wireValues) {
+      assert.ok(
+        policyText.includes(wire),
+        `one tap must show the exact wire value ${wire} of ${key}`,
+      );
+    }
+  }
+  // The executable meaning travels with the enum, not instead of it.
+  assert.match(policyText, /вниз до целых центов/);
+  assert.match(policyText, /FIFO/);
+  assert.match(policyText, /посев/);
   assert.equal(await screen.locator('.mission-history__empty').count(), 1, 'no contribution yet, no history');
   await screen.locator('.mission-screen__close').click();
   await screen.waitFor({ state: 'detached' });
@@ -400,6 +454,7 @@ try {
 
   console.log(
     'mission browser: both gates + additive paw retheme + reserved-and-opened tile'
+    + ' + one-tap contract over every key of the exact closed funding-policy wire'
     + ' + 503→retry ceremony exactly once + watermark across reload + exact revoke restore verified',
   );
 } finally {

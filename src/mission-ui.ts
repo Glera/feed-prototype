@@ -17,6 +17,7 @@ import {
   missionCaseTitle,
   missionOpenedByPlayCents,
   missionSourceLabel,
+  type MissionCaseContract,
   type MissionCaseEvent,
   type MissionCaseView,
   type MissionContributionReceipt,
@@ -294,9 +295,101 @@ function definition(list: HTMLElement, term: string, value: unknown): void {
   list.appendChild(row);
 }
 
+/**
+ * `mission.funding-policy.v1` is a CLOSED, executable contract: every
+ * money-bearing field is an enum with exactly one legal value, naming the one
+ * behaviour the runtime implements. So one tap shows the enum ITSELF and adds
+ * what it means — never a friendly sentence in place of the wire value, which is
+ * how a reader could be told one thing while the runtime does another.
+ */
+const POLICY_LABELS: Record<string, string> = {
+  currency: 'Валюта',
+  rounding: 'Округление',
+  giftFormula: 'Формула подарка',
+  snapshotRule: 'Правило снимка пула',
+  poolConsumption: 'Расходование пула',
+  eligiblePool: 'Источники пула',
+};
+
+const POLICY_ENUM_MEANINGS: Record<string, string> = {
+  'floor-cents': 'вниз до целых центов',
+  'guaranteed-plus-floor-proportional-share-v1':
+    'гарантия плюс доля пула пропорционально прогрессу, вниз до цента',
+  'ledger-seq-alloc-cutoff-v1': 'снимок пула по паре (ledger seq, alloc cutoff) под runtime-локом',
+  'eligible-ledger-fifo-by-seq-v1': 'FIFO по seq и только из разрешённых источников',
+};
+
+const POOL_SOURCE_LABELS: Record<string, string> = {
+  seed: 'посев',
+  revenue_share: 'доля выручки',
+  partner: 'партнёр',
+  subscription_share: 'доля подписки',
+};
+
+/** Curated order for the fields v1 defines; anything the wire adds later follows,
+ *  sorted — visible rather than silently dropped. */
+const POLICY_FIELD_ORDER = [
+  'currency', 'rounding', 'giftFormula', 'snapshotRule', 'poolConsumption', 'eligiblePool',
+];
+
+function poolSourceText(source: unknown): string {
+  const raw = String(source);
+  const label = POOL_SOURCE_LABELS[raw];
+  return label ? `${label} (${raw})` : raw;
+}
+
+/** The exact wire value, plus its meaning when this build knows it. An enum this
+ *  build has never seen is shown raw: an unrecognised money rule is precisely
+ *  what the reader most needs to see, not what it should hide. */
+function policyValueText(value: unknown): string {
+  if (typeof value === 'string') {
+    const meaning = POLICY_ENUM_MEANINGS[value];
+    return meaning ? `${value} — ${meaning}` : value;
+  }
+  if (Array.isArray(value)) return value.map(poolSourceText).join(', ');
+  if (value && typeof value === 'object') {
+    const sources = (value as { sources?: unknown }).sources;
+    if (Array.isArray(sources)) return sources.map(poolSourceText).join(', ');
+    return JSON.stringify(value);
+  }
+  return value === null || value === undefined ? '—' : String(value);
+}
+
+/**
+ * Driven by the DOCUMENT's own keys, never by a hand-written list. A hand-written
+ * list is exactly what let this view fall behind the closed-schema change in
+ * silence: `giftFormula` became a string, the code kept reading `.expression` off
+ * it, and two money rules simply stopped being displayed. Now a key the backend
+ * adds appears (raw), a key it removes disappears, and either way the browser
+ * check's key-set assertion fails instead of the screen quietly omitting a rule.
+ */
+function policySection(policy: MissionCaseContract['fundingPolicy']): HTMLElement {
+  const doc = policy.document as Record<string, unknown>;
+  const keys = Object.keys(doc).filter((key) => key !== 'schema');
+  const ordered = [
+    ...POLICY_FIELD_ORDER.filter((key) => keys.includes(key)),
+    ...keys.filter((key) => !POLICY_FIELD_ORDER.includes(key)).sort(),
+  ];
+  const list = el('div', 'mission-defs mission-policy');
+  const heading = policy.version
+    ? `Политика финансирования · ${policy.version} · ${policy.digest.slice(0, 12)}`
+    : 'Политика финансирования';
+  list.appendChild(el('div', 'mission-defs__head', heading));
+  for (const key of ordered) {
+    const row = el('div', 'mission-def');
+    row.dataset.policyKey = key;
+    row.append(
+      el('span', 'mission-def__term', POLICY_LABELS[key] ?? key),
+      el('span', 'mission-def__value', policyValueText(doc[key])),
+    );
+    list.appendChild(row);
+  }
+  return list;
+}
+
 /** The full public contract, one tap away: the case document AND its resolved
- *  funding policy — source, eligible-pool definition and gift formula in words,
- *  with the raw pinned documents underneath for anyone who wants the bytes. */
+ *  funding policy — every money-bearing field of the executable policy, with the
+ *  raw pinned documents underneath for anyone who wants the bytes. */
 function contractSection(view: MissionCaseView): HTMLElement {
   const wrap = el('details', 'mission-contract');
   const summary = document.createElement('summary');
@@ -315,30 +408,25 @@ function contractSection(view: MissionCaseView): HTMLElement {
   definition(list, 'Сверх плана', doc.stretchDeliverables);
   definition(list, 'Остаток', doc.rolloverRule);
   definition(list, 'Подтверждение', doc.confirmationKind);
+  // Executable since the backend's cutoff fix: UNLOCK is refused before this
+  // instant, so it is a promise the player can hold the platform to, not a note.
+  definition(list, 'Раньше не разблокируется', doc.unlockCutoffAt);
   definition(list, 'Передать до', doc.latestFulfillmentAt);
   definition(list, 'Версия', `${contract.contractVersion} · ${contract.contractDigest.slice(0, 12)}`);
   wrap.appendChild(list);
 
-  const policy = contract.fundingPolicy;
-  const policyDoc = policy.document as Record<string, unknown>;
-  const pool = (policyDoc.eligiblePool ?? {}) as Record<string, unknown>;
-  const formula = (policyDoc.giftFormula ?? {}) as Record<string, unknown>;
-  const policyList = el('div', 'mission-defs');
-  policyList.appendChild(el('div', 'mission-defs__head', 'Политика финансирования'));
-  definition(policyList, 'Источники пула', pool.sources);
-  definition(policyList, 'Что считается', pool.definition);
-  definition(policyList, 'Доля разблокировки', formula.unlockShare);
-  definition(policyList, 'Формула подарка', formula.expression);
-  definition(policyList, 'Округление', policyDoc.rounding);
-  definition(policyList, 'Версия', `${policy.version} · ${policy.digest.slice(0, 12)}`);
-  wrap.appendChild(policyList);
+  wrap.appendChild(policySection(contract.fundingPolicy));
 
   const raw = el('details', 'mission-contract__raw');
   const rawSummary = document.createElement('summary');
   rawSummary.textContent = 'Документы целиком';
   raw.appendChild(rawSummary);
   const pre = el('pre', 'mission-contract__json');
-  pre.textContent = JSON.stringify({ contract: doc, fundingPolicy: policyDoc }, null, 2);
+  pre.textContent = JSON.stringify(
+    { contract: doc, fundingPolicy: contract.fundingPolicy.document },
+    null,
+    2,
+  );
   raw.appendChild(pre);
   wrap.appendChild(raw);
   return wrap;
