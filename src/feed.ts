@@ -139,6 +139,7 @@ import {
   debugPanelQaRouteRequested,
   operatorDebugPanelAvailable,
 } from './operator-debug-entry.mjs';
+import { helpMapPreviewRequested } from './helpmap-preview.mjs';
 import {
   buildBuiltinFeedDecisionV2,
   resolveFeedRosterSession,
@@ -5583,6 +5584,10 @@ export class Feed {
     // catalog and remains the visual card-drop target from the chest. Paging is
     // via swipe (attachSwipeSurface below); these buttons don't page.
     type BarTab = { name: string; label: string; svg: string; onTap: () => void };
+    // Dogfood-превью карты помощи: за секретным startapp=helpmap (или ?helpmap=1)
+    // «Мета» перестаёт быть скрытой и ведёт в карту вместо острова. Без
+    // параметра здесь false — вкладки нет, ./helpmap не импортируется.
+    const helpMapPreview = helpMapPreviewRequested({ search: location.search, startParam: getStartParam() });
     const TABS: BarTab[] = [
       {
         name: 'daily', label: 'Ежедневные задания',
@@ -5596,7 +5601,7 @@ export class Feed {
         // stays reachable via ?metaworld=1 for testing.
         // Open the opaque view FIRST (it pauses + covers the feed), THEN hide daily —
         // so the feed mechanic never resumes or shows during the daily→meta swap.
-        onTap: () => { if (new URLSearchParams(location.search).has('metaworld')) this.openMetaWorld(); else this.openIslandWorld(); this.hideDailyPanel(); },
+        onTap: () => { if (helpMapPreview) this.openHelpMapPreview(); else if (new URLSearchParams(location.search).has('metaworld')) this.openMetaWorld(); else this.openIslandWorld(); this.hideDailyPanel(); },
       },
       {
         name: 'feed', label: 'Лента механик',
@@ -5618,6 +5623,7 @@ export class Feed {
       .filter((tab) =>
         tab.name !== 'meta'
         || ISLAND_UI_ENABLED
+        || helpMapPreview
         || new URLSearchParams(location.search).has('metaworld'));
     const DEFAULT_TAB = 'feed';
     const switcher = document.createElement('div');
@@ -7470,6 +7476,19 @@ export class Feed {
   // created mechanics: each one is a building that themes its own sector.
   // UI/styles live in src/island.ts; state is server-authoritative with a local
   // cache managed by src/island-state.ts. This method owns overlay boilerplate.
+  // Тот же приём, что и у острова: непрозрачный слой кладём синхронно (он сразу
+  // накрывает и замораживает ленту), содержимое подъезжает ленивым import().
+  private openHelpMapPreview() {
+    if (this.overlayOpen) return;
+    this.overlayOpen = true;
+    this.applyActiveStates();
+    const ov = document.createElement('div');
+    ov.className = 'helpmap-preview';
+    this.viewport.appendChild(ov);
+    this.overlayEl = ov;
+    void import('./helpmap').then((m) => m.renderHelpMap(ov, { close: () => this.closeOverlay() }));
+  }
+
   private openIslandWorld() {
     if (this.overlayOpen) return;
     this.overlayOpen = true;
