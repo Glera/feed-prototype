@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -38,6 +38,36 @@ assert.deepEqual(scanMissionArchitecture(root), []);
 {
   const target = sandbox();
   try {
+    mkdirSync(join(target, 'src/mission'), { recursive: true });
+    writeFileSync(join(target, 'src/mission/hidden.ts'), 'export const hidden = true;\n');
+    assert(
+      scanMissionArchitecture(target)
+        .some((error) => error.includes('outside the reviewed')),
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+}
+
+{
+  const target = sandbox();
+  try {
+    writeFileSync(
+      join(target, 'src/mission.ts'),
+      "import { x } from './island';\nexport { x };\n",
+    );
+    assert(
+      scanMissionArchitecture(target)
+        .some((error) => error.includes('forbidden Island authority import')),
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+}
+
+{
+  const target = sandbox();
+  try {
     const policy = JSON.parse(
       readFileSync(
         join(target, 'test-fixtures/mission-architecture-policy.v1.json'),
@@ -54,6 +84,23 @@ assert.deepEqual(scanMissionArchitecture(root), []);
     assert(
       scanMissionArchitecture(target)
         .some((error) => error.includes('src/feed.ts: net line budget exceeded')),
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+  }
+}
+
+{
+  const target = sandbox();
+  try {
+    writeFileSync(join(target, 'src/mission.ts'), 'export const mission = true;\n');
+    writeFileSync(
+      join(target, 'src/unreviewed.ts'),
+      "import './mission';\n",
+    );
+    assert(
+      scanMissionArchitecture(target)
+        .some((error) => error.includes('unreviewed inbound Mission edge')),
     );
   } finally {
     rmSync(target, { recursive: true, force: true });

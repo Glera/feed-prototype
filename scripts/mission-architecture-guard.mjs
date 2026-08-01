@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
 import process from 'node:process';
 import ts from 'typescript';
 
 const DEFAULT_POLICY = 'test-fixtures/mission-architecture-policy.v1.json';
-const missionBasename = (file) => /^mission[-_].+\.(?:ts|mts|mjs)$/.test(basename(file));
+const missionBasename = (file) => /^mission(?:[-_].+)?\.(?:ts|mts|mjs)$/.test(basename(file));
+const missionImport = (specifier) => (
+  /^\.{1,2}\//.test(specifier)
+  && /(?:^|\/)mission(?:$|[-_/])/.test(specifier)
+);
 const lineCount = (raw) => raw.length === 0 ? 0 : raw.replace(/\n$/, '').split('\n').length;
 
 function sourceImports(file, raw) {
@@ -25,12 +29,27 @@ function sourceImports(file, raw) {
 }
 
 function sourceFiles(root) {
-  return readdirSync(join(root, 'src'))
-    .filter((name) => /\.(?:ts|mts|mjs)$/.test(name))
-    .map((name) => join(root, 'src', name))
-    .filter((file) => statSync(file).isFile())
-    .sort();
+  const discovered = [];
+  const walk = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && /\.(?:ts|mts|mjs)$/.test(entry.name)) discovered.push(path);
+    }
+  };
+  walk(join(root, 'src'));
+  return discovered.sort();
 }
+
+const reviewedMissionFile = (root, file) => (
+  missionBasename(file)
+  && /^src\/[^/]+$/.test(relative(root, file).replaceAll('\\', '/'))
+);
+
+const looksLikeMissionFile = (root, file) => {
+  const fileRelative = relative(root, file).replaceAll('\\', '/');
+  return missionBasename(file) || /(?:^|\/)mission(?:\/|[-_])/.test(fileRelative);
+};
 
 export function scanMissionArchitecture(rootInput, policyRelative = DEFAULT_POLICY) {
   const root = resolve(rootInput);
@@ -51,19 +70,27 @@ export function scanMissionArchitecture(rootInput, policyRelative = DEFAULT_POLI
   }
 
   const files = sourceFiles(root);
-  const missionFiles = files.filter(missionBasename);
+  const missionFiles = files.filter((file) => reviewedMissionFile(root, file));
+  for (const file of files) {
+    if (looksLikeMissionFile(root, file) && !reviewedMissionFile(root, file)) {
+      errors.push(
+        `${relative(root, file).replaceAll('\\', '/')}: `
+        + 'Mission source is outside the reviewed src/mission* contour',
+      );
+    }
+  }
   let total = 0;
   for (const file of files) {
     const fileRelative = relative(root, file).replaceAll('\\', '/');
     const raw = readFileSync(file, 'utf8');
     const imports = sourceImports(file, raw);
     for (const imported of imports) {
-      const missionImport = /^\.\/mission[-_]/.test(imported);
-      if (missionImport && !missionBasename(file) && !allowedImporters.has(fileRelative)) {
+      const importsMission = missionImport(imported);
+      if (importsMission && !reviewedMissionFile(root, file) && !allowedImporters.has(fileRelative)) {
         errors.push(`${fileRelative}: unreviewed inbound Mission edge ${imported}`);
       }
     }
-    if (!missionBasename(file)) continue;
+    if (!reviewedMissionFile(root, file)) continue;
     const lines = lineCount(raw);
     total += lines;
     if (lines > Number(policy.missionDomain.maxLinesPerModule)) {
@@ -76,14 +103,14 @@ export function scanMissionArchitecture(rootInput, policyRelative = DEFAULT_POLI
       if (!imported.startsWith('.')) continue;
       if (imported.startsWith('./island')) {
         errors.push(`${fileRelative}: forbidden Island authority import ${imported}`);
-      } else if (!/^\.\/mission[-_]/.test(imported)) {
+      } else if (!missionImport(imported)) {
         errors.push(`${fileRelative}: unreviewed local dependency ${imported}`);
       }
     }
   }
   if (total > Number(policy.missionDomain.maxTotalLines)) {
     errors.push(
-      `src/mission-*: aggregate line budget exceeded `
+      `src/mission*: aggregate line budget exceeded `
       + `(${total}>${policy.missionDomain.maxTotalLines})`,
     );
   }
