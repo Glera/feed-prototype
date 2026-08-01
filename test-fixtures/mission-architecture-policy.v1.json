@@ -1,0 +1,27 @@
+{
+  "allowedMissionImporters": [
+    "src/api.ts",
+    "src/feed.ts",
+    "src/main.ts",
+    "src/outbox.ts"
+  ],
+  "baseline": {
+    "src/feed.ts": {
+      "lines": 10457,
+      "sha256": "f8b48c32654b40049e773533e14d82dbd278ba35bb225cd2eadab92d44a7b81e"
+    },
+    "src/island.ts": {
+      "lines": 4279,
+      "sha256": "4070f3681eca824e94d571fbd9a24e23ec16bfc3863ddd00ed1a8b2cc4fa38f6"
+    }
+  },
+  "integrationLineBudgets": {
+    "src/feed.ts": 90,
+    "src/island.ts": 0
+  },
+  "missionDomain": {
+    "maxLinesPerModule": 600,
+    "maxTotalLines": 1800
+  },
+  "schema": "mission-client-architecture-policy.v1"
+}
