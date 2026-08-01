@@ -5,10 +5,10 @@ import process from 'node:process';
 import ts from 'typescript';
 
 const DEFAULT_POLICY = 'test-fixtures/mission-architecture-policy.v1.json';
-const missionBasename = (file) => /^mission(?:[-_].+)?\.(?:ts|mts|mjs)$/.test(basename(file));
+const missionBasename = (file) => /^mission(?:[-_].+)?\.(?:ts|mts|mjs)$/i.test(basename(file));
 const missionImport = (specifier) => (
   /^\.{1,2}\//.test(specifier)
-  && /(?:^|\/)mission(?:$|[-_/])/.test(specifier)
+  && /(?:^|\/)mission(?:$|[-_/.])/i.test(specifier)
 );
 const lineCount = (raw) => raw.length === 0 ? 0 : raw.replace(/\n$/, '').split('\n').length;
 
@@ -21,6 +21,19 @@ function sourceImports(file, raw) {
   const visit = (node) => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       imports.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isExportDeclaration(node)
+      && node.moduleSpecifier
+      && ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      imports.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isCallExpression(node)
+      && node.expression.kind === ts.SyntaxKind.ImportKeyword
+      && node.arguments.length === 1
+      && ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      imports.push(node.arguments[0].text);
     }
     ts.forEachChild(node, visit);
   };
@@ -48,7 +61,7 @@ const reviewedMissionFile = (root, file) => (
 
 const looksLikeMissionFile = (root, file) => {
   const fileRelative = relative(root, file).replaceAll('\\', '/');
-  return missionBasename(file) || /(?:^|\/)mission(?:\/|[-_])/.test(fileRelative);
+  return missionBasename(file) || /(?:^|\/)mission(?:\/|[-_])/i.test(fileRelative);
 };
 
 export function scanMissionArchitecture(rootInput, policyRelative = DEFAULT_POLICY) {
@@ -66,6 +79,12 @@ export function scanMissionArchitecture(rootInput, policyRelative = DEFAULT_POLI
     const growth = lineCount(current) - Number(policy.baseline[file].lines);
     if (growth > Number(limit)) {
       errors.push(`${file}: net line budget exceeded (${growth}>${limit})`);
+    }
+    if (
+      growth <= 0
+      && createHash('sha256').update(current).digest('hex') !== policy.baseline[file].sha256
+    ) {
+      errors.push(`${file}: nonpositive-growth baseline SHA-256 mismatch`);
     }
   }
 
@@ -115,7 +134,7 @@ export function scanMissionArchitecture(rootInput, policyRelative = DEFAULT_POLI
     );
   }
   const island = readFileSync(join(root, 'src/island.ts'), 'utf8');
-  if (/\bmission(?:_|[A-Z])/.test(island)) {
+  if (/\bmission(?:\b|[-_/.]|[A-Z])/i.test(island)) {
     errors.push('src/island.ts: Mission logic is forbidden');
   }
   for (const [file, anchor] of Object.entries(policy.baseline)) {
