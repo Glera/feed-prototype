@@ -7,8 +7,8 @@
   ],
   "baseline": {
     "src/feed.ts": {
-      "lines": 10441,
-      "sha256": "5da8ae9313ef9af6c19e1f8e7dfcaa0df9eb5df6af5305b3149e100be71bd058"
+      "lines": 10457,
+      "sha256": "f8b48c32654b40049e773533e14d82dbd278ba35bb225cd2eadab92d44a7b81e"
     },
     "src/island.ts": {
       "lines": 4279,
