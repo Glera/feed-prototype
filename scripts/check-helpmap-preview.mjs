@@ -23,9 +23,12 @@ const matches = (source, re, message) => { n += 1; assert.match(source, re, mess
 
 // ------------------------------------------------------------- 1. поведение
 
-ok(helpMapPreviewRequested(), false, 'без источников превью закрыто');
-ok(helpMapPreviewRequested({}), false, 'пустой объект — превью закрыто');
-ok(helpMapPreviewRequested({ search: '', startParam: null }), false, 'пустые значения — закрыто');
+// Решение оператора 01.08.2026: DEFAULT_ON=true — превью включено всем
+// (единственный пользователь прод — оператор). Проверяем ИМЕННО дефолт-он;
+// при возврате гейта эти три assertion возвращаются к false.
+ok(helpMapPreviewRequested(), true, 'DEFAULT_ON: превью открыто без источников');
+ok(helpMapPreviewRequested({}), true, 'DEFAULT_ON: пустой объект — открыто');
+ok(helpMapPreviewRequested({ search: '', startParam: null }), true, 'DEFAULT_ON: пустые значения — открыто');
 
 ok(helpMapPreviewRequested({ startParam: 'helpmap' }), true, 'startapp=helpmap открывает превью');
 ok(helpMapPreviewRequested({ search: '?helpmap=1' }), true, '?helpmap=1 открывает превью');
@@ -33,15 +36,15 @@ ok(helpMapPreviewRequested({ search: '?a=b&helpmap=1&c=d' }), true, '?helpmap=1 
 
 // fail-closed: ничего похожего не считается
 for (const startParam of ['helpmapper', 'HELPMAP', 'Helpmap', ' helpmap', 'helpmap ', 'diag', 'lab_auth', '']) {
-  ok(helpMapPreviewRequested({ startParam }), false, `startParam ${JSON.stringify(startParam)} не открывает превью`);
+  ok(helpMapPreviewRequested({ startParam }), true, `DEFAULT_ON: startParam ${JSON.stringify(startParam)} тоже даёт открытое превью`);
 }
 for (const search of ['?helpmap', '?helpmap=', '?helpmap=0', '?helpmap=2', '?helpmap=true',
   '?helpmapper=1', '?nothelpmap=1', '?diag=1', '?metaworld=1']) {
-  ok(helpMapPreviewRequested({ search }), false, `search ${JSON.stringify(search)} не открывает превью`);
+  ok(helpMapPreviewRequested({ search }), true, `DEFAULT_ON: search ${JSON.stringify(search)} тоже даёт открытое превью`);
 }
 // мусор не должен ронять загрузку ленты
-ok(helpMapPreviewRequested({ search: '%%%' }), false, 'битая строка запроса не открывает превью и не бросает');
-ok(helpMapPreviewRequested({ search: null, startParam: undefined }), false, 'null/undefined безопасны');
+ok(helpMapPreviewRequested({ search: '%%%' }), true, 'DEFAULT_ON: битая строка запроса не бросает');
+ok(helpMapPreviewRequested({ search: null, startParam: undefined }), true, 'DEFAULT_ON: null/undefined безопасны');
 
 // -------------------------------------------------- 2. структура: feed.ts
 
