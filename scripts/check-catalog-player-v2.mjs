@@ -186,6 +186,16 @@ function arrowsBundle(levelCount = 10) {
   return value;
 }
 
+function arrowsProgressionBundle(levelCount = 10) {
+  const value = arrowsBundle(levelCount);
+  value.runtime.capabilities.arrowsProgression1To10 = true;
+  for (const level of value.levels) {
+    level.spec.generator.targetBand = 'progression-1-10';
+    level.spec.generator.version = 'arrows-factory-v5';
+  }
+  return value;
+}
+
 equal(catalogPlayerV2Enabled({}, true, true), false, 'catalog is off by default');
 equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, false, true), false, 'CP is a second gate');
 equal(catalogPlayerV2Enabled({ VITE_CATALOG_PLAYER_V2_ENABLED: 'true' }, true, false), false,
@@ -251,6 +261,13 @@ equal(rasterBinding.skinHash, null);
 const frozenArrowsBundle = validateCatalogTicketLevelSpecBundle(arrowsBundle());
 equal(frozenArrowsBundle.levels.length, 10, 'Arrows delivers the complete ten-level series');
 equal(frozenArrowsBundle.levels[9].spec.schema, 'p4g.arrows.level');
+const frozenArrowsProgressionBundle = validateCatalogTicketLevelSpecBundle(arrowsProgressionBundle());
+equal(frozenArrowsProgressionBundle.levels[0].spec.generator.targetBand, 'progression-1-10',
+  'generated Arrows progression is accepted by an explicitly capable runtime');
+const progressionWithoutCapability = arrowsProgressionBundle();
+delete progressionWithoutCapability.runtime.capabilities.arrowsProgression1To10;
+throws(() => validateCatalogTicketLevelSpecBundle(progressionWithoutCapability),
+  /progression requires its explicit runtime capability/);
 const elevenArrows = arrowsBundle(11);
 throws(() => validateCatalogTicketLevelSpecBundle(elevenArrows), /1\.\.10 levels/);
 const missingArrowsCapability = arrowsBundle();
