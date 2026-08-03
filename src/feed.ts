@@ -62,7 +62,7 @@ import {
 } from './outbox';
 import { ActiveDwellAccumulator } from './active-dwell.mjs';
 import { catalogResultAllowsProgress } from './result-receipts.mjs';
-import { loadCatalogGeneratedPreview } from './catalog-generated-preview.mjs';
+import { loadCatalogGeneratedPreviewOptional } from './catalog-generated-preview.mjs';
 import {
   CatalogPlayerV2Session,
   buildCatalogLevelImpression,
@@ -149,6 +149,7 @@ import {
   debugPanelQaRouteRequested,
   operatorDebugPanelAvailable,
 } from './operator-debug-entry.mjs';
+import { helpMapPreviewRequested } from './helpmap-preview.mjs';
 import {
   buildBuiltinFeedDecisionV2,
   resolveFeedRosterSession,
@@ -1163,25 +1164,41 @@ export class Feed {
       contentHash: allocation.manifest.contentHash,
       runtimeArtifactDigest: allocation.runtime.runtimeArtifactDigest,
     });
-    const preview = await loadCatalogGeneratedPreview({
+    const loaded = await loadCatalogGeneratedPreviewOptional({
       baseUrl: this.generatedPreviewBaseUrl(),
       contentHash: allocation.manifest.contentHash,
       runtimeArtifactDigest: allocation.runtime.runtimeArtifactDigest,
     });
-    const objectUrl = (bytes: Uint8Array) => URL.createObjectURL(new Blob(
-      [bytes.slice().buffer],
-      { type: 'image/jpeg' },
-    ));
+    if (loaded.outcome === 'verified') {
+      const preview = loaded.preview;
+      const objectUrl = (bytes: Uint8Array) => URL.createObjectURL(new Blob(
+        [bytes.slice().buffer],
+        { type: 'image/jpeg' },
+      ));
+      return Object.freeze({
+        mobile: objectUrl(preview.mobile.bytes),
+        compact: objectUrl(preview.compact.bytes),
+      });
+    }
+    // Preview art is presentation, never delivery authority. A missing bake
+    // used to consume the allocation (including a Labs one-shot) and then
+    // hide the series forever behind a failed prefetch. Keep the exact
+    // allocation/ticket/spec closure and show the standard host poster; the
+    // generated badge remains visible until the exact runtime is configured.
+    track('generated_preview_fallback', {
+      reason: loaded.reason,
+      catalog_entry_id: allocation.catalog.entryId,
+    });
     return Object.freeze({
-      mobile: objectUrl(preview.mobile.bytes),
-      compact: objectUrl(preview.compact.bytes),
+      mobile: RIDE_PLACEHOLDER_SRC,
+      compact: RIDE_PLACEHOLDER_SRC,
     });
   }
 
   private releaseGeneratedPreview(offer: PreparedGeneratedOffer | null): void {
     if (!offer) return;
-    URL.revokeObjectURL(offer.previewUrls.mobile);
-    URL.revokeObjectURL(offer.previewUrls.compact);
+    if (offer.previewUrls.mobile.startsWith('blob:')) URL.revokeObjectURL(offer.previewUrls.mobile);
+    if (offer.previewUrls.compact.startsWith('blob:')) URL.revokeObjectURL(offer.previewUrls.compact);
   }
 
   private retireGeneratedSlot(i: number): void {
@@ -5604,6 +5621,10 @@ export class Feed {
     // catalog and remains the visual card-drop target from the chest. Paging is
     // via swipe (attachSwipeSurface below); these buttons don't page.
     type BarTab = { name: string; label: string; svg: string; onTap: () => void };
+    // Dogfood-превью карты помощи: за секретным startapp=helpmap (или ?helpmap=1)
+    // «Мета» перестаёт быть скрытой и ведёт в карту вместо острова. Без
+    // параметра здесь false — вкладки нет, ./helpmap не импортируется.
+    const helpMapPreview = helpMapPreviewRequested({ search: location.search, startParam: getStartParam() });
     const TABS: BarTab[] = [
       {
         name: 'daily', label: 'Ежедневные задания',
@@ -5617,7 +5638,7 @@ export class Feed {
         // stays reachable via ?metaworld=1 for testing.
         // Open the opaque view FIRST (it pauses + covers the feed), THEN hide daily —
         // so the feed mechanic never resumes or shows during the daily→meta swap.
-        onTap: () => { if (new URLSearchParams(location.search).has('metaworld')) this.openMetaWorld(); else this.openIslandWorld(); this.hideDailyPanel(); },
+        onTap: () => { if (helpMapPreview) this.openHelpMapPreview(); else if (new URLSearchParams(location.search).has('metaworld')) this.openMetaWorld(); else this.openIslandWorld(); this.hideDailyPanel(); },
       },
       {
         name: 'feed', label: 'Лента механик',
@@ -5639,6 +5660,7 @@ export class Feed {
       .filter((tab) =>
         tab.name !== 'meta'
         || ISLAND_UI_ENABLED
+        || helpMapPreview
         || new URLSearchParams(location.search).has('metaworld'));
     const DEFAULT_TAB = 'feed';
     const switcher = document.createElement('div');
@@ -7495,6 +7517,19 @@ export class Feed {
   // created mechanics: each one is a building that themes its own sector.
   // UI/styles live in src/island.ts; state is server-authoritative with a local
   // cache managed by src/island-state.ts. This method owns overlay boilerplate.
+  // Тот же приём, что и у острова: непрозрачный слой кладём синхронно (он сразу
+  // накрывает и замораживает ленту), содержимое подъезжает ленивым import().
+  private openHelpMapPreview() {
+    if (this.overlayOpen) return;
+    this.overlayOpen = true;
+    this.applyActiveStates();
+    const ov = document.createElement('div');
+    ov.className = 'helpmap-preview';
+    this.viewport.appendChild(ov);
+    this.overlayEl = ov;
+    void import('./helpmap').then((m) => m.renderHelpMap(ov, { close: () => this.closeOverlay() }));
+  }
+
   private openIslandWorld() {
     if (this.overlayOpen) return;
     this.overlayOpen = true;

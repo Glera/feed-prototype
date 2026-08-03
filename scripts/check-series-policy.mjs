@@ -31,5 +31,18 @@ for (const [mechanicId, expected] of [
   );
 }
 assert.equal(seriesGameLevel('merge-locked-v1-swipe', 1), null);
+assert.deepEqual(
+  [seriesGameLevel('minesweeper-v1-swipe', 1), seriesGameLevel('minesweeper-v1-swipe', 2)],
+  [1, null],
+  'minesweeper-v1-swipe single-level routing',
+);
+assert.deepEqual(
+  Array.from(
+    { length: seriesLength('arrows-v1-swipe') },
+    (_, index) => seriesGameLevel('arrows-v1-swipe', index + 1),
+  ),
+  [11, 12, 13, 14, 10],
+  'arrows-v1-swipe level routing',
+);
 
-console.log(`series policy: ${fixture.vectors.length} lengths + 5 pins routes passed`);
+console.log(`series policy: ${fixture.vectors.length} lengths + 5 pins routes + arrows + minesweeper routes passed`);

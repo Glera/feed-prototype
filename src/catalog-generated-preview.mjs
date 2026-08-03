@@ -116,3 +116,26 @@ export async function loadCatalogGeneratedPreview({
   }
   return Object.freeze(result);
 }
+
+/**
+ * Preview art is optional presentation for an already-authorized allocation.
+ * Preserve the strict loader above for bake/integrity checks, while the feed
+ * gets a typed fallback instead of losing an exact ticket to a cosmetic 404.
+ */
+export async function loadCatalogGeneratedPreviewOptional(options) {
+  try {
+    return Object.freeze({
+      outcome: 'verified',
+      preview: await loadCatalogGeneratedPreview(options),
+      reason: null,
+    });
+  } catch (error) {
+    return Object.freeze({
+      outcome: 'unavailable',
+      preview: null,
+      reason: error instanceof CatalogGeneratedPreviewError
+        ? error.code
+        : 'preview_transport_failure',
+    });
+  }
+}

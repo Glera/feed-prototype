@@ -5,6 +5,7 @@ const ACCEPTED_STATES = new Set([
 const HASH_RE = /^[0-9a-f]{64}$/;
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const MAX_CATALOG_LEVELS = 10;
 const MAX_DEAD_LETTERS = 100;
 
 /**
@@ -240,7 +241,8 @@ function validateResponse(value, request) {
   if (value.schema === 'run.ticket.v3'
     && (!HASH_RE.test(String(value.skin_hash || ''))
       || !HASH_RE.test(String(value.skin_contract_digest || '')))) return null;
-  if (!Array.isArray(value.levels) || value.levels.length < 1 || value.levels.length > 6
+  if (!Array.isArray(value.levels) || value.levels.length < 1
+    || value.levels.length > MAX_CATALOG_LEVELS
     || value.levels.some((level, index) => !hasExactKeys(level, ['ordinal', 'spec_hash'])
       || level.ordinal !== index + 1 || typeof level.spec_hash !== 'string' || !HASH_RE.test(level.spec_hash))) {
     return null;

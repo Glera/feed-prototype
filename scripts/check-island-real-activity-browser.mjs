@@ -200,7 +200,7 @@ try {
   });
 
   const first = await context.newPage();
-  await first.goto(`${origin}/?initData=activity-browser`, { waitUntil: 'domcontentloaded' });
+  await first.goto(`${origin}/?initData=activity-browser&helpmap=0`, { waitUntil: 'domcontentloaded' });
   await first.waitForFunction(() =>
     localStorage.getItem('island-activity-cursor-v1:42') === '10');
   assert.equal(await first.locator('.activity-toast').count(), 0,
@@ -209,7 +209,7 @@ try {
 
   emitNewActivity = true;
   const reopened = await context.newPage();
-  await reopened.goto(`${origin}/?initData=activity-browser`, { waitUntil: 'domcontentloaded' });
+  await reopened.goto(`${origin}/?initData=activity-browser&helpmap=0`, { waitUntil: 'domcontentloaded' });
   const toast = reopened.locator('.activity-toast');
   await toast.waitFor({ state: 'visible', timeout: 10_000 });
   // One batch → ONE line. The human leads it and the bot stays visibly a bot.
@@ -247,7 +247,7 @@ try {
     }).observe(document, { childList: true, subtree: true, attributes: true, characterData: true });`);
   await page.clock.install();
   await page.clock.resume();
-  await page.goto(`${origin}/?initData=activity-live`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${origin}/?initData=activity-live&helpmap=0`, { waitUntil: 'domcontentloaded' });
   const toasts = () => page.evaluate(() => window.__toasts.slice());
   const metaAlert = page.locator('[data-bar-tab="meta"] .feed-bar__daily-alert');
   // Time skips fire the app's own timers; the short real wait lets the resulting
@@ -338,7 +338,7 @@ try {
   await relaunched.addInitScript('window.__toasts = [];');
   await relaunched.clock.install();
   await relaunched.clock.resume();
-  await relaunched.goto(`${origin}/?initData=activity-live`, { waitUntil: 'domcontentloaded' });
+  await relaunched.goto(`${origin}/?initData=activity-live&helpmap=0`, { waitUntil: 'domcontentloaded' });
   await relaunched.clock.fastForward(90_000);
   await relaunched.waitForTimeout(1200);
   assert.equal(

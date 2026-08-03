@@ -46,7 +46,7 @@ export interface ArrowsLevelSpecV1 {
   bounds: { cols: number; rows: number };
   generator: {
     recipe: string;
-    targetBand: 'reference-10-15';
+    targetBand: 'reference-10-15' | 'progression-1-10';
     version: string;
   };
   arrows: Array<{

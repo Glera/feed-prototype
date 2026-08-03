@@ -195,7 +195,7 @@ try {
   });
 
   const page = await context.newPage();
-  await page.goto(`${origin}/?initData=p2-browser`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${origin}/?initData=p2-browser&helpmap=0`, { waitUntil: 'domcontentloaded' });
   await page.locator('.isln-friends [data-friends-list]').waitFor({ state: 'visible' });
 
   const firstFriend = page.locator(

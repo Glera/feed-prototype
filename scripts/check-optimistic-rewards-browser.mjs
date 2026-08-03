@@ -224,7 +224,7 @@ try {
 
   // ── 1. slow server: the animation and the local delta must not wait ────────
   backend.claimDelayMs = 2000;
-  await page.goto(`${origin}/?initData=optimistic-browser`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${origin}/?initData=optimistic-browser&helpmap=0`, { waitUntil: 'domcontentloaded' });
   await counter.waitFor({ state: 'visible' });
   await page.waitForFunction(() => Number(document.querySelector('.hud__puzzles-value')?.textContent) === 10);
   await openDaily();
