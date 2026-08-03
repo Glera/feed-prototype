@@ -318,6 +318,10 @@ export interface SessionResp {
   operator_level_flagging_available?: boolean;
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
+  /** Mission slice v0: present (true) only for an enrolled dogfood account while
+   *  `ENABLE_MISSION_READ` is on. Absent is how every other payload stays
+   *  byte-identical to the pre-mission build. */
+  mission_dogfood?: boolean;
 }
 
 /** Pilot-only exact field annotation. The server rechecks the Telegram user. */
@@ -531,6 +535,10 @@ export interface ResultResp {
   balance: number;
   puzzles_awarded?: number;
   puzzle_balance?: number;
+  /** `mission.contribution-receipt.v1` for a terminal series result of an
+   *  enrolled account; a replay carries the same committed bytes. Typed as
+   *  `unknown` on purpose — `mission-core.mjs` is the only parser. */
+  mission_contribution?: unknown;
 }
 
 export function apiSession(): Promise<SessionResp | null> {
@@ -741,6 +749,15 @@ export interface DailyStateResp {
   seconds_remaining: number;
   puzzle_balance: number;
   quests: DailyQuestView[];
+  /** Present only on `/daily/claim`, only for an enrolled account. */
+  mission_contribution?: unknown;
+}
+
+/** Mission slice v0 read API. A non-enrolled caller is a 404 by design, which
+ *  `get()` collapses to `null` — the same «no mission» answer as a build with
+ *  the feature off. Shape validation belongs to `mission-core.mjs`. */
+export function apiMissionCase(): Promise<unknown | null> {
+  return get<unknown>('/api/mission/case');
 }
 
 function tzOffsetMinutes(): number {

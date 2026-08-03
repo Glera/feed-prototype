@@ -121,6 +121,16 @@ import { track } from './telemetry';
 import { mountIslandVisitAwardCard } from './island-p2-card.mjs';
 import { burstConfetti } from './fx';
 import { hasPendingStageUpgrade } from './island-celebrations';
+// Mission slice v0. Every entry point is a no-op unless VITE_MISSION_ENABLED and
+// the /session `mission_dogfood` capability are both present, so the calls below
+// stay inert (and mount nothing) in the production build.
+import {
+  applyMissionCapability,
+  mountMissionHud,
+  presentMissionContribution,
+  presentMissionDailyContribution,
+  refreshMissionCase,
+} from './mission';
 import { userScopedStorage, userScopedStorageKey } from './user-scope';
 import {
   getStartParam,
@@ -1057,6 +1067,11 @@ export class Feed {
     this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
     this.applyOperatorDebugEntryCapability(session.catalog_lab_authorization_available);
     this.applyOperatorLevelFlaggingCapability(session.operator_level_flagging_available);
+    // Boot AND every foreground land here, which is exactly where the UNLOCKED /
+    // FULFILLED ceremonies are owed from the read API (each shown once, by
+    // watermark).
+    applyMissionCapability(session.mission_dogfood);
+    void refreshMissionCase();
     this.applyServerBalance(session.balance);
     if (typeof session.puzzles === 'number') this.applyServerPuzzles(session.puzzles);
     await this.syncDaily(false);
@@ -3082,6 +3097,7 @@ export class Feed {
         this.applyServerPuzzles(state.puzzle_balance);
         this.renderDailyPanel();
         this.updateDailyNavAlert();
+        this.presentMissionDaily(state);
       });
     } catch (error) {
       const status = error instanceof ApiRequestError ? error.status : 0;
@@ -3104,6 +3120,16 @@ export class Feed {
         void this.syncDaily(false);
       });
     }
+  }
+
+  /** Every SUCCESS of the daily claim — the first answer and every background
+   *  retry — goes through this one presenter. After a lost response or the
+   *  retryable 503 of an empty case queue the contribution is committed later,
+   *  and its receipt exists only on that retry's answer. `mission.ts`
+   *  deduplicates by the immutable contribution seq, so this is still exactly
+   *  one ceremony (and one history row) per contribution. */
+  private presentMissionDaily(state: DailyStateResp): void {
+    presentMissionDailyContribution(state, this.dailyPanelEl?.querySelector('.daily-panel__list') ?? null);
   }
 
   private dailyClaimRefusalText(error: unknown): string {
@@ -3135,6 +3161,7 @@ export class Feed {
           this.applyServerPuzzles(state.puzzle_balance);
           this.renderDailyPanel();
           this.updateDailyNavAlert();
+          this.presentMissionDaily(state);
         } catch (error) {
           const status = error instanceof ApiRequestError ? error.status : 0;
           if (status >= 400 && status < 500) {
@@ -5013,6 +5040,16 @@ export class Feed {
     const payoutRunId = this.series?.payoutRunId ?? null;
     const lastRunId = this.series?.lastRunId ?? null;
     const catalogSeries = Boolean(this.series?.catalog);
+    // Mission contribution ceremony — first in the CTA stack, above the challenge
+    // pill. It waits for THIS run's outbox receipt and renders only the committed
+    // `mission_contribution` bytes, so a slow/retried result simply arrives later.
+    if (payoutRunId) {
+      void presentMissionContribution({
+        runId: payoutRunId,
+        parent: () => this.stateEls[i]?.querySelector<HTMLElement>('.reward') ?? null,
+        alive: () => this.seriesWinShown.has(i) && this.series?.payoutRunId === payoutRunId,
+      });
+    }
     const showFallbackPrompt = () => {
       if (
         lastRunId
@@ -5991,6 +6028,10 @@ export class Feed {
       this.friendsHudEl = cluster;
       this.renderFriendsHud();   // empty cells now; the network refresh runs post-/session
     }
+    // Mission: the case bar joins the same single row (centre), and the puzzle
+    // badge is rethemed into the paw badge — but only after /session proves the
+    // capability, so nothing is inserted here for anybody else.
+    mountMissionHud(hud, this.viewport);
   }
 
 
