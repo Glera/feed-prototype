@@ -194,8 +194,8 @@ const publicIslandView = (ownerId) => {
       is_public: true,
       gift_available_today: true,
     }],
-    deep_link: `${origin}/?island=${friend.user_id}`,
-    share_url: `${origin}/?island=${friend.user_id}`,
+    deep_link: `${origin}/?island=${friend.user_id}&helpmap=0`,
+    share_url: `${origin}/?island=${friend.user_id}&helpmap=0`,
   };
 };
 
@@ -308,7 +308,7 @@ try {
   );
 
   // ── а. first entry: non-zero stages must NOT celebrate history ─────────────
-  await page.goto(`${origin}/?initData=ceremony-browser`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${origin}/?initData=ceremony-browser&helpmap=0`, { waitUntil: 'domcontentloaded' });
   await metaTab.waitFor({ state: 'visible', timeout: 20_000 });
   await sleep(600);
   assert.equal(await islandAlert.isVisible(), false, 'а: an unknown house must not light the "!" badge');

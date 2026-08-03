@@ -121,7 +121,7 @@ try {
   const gotoAwaitingSession = async (page, origin, query) => {
     const sessionSeen = page.waitForResponse((r) =>
       new URL(r.url()).pathname === '/api/session' && r.request().method() === 'POST').catch(() => null);
-    await page.goto(`${origin}/?${new URLSearchParams(query).toString()}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${origin}/?${new URLSearchParams(query).toString()}&helpmap=0`, { waitUntil: 'domcontentloaded' });
     await sessionSeen;
   };
   const shot = (p, n) => p.screenshot({ path: path.join(ARTIFACT_DIR, `${n}.png`) });

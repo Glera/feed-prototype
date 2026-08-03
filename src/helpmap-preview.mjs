@@ -12,14 +12,23 @@
 // демо-данные», риска для чужих сессий нет. Параметрный механизм сохранён:
 // когда появятся реальные пользователи, вернуть гейт = заменить
 // DEFAULT_ON на false (и обновить check-helpmap-preview).
+// Явный выключатель нужен и при DEFAULT_ON: вкладка «Мета» — единственный
+// вход в остров, поэтому сценарии, которым нужен именно остров (браузерные
+// чеки островных путей), обязаны уметь отказаться от карты. `?helpmap=0`
+// проверяется ПЕРВЫМ и перебивает всё остальное.
 const DEFAULT_ON = true;
 
+function param(search, name) {
+  try {
+    return new URLSearchParams(String(search || '')).get(name);
+  } catch {
+    return null;
+  }
+}
+
 export function helpMapPreviewRequested({ search = '', startParam = null } = {}) {
+  if (param(search, 'helpmap') === '0') return false;
   if (DEFAULT_ON) return true;
   if (startParam === 'helpmap') return true;
-  try {
-    return new URLSearchParams(String(search || '')).get('helpmap') === '1';
-  } catch {
-    return false;
-  }
+  return param(search, 'helpmap') === '1';
 }

@@ -38,10 +38,16 @@ ok(helpMapPreviewRequested({ search: '?a=b&helpmap=1&c=d' }), true, '?helpmap=1 
 for (const startParam of ['helpmapper', 'HELPMAP', 'Helpmap', ' helpmap', 'helpmap ', 'diag', 'lab_auth', '']) {
   ok(helpMapPreviewRequested({ startParam }), true, `DEFAULT_ON: startParam ${JSON.stringify(startParam)} тоже даёт открытое превью`);
 }
-for (const search of ['?helpmap', '?helpmap=', '?helpmap=0', '?helpmap=2', '?helpmap=true',
+for (const search of ['?helpmap', '?helpmap=', '?helpmap=2', '?helpmap=true',
   '?helpmapper=1', '?nothelpmap=1', '?diag=1', '?metaworld=1']) {
   ok(helpMapPreviewRequested({ search }), true, `DEFAULT_ON: search ${JSON.stringify(search)} тоже даёт открытое превью`);
 }
+// Единственный выключатель. Он нужен и при DEFAULT_ON: вкладка «Мета» — это
+// единственный вход в остров, поэтому островные сценарии обязаны уметь
+// отказаться от карты. Проверяется первым и перебивает всё остальное.
+ok(helpMapPreviewRequested({ search: '?helpmap=0' }), false, 'помимо DEFAULT_ON: ?helpmap=0 выключает превью');
+ok(helpMapPreviewRequested({ search: '?helpmap=0', startParam: 'helpmap' }), false, '?helpmap=0 перебивает startParam');
+ok(helpMapPreviewRequested({ search: '?a=1&helpmap=0&b=2' }), false, '?helpmap=0 распознаётся в любой позиции');
 // мусор не должен ронять загрузку ленты
 ok(helpMapPreviewRequested({ search: '%%%' }), true, 'DEFAULT_ON: битая строка запроса не бросает');
 ok(helpMapPreviewRequested({ search: null, startParam: undefined }), true, 'DEFAULT_ON: null/undefined безопасны');

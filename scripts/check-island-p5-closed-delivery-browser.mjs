@@ -200,7 +200,7 @@ try {
   const open = async () => {
     const page = await context.newPage();
     page.on('console', (message) => consoleLines.push(message.text()));
-    await page.goto(`${origin}/?initData=p5-browser&island=42`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${origin}/?initData=p5-browser&island=42&helpmap=0`, { waitUntil: 'domcontentloaded' });
     await page.locator('g.isl-sector[data-b="0"]').waitFor({ state: 'attached' });
     return page;
   };
@@ -270,7 +270,7 @@ try {
   }, { state: staleState });
 
   const ownerPage = await context.newPage();
-  await ownerPage.goto(`${origin}/?initData=p5-browser`, { waitUntil: 'domcontentloaded' });
+  await ownerPage.goto(`${origin}/?initData=p5-browser&helpmap=0`, { waitUntil: 'domcontentloaded' });
   await ownerPage.locator('[data-bar-tab="meta"]').click();
   await ownerPage.locator('.island-world').waitFor({ state: 'attached' });
   await ownerPage.waitForFunction(() => {
