@@ -3636,9 +3636,8 @@ export class Feed {
     return !!this.playables[i];
   }
 
-  // Per-mechanic series length. pins runs its 2 real authored levels; everything
-  // else keeps the default 5-level (param-varied) run. Add mechanics here as they
-  // get real multi-level content.
+  // Per-mechanic series length. Explicit policy entries preserve authored
+  // multi-level runs; unknown mechanics safely default to one game.
   private seriesLenFor(mechanicId: string): number {
     return seriesLength(mechanicId);
   }
