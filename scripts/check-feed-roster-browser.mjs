@@ -51,6 +51,8 @@ const challenge = {
 };
 const cpEvents = [];
 const ticketRequests = [];
+const playableReworkRequests = [];
+let operatorCapability = true;
 let origin = '';
 
 const json = (response, value, status = 200) => {
@@ -87,6 +89,7 @@ const server = createServer(async (request, response) => {
       puzzles: 0,
       is_new: false,
       backend_version: 'roster-browser',
+      operator_level_flagging_available: operatorCapability,
       feedRoster: nextRoster,
     });
   }
@@ -100,6 +103,25 @@ const server = createServer(async (request, response) => {
         status: 'projected',
         reject_reason: null,
       })),
+    });
+  }
+  if (request.method === 'POST' && url.pathname === '/api/operator-playable-reworks') {
+    const body = await bodyOf(request);
+    playableReworkRequests.push(structuredClone(body));
+    if (playableReworkRequests.length === 1) await new Promise((resolve) => setTimeout(resolve, 350));
+    return json(response, {
+      schema: 'feed.playable-rework.v1',
+      requestId: body.mutationId,
+      actorUserId: 42,
+      requestHash: 'e'.repeat(64),
+      request: body,
+      state: 'open',
+      releaseId: null,
+      claimedAt: null,
+      closedAt: null,
+      closeReceiptDigest: null,
+      createdAt: body.context.capturedAt,
+      replayed: playableReworkRequests.length > 1,
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/events') return json(response, { ok: true });
@@ -130,8 +152,14 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/versions.json') {
     return json(response, Object.fromEntries([...initialRoster.entries.map((entry) => [
       entry.playableId,
-      { version: 'roster-browser', mountCost: 'light' },
-    ]), [challengePlayableId, { version: 'roster-browser', mountCost: 'light' }]]));
+      {
+        version: 'roster-browser', mountCost: 'light',
+        sourceCommit: 'a'.repeat(40), runtimeArtifactDigest: `sha256:${'b'.repeat(64)}`,
+      },
+    ]), [challengePlayableId, {
+      version: 'roster-browser', mountCost: 'light',
+      sourceCommit: 'a'.repeat(40), runtimeArtifactDigest: `sha256:${'b'.repeat(64)}`,
+    }]]));
   }
   if (url.pathname === '/' || url.pathname === '/index.html') {
     response.setHeader('content-type', 'text/html; charset=utf-8');
@@ -163,6 +191,7 @@ const build = spawnSync('npm', ['run', 'build'], {
     VITE_CATALOG_PLAYER_V2_ENABLED: 'false',
     VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'false',
     VITE_CATALOG_CANARY_DOGFOOD_ENABLED: 'false',
+    VITE_OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS: '150',
   },
 });
 if (build.status !== 0) {
@@ -197,11 +226,11 @@ try {
   }, { data: initData, snapshot: initialRoster, rosterKey: ROSTER_SNAPSHOT_KEY });
 
   await page.goto(`${origin}/?initData=${encodeURIComponent(initData)}`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector(`iframe[title="${initialRoster.entries[0].playableId}"]`, { timeout: 5000 });
+  await page.waitForSelector(`iframe[title="${nextRoster.entries[0].playableId}"]`, { timeout: 5000 });
   assert.equal(
     await page.locator('.page--in-viewport iframe').getAttribute('title'),
-    initialRoster.entries[0].playableId,
-    'the frozen startup snapshot owns the current session order',
+    nextRoster.entries[0].playableId,
+    'a fresh verified /session roster owns the first opened ring',
   );
   await page.waitForFunction(([activationId, rosterKey]) => {
     const raw = localStorage.getItem(rosterKey);
@@ -209,25 +238,45 @@ try {
   }, [nextRoster.activationId, ROSTER_SNAPSHOT_KEY], { timeout: 5000 });
   assert.equal(
     await page.locator('.page--in-viewport iframe').getAttribute('title'),
-    initialRoster.entries[0].playableId,
-    'a newer /session activation cannot reorder the live ring',
+    nextRoster.entries[0].playableId,
+    'the chosen first-open ring remains immutable after mount',
   );
+  const rework = page.locator('.page--in-viewport .game__operator-playable-rework');
+  await rework.waitFor({ state: 'visible', timeout: 5000 });
+  await page.locator('.page--in-viewport iframe').evaluate((frame) => { frame.dataset.runId = 'fresh-run-from-phone'; });
+  await rework.locator('.game__operator-flag-open').click();
+  await rework.locator('textarea[name="instruction"]').fill('Увеличить подпись на текущем экране');
+  await rework.locator('button[type="submit"]').click();
+  await rework.locator('.game__operator-flag-status')
+    .filter({ hasText: 'Не удалось сохранить задачу' }).waitFor({ timeout: 3000 });
+  await rework.locator('button[type="submit"]').click();
+  await rework.locator('.game__operator-flag-status')
+    .filter({ hasText: 'ждёт подключения Labs' }).waitFor({ timeout: 3000 });
+  assert.equal(playableReworkRequests.length, 2);
+  assert.deepEqual(playableReworkRequests[1], playableReworkRequests[0],
+    'transport retry must replay the exact mutationId, capturedAt and request bytes');
+  assert.equal(playableReworkRequests[0].playableId, nextRoster.entries[0].playableId);
+  assert.equal(playableReworkRequests[0].mappingId, nextRoster.entries[0].builtinMappingId);
+  assert.equal(playableReworkRequests[0].rosterActivationId, nextRoster.activationId);
+  assert.equal(playableReworkRequests[0].runtime.artifactDigest, `sha256:${'b'.repeat(64)}`);
+  assert.equal(playableReworkRequests[0].context.runId, 'fresh-run-from-phone');
+  assert.equal(playableReworkRequests[0].context.screenshot.reason, 'not_attached');
   for (let retry = 0; retry < 80
     && !cpEvents.some((event) => event.event_name === 'builtin_feed_decision_v2');
     retry += 1) await new Promise((resolve) => setTimeout(resolve, 50));
   const initialV2 = cpEvents.find((event) => event.event_name === 'builtin_feed_decision_v2');
   assert.ok(initialV2);
-  assert.equal(initialV2.payload.roster_activation_id, initialRoster.activationId);
-  assert.equal(initialV2.payload.mapping_id, initialRoster.entries[0].builtinMappingId);
+  assert.equal(initialV2.payload.roster_activation_id, nextRoster.activationId);
+  assert.equal(initialV2.payload.mapping_id, nextRoster.entries[0].builtinMappingId);
 
-  // The one-shot init seed is guarded by sessionStorage: reload consumes the
-  // staged response rather than reinstalling the original fixture.
+  // A later open remains on the same server-owned activation; no second open
+  // is required to make a newly activated mechanic visible.
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector(`iframe[title="${nextRoster.entries[0].playableId}"]`, { timeout: 5000 });
   assert.equal(
     await page.locator('.page--in-viewport iframe').getAttribute('title'),
     nextRoster.entries[0].playableId,
-    'the staged activation applies on the next session load',
+    'the fresh activation remains stable on later opens',
   );
 
   for (let retry = 0; retry < 80
@@ -302,7 +351,7 @@ try {
   await challengePage.locator('.game--show-close .game__close').click();
   await challengePage.waitForFunction((playableId) =>
     document.querySelector('.page--in-viewport iframe')?.getAttribute('title') === playableId,
-  initialRoster.entries[0].playableId, { timeout: 5000 });
+  nextRoster.entries[0].playableId, { timeout: 5000 });
   let rosterV2 = cpEvents.slice(challengeEventOffset).find((event) =>
     event.event_name === 'builtin_feed_decision_v2');
   for (let retry = 0; retry < 80 && !rosterV2; retry += 1) {
@@ -311,11 +360,30 @@ try {
       event.event_name === 'builtin_feed_decision_v2');
   }
   assert.ok(rosterV2, 'the first default roster unit after challenge emits CP v2');
-  assert.equal(rosterV2.payload.mapping_id, initialRoster.entries[0].builtinMappingId);
-  assert.equal(rosterV2.payload.roster_activation_id, initialRoster.activationId);
+  assert.equal(rosterV2.payload.mapping_id, nextRoster.entries[0].builtinMappingId);
+  assert.equal(rosterV2.payload.roster_activation_id, nextRoster.activationId);
   await challengeContext.close();
 
-  console.log('feed roster browser: next-session order, forced challenge isolation and CP v2 verified');
+  operatorCapability = false;
+  const ordinaryContext = await browser.newContext({ viewport: { width: 390, height: 760 } });
+  const ordinaryPage = await ordinaryContext.newPage();
+  await ordinaryPage.addInitScript(({ data, snapshot, rosterKey }) => {
+    window.Telegram = { WebApp: {
+      initData: data,
+      initDataUnsafe: { user: { id: 42 }, start_param: null },
+      platform: 'web',
+      ready() {}, expand() {}, disableVerticalSwipes() {}, lockOrientation() {},
+      setHeaderColor() {}, setBackgroundColor() {}, onEvent() {},
+    } };
+    localStorage.setItem(rosterKey, JSON.stringify(snapshot));
+  }, { data: initData, snapshot: initialRoster, rosterKey: ROSTER_SNAPSHOT_KEY });
+  await ordinaryPage.goto(`${origin}/?initData=${encodeURIComponent(initData)}&ordinary=1`, { waitUntil: 'domcontentloaded' });
+  await ordinaryPage.waitForSelector(`iframe[title="${nextRoster.entries[0].playableId}"]`, { timeout: 5000 });
+  assert.equal(await ordinaryPage.locator('.game__operator-playable-rework').count(), 0,
+    'capability=false exposed the mobile rework control to an ordinary player');
+  await ordinaryContext.close();
+
+  console.log('feed roster browser: first-open roster, mobile rework retry/capability, forced challenge isolation and CP v2 verified');
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));

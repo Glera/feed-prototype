@@ -168,6 +168,23 @@ export async function loadVerifiedFeedRosterSessionSnapshot(
 }
 
 /**
+ * Pick the immutable roster before Feed construction. A resolved /session is
+ * newer authority than local storage and may therefore take effect on this
+ * very first open. ``undefined`` means the bounded bootstrap did not answer in
+ * time, so the last verified snapshot remains the offline fallback; ``null``
+ * is an explicit server-owned return to the baked roster.
+ */
+export async function feedRosterSnapshotForBoot(
+  persisted,
+  freshValue,
+  cryptoImpl = globalThis.crypto,
+) {
+  if (freshValue === undefined) return persisted;
+  if (freshValue === null) return null;
+  try { return await verifyFeedRosterSessionV1(freshValue, cryptoImpl); } catch { return null; }
+}
+
+/**
  * Stage the authoritative document for the next page/session. Missing or
  * invalid data removes an older snapshot instead of keeping stale authority.
  */

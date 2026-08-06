@@ -3,9 +3,9 @@ import { createFeed } from './feed';
 import { setMechanicVersions } from './playables';
 import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam } from './telegram';
 import { initTelemetry } from './telemetry';
-import { apiGetChallenge, apiPublicIsland, type ChallengeView, type PublicIslandView } from './api';
+import { apiGetChallenge, apiPublicIsland, apiSessionRequired, type ChallengeView, type PublicIslandView, type SessionResp } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
-import { loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
+import { feedRosterSnapshotForBoot, loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 import { userScopedStorage } from './user-scope';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
@@ -56,15 +56,36 @@ async function boot(): Promise<void> {
   // Friend-invite deep link (startapp=f_<code>): the feed accepts it after the
   // first /session (it owns the toast + the friend HUD), mirroring i_<owner>.
   const friendAcceptCode = islandEnabled ? islandFriendCodeFromParam(sp) : null;
-  // Read exactly once. /session may stage a newer activation later, but a live
-  // ring is immutable under the user's finger; that activation starts on the
-  // next page/session load.
+  // Start /session before constructing the ring. A warm backend normally gives
+  // us the newly activated roster on this first open; after 1s we preserve
+  // the fast/offline boot and the same in-flight request stages it for later.
+  // The ring is still immutable once createFeed receives this snapshot.
   // Per-user storage view: a roster activation is issued to ONE player by
   // /session, and its mapping ids end up on that player's feed decisions.
-  const rosterSnapshot = getInitData()
-    ? await loadVerifiedFeedRosterSessionSnapshot(userScopedStorage(localStorage))
-    : null;
-  createFeed(viewport, feedEl, challenge, publicIsland, rosterSnapshot, friendAcceptCode);
+  let initialSessionPromise: Promise<SessionResp> | null = null;
+  let rosterSnapshot = null;
+  if (getInitData()) {
+    const storage = userScopedStorage(localStorage);
+    const persisted = await loadVerifiedFeedRosterSessionSnapshot(storage);
+    initialSessionPromise = apiSessionRequired();
+    const timeout = Symbol('session-timeout');
+    const initial = await Promise.race([
+      initialSessionPromise.catch(() => null),
+      new Promise<typeof timeout>((resolve) => window.setTimeout(() => resolve(timeout), 1000)),
+    ]);
+    rosterSnapshot = initial === timeout
+      ? persisted
+      : await feedRosterSnapshotForBoot(persisted, initial?.feedRoster);
+  }
+  createFeed(
+    viewport,
+    feedEl,
+    challenge,
+    publicIsland,
+    rosterSnapshot,
+    friendAcceptCode,
+    initialSessionPromise,
+  );
 }
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();

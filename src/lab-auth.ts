@@ -19,6 +19,18 @@ const REVOKE_REASON = 'revoked from Telegram Catalog Lab panel';
 
 type Decision = 'approve' | 'deny';
 
+function mobileCandidateUrl(value: string): URL | null {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol !== 'https:' || host === 'localhost' || host.endsWith('.localhost')
+      || host === '127.0.0.1' || host === '[::1]' || host === '::1') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeUserCode(value: string): string | null {
   const compact = value.trim().toUpperCase().replace(/[\s-]/g, '');
   if (compact.length !== 10 || [...compact].some((char) => !USER_CODE_ALPHABET.has(char))) {
@@ -79,22 +91,54 @@ function promotionSummaryView(summary: CatalogPromotionSummary): HTMLElement {
   const heading = document.createElement('h3');
   const batch = summary.schema === 'catalog.promotion-summary-batch.v1';
   const artifact = summary.schema === 'catalog.artifact-promotion-summary.v1';
+  const playableRelease = summary.schema === 'feed.playable-release-summary.v1';
   heading.textContent = batch
     ? 'Exact publication batch'
-    : artifact ? 'Exact raster-art world' : 'Exact series to publish';
+    : artifact ? 'Exact raster-art world'
+      : playableRelease ? 'Exact playable release' : 'Exact series to publish';
   const count = document.createElement('span');
   count.className = 'lab-auth__promotion-count';
   count.textContent = batch
     ? `${summary.items.length} visual variants`
     : artifact
       ? summary.title
+      : playableRelease
+        ? `${summary.mode} · ${summary.playableId}`
       : `${summary.levels.length} ${summary.levels.length === 1 ? 'level' : 'levels'}`;
   header.append(heading, count);
 
   const identity = document.createElement('div');
   identity.className = 'lab-auth__promotion-identity';
   identity.append(detail(batch ? 'Batch ID' : 'Publish ID', summary.publishId));
-  if (artifact) {
+  if (playableRelease) {
+    identity.append(
+      detail('Playable', summary.playableId),
+      detail('Mode', summary.mode),
+      detail('Source commit', summary.sourceCommit),
+      detail('Previous runtime', summary.previousRuntimeArtifactDigest ?? 'new'),
+      detail('Runtime artifact', summary.runtimeArtifactDigest),
+      detail('Production manifest', summary.productionManifestDigest),
+      detail('Tall cover', summary.coverDigests.tall),
+      detail('Compact cover', summary.coverDigests.compact),
+      detail('Series length', String(summary.seriesLength)),
+    );
+    if (summary.mode === 'add' && summary.rosterDiff) {
+      identity.append(
+        detail('Catalog mechanic', summary.catalogMechanic ?? 'invalid'),
+        detail(
+          'Roster change',
+          `Добавить ${summary.rosterDiff.addedPlayableId} после ${summary.rosterDiff.afterPlayableId}`,
+        ),
+        detail(
+          'Existing roster',
+          summary.rosterDiff.removedPlayableIds.length === 0
+            && !summary.rosterDiff.reorderedExisting
+            ? 'Без удалений и перестановок'
+            : 'Изменение старых механик — отклонить',
+        ),
+      );
+    }
+  } else if (artifact) {
     identity.append(
       detail('Title', summary.title),
       detail('Review target', summary.reviewTargetId),
@@ -113,13 +157,33 @@ function promotionSummaryView(summary: CatalogPromotionSummary): HTMLElement {
   identity.append(
     detail('Request hash', summary.requestHash),
     detail('Content hash', summary.contentHash),
-    detail('Reason', summary.reason),
+    ...(playableRelease ? [] : [detail('Reason', summary.reason)]),
   );
 
   const levels = document.createElement('ol');
   levels.className = 'lab-auth__promotion-levels';
   levels.setAttribute('aria-label', batch ? 'Ordered publication batch' : 'Ordered series levels');
-  if (artifact) {
+  if (playableRelease) {
+    const item = document.createElement('li');
+    item.className = 'lab-auth__promotion-level';
+    const itemHeading = document.createElement('strong');
+    itemHeading.textContent = 'Проверить exact candidate';
+    const candidateUrl = mobileCandidateUrl(summary.candidateUrl);
+    if (candidateUrl) {
+      const candidate = document.createElement('a');
+      candidate.className = 'lab-auth__button lab-auth__button--primary';
+      candidate.href = candidateUrl.toString();
+      candidate.target = '_blank';
+      candidate.rel = 'noopener noreferrer';
+      candidate.textContent = 'Поиграть в candidate';
+      item.append(itemHeading, candidate);
+    } else {
+      const blocked = document.createElement('strong');
+      blocked.textContent = 'Candidate недоступен с телефона — публикация заблокирована';
+      item.append(itemHeading, blocked);
+    }
+    levels.appendChild(item);
+  } else if (artifact) {
     const item = document.createElement('li');
     item.className = 'lab-auth__promotion-level';
     const itemHeading = document.createElement('strong');
@@ -372,6 +436,7 @@ export async function mountCatalogLabAuth(): Promise<void> {
   let activeCode = '';
   let activeAuthorization: CatalogLabDeviceAuthorization | null = null;
   let decisionPending = false;
+  let activeCandidateSafe = true;
   let grantsPending = false;
 
   const clearSensitiveCode = (): void => {
@@ -382,6 +447,7 @@ export async function mountCatalogLabAuth(): Promise<void> {
   const showUnavailable = (): void => {
     clearSensitiveCode();
     activeAuthorization = null;
+    activeCandidateSafe = true;
     codeSection.hidden = true;
     requestSection.hidden = true;
     successSection.hidden = true;
@@ -408,25 +474,32 @@ export async function mountCatalogLabAuth(): Promise<void> {
     const promotion = authorization.promotionSummary;
     const promotionBatch = promotion?.schema === 'catalog.promotion-summary-batch.v1';
     const promotionArtifact = promotion?.schema === 'catalog.artifact-promotion-summary.v1';
+    const playableRelease = promotion?.schema === 'feed.playable-release-summary.v1';
+    activeCandidateSafe = !playableRelease || mobileCandidateUrl(promotion.candidateUrl) !== null;
     title.textContent = promotion
       ? promotionBatch
         ? 'Approve an exact batch'
-        : promotionArtifact ? 'Approve an exact raster world' : 'Approve an exact series'
+        : promotionArtifact ? 'Approve an exact raster world'
+          : playableRelease ? 'Подтвердить релиз механики' : 'Approve an exact series'
       : 'Authorize a Lab computer';
     copy.textContent = promotion
-      ? promotionArtifact
+      ? playableRelease
+        ? 'Сначала сыграйте в HTTPS candidate. Это одноразовое решение разрешает опубликовать только показанные source, runtime и обложки.'
+        : promotionArtifact
         ? 'This is a one-time publication decision, not general access. Compare the immutable art, runtime, and gameplay identities below with the reviewed candidate.'
         : 'This is a one-time publication decision, not general access. Compare the immutable series identity below with the reviewed morning candidate.'
       : 'Review the device and permission before you approve it.';
     requestEyebrow.textContent = promotion
       ? promotionBatch
         ? 'Exact batch publication'
-        : promotionArtifact ? 'Exact raster-world publication' : 'Exact series publication'
+        : promotionArtifact ? 'Exact raster-world publication'
+          : playableRelease ? 'Exact playable release' : 'Exact series publication'
       : 'Permission request';
     requestTitle.textContent = promotion
       ? promotionBatch
         ? `${promotion.items.length} approved visual variants`
-        : promotionArtifact ? promotion.title : `${promotion.mechanic} · ${promotion.variant}`
+        : promotionArtifact ? promotion.title
+          : playableRelease ? promotion.playableId : `${promotion.mechanic} · ${promotion.variant}`
       : authorization.clientName;
     requestDetails.replaceChildren(
       detail('Computer', authorization.clientName),
@@ -436,7 +509,9 @@ export async function mountCatalogLabAuth(): Promise<void> {
     );
     if (promotion) requestDetails.appendChild(promotionSummaryView(promotion));
     requestWarning.textContent = promotion
-      ? promotionBatch
+      ? playableRelease
+        ? 'Подтверждение связано только с exact candidate и сгорает после этого релиза. Оно не даёт Labs постоянного права публикации.'
+        : promotionBatch
         ? 'Approval authorizes only this immutable ordered batch. Each item keeps its own idempotent publish receipt; no item outside the batch can use this authorization.'
         : promotionArtifact
           ? 'Approval authorizes this exact immutable raster world once. Verify the art pack, runtime, and gameplay fingerprints before approving; no other world can use this authorization.'
@@ -445,17 +520,20 @@ export async function mountCatalogLabAuth(): Promise<void> {
     approve.textContent = promotion
       ? promotionBatch
         ? 'Approve exact batch'
-        : promotionArtifact ? 'Approve exact raster world' : 'Approve exact publication'
+        : promotionArtifact ? 'Approve exact raster world'
+          : playableRelease ? 'Принять и опубликовать' : 'Approve exact publication'
       : 'Approve';
     const pending = authorization.state === 'pending';
     decisionButtons.hidden = !pending;
+    approve.disabled = pending && !activeCandidateSafe;
     if (!pending) {
       clearSensitiveCode();
       decisionStatus.textContent = authorization.state === 'consumed'
         ? 'This request has already been used.'
         : `This request is already ${authorization.state}.`;
     } else {
-      decisionStatus.textContent = '';
+      decisionStatus.textContent = activeCandidateSafe
+        ? '' : 'Нужен публичный HTTPS candidate; localhost/http нельзя подтвердить с телефона.';
     }
     codeSection.hidden = true;
     successSection.hidden = true;
@@ -569,12 +647,16 @@ export async function mountCatalogLabAuth(): Promise<void> {
 
   const decide = async (decision: Decision): Promise<void> => {
     if (decisionPending || !activeAuthorization || !activeCode) return;
+    if (decision === 'approve' && !activeCandidateSafe) {
+      decisionStatus.textContent = 'Публикация заблокирована: candidate не является публичным HTTPS URL.';
+      return;
+    }
     const verb = decision === 'approve' ? 'Approve' : 'Deny';
     const promotion = activeAuthorization.promotionSummary;
     const confirmed = await showConfirm(
       decision === 'approve'
         ? promotion
-          ? `${verb} exact publication ${promotion.publishId} with content hash ${promotion.contentHash}?`
+        ? `${verb} exact publication ${promotion.publishId} with content hash ${promotion.contentHash}?`
           : `${verb} “${activeAuthorization.clientName}” for ${scopeLabel(activeAuthorization.scopes)}?`
         : `${verb} the access request from “${activeAuthorization.clientName}”?`,
     );
@@ -599,7 +681,9 @@ export async function mountCatalogLabAuth(): Promise<void> {
         : 'Request denied';
       successCopy.textContent = decision === 'approve'
         ? promotion
-          ? `“${result.clientName}” can now complete the short-lived exchange for this exact series only.`
+          ? promotion.schema === 'feed.playable-release-summary.v1'
+            ? `“${result.clientName}” теперь может опубликовать только этот exact playable release.`
+            : `“${result.clientName}” can now complete the short-lived exchange for this exact series only.`
           : `“${result.clientName}” can now complete the short-lived token exchange. You can revoke it below at any time.`
         : `“${result.clientName}” was not granted access.`;
       successSection.hidden = false;
@@ -612,7 +696,7 @@ export async function mountCatalogLabAuth(): Promise<void> {
       decisionStatus.textContent = decisionErrorMessage(error);
     } finally {
       decisionPending = false;
-      approve.disabled = false;
+      approve.disabled = !activeCandidateSafe;
       deny.disabled = false;
     }
   };

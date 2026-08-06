@@ -44,6 +44,11 @@ export function loadVerifiedFeedRosterSessionSnapshot(
   storage: Storage,
   cryptoImpl?: Crypto,
 ): Promise<Readonly<FeedRosterSessionV1> | null>;
+export function feedRosterSnapshotForBoot(
+  persisted: Readonly<FeedRosterSessionV1> | null,
+  freshValue: unknown | undefined,
+  cryptoImpl?: Crypto,
+): Promise<Readonly<FeedRosterSessionV1> | null>;
 export function stageFeedRosterForNextSession(
   storage: Storage,
   value: unknown,

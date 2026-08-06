@@ -340,11 +340,25 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(scenarios.delayed.generatedOfferRequests.length, 1,
     'navigation must not mint another generated-offer request');
+  await waitFor(
+    () => scenarios.delayed.cpEvents.filter(
+      (event) => event.event_name === 'builtin_feed_decision',
+    ).length === 1,
+    10000,
+    'the visible navigation decision did not reach the control-plane outbox',
+  );
   const delayedDecisionEvents = scenarios.delayed.cpEvents.filter(
     (event) => event.event_name === 'builtin_feed_decision',
   );
   assert.equal(delayedDecisionEvents.length, 1,
     'background discovery must not synthesize an impression-less built-in decision');
+  await waitFor(
+    () => scenarios.delayed.cpEvents.filter(
+      (event) => event.event_name === 'unit_impression',
+    ).length === 1,
+    10000,
+    'the visible built-in impression did not reach the control-plane outbox',
+  );
   assert.equal(
     scenarios.delayed.cpEvents.filter((event) => event.event_name === 'unit_impression').length,
     1,

@@ -26,6 +26,7 @@ import type {
   OperatorLevelFlagRequestV1,
   OperatorLevelFlagResponseV1,
 } from './operator-level-flags.mjs';
+import type { OperatorPlayableReworkRequestV1 } from './operator-playable-reworks.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -330,6 +331,32 @@ export function apiCreateOperatorLevelFlagRequired(
 ): Promise<OperatorLevelFlagResponseV1> {
   return postRequired<OperatorLevelFlagResponseV1>(
     '/api/operator-level-flags',
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export interface OperatorPlayableReworkResponseV1 {
+  schema: 'feed.playable-rework.v1';
+  requestId: string;
+  actorUserId: number;
+  requestHash: string;
+  request: OperatorPlayableReworkRequestV1;
+  state: 'open' | 'claimed' | 'closed';
+  releaseId: string | null;
+  claimedAt: string | null;
+  closedAt: string | null;
+  closeReceiptDigest: string | null;
+  createdAt: string;
+  replayed: boolean;
+}
+
+/** Capture one exact built-in playable rework from the signed TMA session. */
+export function apiCreateOperatorPlayableReworkRequired(
+  payload: OperatorPlayableReworkRequestV1,
+): Promise<OperatorPlayableReworkResponseV1> {
+  return postRequired<OperatorPlayableReworkResponseV1>(
+    '/api/operator-playable-reworks',
     payload,
     OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
   );
@@ -1518,10 +1545,35 @@ export interface CatalogPromotionArtifactSummary {
   reason: string;
 }
 
+export interface PlayableReleaseSummary {
+  schema: 'feed.playable-release-summary.v1';
+  publishId: string;
+  requestHash: string;
+  contentHash: string;
+  mode: 'update' | 'add';
+  playableId: string;
+  sourceCommit: string;
+  previousRuntimeArtifactDigest: string | null;
+  runtimeArtifactDigest: string;
+  productionManifestDigest: string;
+  coverDigests: { tall: string; compact: string };
+  candidateUrl: string;
+  seriesLength: number;
+  catalogMechanic: string | null;
+  mechanicFamily: string | null;
+  rosterDiff: {
+    addedPlayableId: string;
+    afterPlayableId: string;
+    removedPlayableIds: string[];
+    reorderedExisting: boolean;
+  } | null;
+}
+
 export type CatalogPromotionSummary =
   | CatalogPromotionSingleSummary
   | CatalogPromotionBatchSummary
-  | CatalogPromotionArtifactSummary;
+  | CatalogPromotionArtifactSummary
+  | PlayableReleaseSummary;
 
 export interface CatalogLabDeviceAuthorization {
   authorizationId: string;

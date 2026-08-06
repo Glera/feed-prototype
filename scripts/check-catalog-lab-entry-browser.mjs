@@ -16,6 +16,7 @@ const requestLog = [];
 let origin = '';
 let catalogLabAvailable = false;
 let sessionRequests = 0;
+let lookupRequests = 0;
 
 const artifactAuthorization = {
   authorizationId: '6b447be0-f961-482e-aa03-b419d5f1492d',
@@ -40,6 +41,39 @@ const artifactAuthorization = {
     reason: 'Human-good raster-art vertical.',
   },
 };
+
+const playableReleaseAuthorization = () => ({
+  authorizationId: '7b447be0-f961-482e-aa03-b419d5f1492d',
+  clientName: 'Mechanic Lab playable release',
+  clientInstanceId: '3435ba2d-34cb-4590-841d-7edbb52ba598',
+  scopes: ['feed.playable-release:write'],
+  state: 'pending',
+  expiresAt: '2026-08-06T19:30:00.000Z',
+  decisionVersion: 0,
+  promotionSummary: {
+    schema: 'feed.playable-release-summary.v1',
+    publishId: '8b447be0-f961-482e-aa03-b419d5f1492d',
+    requestHash: '1'.repeat(64),
+    contentHash: '2'.repeat(64),
+    mode: 'add',
+    playableId: 'solitaire-v1-swipe',
+    sourceCommit: '3'.repeat(40),
+    previousRuntimeArtifactDigest: `sha256:${'4'.repeat(64)}`,
+    runtimeArtifactDigest: `sha256:${'5'.repeat(64)}`,
+    productionManifestDigest: '6'.repeat(64),
+    coverDigests: { tall: '7'.repeat(64), compact: '8'.repeat(64) },
+    candidateUrl: 'https://platform.example.test/playable-previews/exact/solitaire-v1-swipe.html',
+    seriesLength: 1,
+    catalogMechanic: 'solitaire/klondike',
+    mechanicFamily: 'solitaire',
+    rosterDiff: {
+      addedPlayableId: 'solitaire-v1-swipe',
+      afterPlayableId: 'minesweeper-v1-swipe',
+      removedPlayableIds: [],
+      reorderedExisting: false,
+    },
+  },
+});
 
 const json = (response, value, status = 200) => {
   response.statusCode = status;
@@ -87,7 +121,10 @@ const server = createServer((request, response) => {
   }
   if (request.method === 'POST' && url.pathname === '/api/admin/device-auth/lookup') {
     request.resume();
-    return json(response, artifactAuthorization);
+    lookupRequests += 1;
+    const authorization = playableReleaseAuthorization();
+    if (lookupRequests >= 3) authorization.promotionSummary.candidateUrl = `${origin}/playable-previews/unsafe/solitaire-v1-swipe.html`;
+    return json(response, lookupRequests === 1 ? artifactAuthorization : authorization);
   }
   if (request.method === 'GET' && url.pathname === '/api/challenges') {
     return json(response, { box: 'in', items: [] });
@@ -254,6 +291,28 @@ try {
   assert.match((await artifactSummary.textContent()) || '', new RegExp(`sha256:${'4'.repeat(64)}`));
   assert.match((await artifactSummary.textContent()) || '', new RegExp('f'.repeat(64)));
   assert.equal(await enabledPage.getByRole('button', { name: 'Approve exact raster world' }).count(), 1);
+  await enabledPage.getByRole('button', { name: 'Use another code' }).click();
+
+  await enabledPage.getByLabel('One-time code').fill('34567-89ABC');
+  await enabledPage.getByRole('button', { name: 'Review request' }).click();
+  const releaseSummary = enabledPage.locator('[data-testid="catalog-promotion-summary"]');
+  await releaseSummary.waitFor({ state: 'visible' });
+  assert.match((await releaseSummary.textContent()) || '', /Exact playable release/);
+  assert.match((await releaseSummary.textContent()) || '', /solitaire-v1-swipe/);
+  assert.match((await releaseSummary.textContent()) || '', /Добавить solitaire-v1-swipe после minesweeper-v1-swipe/);
+  assert.match((await releaseSummary.textContent()) || '', /Без удалений и перестановок/);
+  assert.match((await releaseSummary.textContent()) || '', new RegExp(`sha256:${'5'.repeat(64)}`));
+  assert.equal(await enabledPage.getByRole('link', { name: 'Поиграть в candidate' }).getAttribute('href'),
+    'https://platform.example.test/playable-previews/exact/solitaire-v1-swipe.html');
+  assert.equal(await enabledPage.getByRole('button', { name: 'Принять и опубликовать' }).count(), 1);
+  await enabledPage.getByRole('button', { name: 'Use another code' }).click();
+
+  await enabledPage.getByLabel('One-time code').fill('45678-9ABCD');
+  await enabledPage.getByRole('button', { name: 'Review request' }).click();
+  await enabledPage.locator('[data-testid="catalog-promotion-summary"]').waitFor({ state: 'visible' });
+  assert.equal(await enabledPage.getByRole('link', { name: 'Поиграть в candidate' }).count(), 0);
+  assert.equal(await enabledPage.getByText('Candidate недоступен с телефона — публикация заблокирована').count(), 1);
+  assert.equal(await enabledPage.getByRole('button', { name: 'Принять и опубликовать' }).isDisabled(), true);
   await enabledPage.getByRole('button', { name: 'Use another code' }).click();
 
   const returnSession = enabledPage.waitForResponse((response) =>
