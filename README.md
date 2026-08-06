@@ -48,10 +48,12 @@ Vanilla TS + Vite, single-file сборка.
 Поверх механик:
 
 - **Серии.** Длина серии — **своя у каждой механики**, а не фиксированные 5:
-  Pins-пары, `marble-sort` и `merge-timepress-v1` → 2 уровня, `short-drama` → 6,
+  `arrows-v1` → 5 уровней, Pins-пары, `marble-sort` и
+  `merge-timepress-v1` → 2, `short-drama` → 6,
   `minesweeper-v1` / `solitaire-v1` / `merge-locked-v1` /
   `merge-timepress-v2` / `no-orders` / `second-board` → 1,
-  неизвестная механика → 5. Та же таблица решает, кто умеет встроенные уровни
+  неизвестная механика безопасно получает 1 уровень. Та же таблица решает,
+  кто умеет встроенные уровни
   (`?level=`): `minesweeper-v1` всегда открывает уровень `1`, `arrows-v1` идёт
   в порядке `11 → 12 → 13 → 14 → 10`;
   `pins`, `pins-lN` и `short-drama` используют свой последовательный порядок,
