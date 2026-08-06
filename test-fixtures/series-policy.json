@@ -7,6 +7,7 @@
     { "mechanic_id": "pins-l9-swipe", "levels": 2 },
     { "mechanic_id": "pins-special-swipe", "levels": 2 },
     { "mechanic_id": "minesweeper-v1-swipe", "levels": 1 },
+    { "mechanic_id": "solitaire-v1-swipe", "levels": 1 },
     { "mechanic_id": "merge-locked-v1-swipe", "levels": 1 },
     { "mechanic_id": "marble-sort-swipe", "levels": 2 },
     { "mechanic_id": "merge-timepress-v1-swipe", "levels": 2 },

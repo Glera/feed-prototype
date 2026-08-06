@@ -122,6 +122,7 @@ export const PLAYABLES: Playable[] = [
   { id: 'pins-swipe' },                       // FTUE release levels 1–2
   { id: 'arrows-v1-swipe' },                  // Reference series: 11, 12, 13, 14, 10
   { id: 'minesweeper-v1-swipe' },             // Single-level mobile Minesweeper series
+  { id: 'solitaire-v1-swipe' },               // One complete Klondike deal per series
   { id: 'merge-timepress-v1-swipe' },
   { id: 'merge-timepress-v2-swipe' },
   { id: 'merge-timepress-no-orders-v1-swipe' },
