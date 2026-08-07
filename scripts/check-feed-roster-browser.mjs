@@ -392,6 +392,7 @@ try {
     'Проверки механики не прошли; изменения не опубликованы.',
   );
   await blockerDetails.evaluate((node) => { node.dataset.identityProbe = 'preserve-open-details'; });
+  await page.waitForTimeout(1_100); // cross the foreground restore-edge dedupe window
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/session'),
@@ -405,6 +406,7 @@ try {
   // A later release claim remains a separate lifecycle transition.
   playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
   playableReworkProjectionState = 'claimed';
+  await page.waitForTimeout(1_100); // request a distinct foreground bootstrap
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/session'),
