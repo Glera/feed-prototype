@@ -752,6 +752,23 @@ body {
 .game__operator-flag-status.is-error { color: #ff9d9d; }
 .game__operator-flag-status.is-busy { color: #ffe08a; }
 .game__operator-flag-open--done { opacity: 0.85; color: #7dffb0; }
+.game__operator-playable-rework-details {
+  max-width: min(360px, calc(100vw - 38px));
+  max-height: min(50vh, 360px);
+  margin-top: 8px;
+  padding: 10px 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid rgba(125, 255, 176, 0.3);
+  border-radius: 10px;
+  background: rgba(10, 18, 15, 0.94);
+  color: #f1fff6;
+}
+.game__operator-playable-rework-details[hidden] { display: none; }
+.game__operator-playable-rework-details b { display: block; margin-bottom: 5px; font-size: 12px; }
+.game__operator-playable-rework-details p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 13px; line-height: 1.4; }
+.game__operator-playable-rework-details small { display: block; margin-top: 7px; color: #a7c5b2; font-size: 10px; }
+.game__operator-playable-rework-details small[hidden] { display: none; }
 
 /* Reward badge (top-left): the single star this mechanic awards on a win. Hidden until
    the live mechanic/autoplay is up (not during init), like the reel chrome. */
@@ -816,7 +833,8 @@ body {
    comparison screenshots — pointer-events stay auto (tap still releases the hold). */
 .holdcover .game--autoplay .game__autoplay { opacity: 0; }
 /* holdcover debug badge: let the slot readout wrap instead of running off-screen. */
-.holdcover .feed-bar__version { white-space: normal; overflow: visible; max-width: 92vw; line-height: 1.25; }
+.feed-bar__version { display: none; }
+.holdcover .feed-bar__version { display: block; white-space: normal; overflow: visible; max-width: 92vw; line-height: 1.25; }
 
 /* Single FIXED bottom bar — sits at the feed's bottom, does NOT page with the
    mechanics (slots reserve --swipebar-h above it). Centered button → next mechanic. */
@@ -913,26 +931,26 @@ body {
 .feed-bar__icon--attention svg * { stroke: #ffd85f; }
 .feed-bar__lab {
   position: absolute;
-  right: 8px;
+  left: 42px;
   bottom: calc(var(--safe-bottom) + 8px);
   z-index: 2;
-  min-width: 40px;
+  width: 32px;
   height: 30px;
-  padding: 0 9px;
+  padding: 0;
   border: 1px solid rgba(116, 206, 255, 0.48);
   border-radius: 10px;
   background: linear-gradient(180deg, rgba(40, 102, 138, 0.9), rgba(20, 54, 78, 0.94));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 4px 12px rgba(0, 0, 0, 0.34);
   color: #d9f4ff;
-  font: 900 10px/1 system-ui, sans-serif;
-  letter-spacing: 0.12em;
+  font: 900 9px/1 system-ui, sans-serif;
+  letter-spacing: 0.08em;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
 .feed-bar__lab[hidden] { display: none; }
 .feed-bar__lab:active { transform: scale(0.94); }
 .feed-bar__lab:focus-visible { outline: 2px solid #9bdfff; outline-offset: 2px; }
-/* Debug-panel entry: bottom-right corner of the bar, immediately left of LAB
+/* Debug-panel entry: bottom-left corner of the bar, immediately left of LAB
    (both appear together for an operator). Deliberately dim and outside the
    centred tab switcher, so the four product tabs never shift and no feed
    gesture surface changes. It exists only for an operator / an explicit QA
@@ -959,6 +977,64 @@ body {
 }
 .feed-bar__debug:active { transform: scale(0.94); opacity: 0.9; }
 .feed-bar__debug:focus-visible { outline: 2px solid #9bdfff; outline-offset: 2px; }
+
+/* Mechanic rework is a persistent bar action, not gameplay chrome. The compact
+   button stays at the far right; its form/details intentionally open above the
+   bar only after a tap. The generic .game__operator-flag positioning remains
+   unchanged for level-specific annotations inside a game. */
+.feed-bar .game__operator-playable-rework {
+  position: absolute;
+  right: 8px;
+  bottom: calc(var(--safe-bottom) + 8px);
+  z-index: 3;
+  width: 32px;
+  min-height: 30px;
+}
+.feed-bar .game__operator-playable-rework .game__operator-flag-open {
+  width: 32px;
+  height: 30px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border-color: rgba(202, 169, 255, 0.5);
+  border-radius: 10px;
+  font-size: 15px;
+  line-height: 1;
+}
+.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="open"] {
+  border-color: rgba(125, 255, 176, 0.56);
+  color: #9dffc1;
+}
+.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="claimed"] {
+  border-color: rgba(255, 224, 138, 0.62);
+  color: #ffe08a;
+}
+.feed-bar .game__operator-playable-rework .game__operator-flag-form,
+.feed-bar .game__operator-playable-rework .game__operator-playable-rework-details {
+  position: absolute;
+  right: 0;
+  /* Root sits 8px above the safe area and is 30px high; +30px lands this
+     popover 10px above the 58px visible bar even while the CTA is hidden. */
+  bottom: calc(100% + 30px);
+  width: min(310px, calc(100vw - 24px));
+  box-sizing: border-box;
+}
+.feed-bar .game__operator-playable-rework .game__operator-playable-rework-details {
+  margin: 0;
+}
+.feed-bar:has(.game__operator-playable-rework .game__operator-flag-form:not([hidden])),
+.feed-bar:has(.game__operator-playable-rework .game__operator-playable-rework-details:not([hidden])) {
+  touch-action: pan-y;
+}
+.feed-bar .game__operator-playable-rework .game__operator-flag-form,
+.feed-bar .game__operator-playable-rework .game__operator-playable-rework-details {
+  user-select: text;
+  -webkit-user-select: text;
+}
+@media (max-width: 370px) {
+  .feed-bar__switch { gap: 4px; }
+  .feed-bar__icon { width: 38px; }
+}
 @keyframes daily-alert-in {
   0% { transform: scale(0); }
   62% { transform: scale(1.28); }

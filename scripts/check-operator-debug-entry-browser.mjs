@@ -189,13 +189,21 @@ try {
 
   // It must not sit on top of the LAB button it ships beside, and it must stay
   // out of the centred product tab switcher.
-  const debugBox = await operator.locator(debugSelector).boundingBox();
-  const labBox = await operator.locator(labSelector).boundingBox();
-  const switchBox = await operator.locator('.feed-bar__switch').boundingBox();
   const overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width
     && a.y < b.y + b.height && b.y < a.y + a.height;
-  assert.equal(overlaps(debugBox, labBox), false, 'the debug entry overlaps the LAB button');
-  assert.equal(overlaps(debugBox, switchBox), false, 'the debug entry overlaps the tab switcher');
+  for (const width of [320, 360, 390]) {
+    await operator.setViewportSize({ width, height: 760 });
+    const debugBox = await operator.locator(debugSelector).boundingBox();
+    const labBox = await operator.locator(labSelector).boundingBox();
+    const switchBox = await operator.locator('.feed-bar__switch').boundingBox();
+    assert.equal(overlaps(debugBox, labBox), false,
+      `the debug entry overlaps the LAB button at ${width}px`);
+    assert.equal(overlaps(debugBox, switchBox), false,
+      `the debug entry overlaps the tab switcher at ${width}px`);
+    assert.equal(overlaps(labBox, switchBox), false,
+      `the LAB button overlaps the tab switcher at ${width}px`);
+  }
+  await operator.setViewportSize({ width: 375, height: 812 });
   assert.equal(await operator.locator('.feed-bar__switch .feed-bar__debug').count(), 0,
     'the debug entry must not be a tab of the product switcher');
 
