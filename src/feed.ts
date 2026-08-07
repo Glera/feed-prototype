@@ -8,6 +8,7 @@ import {
   mechanicPrefetchBytes,
   mechanicAssetUrls,
   mechanicIsAvailable,
+  mechanicReleaseIdentity,
   type Playable,
 } from './playables';
 // Series-reward gift icons (inlined into the single-file feed bundle). One is picked
@@ -33,6 +34,7 @@ import {
 import {
   apiSessionRequired, apiMe, variantIdForMechanic,
   apiCreateOperatorLevelFlagRequired,
+  apiCreateOperatorPlayableReworkRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
   apiGetGeneratedOfferRequired,
@@ -169,6 +171,12 @@ import {
   type OperatorLevelFlagOccurrence,
   type OperatorLevelFlagRequestV1,
 } from './operator-level-flags.mjs';
+import {
+  mountOperatorPlayableReworkControl,
+  type OperatorPlayableReworkControl,
+  type OperatorPlayableReworkOccurrence,
+  type OperatorPlayableReworkRequestV1,
+} from './operator-playable-reworks.mjs';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
@@ -725,6 +733,7 @@ export class Feed {
   private debugEntryQaRoute = false;
   private operatorLevelFlaggingAvailable = false;
   private operatorLevelFlagControl: OperatorLevelFlagControl | null = null;
+  private operatorPlayableReworkControl: OperatorPlayableReworkControl | null = null;
   private operatorLevelFlagDraft: Readonly<{
     subjectKey: string;
     draft: Readonly<OperatorLevelFlagDraft>;
@@ -870,6 +879,7 @@ export class Feed {
   private preloaderProgressEl: HTMLElement | null = null;
   private preloaderEl: HTMLElement | null = null;
   private initialTarget = 0;
+  private initialSessionPromise: Promise<SessionResp> | null;
 
   // When the user taps to take over an autoplay demo, restart the mechanic from
   // scratch (fresh level) by default. `?takeover=continue` keeps the old behavior
@@ -917,6 +927,7 @@ export class Feed {
     rosterEntries: ReadonlyArray<FeedRosterSessionEntryV1 | null> = [],
     rosterActivationId: string | null = null,
     friendAcceptCode: string | null = null,
+    initialSessionPromise: Promise<SessionResp> | null = null,
   ) {
     this.viewport = viewport;
     this.feedEl = feedEl;
@@ -927,6 +938,7 @@ export class Feed {
     this.activeChallenge = challenge;
     this.publicIsland = publicIsland;
     this.friendAcceptCode = friendAcceptCode;
+    this.initialSessionPromise = initialSessionPromise;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     const initialPlayableId = this.playables[this.realIndex()]?.id;
@@ -1461,7 +1473,9 @@ export class Feed {
     if (this.sessionSyncPromise) return this.sessionSyncPromise;
     const current = (async () => {
       try {
-        const session = await apiSessionRequired();
+        const pending = this.initialSessionPromise;
+        this.initialSessionPromise = null;
+        const session = await (pending ?? apiSessionRequired());
         this.sessionAuthenticationRejected = false;
         this.clearSessionAuthBanner();
         await this.applySessionBootstrap(session);
@@ -2314,7 +2328,7 @@ export class Feed {
     }
     slot.phase = 'disposed';
     this.catalogSlots.delete(i);
-    this.refreshOperatorLevelFlagControl();
+    this.refreshOperatorControls();
   }
 
   private controlPlaneDwellGates(exposure: ControlPlaneExposure): {
@@ -2430,7 +2444,7 @@ export class Feed {
     };
     this.cpAttempts.set(runId, attempt);
     this.flushControlPlaneAttempt(attempt);
-    this.refreshOperatorLevelFlagControl();
+    this.refreshOperatorControls();
     return attempt;
   }
 
@@ -2683,7 +2697,12 @@ export class Feed {
 
   private applyOperatorLevelFlaggingCapability(value: unknown): void {
     this.operatorLevelFlaggingAvailable = operatorLevelFlaggingAvailable(value);
+    this.refreshOperatorControls();
+  }
+
+  private refreshOperatorControls(): void {
     this.refreshOperatorLevelFlagControl();
+    this.refreshOperatorPlayableReworkControl();
   }
 
   private currentOperatorLevelFlagOccurrence(): OperatorLevelFlagOccurrence | null {
@@ -2752,6 +2771,78 @@ export class Feed {
       submit: (request) => this.submitOperatorLevelFlag(request, occurrence),
     });
     this.operatorLevelFlagDraft = null;
+  }
+
+  private currentOperatorPlayableReworkOccurrence(): OperatorPlayableReworkOccurrence | null {
+    if (!this.operatorLevelFlaggingAvailable) return null;
+    const index = this.realIndex();
+    const generated = this.catalogSlotForIndex(index);
+    if (generated && generated.insertionKind === 'generated' && generated.phase === 'catalog_mounted') return null;
+    if (index !== this.shownIndex || !this.feedActuallyVisible(index)) return null;
+    const playableId = this.playables[index]?.id;
+    const rosterEntry = this.feedRosterEntries[index] ?? null;
+    const activationId = rosterEntry ? this.feedRosterActivationId : null;
+    const legacyBinding = playableId ? this.builtinFeedBindings.get(playableId) : null;
+    const mappingId = rosterEntry?.builtinMappingId ?? legacyBinding?.mapping_id ?? null;
+    const bindingPlayableId = rosterEntry?.playableId ?? legacyBinding?.playable_id ?? null;
+    const runtime = playableId ? mechanicReleaseIdentity(playableId) : null;
+    if (!playableId || !runtime || !mappingId || !activationId
+      || bindingPlayableId !== playableId) return null;
+    const seriesLevel = this.series?.index === index ? this.series.done + 1 : 1;
+    return Object.freeze({
+      playableId,
+      mappingId,
+      rosterActivationId: activationId,
+      runtime: Object.freeze({
+        version: runtime.version,
+        artifactDigest: runtime.runtimeArtifactDigest,
+        sourceCommit: runtime.sourceCommit,
+      }),
+      feedPosition: index,
+      level: this.seriesGameLevel(playableId, seriesLevel),
+      runId: this.frames.get(index)?.dataset.runId ?? null,
+    });
+  }
+
+  private refreshOperatorPlayableReworkControl(): void {
+    const occurrence = this.currentOperatorPlayableReworkOccurrence();
+    const key = occurrence
+      ? `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}`
+      : null;
+    if (this.operatorPlayableReworkControl?.key === key) return;
+    this.operatorPlayableReworkControl?.destroy();
+    this.operatorPlayableReworkControl = null;
+    if (!occurrence) return;
+    const host = this.games[this.realIndex()];
+    if (!host) return;
+    this.operatorPlayableReworkControl = mountOperatorPlayableReworkControl(host, {
+      occurrence,
+      createMutationId: ticketUid,
+      resolveOccurrence: () => {
+        const current = this.currentOperatorPlayableReworkOccurrence();
+        if (!current) throw new ApiRequestError(409, 'The active playable changed', 'playable_rework_stale');
+        return current;
+      },
+      submit: (request) => this.submitOperatorPlayableRework(request),
+    });
+  }
+
+  private async submitOperatorPlayableRework(
+    request: OperatorPlayableReworkRequestV1,
+  ): Promise<void> {
+    const current = this.currentOperatorPlayableReworkOccurrence();
+    const expected = `${request.playableId}:${request.mappingId}:${request.rosterActivationId}:${request.runtime.artifactDigest}`;
+    const actual = current
+      ? `${current.playableId}:${current.mappingId}:${current.rosterActivationId}:${current.runtime.artifactDigest}`
+      : null;
+    if (actual !== expected) {
+      throw new ApiRequestError(409, 'The active playable changed', 'playable_rework_stale');
+    }
+    const response = await apiCreateOperatorPlayableReworkRequired(request);
+    if (response.requestHash.length !== 64 || response.request.playableId !== request.playableId
+      || response.request.mutationId !== request.mutationId) {
+      throw new ApiRequestError(503, 'Playable rework receipt differs', 'playable_rework_receipt_invalid');
+    }
   }
 
   private requireProjectedOperatorFlagEvent(eventId: string | null): void {
@@ -6990,7 +7081,7 @@ export class Feed {
     this.pollAutoplayUi();
     this.markCurrentUnitShownIfVisible();
     this.syncControlPlaneDwell();
-    this.refreshOperatorLevelFlagControl();
+    this.refreshOperatorControls();
   }
 
   /** Pick the cover aspect bucket for THIS device from the real slot box (covers
@@ -9129,7 +9220,7 @@ export class Feed {
     for (const attempt of this.cpAttempts.values()) {
       if (attempt.exposure === exposure) this.flushControlPlaneAttempt(attempt);
     }
-    this.refreshOperatorLevelFlagControl();
+    this.refreshOperatorControls();
   }
 
   private async confirmCanaryCatalogProjection(
@@ -10451,6 +10542,7 @@ export function createFeed(
   publicIsland: PublicIslandView | null = null,
   rosterSnapshot: FeedRosterSessionV1 | null = null,
   friendAcceptCode: string | null = null,
+  initialSessionPromise: Promise<SessionResp> | null = null,
 ) {
   const resolution: FeedRosterResolutionV1 = resolveFeedRosterSession(
     rosterSnapshot,
@@ -10512,5 +10604,6 @@ export function createFeed(
     rosterEntries,
     resolution.source === 'roster' ? resolution.activationId : null,
     friendAcceptCode,
+    initialSessionPromise,
   );
 }

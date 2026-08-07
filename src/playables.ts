@@ -29,6 +29,8 @@ export interface MechanicManifestEntry {
   assets?: string[];
   mediaBytes?: number;
   mountCost?: MechanicMountCost;
+  sourceCommit?: string;
+  runtimeArtifactDigest?: string;
 }
 type MechanicManifestValue = string | MechanicManifestEntry;
 let MECH_MANIFEST: Record<string, MechanicManifestValue> = {};
@@ -48,6 +50,23 @@ function manifestEntry(id: string): MechanicManifestEntry | null {
   const raw = MECH_MANIFEST[htmlFileFor(id)];
   if (!raw) return null;
   return typeof raw === 'string' ? { version: raw } : raw;
+}
+
+export interface MechanicReleaseIdentity {
+  version: string;
+  sourceCommit: string | null;
+  runtimeArtifactDigest: string;
+}
+
+/** Exact static identity shown in the operator-only mobile rework form. */
+export function mechanicReleaseIdentity(id: string): MechanicReleaseIdentity | null {
+  const entry = manifestEntry(id);
+  if (!entry || !/^sha256:[0-9a-f]{64}$/.test(entry.runtimeArtifactDigest || '')) return null;
+  return Object.freeze({
+    version: entry.version,
+    sourceCommit: /^[0-9a-f]{40}$/.test(entry.sourceCommit || '') ? entry.sourceCommit! : null,
+    runtimeArtifactDigest: entry.runtimeArtifactDigest!,
+  });
 }
 
 /** True only when this exact deployment manifest can mount the playable. */

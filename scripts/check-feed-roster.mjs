@@ -8,6 +8,7 @@ import {
   FEED_ROSTER_SNAPSHOT_KEY,
   buildBuiltinFeedDecisionV2,
   feedRosterIdentityJcs,
+  feedRosterSnapshotForBoot,
   loadFeedRosterSessionSnapshot,
   loadVerifiedFeedRosterSessionSnapshot,
   parseFeedRosterSessionV1,
@@ -182,6 +183,26 @@ const reversed = {
   rosterHash: createHash('sha256').update(reversedIdentityJcs).digest('hex'),
   entries: reversedEntries,
 };
+assert.equal(
+  (await feedRosterSnapshotForBoot(currentSessionSnapshot, reversed, webcrypto)).activationId,
+  reversed.activationId,
+  'a fresh verified /session roster is eligible on the first open',
+);
+assert.equal(
+  await feedRosterSnapshotForBoot(currentSessionSnapshot, null, webcrypto),
+  null,
+  'an explicit absent server roster returns to the baked ring',
+);
+assert.equal(
+  (await feedRosterSnapshotForBoot(currentSessionSnapshot, undefined, webcrypto)).activationId,
+  golden.activationId,
+  'a bounded timeout preserves the verified offline snapshot',
+);
+assert.equal(
+  await feedRosterSnapshotForBoot(currentSessionSnapshot, { ...golden, rosterHash: 'f'.repeat(64) }, webcrypto),
+  null,
+  'invalid fresh authority fails closed instead of retaining a stale activation',
+);
 assert.equal((await stageFeedRosterForNextSession(storage, reversed, webcrypto)).status, 'staged');
 assert.deepEqual(
   currentSessionSnapshot.entries.map((entry) => entry.playableId),
@@ -215,4 +236,4 @@ assert.deepEqual(buildBuiltinFeedDecisionV2(
   feed_position: 7,
 });
 
-console.log('feed roster contract: 41 assertions');
+console.log('feed roster contract: 45 assertions');
