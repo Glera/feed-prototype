@@ -35,6 +35,7 @@ import {
   apiSessionRequired, apiMe, variantIdForMechanic,
   apiCreateOperatorLevelFlagRequired,
   apiCreateOperatorPlayableReworkRequired,
+  apiListOperatorPlayableReworksRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
   apiGetGeneratedOfferRequired,
@@ -52,6 +53,7 @@ import {
   type CatalogRunTicketViewV2, type CatalogRunTicketViewV3,
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
   type SessionResp,
+  type OperatorPlayableReworkResponseV1,
 } from './api';
 import {
   queueResult,
@@ -734,6 +736,8 @@ export class Feed {
   private operatorLevelFlaggingAvailable = false;
   private operatorLevelFlagControl: OperatorLevelFlagControl | null = null;
   private operatorPlayableReworkControl: OperatorPlayableReworkControl | null = null;
+  private operatorPlayableReworks = new Map<string, OperatorPlayableReworkResponseV1>();
+  private operatorPlayableReworkSyncEpoch = 0;
   private operatorLevelFlagDraft: Readonly<{
     subjectKey: string;
     draft: Readonly<OperatorLevelFlagDraft>;
@@ -2697,7 +2701,36 @@ export class Feed {
 
   private applyOperatorLevelFlaggingCapability(value: unknown): void {
     this.operatorLevelFlaggingAvailable = operatorLevelFlaggingAvailable(value);
+    if (!this.operatorLevelFlaggingAvailable) {
+      this.operatorPlayableReworkSyncEpoch += 1;
+      this.operatorPlayableReworks.clear();
+    } else {
+      void this.refreshOperatorPlayableReworks();
+    }
     this.refreshOperatorControls();
+  }
+
+  private async refreshOperatorPlayableReworks(): Promise<void> {
+    const epoch = ++this.operatorPlayableReworkSyncEpoch;
+    try {
+      const projection = await apiListOperatorPlayableReworksRequired();
+      if (epoch !== this.operatorPlayableReworkSyncEpoch || !this.operatorLevelFlaggingAvailable
+        || projection?.schema !== 'feed.playable-rework-list.v1'
+        || !Array.isArray(projection.items)) return;
+      const next = new Map<string, OperatorPlayableReworkResponseV1>();
+      for (const item of projection.items) {
+        if (!item || !['open', 'claimed'].includes(item.state)
+          || typeof item.requestId !== 'string'
+          || typeof item.request?.playableId !== 'string'
+          || next.has(item.request.playableId)) continue;
+        next.set(item.request.playableId, item);
+      }
+      this.operatorPlayableReworks = next;
+      this.refreshOperatorPlayableReworkControl();
+    } catch {
+      // The operator surface is fail-quiet: gameplay stays available and a
+      // later foreground sync rehydrates the durable task projection.
+    }
   }
 
   private refreshOperatorControls(): void {
@@ -2806,8 +2839,9 @@ export class Feed {
 
   private refreshOperatorPlayableReworkControl(): void {
     const occurrence = this.currentOperatorPlayableReworkOccurrence();
+    const existing = occurrence ? this.operatorPlayableReworks.get(occurrence.playableId) || null : null;
     const key = occurrence
-      ? `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}`
+      ? `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}`
       : null;
     if (this.operatorPlayableReworkControl?.key === key) return;
     this.operatorPlayableReworkControl?.destroy();
@@ -2817,6 +2851,7 @@ export class Feed {
     if (!host) return;
     this.operatorPlayableReworkControl = mountOperatorPlayableReworkControl(host, {
       occurrence,
+      existing,
       createMutationId: ticketUid,
       resolveOccurrence: () => {
         const current = this.currentOperatorPlayableReworkOccurrence();
@@ -2843,6 +2878,7 @@ export class Feed {
       || response.request.mutationId !== request.mutationId) {
       throw new ApiRequestError(503, 'Playable rework receipt differs', 'playable_rework_receipt_invalid');
     }
+    this.operatorPlayableReworks.set(request.playableId, response);
   }
 
   private requireProjectedOperatorFlagEvent(eventId: string | null): void {

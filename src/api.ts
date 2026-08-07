@@ -348,7 +348,12 @@ export interface OperatorPlayableReworkResponseV1 {
   closedAt: string | null;
   closeReceiptDigest: string | null;
   createdAt: string;
-  replayed: boolean;
+  replayed?: boolean;
+}
+
+export interface OperatorPlayableReworkListV1 {
+  schema: 'feed.playable-rework-list.v1';
+  items: OperatorPlayableReworkResponseV1[];
 }
 
 /** Capture one exact built-in playable rework from the signed TMA session. */
@@ -360,6 +365,11 @@ export function apiCreateOperatorPlayableReworkRequired(
     payload,
     OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
   );
+}
+
+/** Rehydrate durable mobile task state after a Mini App restart. */
+export function apiListOperatorPlayableReworksRequired(): Promise<OperatorPlayableReworkListV1> {
+  return getRequired<OperatorPlayableReworkListV1>('/api/operator-playable-reworks');
 }
 
 export interface BuiltinFeedBindingV1 {

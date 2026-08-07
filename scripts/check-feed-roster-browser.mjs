@@ -124,6 +124,18 @@ const server = createServer(async (request, response) => {
       replayed: playableReworkRequests.length > 1,
     });
   }
+  if (request.method === 'GET' && url.pathname === '/api/operator-playable-reworks') {
+    const body = playableReworkRequests.at(-1) || null;
+    return json(response, {
+      schema: 'feed.playable-rework-list.v1',
+      items: body ? [{
+        schema: 'feed.playable-rework.v1', requestId: body.mutationId,
+        actorUserId: 42, requestHash: 'e'.repeat(64), request: body,
+        state: 'open', releaseId: null, claimedAt: null, closedAt: null,
+        closeReceiptDigest: null, createdAt: body.context.capturedAt,
+      }] : [],
+    });
+  }
   if (request.method === 'POST' && url.pathname === '/api/events') return json(response, { ok: true });
   if (request.method === 'POST' && url.pathname === '/api/daily/sync') {
     return json(response, { code: 'daily_not_configured' }, 404);
@@ -273,6 +285,13 @@ try {
   // is required to make a newly activated mechanic visible.
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector(`iframe[title="${nextRoster.entries[0].playableId}"]`, { timeout: 5000 });
+  await page.locator('.page--in-viewport .game__operator-playable-rework .game__operator-flag-open')
+    .filter({ hasText: 'Задача принята ✓' }).waitFor({ timeout: 5000 });
+  assert.equal(
+    await page.locator('.page--in-viewport .game__operator-playable-rework .game__operator-flag-open').isDisabled(),
+    true,
+    'durable open rework was not restored after Mini App reload',
+  );
   assert.equal(
     await page.locator('.page--in-viewport iframe').getAttribute('title'),
     nextRoster.entries[0].playableId,

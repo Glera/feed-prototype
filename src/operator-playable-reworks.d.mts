@@ -50,6 +50,11 @@ export function mountOperatorPlayableReworkControl(
   host: HTMLElement,
   options: {
     occurrence: OperatorPlayableReworkOccurrence;
+    existing?: {
+      requestId: string;
+      state: 'open' | 'claimed' | 'closed';
+      request: { playableId: string };
+    } | null;
     createMutationId(): string;
     resolveOccurrence?(): OperatorPlayableReworkOccurrence;
     submit(request: OperatorPlayableReworkRequestV1): Promise<unknown>;
