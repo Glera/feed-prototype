@@ -735,6 +735,27 @@ body {
   color: #fff;
 }
 .game__operator-flag-form textarea { resize: vertical; min-height: 70px; }
+.game__operator-playable-rework-dictation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 10px;
+}
+.game__operator-playable-rework-dictation button {
+  flex: 0 0 auto;
+  border: 1px solid rgba(155, 223, 255, 0.45);
+  border-radius: 9px;
+  padding: 7px 10px;
+  background: rgba(73, 153, 192, 0.2);
+  color: #dff6ff;
+  font: inherit;
+}
+.game__operator-playable-rework-dictation button:active { transform: scale(0.97); }
+.game__operator-playable-rework-dictation small {
+  color: rgba(235, 247, 255, 0.72);
+  font-size: 10px;
+  line-height: 1.25;
+}
 .game__operator-flag-actions { display: flex; gap: 8px; }
 .game__operator-flag-actions button {
   border: 0;

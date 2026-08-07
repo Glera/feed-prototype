@@ -84,8 +84,12 @@ export function mountOperatorPlayableReworkControl(host, options) {
     <button class="game__operator-flag-open" type="button" aria-expanded="false" aria-controls="${controlId}-form" aria-label="✎ Доработать механику" title="Доработать механику">✎</button>
     <form class="game__operator-flag-form" id="${controlId}-form" hidden>
       <label>Что поправить
-        <textarea name="instruction" rows="3" required placeholder="Например: увеличить номиналы карт"></textarea>
+        <textarea name="instruction" rows="3" required placeholder="Например: увеличить номиналы карт" aria-describedby="${controlId}-dictation-hint"></textarea>
       </label>
+      <div class="game__operator-playable-rework-dictation">
+        <button type="button" data-action="dictate">🎙 Надиктовать</button>
+        <small id="${controlId}-dictation-hint">Откроется клавиатура — нажмите на ней 🎤</small>
+      </div>
       <label>Скриншот (необязательно)
         <input name="screenshot" type="file" accept="image/jpeg,image/png">
       </label>
@@ -107,6 +111,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
   const file = form.elements.namedItem('screenshot');
   const status = root.querySelector('output');
   const submit = form.querySelector('button[type="submit"]');
+  const dictate = form.querySelector('[data-action="dictate"]');
   const details = root.querySelector('.game__operator-playable-rework-details');
   const taskInstruction = details.querySelector('[data-rework-task-instruction]');
   const taskCreated = details.querySelector('[data-rework-task-created]');
@@ -147,6 +152,11 @@ export function mountOperatorPlayableReworkControl(host, options) {
     open.hidden = true;
     open.setAttribute('aria-expanded', 'true');
     instruction.focus();
+  });
+  dictate.addEventListener('click', () => {
+    instruction.focus();
+    const end = instruction.value.length;
+    instruction.setSelectionRange?.(end, end);
   });
   form.querySelector('[data-action="cancel"]').addEventListener('click', () => {
     form.hidden = true;
