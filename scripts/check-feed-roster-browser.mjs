@@ -379,6 +379,8 @@ try {
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/session'),
+    page.waitForResponse((response) => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
     page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
   ]);
   const blockedButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Нужна помощь"]');
@@ -396,6 +398,8 @@ try {
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/session'),
+    page.waitForResponse((response) => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
     page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
   ]);
   assert.equal(await blockerDetails.getAttribute('data-identity-probe'), 'preserve-open-details',
@@ -410,6 +414,8 @@ try {
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/session'),
+    page.waitForResponse((response) => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
     page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
   ]);
   await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Готово к проверке"]')
