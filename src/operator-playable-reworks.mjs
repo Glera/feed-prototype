@@ -103,6 +103,11 @@ export function mountOperatorPlayableReworkControl(host, options) {
       <b>Запрошенная правка</b>
       <p data-rework-task-instruction></p>
       <small data-rework-task-created></small>
+      <div class="game__operator-playable-rework-blocker" data-rework-task-blocker hidden>
+        <b>Почему остановилось</b>
+        <p data-rework-task-blocker-summary></p>
+        <small>В Git и ленту изменения не опубликованы.</small>
+      </div>
     </section>`;
   host.appendChild(root);
   const open = root.querySelector('.game__operator-flag-open');
@@ -115,14 +120,17 @@ export function mountOperatorPlayableReworkControl(host, options) {
   const details = root.querySelector('.game__operator-playable-rework-details');
   const taskInstruction = details.querySelector('[data-rework-task-instruction]');
   const taskCreated = details.querySelector('[data-rework-task-created]');
+  const taskBlocker = details.querySelector('[data-rework-task-blocker]');
+  const taskBlockerSummary = details.querySelector('[data-rework-task-blocker-summary]');
   let acceptedTask = existing;
   const renderAcceptedTask = (task) => {
     acceptedTask = task;
     open.disabled = false;
+    const blocked = task.execution?.state === 'blocked';
     const claimed = task.state === 'claimed';
-    open.textContent = claimed ? '!' : '✓';
-    open.dataset.reworkState = claimed ? 'claimed' : 'open';
-    const stateLabel = claimed ? '! Готово к проверке' : '✓ Задача принята';
+    open.textContent = blocked || claimed ? '!' : '✓';
+    open.dataset.reworkState = blocked ? 'blocked' : claimed ? 'claimed' : 'open';
+    const stateLabel = blocked ? '! Нужна помощь' : claimed ? '! Готово к проверке' : '✓ Задача принята';
     open.setAttribute('aria-label', stateLabel);
     open.title = stateLabel.slice(2);
     taskInstruction.textContent = task.request.instruction || 'Описание задачи недоступно.';
@@ -132,6 +140,10 @@ export function mountOperatorPlayableReworkControl(host, options) {
       ? `Отправлено ${created.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}`
       : '';
     taskCreated.hidden = !taskCreated.textContent;
+    taskBlockerSummary.textContent = blocked
+      ? task.execution.summary || 'Автоматическая доработка остановилась.'
+      : '';
+    taskBlocker.hidden = !blocked;
     details.hidden = true;
     open.setAttribute('aria-controls', details.id);
     open.setAttribute('aria-expanded', 'false');
@@ -197,7 +209,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
     }
   });
   return Object.freeze({
-    key: `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}`,
+    key: `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}:${existing?.execution?.state || ''}:${existing?.execution?.updatedAt || ''}`,
     destroy() { destroyed = true; root.remove(); },
   });
 }

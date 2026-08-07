@@ -53,6 +53,7 @@ const cpEvents = [];
 const ticketRequests = [];
 const playableReworkRequests = [];
 let playableReworkProjectionState = 'open';
+let playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
 let operatorCapability = true;
 let origin = '';
 
@@ -121,6 +122,7 @@ const server = createServer(async (request, response) => {
       claimedAt: null,
       closedAt: null,
       closeReceiptDigest: null,
+      execution: structuredClone(playableReworkExecution),
       createdAt: body.context.capturedAt,
       replayed: playableReworkRequests.length > 1,
     });
@@ -136,6 +138,7 @@ const server = createServer(async (request, response) => {
         claimedAt: playableReworkProjectionState === 'claimed' ? new Date().toISOString() : null,
         closedAt: null,
         closeReceiptDigest: null, createdAt: body.context.capturedAt,
+        execution: structuredClone(playableReworkExecution),
       }] : [],
     });
   }
@@ -365,14 +368,31 @@ try {
     'the fresh activation remains stable on later opens',
   );
 
-  // Foreground refresh changes the durable state without changing requestId.
-  // The control key must include state so the accepted label updates in place.
+  // A failed local agent is projected durably without changing requestId.
+  // The control key includes execution status so the mobile warning updates in place.
+  playableReworkExecution = {
+    state: 'blocked',
+    code: 'playable_rework_agent_check_failed',
+    summary: 'Проверки механики не прошли; изменения не опубликованы.',
+    updatedAt: '2026-08-07T12:00:00.000Z',
+  };
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const blockedButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Нужна помощь"]');
+  await blockedButton.waitFor({ timeout: 5000 });
+  assert.equal(await blockedButton.getAttribute('data-rework-state'), 'blocked');
+  await blockedButton.click();
+  const blockerDetails = page.locator('.feed-bar .game__operator-playable-rework .game__operator-playable-rework-details');
+  await blockerDetails.waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(
+    await blockerDetails.locator('[data-rework-task-blocker-summary]').textContent(),
+    'Проверки механики не прошли; изменения не опубликованы.',
+  );
+  await blockedButton.click();
+
+  // A later release claim remains a separate lifecycle transition.
+  playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
   playableReworkProjectionState = 'claimed';
-  await Promise.all([
-    page.waitForResponse((response) => response.request().method() === 'POST'
-      && new URL(response.url()).pathname === '/api/session'),
-    page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
-  ]);
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Готово к проверке"]')
     .waitFor({ timeout: 5000 });
   await assertReworkGeometry('claimed mechanic task');
