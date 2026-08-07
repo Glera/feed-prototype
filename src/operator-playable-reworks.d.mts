@@ -53,7 +53,8 @@ export function mountOperatorPlayableReworkControl(
     existing?: {
       requestId: string;
       state: 'open' | 'claimed' | 'closed';
-      request: { playableId: string };
+      createdAt?: string;
+      request: Pick<OperatorPlayableReworkRequestV1, 'playableId' | 'instruction' | 'context'>;
     } | null;
     createMutationId(): string;
     resolveOccurrence?(): OperatorPlayableReworkOccurrence;

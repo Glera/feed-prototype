@@ -103,7 +103,7 @@ if (labAuthLaunch) {
 // On-device backend diagnostics: ?diag=1, or open in Telegram via
 // t.me/<bot>?startapp=diag (start_param='diag') — shows initData + /session status
 // right on screen (no desktop console in Telegram).
-// Debug panel lives on the feed bar (right of the switcher icons). Also openable
+// Debug panel lives on the feed bar (left of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
 if (!labAuthLaunch && (query.get('diag') === '1' || startParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());

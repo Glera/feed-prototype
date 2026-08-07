@@ -2841,13 +2841,17 @@ export class Feed {
     const occurrence = this.currentOperatorPlayableReworkOccurrence();
     const existing = occurrence ? this.operatorPlayableReworks.get(occurrence.playableId) || null : null;
     const key = occurrence
-      ? `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}`
+      ? `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}`
       : null;
     if (this.operatorPlayableReworkControl?.key === key) return;
     this.operatorPlayableReworkControl?.destroy();
     this.operatorPlayableReworkControl = null;
     if (!occurrence) return;
-    const host = this.games[this.realIndex()];
+    // This is a mechanic-level action, so it belongs to the persistent bottom
+    // bar rather than on top of the playable. The occurrence is still resolved
+    // from the currently visible game and the control is remounted when that
+    // exact identity changes.
+    const host = this.feedBarEl;
     if (!host) return;
     this.operatorPlayableReworkControl = mountOperatorPlayableReworkControl(host, {
       occurrence,
@@ -5864,8 +5868,9 @@ export class Feed {
     });
     bar.appendChild(catalogLab);
     this.catalogLabNavEl = catalogLab;
-    // Platform build stamp, bottom-left of the bar — so it's clear which platform
-    // build is live (mechanics carry their own badge in their bottom-left corner).
+    // Platform build stamp stays in the DOM for diagnostics and hold-cover QA,
+    // but normal product chrome hides it so the operator cluster has a clean,
+    // non-overlapping home in the bottom bar.
     const ver = document.createElement('div');
     ver.className = 'feed-bar__version';
     ver.style.cssText = 'position:absolute;left:10px;bottom:calc(env(safe-area-inset-bottom,0px) + 6px);' +
