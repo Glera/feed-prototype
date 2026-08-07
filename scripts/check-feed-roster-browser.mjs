@@ -53,6 +53,7 @@ const cpEvents = [];
 const ticketRequests = [];
 const playableReworkRequests = [];
 let playableReworkProjectionState = 'open';
+let playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
 let operatorCapability = true;
 let origin = '';
 
@@ -121,6 +122,7 @@ const server = createServer(async (request, response) => {
       claimedAt: null,
       closedAt: null,
       closeReceiptDigest: null,
+      execution: structuredClone(playableReworkExecution),
       createdAt: body.context.capturedAt,
       replayed: playableReworkRequests.length > 1,
     });
@@ -136,6 +138,7 @@ const server = createServer(async (request, response) => {
         claimedAt: playableReworkProjectionState === 'claimed' ? new Date().toISOString() : null,
         closedAt: null,
         closeReceiptDigest: null, createdAt: body.context.capturedAt,
+        execution: structuredClone(playableReworkExecution),
       }] : [],
     });
   }
@@ -365,12 +368,54 @@ try {
     'the fresh activation remains stable on later opens',
   );
 
-  // Foreground refresh changes the durable state without changing requestId.
-  // The control key must include state so the accepted label updates in place.
-  playableReworkProjectionState = 'claimed';
+  // A failed local agent is projected durably without changing requestId.
+  // The control key includes execution status so the mobile warning updates in place.
+  playableReworkExecution = {
+    state: 'blocked',
+    code: 'playable_rework_agent_check_failed',
+    summary: 'Проверки механики не прошли; изменения не опубликованы.',
+    updatedAt: '2026-08-07T12:00:00.000Z',
+  };
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/session'),
+    page.waitForResponse((response) => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
+    page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
+  ]);
+  const blockedButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Нужна помощь"]');
+  await blockedButton.waitFor({ timeout: 5000 });
+  assert.equal(await blockedButton.getAttribute('data-rework-state'), 'blocked');
+  await blockedButton.click();
+  const blockerDetails = page.locator('.feed-bar .game__operator-playable-rework .game__operator-playable-rework-details');
+  await blockerDetails.waitFor({ state: 'visible', timeout: 3000 });
+  assert.equal(
+    await blockerDetails.locator('[data-rework-task-blocker-summary]').textContent(),
+    'Проверки механики не прошли; изменения не опубликованы.',
+  );
+  await blockerDetails.evaluate((node) => { node.dataset.identityProbe = 'preserve-open-details'; });
+  await page.waitForTimeout(1_100); // cross the foreground restore-edge dedupe window
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session'),
+    page.waitForResponse((response) => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
+    page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
+  ]);
+  assert.equal(await blockerDetails.getAttribute('data-identity-probe'), 'preserve-open-details',
+    'unchanged foreground sync must not remount the mechanic task control');
+  assert.equal(await blockerDetails.isVisible(), true,
+    'unchanged foreground sync must preserve the open blocker disclosure');
+
+  // A later release claim remains a separate lifecycle transition.
+  playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
+  playableReworkProjectionState = 'claimed';
+  await page.waitForTimeout(1_100); // request a distinct foreground bootstrap
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session'),
+    page.waitForResponse((response) => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
     page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
   ]);
   await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Готово к проверке"]')

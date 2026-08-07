@@ -1030,6 +1030,19 @@ body {
   border-color: rgba(255, 224, 138, 0.62);
   color: #ffe08a;
 }
+.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="blocked"] {
+  border-color: rgba(255, 143, 105, 0.86);
+  background: rgba(150, 47, 25, 0.34);
+  color: #ffb096;
+  box-shadow: 0 0 0 2px rgba(255, 111, 71, 0.12);
+}
+.game__operator-playable-rework-blocker {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 176, 150, 0.24);
+  color: #ffd0c1;
+}
+.game__operator-playable-rework-blocker[hidden] { display: none; }
 .feed-bar .game__operator-playable-rework .game__operator-flag-form,
 .feed-bar .game__operator-playable-rework .game__operator-playable-rework-details {
   position: absolute;

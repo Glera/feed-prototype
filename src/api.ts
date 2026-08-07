@@ -347,6 +347,12 @@ export interface OperatorPlayableReworkResponseV1 {
   claimedAt: string | null;
   closedAt: string | null;
   closeReceiptDigest: string | null;
+  execution?: {
+    state: 'accepted' | 'blocked';
+    code: string | null;
+    summary: string | null;
+    updatedAt: string | null;
+  };
   createdAt: string;
   replayed?: boolean;
 }
