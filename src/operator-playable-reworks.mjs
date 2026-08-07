@@ -73,6 +73,9 @@ export function mountOperatorPlayableReworkControl(host, options) {
     fail('playable_rework_invalid', 'control options are invalid');
   }
   const occurrence = options.occurrence;
+  const existing = options.existing?.request?.playableId === occurrence.playableId
+    && ['open', 'claimed'].includes(options.existing.state)
+    ? options.existing : null;
   const root = document.createElement('section');
   root.className = 'game__operator-flag game__operator-playable-rework';
   root.innerHTML = `
@@ -97,6 +100,10 @@ export function mountOperatorPlayableReworkControl(host, options) {
   const file = form.elements.namedItem('screenshot');
   const status = root.querySelector('output');
   const submit = form.querySelector('button[type="submit"]');
+  if (existing) {
+    open.disabled = true;
+    open.textContent = existing.state === 'claimed' ? 'Готово к проверке ✓' : 'Задача принята ✓';
+  }
   let destroyed = false;
   let pendingRequest = null;
   root.addEventListener('pointerdown', (event) => event.stopPropagation());
@@ -121,7 +128,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
       await options.submit(pendingRequest);
       status.textContent = 'Задача сохранена ✓ · ждёт подключения Labs';
       form.querySelectorAll('textarea,input,button').forEach((element) => { element.disabled = true; });
-      setTimeout(() => { if (!destroyed) { form.hidden = true; open.hidden = false; open.disabled = true; open.textContent = 'В работе ✓'; } }, 1200);
+      setTimeout(() => { if (!destroyed) { form.hidden = true; open.hidden = false; open.disabled = true; open.textContent = 'Задача принята ✓'; } }, 1200);
     } catch (error) {
       if (error?.code === 'playable_rework_stale') pendingRequest = null;
       status.textContent = error?.code === 'playable_rework_screenshot_invalid'
@@ -130,7 +137,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
     }
   });
   return Object.freeze({
-    key: `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}`,
+    key: `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}`,
     destroy() { destroyed = true; root.remove(); },
   });
 }
