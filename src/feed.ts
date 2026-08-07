@@ -175,6 +175,7 @@ import {
 } from './operator-level-flags.mjs';
 import {
   mountOperatorPlayableReworkControl,
+  operatorPlayableReworkControlKey,
   type OperatorPlayableReworkControl,
   type OperatorPlayableReworkOccurrence,
   type OperatorPlayableReworkRequestV1,
@@ -2841,7 +2842,7 @@ export class Feed {
     const occurrence = this.currentOperatorPlayableReworkOccurrence();
     const existing = occurrence ? this.operatorPlayableReworks.get(occurrence.playableId) || null : null;
     const key = occurrence
-      ? `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}`
+      ? operatorPlayableReworkControlKey(occurrence, existing)
       : null;
     if (this.operatorPlayableReworkControl?.key === key) return;
     this.operatorPlayableReworkControl?.destroy();

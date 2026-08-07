@@ -67,6 +67,10 @@ function screenshotFromFile(file) {
   });
 }
 
+export function operatorPlayableReworkControlKey(occurrence, existing) {
+  return `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}:${existing?.execution?.state || ''}:${existing?.execution?.updatedAt || ''}`;
+}
+
 export function mountOperatorPlayableReworkControl(host, options) {
   if (!(host instanceof HTMLElement) || typeof options?.submit !== 'function'
     || typeof options?.createMutationId !== 'function'
@@ -106,7 +110,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
       <div class="game__operator-playable-rework-blocker" data-rework-task-blocker hidden>
         <b>Почему остановилось</b>
         <p data-rework-task-blocker-summary></p>
-        <small>В Git и ленту изменения не опубликованы.</small>
+        <small>В ленту изменения не опубликованы.</small>
       </div>
     </section>`;
   host.appendChild(root);
@@ -209,7 +213,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
     }
   });
   return Object.freeze({
-    key: `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}:${existing?.execution?.state || ''}:${existing?.execution?.updatedAt || ''}`,
+    key: operatorPlayableReworkControlKey(occurrence, existing),
     destroy() { destroyed = true; root.remove(); },
   });
 }

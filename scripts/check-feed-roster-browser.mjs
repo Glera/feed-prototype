@@ -376,7 +376,11 @@ try {
     summary: 'Проверки механики не прошли; изменения не опубликованы.',
     updatedAt: '2026-08-07T12:00:00.000Z',
   };
-  await page.reload({ waitUntil: 'domcontentloaded' });
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session'),
+    page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
+  ]);
   const blockedButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Нужна помощь"]');
   await blockedButton.waitFor({ timeout: 5000 });
   assert.equal(await blockedButton.getAttribute('data-rework-state'), 'blocked');
@@ -387,12 +391,25 @@ try {
     await blockerDetails.locator('[data-rework-task-blocker-summary]').textContent(),
     'Проверки механики не прошли; изменения не опубликованы.',
   );
-  await blockedButton.click();
+  await blockerDetails.evaluate((node) => { node.dataset.identityProbe = 'preserve-open-details'; });
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session'),
+    page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
+  ]);
+  assert.equal(await blockerDetails.getAttribute('data-identity-probe'), 'preserve-open-details',
+    'unchanged foreground sync must not remount the mechanic task control');
+  assert.equal(await blockerDetails.isVisible(), true,
+    'unchanged foreground sync must preserve the open blocker disclosure');
 
   // A later release claim remains a separate lifecycle transition.
   playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
   playableReworkProjectionState = 'claimed';
-  await page.reload({ waitUntil: 'domcontentloaded' });
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session'),
+    page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
+  ]);
   await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Готово к проверке"]')
     .waitFor({ timeout: 5000 });
   await assertReworkGeometry('claimed mechanic task');

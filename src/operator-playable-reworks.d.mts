@@ -46,6 +46,20 @@ export function buildOperatorPlayableReworkRequest(input: {
   screenshot: OperatorPlayableReworkRequestV1['context']['screenshot'];
 }): Readonly<OperatorPlayableReworkRequestV1>;
 
+export function operatorPlayableReworkControlKey(
+  occurrence: OperatorPlayableReworkOccurrence,
+  existing?: {
+    requestId: string;
+    state: 'open' | 'claimed' | 'closed';
+    execution?: {
+      state: 'accepted' | 'blocked';
+      code: string | null;
+      summary: string | null;
+      updatedAt: string | null;
+    };
+  } | null,
+): string;
+
 export function mountOperatorPlayableReworkControl(
   host: HTMLElement,
   options: {
