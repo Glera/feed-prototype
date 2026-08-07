@@ -273,7 +273,23 @@ try {
   await assertReworkGeometry('mechanic rework control');
   await page.locator('.page--in-viewport iframe').evaluate((frame) => { frame.dataset.runId = 'fresh-run-from-phone'; });
   await rework.locator('.game__operator-flag-open').click();
-  await rework.locator('textarea[name="instruction"]').fill('Увеличить подпись на текущем экране');
+  const reworkInstruction = rework.locator('textarea[name="instruction"]');
+  const dictate = rework.locator('button[data-action="dictate"]');
+  await dictate.waitFor({ state: 'visible' });
+  const dictationHintId = await reworkInstruction.getAttribute('aria-describedby');
+  assert.ok(dictationHintId, 'instruction textarea must expose its dictation hint');
+  assert.match(
+    await rework.locator(`#${dictationHintId}`).textContent(),
+    /нажмите на ней 🎤/,
+    'dictation affordance must explain the Telegram keyboard handoff',
+  );
+  await dictate.click();
+  assert.equal(
+    await reworkInstruction.evaluate((element) => document.activeElement === element),
+    true,
+    'dictation tap must focus the instruction textarea so the system keyboard can dictate',
+  );
+  await reworkInstruction.fill('Увеличить подпись на текущем экране');
   await rework.locator('button[type="submit"]').click();
   await rework.locator('.game__operator-flag-status')
     .filter({ hasText: 'Не удалось сохранить задачу' }).waitFor({ timeout: 3000 });
