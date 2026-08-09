@@ -999,6 +999,69 @@ body {
 .feed-bar__debug:active { transform: scale(0.94); opacity: 0.9; }
 .feed-bar__debug:focus-visible { outline: 2px solid #9bdfff; outline-offset: 2px; }
 
+/* Operator-only platform intake mirrors the left-side diagnostics/LAB cluster
+   on the right, beside the playable-rework action. It is absent from the DOM
+   without the server capability and opens an editable popover above the bar. */
+.feed-bar .platform-development-intake {
+  position: absolute;
+  left: auto;
+  right: 44px;
+  bottom: calc(var(--safe-bottom) + 8px);
+  z-index: 3;
+  width: 32px;
+  min-height: 30px;
+}
+.platform-development-intake__open {
+  width: 32px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(113, 211, 255, 0.5);
+  border-radius: 10px;
+  background: rgba(55, 141, 180, 0.16);
+  color: #bcecff;
+  font: 15px/1 system-ui, sans-serif;
+}
+.platform-development-intake__open[data-intake-state="pending"] {
+  border-color: rgba(255, 224, 138, 0.62);
+  color: #ffe08a;
+}
+.platform-development-intake__open[data-intake-state="confirmed"] {
+  border-color: rgba(125, 255, 176, 0.56);
+  color: #9dffc1;
+}
+.platform-development-intake__open[data-intake-state="needs_help"] {
+  border-color: rgba(255, 143, 105, 0.86);
+  background: rgba(150, 47, 25, 0.34);
+  color: #ffb096;
+}
+.feed-bar .platform-development-intake .game__operator-flag-form,
+.feed-bar .platform-development-intake__details {
+  position: absolute;
+  left: auto;
+  right: -32px;
+  bottom: calc(100% + 30px);
+  width: min(320px, calc(100vw - 24px));
+  box-sizing: border-box;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.platform-development-intake__details {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgba(113, 211, 255, 0.3);
+  border-radius: 12px;
+  background: rgba(8, 16, 28, 0.98);
+  color: #eef9ff;
+  font: 12px/1.4 system-ui, sans-serif;
+}
+.platform-development-intake__details[hidden] { display: none; }
+.platform-development-intake__details p { margin: 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.platform-development-intake__details small { display: block; color: #acd0df; }
+.platform-development-intake__details button { margin-top: 9px; }
+.platform-development-intake__blocker { color: #ffd0c1; }
+.feed-bar:has(.platform-development-intake .game__operator-flag-form:not([hidden])),
+.feed-bar:has(.platform-development-intake__details:not([hidden])) { touch-action: pan-y; }
+
 /* Mechanic rework is a persistent bar action, not gameplay chrome. The compact
    button stays at the far right; its form/details intentionally open above the
    bar only after a tap. The generic .game__operator-flag positioning remains

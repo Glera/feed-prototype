@@ -1,0 +1,90 @@
+export interface PlatformDevelopmentIntakeScreenshotV1 {
+  kind: 'unavailable' | 'data_url';
+  reason: string | null;
+  mimeType: 'image/jpeg' | 'image/png' | null;
+  dataUrl: string | null;
+}
+
+export interface PlatformDevelopmentIntakeRequestV1 {
+  schema: 'platform.development-intake.request.v1';
+  mutationId: string;
+  instruction: string;
+  surface: string;
+  route: string;
+  buildSha: string;
+  capturedAt: string;
+  screenshot: PlatformDevelopmentIntakeScreenshotV1;
+}
+
+export interface PlatformDevelopmentIntakeReceiptV1 {
+  schema: 'platform.development-intake.response.v1';
+  requestId: string;
+  mutationId: string;
+  requestHash: string;
+  delivery: {
+    deliveryId: string;
+    status: 'queued' | 'send_started' | 'outcome_unknown' | 'retry_wait' | 'confirmed' | 'failed_terminal';
+    issueUrl: string | null;
+    nothingPublished: true;
+  };
+  request: PlatformDevelopmentIntakeRequestV1;
+  replayed: boolean;
+  createdAt: string;
+}
+
+export interface PlatformDevelopmentIntakeControl {
+  destroy(): void;
+  update(receipt: PlatformDevelopmentIntakeReceiptV1): void;
+}
+
+export function platformDevelopmentIntakeAvailable(value: unknown): boolean;
+export function platformDevelopmentIntakeSessionGrant(
+  value: unknown,
+  context: unknown,
+  buildSha: string | null,
+): boolean;
+export function buildPlatformDevelopmentIntakeRequest(input: {
+  mutationId: string;
+  instruction: string;
+  surface: string;
+  route: string;
+  buildSha: string;
+  screenshot: PlatformDevelopmentIntakeScreenshotV1;
+  capturedAt?: string;
+}): Readonly<PlatformDevelopmentIntakeRequestV1>;
+export function platformDevelopmentIntakePendingStorageKey(options: {
+  actorUserId: number;
+  buildSha: string;
+  route: string;
+}): string;
+export function restorePlatformDevelopmentIntakePendingRequest(
+  storage: Pick<Storage, 'getItem' | 'removeItem'> | undefined,
+  options: { actorUserId: number; buildSha: string; route: string; surface: string },
+): Readonly<PlatformDevelopmentIntakeRequestV1> | null;
+export function persistPlatformDevelopmentIntakePendingRequest(
+  storage: Pick<Storage, 'getItem' | 'setItem'> | undefined,
+  options: { actorUserId: number; buildSha: string; route: string; surface: string },
+  request: PlatformDevelopmentIntakeRequestV1,
+): boolean;
+export function validatePlatformDevelopmentIntakeReceipt(
+  value: unknown,
+  expectedRequest?: PlatformDevelopmentIntakeRequestV1 | null,
+): Readonly<PlatformDevelopmentIntakeReceiptV1>;
+export function validatePlatformDevelopmentIntakeList(value: unknown): Readonly<{
+  schema: 'platform.development-intake.list.v1';
+  items: ReadonlyArray<Readonly<PlatformDevelopmentIntakeReceiptV1>>;
+}>;
+export function platformDevelopmentIntakeFailureDisposition(error: unknown): 'rejected' | 'retry';
+export function mountPlatformDevelopmentIntakeControl(
+  host: HTMLElement,
+  options: {
+    actorUserId: number;
+    buildSha: string;
+    surface: string;
+    route: string;
+    storage?: Storage;
+    existing?: PlatformDevelopmentIntakeReceiptV1 | null;
+    createMutationId(): string;
+    submit(request: PlatformDevelopmentIntakeRequestV1): Promise<PlatformDevelopmentIntakeReceiptV1>;
+  },
+): PlatformDevelopmentIntakeControl;
