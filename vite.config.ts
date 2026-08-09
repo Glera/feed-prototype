@@ -468,6 +468,13 @@ export default defineConfig({
     // badge carries the git short-hash (timestamps collide at minute resolution).
     // Falls back to a bare UTC timestamp for standalone/dev builds.
     __PLATFORM_VERSION__: JSON.stringify(process.env.PLATFORM_VERSION || new Date().toISOString().slice(0, 16).replace('T', ' ')),
+    // Exact source identity for operator-authored platform intake. Ordinary
+    // builds that do not pin it expose no platform-intake control.
+    __PLATFORM_SOURCE_SHA__: JSON.stringify(
+      /^[0-9a-f]{40}$/.test(process.env.PLATFORM_SOURCE_SHA || '')
+        ? process.env.PLATFORM_SOURCE_SHA
+        : null,
+    ),
     __ISLAND_SORT_RECIPE__: JSON.stringify(sortRecipe),
   },
   build: {
