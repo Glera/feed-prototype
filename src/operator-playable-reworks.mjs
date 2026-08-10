@@ -9,9 +9,27 @@ const exactKeys = (value, keys) => Boolean(value) && typeof value === 'object' &
 const printable = (value, max = 2_000) => typeof value === 'string' && value === value.trim()
   && value.length >= 1 && value.length <= max && new TextEncoder().encode(value).length <= max * 4
   && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+const normalizeInstruction = (value) => typeof value === 'string'
+  ? value.replace(/\s+/gu, ' ').trim()
+  : value;
+
+export function operatorPlayableReworkErrorMessage(error) {
+  if (error?.code === 'playable_rework_screenshot_invalid') return 'Скриншот должен быть JPG/PNG до 380 КБ.';
+  if (error?.code === 'playable_rework_stale') return 'Механика изменилась. Закройте форму и откройте её снова.';
+  if (error?.code === 'playable_rework_invalid' && error?.message === 'invalid rework input') {
+    return 'Описание должно содержать от 1 до 2000 символов.';
+  }
+  if (error?.code === 'playable_rework_invalid') {
+    return 'Не удалось подтвердить текущую механику. Закройте форму и откройте её снова.';
+  }
+  if (error?.code === 'request_timeout') return 'Сервер не ответил вовремя. Повторите отправку.';
+  if (error?.status === 0) return 'Нет связи с сервером. Задача не сохранена.';
+  return 'Сервер не принял задачу. Повторите позже.';
+}
 
 export function buildOperatorPlayableReworkRequest({ mutationId, occurrence, instruction, screenshot }) {
-  if (!UUID.test(mutationId) || !printable(instruction)) fail('playable_rework_invalid', 'invalid rework input');
+  const normalizedInstruction = normalizeInstruction(instruction);
+  if (!UUID.test(mutationId) || !printable(normalizedInstruction)) fail('playable_rework_invalid', 'invalid rework input');
   if (!exactKeys(occurrence, [
     'playableId', 'mappingId', 'rosterActivationId', 'runtime', 'feedPosition', 'level', 'runId',
   ]) || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$/.test(occurrence.playableId)
@@ -48,7 +66,7 @@ export function buildOperatorPlayableReworkRequest({ mutationId, occurrence, ins
       capturedAt: new Date().toISOString(),
       screenshot: Object.freeze({ ...screenshot }),
     }),
-    instruction,
+    instruction: normalizedInstruction,
   });
 }
 
@@ -207,8 +225,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
       }, 1200);
     } catch (error) {
       if (error?.code === 'playable_rework_stale') pendingRequest = null;
-      status.textContent = error?.code === 'playable_rework_screenshot_invalid'
-        ? 'Скриншот должен быть JPG/PNG до 380 КБ.' : 'Не удалось сохранить задачу.';
+      status.textContent = operatorPlayableReworkErrorMessage(error);
       submit.disabled = false;
     }
   });

@@ -46,6 +46,8 @@ export function buildOperatorPlayableReworkRequest(input: {
   screenshot: OperatorPlayableReworkRequestV1['context']['screenshot'];
 }): Readonly<OperatorPlayableReworkRequestV1>;
 
+export function operatorPlayableReworkErrorMessage(error: unknown): string;
+
 export function operatorPlayableReworkControlKey(
   occurrence: OperatorPlayableReworkOccurrence,
   existing?: {
