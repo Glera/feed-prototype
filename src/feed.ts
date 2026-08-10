@@ -158,6 +158,14 @@ import {
 } from './operator-debug-entry.mjs';
 import { helpMapPreviewRequested } from './helpmap-preview.mjs';
 import {
+  bottomFeedTapAction,
+  committedSwipeStep,
+  navigationDirection,
+  swipeIntentDirection,
+  wrappedNavigationIndex,
+  type NavigationDirection,
+} from './feed-navigation.mjs';
+import {
   buildBuiltinFeedDecisionV2,
   resolveFeedRosterSession,
   stageFeedRosterForNextSession,
@@ -222,6 +230,8 @@ const DISTANCE_SNAP_PX = 14;       // absolute cap so mobile swipes feel sharp
 const TAP_SLOP_PX = 8;             // micro movement still counts as a tap
 const MIN_SWIPE_INTENT_PX = 8;     // velocity alone cannot turn a tiny wiggle into a swipe
 const VELOCITY_SNAP = 0.24;        // px/ms flick that commits regardless of distance
+type RideDirection = Exclude<NavigationDirection, 0>;
+const RIDE_DIRECTIONS: readonly RideDirection[] = [-1, 1];
 
 // Guided-UGC island (src/island.ts) is an unreleased meta prototype. Its feed-bar
 // entry (the "Мета" tab) stays HIDDEN by default so a friend cohort never stumbles
@@ -599,6 +609,8 @@ export class Feed {
   private completedRunIds = new Set<string>();
   private liveHold = new Set<number>();
   private settlingTargetIndex: number | null = null;
+  private settlingDirection: RideDirection | null = null;
+  private advanceAfterSettle = false;
   private resetCycleAfterSettle = false;
   private warmIndex: number | null = null;
   // ── Warm-up debugging (open with ?warm=1 to log to console; call window.__feedWarm()
@@ -972,7 +984,7 @@ export class Feed {
     this.mountFeedBar();
     this.measure();
     this.render(false);
-    this.updateIncomingPoster();
+    this.updateIncomingPosters();
     this.updateMechanicStates();
     this.updateHud(false);
     this.mountPreloader();
@@ -1254,8 +1266,7 @@ export class Feed {
     this.catalogCanaryClaimed = false;
     this.coverLoaded.delete(i);
     this.ensureCover(i);
-    this.incomingIndex = -1;
-    this.updateIncomingPoster();
+    this.resetIncomingPosterIdentities();
     this.scheduleGeneratedOfferPrefetch();
   }
 
@@ -1493,8 +1504,7 @@ export class Feed {
     this.games[target]?.classList.add('game--generated');
     this.coverLoaded.delete(target);
     this.ensureCover(target);
-    this.incomingIndex = -1;
-    this.updateIncomingPoster();
+    this.resetIncomingPosterIdentities();
   }
 
   private syncSessionBootstrap(): Promise<boolean> {
@@ -1586,8 +1596,7 @@ export class Feed {
     this.catalogCanaryTerminallyUnavailable = true;
     this.backendVersion = null;
     this.renderVersionLabel();
-    this.incomingIndex = -1;
-    this.updateIncomingPoster();
+    this.resetIncomingPosterIdentities();
   }
 
   // ── Durable shadow control plane ─────────────────────────────────────────
@@ -2288,8 +2297,7 @@ export class Feed {
       this.catalogCanaryClaimed = false;
       this.coverLoaded.delete(slot.index);
       this.ensureCover(slot.index);
-      this.incomingIndex = -1;
-      this.updateIncomingPoster();
+      this.resetIncomingPosterIdentities();
     }
     if (this.series?.catalog === slot) {
       this.clearSeriesUi();
@@ -5729,7 +5737,7 @@ export class Feed {
   }
 
   private indexForPos(pos: number): number {
-    return ((Math.round(pos) % this.N) + this.N) % this.N;
+    return wrappedNavigationIndex(pos, this.N);
   }
 
   // ── Build DOM ──────────────────────────────────────────────────────────
@@ -5818,7 +5826,7 @@ export class Feed {
       close.setAttribute('aria-label', 'Next mechanic');
       close.textContent = '✕';
       close.addEventListener('pointerdown', (e) => e.stopPropagation());
-      close.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(); });
+      close.addEventListener('click', (e) => { e.stopPropagation(); this.advanceToNext(true); });
       game.appendChild(close);
 
       // "Footage reel" chrome shown during autoplay (see .game--autoplay): camera
@@ -5862,8 +5870,8 @@ export class Feed {
   }
 
   // Single FIXED bottom bar — lives at the feed's bottom and does NOT page with the
-  // mechanics (the per-game slots reserve --swipebar-h of space above it). A centered
-  // button advances to the next mechanic.
+  // mechanics (the per-game slots reserve --swipebar-h of space above it). The feed
+  // tab returns from another view first; when the feed is already active it advances.
   private mountFeedBar() {
     const bar = document.createElement('div');
     bar.className = 'feed-bar';
@@ -5967,10 +5975,17 @@ export class Feed {
           && !this.publicIsland
           && this.overlayEl?.classList.contains('island-world')
         ) return;
+        const feedAction = tab.name === 'feed'
+          ? bottomFeedTapAction({
+              nonFeedView: this.overlayOpen || this.dailyOpen,
+              navigationBusy: this.isGestureBusy(),
+            })
+          : null;
         if (this.overlayOpen) this.closeOverlay();
         switcher.querySelectorAll('.feed-bar__icon--active').forEach((el) => el.classList.remove('feed-bar__icon--active'));
         icon.classList.add('feed-bar__icon--active');
         tab.onTap();
+        if (feedAction === 'advance') this.advanceToNext();
       });
       switcher.appendChild(icon);
     });
@@ -6501,28 +6516,6 @@ export class Feed {
     page.style.visibility = 'visible';
   }
 
-  private syncSettlingPositionToVisual(): number {
-    if (this.settlingTargetIndex === null || this.pageH <= 0) return this.pos;
-    const targetPage = this.pageEls[this.settlingTargetIndex];
-    const y = this.currentTranslateY(targetPage);
-    if (!Number.isFinite(y)) return this.pos;
-    this.pos = this.pos - y / this.pageH;
-    this.settlingTargetIndex = null;
-    this.render(false);
-    return this.pos;
-  }
-
-  private currentTranslateY(el: HTMLElement | undefined): number {
-    if (!el) return 0;
-    try {
-      const transform = getComputedStyle(el).transform;
-      if (!transform || transform === 'none') return 0;
-      return new DOMMatrixReadOnly(transform).m42;
-    } catch {
-      return 0;
-    }
-  }
-
   private previewRewardLevel(): number {
     return this.levelForStars(this.totalStars + this.rewardStarsFor(this.realIndex()));
   }
@@ -6580,50 +6573,58 @@ export class Feed {
   }
 
   // ── Incoming-poster ride ────────────────────────────────────────────────
-  // The only way to show the next mechanic RIDING in: browsers rasterise
+  // The only reliable way to show an arriving mechanic RIDING in: browsers rasterise
   // lazily outside the viewport — iframe layers AND host page layers alike —
   // so anything parked at translateY(pageH) arrives as an empty rectangle no
   // matter what it contains (measured frame-by-frame; will-change doesn't
-  // extend the tile interest area far enough). This layer PERMANENTLY lives
+  // extend the tile interest area far enough). These direction-specific layers
+  // PERMANENTLY live
   // at translateY(0) inside the viewport, hidden UNDER the opaque current
-  // page (z:1), so its raster always exists. On slide/drag it teleports to
+  // page (z:1), so both adjacent rasters always exist. On slide/drag the
+  // matching layer teleports to
   // the arriving page's offset (raster survives transform changes) and
   // mirrors the page's transform/transition ABOVE the pages (z:1010, under
   // the feed bar). At settle it parks back under the arrived page, whose
   // in-slot poster shows the identical pixels — seamless handoff.
-  private incomingEl!: HTMLElement;
-  private incomingImg!: HTMLImageElement;
-  private incomingIndex = -1;
-  private incomingPosterOk = false;
+  private incomingEls = new Map<RideDirection, HTMLElement>();
+  private incomingImgs = new Map<RideDirection, HTMLImageElement>();
+  private incomingIndices = new Map<RideDirection, number>([[-1, -1], [1, -1]]);
+  private incomingPosterOk = new Map<RideDirection, boolean>([[-1, false], [1, false]]);
 
   private buildIncoming() {
-    const el = document.createElement('div');
-    el.className = 'incoming-poster';
-    const img = document.createElement('img');
-    img.draggable = false;
-    img.addEventListener('load', () => { this.incomingPosterOk = true; });
-    // No cover art → the standard platform card (data URI — its own load
-    // event re-arms incomingPosterOk, so the ride is never disabled).
-    img.addEventListener('error', () => {
-      this.incomingPosterOk = false;
-      if (img.src !== RIDE_PLACEHOLDER_SRC) img.src = RIDE_PLACEHOLDER_SRC;
-    });
-    el.appendChild(img);
-    this.feedEl.appendChild(el);
-    this.incomingEl = el;
-    this.incomingImg = img;
+    for (const direction of RIDE_DIRECTIONS) {
+      const el = document.createElement('div');
+      el.className = 'incoming-poster';
+      el.dataset.direction = String(direction);
+      const img = document.createElement('img');
+      img.draggable = false;
+      img.addEventListener('load', () => { this.incomingPosterOk.set(direction, true); });
+      // No cover art → the standard platform card (data URI — its own load
+      // event re-arms the direction's readiness, so the ride is never disabled).
+      img.addEventListener('error', () => {
+        this.incomingPosterOk.set(direction, false);
+        if (img.src !== RIDE_PLACEHOLDER_SRC) img.src = RIDE_PLACEHOLDER_SRC;
+      });
+      el.appendChild(img);
+      this.feedEl.appendChild(el);
+      this.incomingEls.set(direction, el);
+      this.incomingImgs.set(direction, img);
+    }
   }
 
-  /** Point the resident layer at the NEXT mechanic's poster and copy the
+  /** Point one resident layer at its adjacent mechanic's poster and copy the
    *  arriving page's slot box (page-local, includes the autoplay 0.92 scale). */
-  private updateIncomingPoster() {
-    if (!this.incomingEl) return;
-    const next = (this.realIndex() + 1) % this.N;
-    if (next === this.incomingIndex) return;
-    this.incomingIndex = next;
-    this.incomingPosterOk = false;
-    this.incomingImg.src = this.coverForIndex(next);
-    const game = this.games[next];
+  private updateIncomingPoster(direction: RideDirection) {
+    const el = this.incomingEls.get(direction);
+    const img = this.incomingImgs.get(direction);
+    if (!el || !img) return;
+    const target = this.indexForPos(this.realIndex() + direction);
+    if (target === this.incomingIndices.get(direction)) return;
+    this.incomingIndices.set(direction, target);
+    this.incomingPosterOk.set(direction, false);
+    el.dataset.mechanicIndex = String(target);
+    img.src = this.coverForIndex(target);
+    const game = this.games[target];
     const slot = game?.querySelector<HTMLElement>('.game__slot');
     if (game && slot) {
       // UNSCALED layout box via offset* (transforms don't affect it), then
@@ -6633,35 +6634,58 @@ export class Feed {
       // raced it and the poster rode in 8% larger than the mechanic
       // (.game--autoplay .game__slot { transform: scale(0.92) } — keep in
       // sync with styles.css).
-      this.incomingImg.style.top = `${game.offsetTop + slot.offsetTop}px`;
-      this.incomingImg.style.left = `${game.offsetLeft + slot.offsetLeft}px`;
-      this.incomingImg.style.width = `${slot.offsetWidth}px`;
-      this.incomingImg.style.height = `${slot.offsetHeight}px`;
-      this.incomingImg.style.transform = 'scale(0.92)';
-      this.incomingImg.style.transformOrigin = '50% 50%';
+      img.style.top = `${game.offsetTop + slot.offsetTop}px`;
+      img.style.left = `${game.offsetLeft + slot.offsetLeft}px`;
+      img.style.width = `${slot.offsetWidth}px`;
+      img.style.height = `${slot.offsetHeight}px`;
+      img.style.transform = 'scale(0.92)';
+      img.style.transformOrigin = '50% 50%';
     }
+  }
+
+  private updateIncomingPosters() {
+    for (const direction of RIDE_DIRECTIONS) this.updateIncomingPoster(direction);
+  }
+
+  private resetIncomingPosterIdentities() {
+    for (const direction of RIDE_DIRECTIONS) this.incomingIndices.set(direction, -1);
+    this.updateIncomingPosters();
+  }
+
+  private parkIncomingPoster(el: HTMLElement) {
+    el.style.zIndex = '1';
+    el.style.transition = 'none';
+    el.style.transform = 'translate3d(0, 0, 0)';
   }
 
   /** Mirror the arriving page's motion during a drag or an animated slide;
    *  park under the pages otherwise. Called at the end of every render(). */
   private driveIncoming(animate: boolean) {
-    if (!this.incomingEl) return;
-    // Under ?livein=1 the live iframe rides instead of the cover.
-    if (this.liveRideOk(this.incomingIndex)) return;
-    const i = this.incomingIndex;
-    const delta = i >= 0 ? this.pageDelta[i] : undefined;
-    const riding = i >= 0 && this.incomingPosterOk && delta !== undefined && (
-      (this.dragging && delta > 0.001 && delta < 1.2) ||
-      (animate && this.settlingTargetIndex === i)
-    );
-    if (riding) {
-      this.incomingEl.style.zIndex = '1010';
-      this.incomingEl.style.transition = this.pageTransitionState[i] || 'none';
-      this.incomingEl.style.transform = this.pageTransformState[i] || 'translate3d(0, 0, 0)';
-    } else if (!this.dragging && this.settlingTargetIndex === null) {
-      this.incomingEl.style.zIndex = '1';
-      this.incomingEl.style.transition = 'none';
-      this.incomingEl.style.transform = 'translate3d(0, 0, 0)';
+    const dragDirection = navigationDirection(this.basePos, this.pos);
+    for (const direction of RIDE_DIRECTIONS) {
+      const el = this.incomingEls.get(direction);
+      const i = this.incomingIndices.get(direction) ?? -1;
+      // The experimental live ride is pre-rasterized only for NEXT. Backward
+      // always uses its resident cover, even under ?livein=1.
+      if (!el || i < 0 || (direction === 1 && this.liveRideOk(i))) {
+        if (el) this.parkIncomingPoster(el);
+        continue;
+      }
+      const delta = this.pageDelta[i];
+      const directionalDelta = delta === undefined ? undefined : delta * direction;
+      const riding = this.incomingPosterOk.get(direction) === true
+        && directionalDelta !== undefined && (
+          (this.dragging && dragDirection === direction
+            && directionalDelta > 0.001 && directionalDelta < 1.2)
+          || (animate && this.settlingTargetIndex === i && this.settlingDirection === direction)
+        );
+      if (riding) {
+        el.style.zIndex = '1010';
+        el.style.transition = this.pageTransitionState[i] || 'none';
+        el.style.transform = this.pageTransformState[i] || 'translate3d(0, 0, 0)';
+      } else {
+        this.parkIncomingPoster(el);
+      }
     }
   }
 
@@ -7273,8 +7297,7 @@ export class Feed {
     if (this.coverLoaded.size) {
       this.coverLoaded.clear();
       this.ensureNearCovers();
-      this.incomingIndex = -1;   // force updateIncomingPoster to refetch
-      this.updateIncomingPoster();
+      this.resetIncomingPosterIdentities(); // refetch both adjacent ride covers
     }
   }
   private coverLoadedBucketSet = false;
@@ -7551,8 +7574,22 @@ export class Feed {
   };
 
   // Advance forward one mechanic (the close × and any "skip" affordance use this).
-  private advanceToNext() {
-    if (this.dragging) return;
+  private advanceToNext(settleCurrentTransition = false) {
+    if (this.N < 2 || this.dragging) return;
+    if (this.settlingTargetIndex !== null) {
+      if (settleCurrentTransition) {
+        // The manual × is already visible on the arriving current unit. Finish
+        // that lifecycle synchronously, then start its requested next slide;
+        // this preserves the canonical close path without re-entering goTo.
+        this.advanceAfterSettle = false;
+        this.settleSlide();
+      } else {
+        // Other canonical programmatic callers coalesce repeated requests into
+        // one advance after the current transition reaches a stable lifecycle.
+        this.advanceAfterSettle = true;
+        return;
+      }
+    }
     // Leaving a mechanic mid-series (× / bar) breaks the series, no reward. If the
     // series just finished, finishSeries() already cleared it → this is a no-op.
     this.breakSeries();
@@ -8973,8 +9010,8 @@ export class Feed {
   private onDown(e: PointerEvent, surface: HTMLElement, mode: 'feed' | 'reward' | 'levelup', rewardIndex: number | null = null) {
     if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
     e.preventDefault();
+    if (this.isGestureBusy()) return;
     this.clearWarmTimer();
-    if (this.settlingTargetIndex !== null) this.syncSettlingPositionToVisual();
     const current = this.realIndex();
     const next = (current + 1) % this.N;
     const prev = ((current - 1) % this.N + this.N) % this.N;
@@ -8982,7 +9019,7 @@ export class Feed {
     this.dragMode = mode;
     this.rewardDragIndex = rewardIndex;
     this.dragAutoplayIndex = autoplayIndex;
-    this.dragAllowsBack = autoplayIndex !== null;
+    this.dragAllowsBack = autoplayIndex !== null && this.N > 1;
     if (mode === 'feed' || mode === 'reward') {
       this.liveHold = this.dragAllowsBack ? new Set([prev, current, next]) : new Set([current, next]);
       this.primeIncomingAutoplayPreview(this.dragAllowsBack ? [prev, next] : [next]);
@@ -9021,21 +9058,28 @@ export class Feed {
     if (dt > 0) this.velocity = (e.clientY - this.lastY) / dt;
     this.lastY = e.clientY;
     this.lastT = e.timeStamp;
-    // A real upward direction is the mount boundary for heavy next mechanics.
+    // A real direction is the mount boundary for either adjacent heavy mechanic.
     // Plain taps and sub-slop finger noise never create an iframe. An active
     // series cannot page away, so it must not trigger unrelated work either.
-    if (dy <= -MIN_SWIPE_INTENT_PX && !(this.series && this.series.playing)) {
-      const next = this.indexForPos(Math.round(this.basePos) + 1);
-      this.mountIntentTarget(next);
+    const intentDirection = swipeIntentDirection({
+      dy,
+      allowsBack: this.dragAllowsBack,
+      minIntentPx: MIN_SWIPE_INTENT_PX,
+    });
+    if (intentDirection !== 0 && this.N > 1 && !(this.series && this.series.playing)) {
+      const target = this.indexForPos(Math.round(this.basePos) + intentDirection);
+      this.mountIntentTarget(target);
     }
     // Reward-collect drags don't scroll the page: the win star must stay PUT so the
     // collect flight starts from its resting spot (and pulses there) instead of
     // riding the finger upward first. The flick threshold still uses dy/velocity.
     if (this.dragMode === 'reward') return;
     const rawProgress = -dy / this.pageH;         // drag up → positive → next; drag down → negative → previous
-    const pageProgress = this.dragAllowsBack
-      ? Math.max(-1, Math.min(1, rawProgress))
-      : Math.max(0, Math.min(1, rawProgress));
+    const pageProgress = this.N < 2
+      ? 0
+      : this.dragAllowsBack
+        ? Math.max(-1, Math.min(1, rawProgress))
+        : Math.max(0, Math.min(1, rawProgress));
     this.pos = this.basePos + pageProgress;
     this.queueDragRender();
     // Fade the (fixed) series row OUT while the page swipes — it re-fades IN for the
@@ -9082,16 +9126,17 @@ export class Feed {
     }
 
     const dy = e.clientY - this.startY;
-    let step = 0;
-    const hasSwipeIntent = Math.abs(dy) >= MIN_SWIPE_INTENT_PX;
-    const fastUp = hasSwipeIntent && this.velocity <= -VELOCITY_SNAP;
-    const fastDown = hasSwipeIntent && this.dragAllowsBack && this.velocity >= VELOCITY_SNAP;
-    const snapDistance = Math.min(this.pageH * DISTANCE_SNAP_FRAC, DISTANCE_SNAP_PX);
-    const farUp = dy <= -snapDistance;
-    const farDown = this.dragAllowsBack && dy >= snapDistance;
+    const step = this.N < 2 ? 0 : committedSwipeStep({
+      dy,
+      velocity: this.velocity,
+      allowsBack: this.dragAllowsBack,
+      pageHeight: this.pageH,
+      minIntentPx: MIN_SWIPE_INTENT_PX,
+      velocitySnap: VELOCITY_SNAP,
+      distanceSnapFraction: DISTANCE_SNAP_FRAC,
+      distanceSnapPixels: DISTANCE_SNAP_PX,
+    });
     const movedPastTap = Math.abs(dy) > TAP_SLOP_PX;
-    if (fastUp || farUp) step = 1;
-    else if (fastDown || farDown) step = -1;
 
     const fromIndex = this.indexForPos(this.basePos);
     const commitBasePos = Math.round(this.basePos);
@@ -10572,6 +10617,7 @@ export class Feed {
   private settleSlide() {
     const leavingLevelUp = this.levelUpPageState === 'leaving';
     this.settlingTargetIndex = null;
+    this.settlingDirection = null;
     this.pos = this.realIndex();      // keep pos bounded; same visual (delta mod N)
     this.liveHold.clear();
     this.render(false);
@@ -10596,10 +10642,14 @@ export class Feed {
     // Arrived: re-park the resident poster layer under the new current page
     // (render(false) above already reset transform/z) and repoint it at the
     // NEW next mechanic for the following swipe.
-    this.updateIncomingPoster();
+    this.updateIncomingPosters();
     // Telemetry: we left the previous unit and are now showing this one (only if
     // it's revealed — a cold-arriving frame emits unit_shown from tryRevealFrame).
     if (this.frameRevealed.has(this.realIndex())) this.markUnitShown(this.realIndex());
+    if (this.advanceAfterSettle) {
+      this.advanceAfterSettle = false;
+      this.advanceToNext();
+    }
   }
 
   // ── Paging ───────────────────────────────────────────────────────────────
@@ -10625,6 +10675,8 @@ export class Feed {
       this.warmIndex = null;
       this.liveHold = new Set([fromIndex, targetIndex]);
       this.settlingTargetIndex = targetIndex;
+      const direction = navigationDirection(fromPos, targetPos);
+      this.settlingDirection = direction === 0 ? null : direction;
       // Programmatic advances have no pointer-move intent signal. Start their
       // target navigation at commit; the host poster carries the transition.
       if (this.warmNextEnabled) this.updateLive();
@@ -10649,11 +10701,18 @@ export class Feed {
         // the × path; post-win the reward flyover masked it). Teleport it to
         // the arriving page's off-screen offset first; the flush below commits
         // it, and the animated pass rides it in like a swipe.
-        if (this.incomingIndex === targetIndex && this.incomingEl) {
-          this.incomingEl.style.transition = 'none';
-          this.incomingEl.style.transform =
-            this.pageTransformState[targetIndex] || `translate3d(0, ${this.pageH}px, 0)`;
-          this.incomingEl.style.zIndex = '1010';
+        const rideDirection = this.settlingDirection;
+        const incomingEl = rideDirection === null
+          ? undefined
+          : this.incomingEls.get(rideDirection);
+        const incomingIndex = rideDirection === null
+          ? -1
+          : this.incomingIndices.get(rideDirection);
+        if (rideDirection !== null && incomingIndex === targetIndex && incomingEl) {
+          incomingEl.style.transition = 'none';
+          incomingEl.style.transform = this.pageTransformState[targetIndex]
+            || `translate3d(0, ${rideDirection * this.pageH}px, 0)`;
+          incomingEl.style.zIndex = '1010';
         }
         void this.feedEl.offsetHeight;
         this.pos = savedPos;
@@ -10672,8 +10731,10 @@ export class Feed {
       }, 460);
     } else if (changed) {
       this.settlingTargetIndex = null;
+      this.settlingDirection = null;
     } else {
       this.settlingTargetIndex = null;
+      this.settlingDirection = null;
       this.liveHold.clear();
       this.updateLive();
       this.applyActiveStates();
@@ -10695,8 +10756,7 @@ export class Feed {
     this.pickCoverBucket();
     // Slot geometry changed with the viewport — re-measure the resident
     // poster layer's box (force by resetting the identity guard).
-    this.incomingIndex = -1;
-    this.updateIncomingPoster();
+    this.resetIncomingPosterIdentities();
   };
 }
 

@@ -294,6 +294,7 @@ npm run lint    # tsc --noEmit + все check-скрипты ниже
 | `check:rewards` / `check:series` | Детерминированные награды и длина серии / резолв `?level=` (голден-векторы синхронны с бэкендом). |
 | `check:dwell` | Активный dwell: фон, ремаунт, скачущие часы. |
 | `check:cp-outbox` / `check:run-ticket-outbox` / `check:result-receipts` | Durable-очереди: persist-before-ack, ретраи, восстановление после reload. |
+| `check:feed-navigation` / `check:feed-navigation-browser` | Нижняя feed-вкладка return/advance, симметричные forward/backward swipe, границы и защита от повторного pointer input на mobile/TMA и desktop. |
 | `check:feed-roster` (+`-browser`) | Ростер-конфиг из `/session`, неизменность живого кольца, форсированный слот челленджа. |
 | `check:catalog-player-v2` / `check:catalog-feed-authority` / `check:catalog-generated-preview` / `check:catalog-authority-timing-browser` | Каталожный путь: тикет/спека, эпохи и дедлайны authority, BFCache, generated-превью. |
 | `check:catalog-lab-navigation` / `check:catalog-lab-entry-browser` | Вход в Catalog Lab раскрывается только точной серверной capability. |
