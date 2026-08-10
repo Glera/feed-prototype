@@ -295,7 +295,7 @@ try {
   await reworkInstruction.fill('Увеличить подпись на текущем экране');
   await rework.locator('button[type="submit"]').click();
   await rework.locator('.game__operator-flag-status')
-    .filter({ hasText: 'Не удалось сохранить задачу' }).waitFor({ timeout: 3000 });
+    .filter({ hasText: 'Сервер не ответил вовремя' }).waitFor({ timeout: 3000 });
   await rework.locator('button[type="submit"]').click();
   await rework.locator('.game__operator-flag-status')
     .filter({ hasText: 'ждёт подключения Labs' }).waitFor({ timeout: 3000 });
