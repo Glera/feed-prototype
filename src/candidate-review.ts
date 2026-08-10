@@ -1,5 +1,7 @@
 import {
+  apiPlayableReleaseDecision,
   apiPlayableReleaseReview,
+  type PlayableReleaseDecisionReceipt,
   type PlayableReleaseSummary,
 } from './api';
 
@@ -7,7 +9,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const DIGEST = /^[0-9a-f]{64}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const PLAYABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
-const SOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
+const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_BINDING_BYTES = 32_768;
 
 type CandidateReviewLink = NonNullable<PlayableReleaseSummary['review']>;
@@ -47,6 +49,46 @@ const exactKeys = (value: unknown, keys: string[]): boolean => Boolean(value)
 function printable(value: unknown, max = 2_000): value is string {
   return typeof value === 'string' && value === value.trim() && value.length >= 1
     && value.length <= max && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
+
+function validTerminalDecision(
+  value: unknown,
+  summary: PlayableReleaseSummary,
+): PlayableReleaseDecisionReceipt | null {
+  if (!value || typeof value !== 'object') return null;
+  const receipt = value as PlayableReleaseDecisionReceipt;
+  const review = summary.review;
+  if (receipt.schema !== 'feed.playable-release-decision.receipt.v1'
+    || receipt.decisionSchema !== 'feed.playable-release-decision.v1'
+    || !UUID.test(receipt.decisionId) || !UUID.test(receipt.mutationId)
+    || receipt.releaseId.toLowerCase() !== summary.publishId.toLowerCase()
+    || !Number.isSafeInteger(receipt.actorUserId) || receipt.actorUserId <= 0
+    || !review || receipt.reviewBindingDigest !== review.reviewBindingDigest
+    || receipt.candidateArtifactDigest !== review.candidateArtifactDigest
+    || receipt.audience !== 'exact-user' || receipt.publicRollout !== false
+    || !DIGEST.test(receipt.receiptDigest) || !Number.isFinite(Date.parse(receipt.decidedAt))
+    || receipt.authorization?.schema
+      !== 'feed.playable-release-authorization-disposition.v1'
+    || !Number.isSafeInteger(receipt.authorization.itemCount)
+    || receipt.authorization.itemCount < 0
+    || !DIGEST.test(receipt.authorization.itemsDigest)
+    || !Array.isArray(receipt.authorization.items)
+    || receipt.authorization.items.length
+      !== Math.min(receipt.authorization.itemCount, 100)) return null;
+  if (receipt.decision === 'accept') {
+    if (receipt.instruction !== null || receipt.successor !== null
+      || !['approved', 'awaiting_exact_authorization'].includes(receipt.authorization.state)) return null;
+  } else if (receipt.decision === 'rework') {
+    const successor = receipt.successor;
+    if (!printable(receipt.instruction) || receipt.authorization.state !== 'fenced'
+      || !successor || !UUID.test(successor.requestId)
+      || successor.parentReleaseId.toLowerCase() !== summary.publishId.toLowerCase()
+      || !(successor.predecessorRequestId === null || UUID.test(successor.predecessorRequestId))
+      || !Number.isSafeInteger(successor.cycle) || successor.cycle < 1) return null;
+  } else {
+    return null;
+  }
+  return receipt;
 }
 
 export function candidateReviewReleaseIdFromParam(value: string | null): string | null {
@@ -447,9 +489,173 @@ export async function mountPlayableCandidateReviewSurface(releaseId: string): Pr
       || summary.publishId.toLowerCase() !== releaseId.toLowerCase()) {
       throw new Error('release summary mismatch');
     }
-    const mounted = mountPlayableCandidateReview(summary);
+    const initialDecision = summary.decision == null
+      ? null : validTerminalDecision(summary.decision, summary);
+    if (summary.decision != null && !initialDecision) {
+      throw new Error('release decision mismatch');
+    }
+    let reviewState: CandidateReviewState = {
+      bindingValid: false,
+      interactiveReady: false,
+      manualTakeover: false,
+      approvalReady: false,
+      terminal: null,
+      error: null,
+    };
+    let updateControls = (): void => {};
+    const mounted = mountPlayableCandidateReview(summary, (next) => {
+      reviewState = next;
+      updateControls();
+    });
     status.remove();
     card.appendChild(mounted.element);
+
+    const decisionPanel = document.createElement('section');
+    decisionPanel.className = 'candidate-decision';
+    decisionPanel.dataset.testid = 'candidate-decision-loop';
+    const decisionHeading = document.createElement('strong');
+    decisionHeading.textContent = 'Решение';
+    const decisionStatus = document.createElement('p');
+    decisionStatus.className = 'candidate-decision__status';
+    decisionStatus.dataset.testid = 'candidate-decision-status';
+    decisionStatus.setAttribute('aria-live', 'polite');
+    const actions = document.createElement('div');
+    actions.className = 'candidate-decision__actions';
+    const accept = document.createElement('button');
+    accept.type = 'button';
+    accept.className = 'lab-auth__button';
+    accept.textContent = 'Принять в тестовую ленту';
+    const rework = document.createElement('button');
+    rework.type = 'button';
+    rework.className = 'lab-auth__button lab-auth__button--danger';
+    rework.textContent = 'Отправить на доработку';
+    actions.append(accept, rework);
+    const reworkForm = document.createElement('div');
+    reworkForm.className = 'candidate-decision__rework';
+    reworkForm.hidden = true;
+    const reworkLabel = document.createElement('label');
+    reworkLabel.textContent = 'Что именно доработать';
+    const instruction = document.createElement('textarea');
+    instruction.rows = 4;
+    instruction.maxLength = 2_000;
+    instruction.placeholder = 'Опишите одно конкретное изменение…';
+    instruction.setAttribute('aria-label', 'Что именно доработать');
+    reworkLabel.appendChild(instruction);
+    const dictation = document.createElement('button');
+    dictation.type = 'button';
+    dictation.className = 'lab-auth__button lab-auth__button--quiet';
+    dictation.textContent = 'Диктовать системной клавиатурой';
+    const dictationHint = document.createElement('small');
+    dictationHint.textContent = 'Используйте микрофон системной клавиатуры — голосовые файлы не загружаются.';
+    const cancelRework = document.createElement('button');
+    cancelRework.type = 'button';
+    cancelRework.className = 'lab-auth__button lab-auth__button--quiet';
+    cancelRework.textContent = 'Отменить ввод';
+    reworkForm.append(reworkLabel, dictation, dictationHint, cancelRework);
+    decisionPanel.append(decisionHeading, decisionStatus, actions, reworkForm);
+    card.appendChild(decisionPanel);
+
+    let terminalDecision = initialDecision;
+    let pending = false;
+    let formOpen = false;
+    const mutationIds: Partial<Record<'accept' | 'rework', string>> = {};
+    const cleanInstruction = (): string | null => {
+      const value = instruction.value.trim();
+      return printable(value) ? value : null;
+    };
+    const renderTerminal = (receipt: PlayableReleaseDecisionReceipt): void => {
+      terminalDecision = receipt;
+      decisionPanel.dataset.state = receipt.decision;
+      if (receipt.decision === 'accept') {
+        decisionStatus.textContent = receipt.authorization.state === 'approved'
+          ? 'Exact content-bound approval подтверждён. Candidate принят только в тестовую ленту; public rollout не выполнялся.'
+          : 'Exact content-bound approval запущен. Candidate принят только в тестовую ленту; public rollout не выполнялся.';
+      } else {
+        decisionStatus.textContent = `Отправлено на доработку. Successor cycle ${receipt.successor?.cycle} создан; production не изменён.`;
+        instruction.value = receipt.instruction ?? '';
+        formOpen = true;
+        reworkForm.hidden = false;
+      }
+    };
+    updateControls = (): void => {
+      const terminal = terminalDecision !== null;
+      accept.disabled = pending || terminal || formOpen || !reviewState.approvalReady;
+      rework.disabled = pending || terminal || !reviewState.bindingValid
+        || Boolean(reviewState.error) || (formOpen && cleanInstruction() === null);
+      instruction.disabled = pending || terminal;
+      dictation.disabled = pending || terminal;
+      cancelRework.disabled = pending || terminal;
+      if (!terminal && !pending) {
+        decisionStatus.textContent = reviewState.error
+          ?? (reviewState.approvalReady
+            ? 'Выберите один исход для exact candidate.'
+            : 'Сначала откройте ручной режим candidate. Доработку можно описать после проверки binding.');
+      }
+    };
+    const reconcile = async (): Promise<PlayableReleaseDecisionReceipt | null> => {
+      try {
+        const refreshed = await apiPlayableReleaseReview(releaseId);
+        if (refreshed.publishId.toLowerCase() !== releaseId.toLowerCase()
+          || refreshed.decision == null) return null;
+        return validTerminalDecision(refreshed.decision, summary);
+      } catch {
+        return null;
+      }
+    };
+    const submitDecision = async (decision: 'accept' | 'rework'): Promise<void> => {
+      if (pending || terminalDecision) return;
+      const text = decision === 'rework' ? cleanInstruction() : null;
+      if (decision === 'rework' && text === null) return;
+      mutationIds[decision] ??= crypto.randomUUID();
+      pending = true;
+      decisionStatus.textContent = decision === 'accept'
+        ? 'Фиксируем exact-user approval…'
+        : 'Фиксируем server-owned successor request…';
+      updateControls();
+      try {
+        const receipt = await apiPlayableReleaseDecision(releaseId, {
+          schema: 'feed.playable-release-decision.v1',
+          mutationId: mutationIds[decision] as string,
+          decision,
+          ...(text === null ? {} : { instruction: text }),
+        });
+        const verified = validTerminalDecision(receipt, summary);
+        if (!verified) throw new Error('decision receipt mismatch');
+        renderTerminal(verified);
+      } catch {
+        const reconciled = await reconcile();
+        if (reconciled) renderTerminal(reconciled);
+        else decisionStatus.textContent = 'Решение не подтверждено. Production не изменён; повторите тот же исход.';
+      } finally {
+        pending = false;
+        updateControls();
+      }
+    };
+    accept.addEventListener('click', () => { void submitDecision('accept'); });
+    rework.addEventListener('click', () => {
+      if (!formOpen) {
+        formOpen = true;
+        reworkForm.hidden = false;
+        instruction.focus();
+        updateControls();
+        return;
+      }
+      void submitDecision('rework');
+    });
+    instruction.addEventListener('input', updateControls);
+    dictation.addEventListener('click', () => {
+      instruction.focus();
+      instruction.setSelectionRange(instruction.value.length, instruction.value.length);
+    });
+    cancelRework.addEventListener('click', () => {
+      if (pending || terminalDecision) return;
+      formOpen = false;
+      reworkForm.hidden = true;
+      updateControls();
+      accept.focus();
+    });
+    if (initialDecision) renderTerminal(initialDecision);
+    updateControls();
   } catch {
     status.textContent = 'Исходная задача недоступна или release больше нельзя проверить.';
   }
