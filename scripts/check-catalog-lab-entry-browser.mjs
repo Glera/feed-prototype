@@ -18,6 +18,8 @@ let origin = '';
 let catalogLabAvailable = false;
 let sessionRequests = 0;
 let lookupRequests = 0;
+let releaseDecision = null;
+const decisionRequests = [];
 const releaseId = '8b447be0-f961-482e-aa03-b419d5f1492d';
 const playableId = 'solitaire-v1-swipe';
 const candidatePath = `/playable-previews/${releaseId}/${playableId}.html`;
@@ -110,6 +112,7 @@ const playableReleaseAuthorization = () => ({
         'Проверить restart и terminal state.',
       ],
     },
+    decision: releaseDecision,
   },
 });
 
@@ -174,6 +177,54 @@ const server = createServer((request, response) => {
   if (request.method === 'GET'
     && url.pathname === `/api/operator/playable-releases/${releaseId}/review`) {
     return json(response, playableReleaseAuthorization().promotionSummary);
+  }
+  if (request.method === 'POST'
+    && url.pathname === `/api/operator/playable-releases/${releaseId}/decision`) {
+    let raw = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { raw += chunk; });
+    request.on('end', () => {
+      const body = JSON.parse(raw);
+      decisionRequests.push(body);
+      if (releaseDecision && (releaseDecision.decision !== body.decision
+        || releaseDecision.instruction !== (body.instruction ?? null))) {
+        return json(response, { code: 'playable_rework_conflict' }, 409);
+      }
+      if (!releaseDecision) {
+        releaseDecision = {
+          schema: 'feed.playable-release-decision.receipt.v1',
+          decisionSchema: 'feed.playable-release-decision.v1',
+          decisionId: '1b447be0-f961-482e-aa03-b419d5f1492d',
+          mutationId: body.mutationId,
+          releaseId,
+          actorUserId: 42,
+          reviewBindingDigest,
+          candidateArtifactDigest,
+          decision: body.decision,
+          instruction: body.instruction ?? null,
+          audience: 'exact-user',
+          publicRollout: false,
+          authorization: {
+            schema: 'feed.playable-release-authorization-disposition.v1',
+            state: body.decision === 'accept' ? 'approved' : 'fenced',
+            itemCount: 0,
+            itemsDigest: '0'.repeat(64),
+            items: [],
+          },
+          successor: body.decision === 'rework' ? {
+            requestId: '2b447be0-f961-482e-aa03-b419d5f1492d',
+            parentReleaseId: releaseId,
+            predecessorRequestId: reviewBinding.review.reworkRequestId,
+            cycle: 2,
+          } : null,
+          decidedAt: '2026-08-10T17:30:00.000Z',
+          receiptDigest: 'd'.repeat(64),
+          replayed: false,
+        };
+      }
+      return json(response, { ...releaseDecision, replayed: decisionRequests.length > 1 });
+    });
+    return;
   }
   if (request.method === 'GET' && url.pathname === '/api/challenges') {
     return json(response, { box: 'in', items: [] });
@@ -434,8 +485,9 @@ try {
   await enabledPage.getByRole('button', { name: 'Use another code' }).click();
 
   // READY Telegram deep-link resolves only the requested server-owned release.
-  // It mounts the same review component without an approval CTA or normal feed.
+  // It owns the two safe product outcomes and never boots the normal feed.
   const directPage = await newPage();
+  await directPage.setViewportSize({ width: 390, height: 844 });
   const directRequestsStart = requestLog.length;
   await directPage.goto(`${origin}/?tgWebAppStartParam=pr_${releaseId}`, { waitUntil: 'domcontentloaded' });
   const directSurface = directPage.locator('[aria-label="Playable candidate review"]');
@@ -445,7 +497,45 @@ try {
     '[data-testid="playable-candidate-review"] iframe',
   )?.getAttribute('src')?.includes('auto=1'));
   assert.match((await directSurface.textContent()) || '', /Показывать tutor hand до первого ручного хода/);
+  const directAccept = directSurface.getByRole('button', { name: 'Принять в тестовую ленту' });
+  const directRework = directSurface.getByRole('button', { name: 'Отправить на доработку' });
+  assert.equal(await directAccept.count(), 1);
+  assert.equal(await directRework.count(), 1);
   assert.equal(await directSurface.getByRole('button', { name: 'Принять и опубликовать' }).count(), 0);
+  const directSlot = await directSurface.locator('[data-testid="candidate-game-slot"]').boundingBox();
+  assert.ok(directSlot && Math.abs((directSlot.width / directSlot.height) - (9 / 16)) < 0.02,
+    `390x844 READY candidate slot is not platform 9:16: ${JSON.stringify(directSlot)}`);
+  await directSurface.getByRole('button', { name: 'Коснитесь, чтобы играть вручную' }).click();
+  await directPage.waitForFunction(() => document.querySelector(
+    '[data-testid="playable-candidate-review"] iframe',
+  )?.getAttribute('src')?.includes('auto=0'));
+  await directRework.click();
+  const reworkInput = directSurface.getByLabel('Что именно доработать');
+  await reworkInput.waitFor({ state: 'visible' });
+  const dictation = directSurface.getByRole('button', { name: 'Диктовать системной клавиатурой' });
+  await dictation.click();
+  assert.equal(await reworkInput.evaluate((entry) => entry === document.activeElement), true,
+    'system dictation action did not focus the text input');
+  await directSurface.getByRole('button', { name: 'Отменить ввод' }).click();
+  assert.equal(await reworkInput.isHidden(), true,
+    'closing an uncommitted rework form must restore the mutually exclusive accept outcome');
+  assert.equal(await directAccept.isDisabled(), false);
+  await directRework.click();
+  await reworkInput.waitFor({ state: 'visible' });
+  const instruction = 'Оставить только текущий уровень 5 в runtime; сохранить factory-ready шаблон.';
+  await reworkInput.fill(instruction);
+  await directRework.click();
+  await directSurface.getByText('Отправлено на доработку. Successor cycle 2 создан; production не изменён.')
+    .waitFor({ state: 'visible' });
+  assert.equal(decisionRequests.length, 1, 'one rework tap created more than one decision request');
+  assert.deepEqual(Object.keys(decisionRequests[0]).sort(),
+    ['decision', 'instruction', 'mutationId', 'schema']);
+  assert.equal(decisionRequests[0].decision, 'rework');
+  assert.equal(decisionRequests[0].instruction, instruction);
+  assert.equal(await directAccept.isDisabled(), true);
+  assert.equal(await directRework.isDisabled(), true);
+  await directRework.evaluate((button) => button.click());
+  assert.equal(decisionRequests.length, 1, 'disabled terminal rework replayed in the browser');
   assert.equal(await directPage.locator('.feed-bar').count(), 0);
   assert.equal(await directPage.locator('#viewport').isHidden(), true);
   const directRequests = requestLog.slice(directRequestsStart);
@@ -455,6 +545,35 @@ try {
     `READY review deep-link booted session: ${directRequests.join(', ')}`);
   assert.equal(directRequests.some((entry) => entry.includes(`/api/operator/playable-releases/${releaseId}/review`)), true);
   await directPage.close();
+
+  // The mutually exclusive accept outcome uses the same release-only contract
+  // and remains exact-user/dogfood rather than a public publication action.
+  releaseDecision = null;
+  decisionRequests.length = 0;
+  const acceptPage = await newPage();
+  await acceptPage.setViewportSize({ width: 390, height: 844 });
+  await acceptPage.goto(`${origin}/?tgWebAppStartParam=pr_${releaseId}`, { waitUntil: 'domcontentloaded' });
+  const acceptSurface = acceptPage.locator('[aria-label="Playable candidate review"]');
+  await acceptPage.waitForFunction(() => document.querySelector(
+    '[data-testid="playable-candidate-review"] iframe',
+  )?.getAttribute('src')?.includes('auto=1'));
+  await acceptSurface.getByRole('button', { name: 'Коснитесь, чтобы играть вручную' }).click();
+  await acceptPage.waitForFunction(() => {
+    const button = [...document.querySelectorAll('button')]
+      .find((entry) => entry.textContent === 'Принять в тестовую ленту');
+    return button instanceof HTMLButtonElement && !button.disabled;
+  });
+  await acceptSurface.getByRole('button', { name: 'Принять в тестовую ленту' }).click();
+  await acceptSurface.getByText(/Exact content-bound approval подтверждён/).waitFor({ state: 'visible' });
+  assert.equal(decisionRequests.length, 1, 'accept created more than one decision request');
+  assert.deepEqual(Object.keys(decisionRequests[0]).sort(), ['decision', 'mutationId', 'schema']);
+  assert.equal(decisionRequests[0].decision, 'accept');
+  assert.match((await acceptSurface.textContent()) || '', /public rollout не выполнялся/);
+  assert.equal(await acceptSurface.getByRole('button', { name: 'Принять в тестовую ленту' }).isDisabled(), true);
+  assert.equal(await acceptSurface.getByRole('button', { name: 'Отправить на доработку' }).isDisabled(), true);
+  await acceptPage.close();
+  releaseDecision = null;
+  decisionRequests.length = 0;
 
   // The desktop Lab uses the same narrow release-id-only route. It must not
   // accept a caller-authored candidate URL or fall through to normal feed boot.

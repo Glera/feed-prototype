@@ -420,6 +420,50 @@ body.lab-auth-open #viewport { display: none; }
 }
 .candidate-review__restart { width: 100%; }
 
+.candidate-decision {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(157, 182, 242, 0.18);
+}
+.candidate-decision > strong { color: #f4fff9; font-size: 16px; }
+.candidate-decision__status {
+  min-height: 38px;
+  margin: 0;
+  color: #b8c8e8;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.candidate-decision__actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+}
+.candidate-decision__actions .lab-auth__button { min-height: 48px; }
+.candidate-decision__rework { display: grid; gap: 8px; }
+.candidate-decision__rework[hidden] { display: none; }
+.candidate-decision__rework label {
+  display: grid;
+  gap: 6px;
+  color: #dbe5f8;
+  font-size: 12px;
+  font-weight: 700;
+}
+.candidate-decision__rework textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border: 1px solid rgba(157, 182, 242, 0.3);
+  border-radius: 12px;
+  padding: 11px 12px;
+  background: rgba(4, 8, 18, 0.78);
+  color: #f4f7ff;
+  font: 500 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+.candidate-decision__rework small { color: #91a0bd; font-size: 11px; line-height: 1.45; }
+.candidate-decision[data-state="accept"] .candidate-decision__status { color: #9ce5b5; }
+.candidate-decision[data-state="rework"] .candidate-decision__status { color: #ffd29c; }
+
 @media (max-width: 380px) {
   .lab-auth { padding-left: 12px; padding-right: 12px; }
   .lab-auth__card { padding: 15px; }
@@ -427,6 +471,7 @@ body.lab-auth-open #viewport { display: none; }
   .lab-auth__actions { flex-direction: column-reverse; }
   .lab-auth__actions .lab-auth__button { width: 100%; }
   .candidate-review__detail { grid-template-columns: 1fr; gap: 2px; }
+  .candidate-decision__actions { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: no-preference) {

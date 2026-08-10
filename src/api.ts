@@ -1664,6 +1664,38 @@ export interface PlayableReleaseSummary {
     checklist: string[];
     notificationStatus?: string | null;
   };
+  decision?: PlayableReleaseDecisionReceipt | null;
+}
+
+export interface PlayableReleaseDecisionReceipt {
+  schema: 'feed.playable-release-decision.receipt.v1';
+  decisionSchema: 'feed.playable-release-decision.v1';
+  decisionId: string;
+  mutationId: string;
+  releaseId: string;
+  actorUserId: number;
+  reviewBindingDigest: string;
+  candidateArtifactDigest: string;
+  decision: 'accept' | 'rework';
+  instruction: string | null;
+  audience: 'exact-user';
+  publicRollout: false;
+  authorization: {
+    schema: 'feed.playable-release-authorization-disposition.v1';
+    state: 'approved' | 'awaiting_exact_authorization' | 'fenced';
+    itemCount: number;
+    itemsDigest: string;
+    items: unknown[];
+  };
+  successor: {
+    requestId: string;
+    parentReleaseId: string;
+    predecessorRequestId: string | null;
+    cycle: number;
+  } | null;
+  decidedAt: string;
+  receiptDigest: string;
+  replayed?: boolean;
 }
 
 export type CatalogPromotionSummary =
@@ -1704,6 +1736,22 @@ export function apiCatalogLabLookup(userCode: string): Promise<CatalogLabDeviceA
 export function apiPlayableReleaseReview(releaseId: string): Promise<PlayableReleaseSummary> {
   return getRequired<PlayableReleaseSummary>(
     `/api/operator/playable-releases/${encodeURIComponent(releaseId)}/review`,
+  );
+}
+
+/** Commit one server-owned terminal outcome for one immutable READY release. */
+export function apiPlayableReleaseDecision(
+  releaseId: string,
+  payload: {
+    schema: 'feed.playable-release-decision.v1';
+    mutationId: string;
+    decision: 'accept' | 'rework';
+    instruction?: string;
+  },
+): Promise<PlayableReleaseDecisionReceipt> {
+  return postRequired<PlayableReleaseDecisionReceipt>(
+    `/api/operator/playable-releases/${encodeURIComponent(releaseId)}/decision`,
+    payload,
   );
 }
 
