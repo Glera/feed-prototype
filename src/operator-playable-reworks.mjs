@@ -86,7 +86,34 @@ function screenshotFromFile(file) {
 }
 
 export function operatorPlayableReworkControlKey(occurrence, existing) {
-  return `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}:${existing?.execution?.state || ''}:${existing?.execution?.updatedAt || ''}`;
+  return `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}:${existing?.execution?.state || ''}:${existing?.execution?.updatedAt || ''}:${existing?.releaseExecution?.state || ''}:${existing?.releaseExecution?.updatedAt || ''}`;
+}
+
+export function operatorPlayableReworkPresentation(task) {
+  const projected = task?.releaseExecution;
+  if (projected?.state === 'preparing') {
+    return Object.freeze({ state: 'preparing', icon: '…', label: 'Готовится', blocker: null });
+  }
+  if (projected?.state === 'ready_for_approval') {
+    return Object.freeze({ state: 'ready_for_approval', icon: '!', label: 'Готово к проверке', blocker: null });
+  }
+  if (projected?.state === 'needs_help') {
+    return Object.freeze({
+      state: 'needs_help',
+      icon: '!',
+      label: 'Нужна помощь',
+      blocker: projected.summary || 'Автоматическая доработка остановилась.',
+    });
+  }
+  if (task?.execution?.state === 'blocked') {
+    return Object.freeze({
+      state: 'blocked',
+      icon: '!',
+      label: 'Нужна помощь',
+      blocker: task.execution.summary || 'Автоматическая доработка остановилась.',
+    });
+  }
+  return Object.freeze({ state: task?.state || 'open', icon: '✓', label: 'Задача принята', blocker: null });
 }
 
 export function mountOperatorPlayableReworkControl(host, options) {
@@ -148,13 +175,12 @@ export function mountOperatorPlayableReworkControl(host, options) {
   const renderAcceptedTask = (task) => {
     acceptedTask = task;
     open.disabled = false;
-    const blocked = task.execution?.state === 'blocked';
-    const claimed = task.state === 'claimed';
-    open.textContent = blocked || claimed ? '!' : '✓';
-    open.dataset.reworkState = blocked ? 'blocked' : claimed ? 'claimed' : 'open';
-    const stateLabel = blocked ? '! Нужна помощь' : claimed ? '! Готово к проверке' : '✓ Задача принята';
+    const presentation = operatorPlayableReworkPresentation(task);
+    open.textContent = presentation.icon;
+    open.dataset.reworkState = presentation.state;
+    const stateLabel = `${presentation.icon} ${presentation.label}`;
     open.setAttribute('aria-label', stateLabel);
-    open.title = stateLabel.slice(2);
+    open.title = presentation.label;
     taskInstruction.textContent = task.request.instruction || 'Описание задачи недоступно.';
     const createdAt = task.createdAt || task.request.context?.capturedAt || '';
     const created = createdAt ? new Date(createdAt) : null;
@@ -162,10 +188,8 @@ export function mountOperatorPlayableReworkControl(host, options) {
       ? `Отправлено ${created.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}`
       : '';
     taskCreated.hidden = !taskCreated.textContent;
-    taskBlockerSummary.textContent = blocked
-      ? task.execution.summary || 'Автоматическая доработка остановилась.'
-      : '';
-    taskBlocker.hidden = !blocked;
+    taskBlockerSummary.textContent = presentation.blocker || '';
+    taskBlocker.hidden = presentation.blocker === null;
     details.hidden = true;
     open.setAttribute('aria-controls', details.id);
     open.setAttribute('aria-expanded', 'false');

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   buildOperatorPlayableReworkRequest,
+  operatorPlayableReworkPresentation,
   operatorPlayableReworkErrorMessage,
 } from '../src/operator-playable-reworks.mjs';
 
@@ -62,4 +63,28 @@ assert.throws(
   }),
   (error) => error?.code === 'playable_rework_invalid',
 );
-console.log('operator playable rework contract: 10 assertions');
+const projected = (state) => ({
+  releaseExecution: {
+    releaseId: randomUUID(),
+    state,
+    code: state === 'needs_help' ? 'candidate_failed' : null,
+    summary: state === 'needs_help' ? 'Проверка candidate остановилась.' : null,
+    updatedAt: '2026-08-10T12:30:00.000Z',
+  },
+  state: 'open',
+  execution: { state: 'accepted', code: null, summary: null, updatedAt: null },
+});
+assert.deepEqual(operatorPlayableReworkPresentation(projected('preparing')), {
+  state: 'preparing', icon: '…', label: 'Готовится', blocker: null,
+});
+assert.deepEqual(operatorPlayableReworkPresentation(projected('ready_for_approval')), {
+  state: 'ready_for_approval', icon: '!', label: 'Готово к проверке', blocker: null,
+});
+assert.deepEqual(operatorPlayableReworkPresentation(projected('needs_help')), {
+  state: 'needs_help', icon: '!', label: 'Нужна помощь', blocker: 'Проверка candidate остановилась.',
+});
+assert.deepEqual(operatorPlayableReworkPresentation({
+  state: 'claimed',
+  execution: { state: 'accepted', code: null, summary: null, updatedAt: null },
+}), { state: 'claimed', icon: '✓', label: 'Задача принята', blocker: null });
+console.log('operator playable rework contract: 14 assertions');
