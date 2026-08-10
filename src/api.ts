@@ -27,6 +27,7 @@ import type {
   OperatorLevelFlagResponseV1,
 } from './operator-level-flags.mjs';
 import type { OperatorPlayableReworkRequestV1 } from './operator-playable-reworks.mjs';
+import type { PlatformDevelopmentIntakeRequestV1 } from './operator-development-intakes.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -317,12 +318,66 @@ export interface SessionResp {
   backend_version?: string;
   catalog_lab_authorization_available?: boolean;
   operator_level_flagging_available?: boolean;
+  development_intake_available?: boolean;
+  development_intake_context?: { buildSha: string };
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
   /** Mission slice v0: present (true) only for an enrolled dogfood account while
    *  `ENABLE_MISSION_READ` is on. Absent is how every other payload stays
    *  byte-identical to the pre-mission build. */
   mission_dogfood?: boolean;
+}
+
+export interface PlatformDevelopmentIntakeResponseV1 {
+  schema: 'platform.development-intake.response.v1';
+  requestId: string;
+  mutationId: string;
+  requestHash: string;
+  delivery: {
+    deliveryId: string;
+    status: 'queued' | 'send_started' | 'outcome_unknown' | 'retry_wait' | 'confirmed' | 'failed_terminal';
+    issueUrl: string | null;
+    nothingPublished: true;
+  };
+  terminal: {
+    status: 'READY_TO_PLAY' | 'NEEDS_HELP';
+    summary: string;
+    candidate: {
+      repository: string;
+      commitSha: string;
+      artifactDigest: string;
+      url: string;
+    } | null;
+    blocker: { reasonCode: string; operatorAction: string } | null;
+    review: {
+      provider: 'claude';
+      verdict: 'APPROVE';
+      patchDigest: string;
+      reviewedAt: string;
+    } | null;
+    recordedAt: string;
+    nothingPublished: true;
+  } | null;
+  request: PlatformDevelopmentIntakeRequestV1;
+  replayed: boolean;
+  createdAt: string;
+}
+
+export interface PlatformDevelopmentIntakeListV1 {
+  schema: 'platform.development-intake.list.v1';
+  items: PlatformDevelopmentIntakeResponseV1[];
+}
+
+export function apiCreatePlatformDevelopmentIntakeRequired(
+  payload: PlatformDevelopmentIntakeRequestV1,
+): Promise<PlatformDevelopmentIntakeResponseV1> {
+  return postRequired<PlatformDevelopmentIntakeResponseV1>(
+    '/api/development-intake', payload, OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiListPlatformDevelopmentIntakesRequired(): Promise<PlatformDevelopmentIntakeListV1> {
+  return getRequired<PlatformDevelopmentIntakeListV1>('/api/development-intake?limit=1');
 }
 
 /** Pilot-only exact field annotation. The server rechecks the Telegram user. */

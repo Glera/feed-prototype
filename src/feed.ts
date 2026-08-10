@@ -36,6 +36,8 @@ import {
   apiCreateOperatorLevelFlagRequired,
   apiCreateOperatorPlayableReworkRequired,
   apiListOperatorPlayableReworksRequired,
+  apiCreatePlatformDevelopmentIntakeRequired,
+  apiListPlatformDevelopmentIntakesRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
   apiGetGeneratedOfferRequired,
@@ -54,6 +56,7 @@ import {
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
   type SessionResp,
   type OperatorPlayableReworkResponseV1,
+  type PlatformDevelopmentIntakeResponseV1,
 } from './api';
 import {
   queueResult,
@@ -180,9 +183,18 @@ import {
   type OperatorPlayableReworkOccurrence,
   type OperatorPlayableReworkRequestV1,
 } from './operator-playable-reworks.mjs';
+import {
+  mountPlatformDevelopmentIntakeControl,
+  platformDevelopmentIntakeSessionGrant,
+  validatePlatformDevelopmentIntakeList,
+  validatePlatformDevelopmentIntakeReceipt,
+  type PlatformDevelopmentIntakeControl,
+  type PlatformDevelopmentIntakeRequestV1,
+} from './operator-development-intakes.mjs';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
+declare const __PLATFORM_SOURCE_SHA__: string | null;
 
 /**
  * Infinite vertical feed pager (Instagram-Reels / TikTok style) over real playables.
@@ -739,6 +751,11 @@ export class Feed {
   private operatorPlayableReworkControl: OperatorPlayableReworkControl | null = null;
   private operatorPlayableReworks = new Map<string, OperatorPlayableReworkResponseV1>();
   private operatorPlayableReworkSyncEpoch = 0;
+  private developmentIntakeAvailable = false;
+  private platformDevelopmentIntakeControl: PlatformDevelopmentIntakeControl | null = null;
+  private platformDevelopmentIntakeLatest: PlatformDevelopmentIntakeResponseV1 | null = null;
+  private platformDevelopmentIntakeSyncEpoch = 0;
+  private platformDevelopmentIntakeActorUserId: number | null = null;
   private operatorLevelFlagDraft: Readonly<{
     subjectKey: string;
     draft: Readonly<OperatorLevelFlagDraft>;
@@ -1075,7 +1092,10 @@ export class Feed {
     // created/refreshed the user row. This avoids a first-run FK race while
     // still flushing any events persisted by an earlier app launch.
     initControlPlane();
-    this.authenticatedUserId = Number(session.user.id);
+    this.authenticatedUserId = typeof session.user.id === 'number'
+      && Number.isSafeInteger(session.user.id) && session.user.id > 0
+      ? session.user.id
+      : null;
     const rosterStage = await stageFeedRosterForNextSession(scopedStorage(), session.feedRoster);
     if (rosterStage.status === 'rejected') {
       track('roster_snapshot_rejected', { reason: rosterStage.reason });
@@ -1084,6 +1104,10 @@ export class Feed {
     this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
     this.applyOperatorDebugEntryCapability(session.catalog_lab_authorization_available);
     this.applyOperatorLevelFlaggingCapability(session.operator_level_flagging_available);
+    this.applyDevelopmentIntakeCapability(
+      session.development_intake_available,
+      session.development_intake_context,
+    );
     // Boot AND every foreground land here, which is exactly where the UNLOCKED /
     // FULFILLED ceremonies are owed from the read API (each shown once, by
     // watermark).
@@ -1534,6 +1558,7 @@ export class Feed {
     this.applyCatalogLabAuthorizationCapability(false);
     this.applyOperatorDebugEntryCapability(false);
     this.applyOperatorLevelFlaggingCapability(false);
+    this.applyDevelopmentIntakeCapability(false, undefined);
     for (const slot of [...this.catalogSlots.values()]) {
       this.activateCatalogBuiltinFallback(slot, 'session_authentication_rejected');
       this.disposeCatalogSlot(slot.index);
@@ -2709,6 +2734,104 @@ export class Feed {
       void this.refreshOperatorPlayableReworks();
     }
     this.refreshOperatorControls();
+  }
+
+  private applyDevelopmentIntakeCapability(value: unknown, context: unknown): void {
+    this.developmentIntakeAvailable = platformDevelopmentIntakeSessionGrant(
+      value,
+      context,
+      typeof __PLATFORM_SOURCE_SHA__ === 'string' ? __PLATFORM_SOURCE_SHA__ : null,
+    );
+    if (!this.developmentIntakeAvailable) {
+      this.platformDevelopmentIntakeSyncEpoch += 1;
+      this.platformDevelopmentIntakeLatest = null;
+      this.platformDevelopmentIntakeControl?.destroy();
+      this.platformDevelopmentIntakeControl = null;
+      this.platformDevelopmentIntakeActorUserId = null;
+      return;
+    }
+    this.refreshPlatformDevelopmentIntakeControl();
+    void this.refreshPlatformDevelopmentIntakes();
+  }
+
+  private async refreshPlatformDevelopmentIntakes(): Promise<void> {
+    const epoch = ++this.platformDevelopmentIntakeSyncEpoch;
+    try {
+      const projection = validatePlatformDevelopmentIntakeList(
+        await apiListPlatformDevelopmentIntakesRequired(),
+      );
+      if (epoch !== this.platformDevelopmentIntakeSyncEpoch || !this.developmentIntakeAvailable
+        || this.platformDevelopmentIntakeActorUserId !== this.authenticatedUserId) return;
+      const latest = projection.items[0] ?? null;
+      this.platformDevelopmentIntakeLatest = latest;
+      if (latest && this.platformDevelopmentIntakeControl) {
+        this.platformDevelopmentIntakeControl.update(latest);
+      } else {
+        this.refreshPlatformDevelopmentIntakeControl();
+      }
+    } catch {
+      // Durable server state is retried on the next authenticated foreground sync.
+    }
+  }
+
+  private refreshPlatformDevelopmentIntakeControl(): void {
+    const actorUserId = this.authenticatedUserId;
+    if (!this.developmentIntakeAvailable || !this.feedBarEl
+      || !Number.isSafeInteger(actorUserId) || Number(actorUserId) <= 0
+      || typeof __PLATFORM_SOURCE_SHA__ !== 'string'
+      || !/^[0-9a-f]{40}$/.test(__PLATFORM_SOURCE_SHA__)) {
+      this.platformDevelopmentIntakeControl?.destroy();
+      this.platformDevelopmentIntakeControl = null;
+      this.platformDevelopmentIntakeActorUserId = null;
+      return;
+    }
+    if (this.platformDevelopmentIntakeControl
+      && this.platformDevelopmentIntakeActorUserId === actorUserId) return;
+    if (this.platformDevelopmentIntakeActorUserId !== actorUserId) {
+      this.platformDevelopmentIntakeSyncEpoch += 1;
+      this.platformDevelopmentIntakeLatest = null;
+      this.platformDevelopmentIntakeControl?.destroy();
+      this.platformDevelopmentIntakeControl = null;
+    }
+    const route = `${location.pathname}${location.search}`.slice(0, 512);
+    this.platformDevelopmentIntakeControl = mountPlatformDevelopmentIntakeControl(this.feedBarEl, {
+      buildSha: __PLATFORM_SOURCE_SHA__,
+      actorUserId: Number(actorUserId),
+      surface: 'feed',
+      route,
+      storage: localStorage,
+      existing: this.platformDevelopmentIntakeLatest,
+      createMutationId: ticketUid,
+      submit: (request) => this.submitPlatformDevelopmentIntake(request),
+    });
+    this.platformDevelopmentIntakeActorUserId = Number(actorUserId);
+  }
+
+  private async submitPlatformDevelopmentIntake(
+    request: PlatformDevelopmentIntakeRequestV1,
+  ): Promise<PlatformDevelopmentIntakeResponseV1> {
+    if (!this.developmentIntakeAvailable || request.buildSha !== __PLATFORM_SOURCE_SHA__) {
+      throw new ApiRequestError(409, 'The platform build changed', 'development_intake_stale');
+    }
+    // A projection read begun before this mutation cannot authoritatively
+    // overwrite its receipt after the POST completes (or while it is in flight).
+    this.platformDevelopmentIntakeSyncEpoch += 1;
+    let rawResponse: PlatformDevelopmentIntakeResponseV1;
+    try {
+      rawResponse = await apiCreatePlatformDevelopmentIntakeRequired(request);
+    } finally {
+      // Also fence reads started after submission began but before its terminal
+      // response; neither pre-submit nor in-flight projections may win.
+      this.platformDevelopmentIntakeSyncEpoch += 1;
+    }
+    let response: PlatformDevelopmentIntakeResponseV1;
+    try {
+      response = validatePlatformDevelopmentIntakeReceipt(rawResponse, request);
+    } catch {
+      throw new ApiRequestError(503, 'Development intake receipt differs', 'development_intake_receipt_invalid');
+    }
+    this.platformDevelopmentIntakeLatest = response;
+    return response;
   }
 
   private async refreshOperatorPlayableReworks(): Promise<void> {
