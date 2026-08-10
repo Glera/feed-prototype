@@ -408,6 +408,15 @@ export interface OperatorPlayableReworkResponseV1 {
     summary: string | null;
     updatedAt: string | null;
   };
+  releaseExecution?: {
+    releaseId: string;
+    state: 'preparing' | 'ready_for_approval' | 'needs_help';
+    bindingDigest: string | null;
+    code: string | null;
+    summary: string | null;
+    updatedAt: string;
+    notificationStatus: 'confirmed' | 'retry_wait' | 'outcome_unknown' | 'failed_terminal' | null;
+  };
   createdAt: string;
   replayed?: boolean;
 }
@@ -1626,7 +1635,9 @@ export interface PlayableReleaseSummary {
   sourceCommit: string;
   previousRuntimeArtifactDigest: string | null;
   runtimeArtifactDigest: string;
-  productionManifestDigest: string;
+  productionManifestDigest?: string;
+  candidateManifestDigest?: string;
+  manifestEntryDigest?: string;
   coverDigests: { tall: string; compact: string };
   candidateUrl: string;
   seriesLength: number;
@@ -1638,6 +1649,21 @@ export interface PlayableReleaseSummary {
     removedPlayableIds: string[];
     reorderedExisting: boolean;
   } | null;
+  review?: {
+    kind: 'rework' | 'source';
+    reworkRequestId: string | null;
+    sourceId: string | null;
+    sourceCommit: string | null;
+    originalRequest: string | null;
+    submittedAt: string | null;
+    actorUserId: number | null;
+    unavailable: boolean;
+    candidatePath: string;
+    candidateArtifactDigest: string;
+    reviewBindingDigest: string;
+    checklist: string[];
+    notificationStatus?: string | null;
+  };
 }
 
 export type CatalogPromotionSummary =
@@ -1672,6 +1698,13 @@ export interface CatalogLabGrantView {
 /** Resolve a short user code entered by an allowlisted Telegram dev. */
 export function apiCatalogLabLookup(userCode: string): Promise<CatalogLabDeviceAuthorization> {
   return postRequired<CatalogLabDeviceAuthorization>('/api/admin/device-auth/lookup', { userCode });
+}
+
+/** Resolve one server-bound READY release for its Telegram operator. */
+export function apiPlayableReleaseReview(releaseId: string): Promise<PlayableReleaseSummary> {
+  return getRequired<PlayableReleaseSummary>(
+    `/api/operator/playable-releases/${encodeURIComponent(releaseId)}/review`,
+  );
 }
 
 /** Approve or deny exactly the authorization returned by lookup. */

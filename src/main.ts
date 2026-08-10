@@ -7,6 +7,7 @@ import { apiGetChallenge, apiPublicIsland, apiSessionRequired, type ChallengeVie
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 import { feedRosterSnapshotForBoot, loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 import { userScopedStorage } from './user-scope';
+import { candidateReviewReleaseIdFromParam } from './candidate-review';
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
@@ -90,8 +91,16 @@ async function boot(): Promise<void> {
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
 const labAuthLaunch = catalogLabAuthRequested({ search: location.search, startParam });
+const candidateReviewQuery = query.get('candidateReview');
+const candidateReviewReleaseId = candidateReviewReleaseIdFromParam(startParam)
+  || candidateReviewReleaseIdFromParam(candidateReviewQuery ? `pr_${candidateReviewQuery}` : null);
 
-if (labAuthLaunch) {
+if (candidateReviewReleaseId) {
+  // READY deep-link: resolve only this server-owned immutable release. This
+  // focused path never boots the feed or reads its mutable roster/manifest.
+  void import('./candidate-review').then((module) =>
+    module.mountPlayableCandidateReviewSurface(candidateReviewReleaseId));
+} else if (labAuthLaunch) {
   // Focused device approval flow: do not mount or warm the playable feed under
   // a security decision. The backend remains the authority for dev allowlisting
   // and feature availability.
@@ -105,6 +114,7 @@ if (labAuthLaunch) {
 // right on screen (no desktop console in Telegram).
 // Debug panel lives on the feed bar (left of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
-if (!labAuthLaunch && (query.get('diag') === '1' || startParam === 'diag')) {
+if (!candidateReviewReleaseId && !labAuthLaunch
+  && (query.get('diag') === '1' || startParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
 }

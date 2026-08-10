@@ -344,12 +344,89 @@ body.lab-auth-open #viewport { display: none; }
 }
 .lab-auth__privacy { padding: 2px 8px 8px; text-align: center; }
 
+.candidate-review {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+}
+.candidate-review > h3,
+.candidate-review > strong,
+.candidate-review__status { margin: 0; }
+.candidate-review > h3 { color: #f4fff9; font-size: 16px; }
+.candidate-review__context { display: grid; gap: 7px; }
+.candidate-review__detail {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.36fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+.candidate-review__detail > span { color: #91a0bd; font-size: 12px; }
+.candidate-review__detail > strong {
+  overflow-wrap: anywhere;
+  color: #eef3ff;
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.candidate-review__checklist {
+  display: grid;
+  gap: 7px;
+  margin: -3px 0 0;
+  padding-left: 21px;
+  color: #c7d2e8;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.candidate-review__slot {
+  position: relative;
+  width: min(100%, calc(68vh * 9 / 16));
+  max-height: 68vh;
+  margin: 0 auto;
+  aspect-ratio: 9 / 16;
+  overflow: hidden;
+  border: 1px solid rgba(157, 182, 242, 0.34);
+  border-radius: 20px;
+  background: #03050a;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
+}
+.candidate-review__frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #03050a;
+}
+.candidate-review__takeover {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 24px;
+  background: linear-gradient(180deg, transparent 42%, rgba(2, 6, 13, 0.82));
+  color: #fff;
+  font: 800 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  text-shadow: 0 2px 8px #000;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.candidate-review__takeover:not(:disabled) { display: flex; align-items: flex-end; justify-content: center; }
+.candidate-review__takeover:disabled { color: transparent; cursor: wait; }
+.candidate-review__status {
+  min-height: 18px;
+  color: #b8c8e8;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+}
+.candidate-review__restart { width: 100%; }
+
 @media (max-width: 380px) {
   .lab-auth { padding-left: 12px; padding-right: 12px; }
   .lab-auth__card { padding: 15px; }
   .lab-auth__detail { grid-template-columns: 1fr; gap: 3px; }
   .lab-auth__actions { flex-direction: column-reverse; }
   .lab-auth__actions .lab-auth__button { width: 100%; }
+  .candidate-review__detail { grid-template-columns: 1fr; gap: 2px; }
 }
 
 @media (prefers-reduced-motion: no-preference) {

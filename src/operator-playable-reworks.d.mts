@@ -59,8 +59,29 @@ export function operatorPlayableReworkControlKey(
       summary: string | null;
       updatedAt: string | null;
     };
+    releaseExecution?: {
+      releaseId: string;
+      state: 'preparing' | 'ready_for_approval' | 'needs_help';
+      code: string | null;
+      summary: string | null;
+      updatedAt: string;
+    };
   } | null,
 ): string;
+
+export function operatorPlayableReworkPresentation(task: {
+  state?: string;
+  execution?: { state?: string; summary?: string | null };
+  releaseExecution?: {
+    state?: 'preparing' | 'ready_for_approval' | 'needs_help';
+    summary?: string | null;
+  };
+}): Readonly<{
+  state: string;
+  icon: string;
+  label: 'Готовится' | 'Готово к проверке' | 'Нужна помощь' | 'Задача принята';
+  blocker: string | null;
+}>;
 
 export function mountOperatorPlayableReworkControl(
   host: HTMLElement,
@@ -74,6 +95,13 @@ export function mountOperatorPlayableReworkControl(
         code: string | null;
         summary: string | null;
         updatedAt: string | null;
+      };
+      releaseExecution?: {
+        releaseId: string;
+        state: 'preparing' | 'ready_for_approval' | 'needs_help';
+        code: string | null;
+        summary: string | null;
+        updatedAt: string;
       };
       createdAt?: string;
       request: Pick<OperatorPlayableReworkRequestV1, 'playableId' | 'instruction' | 'context'>;

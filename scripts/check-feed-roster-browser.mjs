@@ -54,6 +54,7 @@ const ticketRequests = [];
 const playableReworkRequests = [];
 let playableReworkProjectionState = 'open';
 let playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
+let playableReworkReleaseExecution = null;
 let operatorCapability = true;
 let origin = '';
 
@@ -123,6 +124,8 @@ const server = createServer(async (request, response) => {
       closedAt: null,
       closeReceiptDigest: null,
       execution: structuredClone(playableReworkExecution),
+      ...(playableReworkReleaseExecution
+        ? { releaseExecution: structuredClone(playableReworkReleaseExecution) } : {}),
       createdAt: body.context.capturedAt,
       replayed: playableReworkRequests.length > 1,
     });
@@ -139,6 +142,8 @@ const server = createServer(async (request, response) => {
         closedAt: null,
         closeReceiptDigest: null, createdAt: body.context.capturedAt,
         execution: structuredClone(playableReworkExecution),
+        ...(playableReworkReleaseExecution
+          ? { releaseExecution: structuredClone(playableReworkReleaseExecution) } : {}),
       }] : [],
     });
   }
@@ -368,10 +373,31 @@ try {
     'the fresh activation remains stable on later opens',
   );
 
-  // A failed local agent is projected durably without changing requestId.
-  // The control key includes execution status so the mobile warning updates in place.
-  playableReworkExecution = {
-    state: 'blocked',
+  // The additive release execution projection owns visible Fast Lane states;
+  // neither source claim nor the legacy agent receipt is mistaken for READY.
+  playableReworkReleaseExecution = {
+    releaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    state: 'preparing',
+    code: null,
+    summary: null,
+    updatedAt: '2026-08-07T11:59:00.000Z',
+  };
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session'),
+    page.waitForResponse((response) => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
+    page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
+  ]);
+  const preparingButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="… Готовится"]');
+  await preparingButton.waitFor({ timeout: 5000 });
+  assert.equal(await preparingButton.getAttribute('data-rework-state'), 'preparing');
+
+  // A failed release affects only this durable task and discloses its reason.
+  await page.waitForTimeout(1_100);
+  playableReworkReleaseExecution = {
+    releaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    state: 'needs_help',
     code: 'playable_rework_agent_check_failed',
     summary: 'Проверки механики не прошли; изменения не опубликованы.',
     updatedAt: '2026-08-07T12:00:00.000Z',
@@ -385,7 +411,7 @@ try {
   ]);
   const blockedButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Нужна помощь"]');
   await blockedButton.waitFor({ timeout: 5000 });
-  assert.equal(await blockedButton.getAttribute('data-rework-state'), 'blocked');
+  assert.equal(await blockedButton.getAttribute('data-rework-state'), 'needs_help');
   await blockedButton.click();
   const blockerDetails = page.locator('.feed-bar .game__operator-playable-rework .game__operator-playable-rework-details');
   await blockerDetails.waitFor({ state: 'visible', timeout: 3000 });
@@ -407,9 +433,16 @@ try {
   assert.equal(await blockerDetails.isVisible(), true,
     'unchanged foreground sync must preserve the open blocker disclosure');
 
-  // A later release claim remains a separate lifecycle transition.
+  // READY is explicit; a source claim by itself is not review readiness.
   playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
   playableReworkProjectionState = 'claimed';
+  playableReworkReleaseExecution = {
+    releaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    state: 'ready_for_approval',
+    code: null,
+    summary: null,
+    updatedAt: '2026-08-07T12:01:00.000Z',
+  };
   await page.waitForTimeout(1_100); // request a distinct foreground bootstrap
   await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST'
@@ -420,7 +453,7 @@ try {
   ]);
   await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Готово к проверке"]')
     .waitFor({ timeout: 5000 });
-  await assertReworkGeometry('claimed mechanic task');
+  await assertReworkGeometry('READY mechanic task');
 
   for (let retry = 0; retry < 80
     && !cpEvents.some((event) => event.event_name === 'builtin_feed_decision_v2'
