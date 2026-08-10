@@ -221,11 +221,10 @@ function draftKey(options) {
 
 export function platformDevelopmentIntakePendingStorageKey(options) {
   if (!exactActorUserId(options?.actorUserId)
-    || !SHA.test(String(options?.buildSha)) || !printable(options?.route, 512)
-    || !options.route.startsWith('/') || options.route.startsWith('//')) {
+    || !SHA.test(String(options?.buildSha))) {
     fail('development_intake_invalid', 'pending request storage identity is invalid');
   }
-  return `platform-development-intake-pending:v1:${options.actorUserId}:${options.buildSha}:${options.route}`;
+  return `platform-development-intake-pending:v1:${options.actorUserId}:${options.buildSha}`;
 }
 
 function removeStored(storage, key) {
@@ -267,8 +266,8 @@ export function restorePlatformDevelopmentIntakePendingRequest(storage, options)
       return null;
     }
     const request = buildPlatformDevelopmentIntakeRequest(value.request);
-    if (request.buildSha !== options.buildSha || request.route !== options.route
-      || request.surface !== options.surface || !sameRequest(request, value.request)) {
+    if (request.buildSha !== options.buildSha || request.surface !== options.surface
+      || !sameRequest(request, value.request)) {
       removeStored(storage, key);
       return null;
     }
@@ -352,7 +351,15 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
       <b>Запрошенная правка платформы</b>
       <p data-intake-instruction></p>
       <small data-intake-status></small>
+      <dl class="platform-development-intake__receipt" aria-label="Durable receipt">
+        <div><dt>requestId</dt><dd data-intake-request-id></dd></div>
+        <div><dt>mutationId</dt><dd data-intake-mutation-id></dd></div>
+        <div><dt>requestHash</dt><dd data-intake-request-hash></dd></div>
+        <div><dt>replayed</dt><dd data-intake-replayed></dd></div>
+        <div><dt>Issue delivery</dt><dd data-intake-delivery-state></dd></div>
+      </dl>
       <p class="platform-development-intake__blocker" data-intake-blocker hidden></p>
+      <a class="platform-development-intake__result" data-intake-result target="_blank" rel="noreferrer" hidden>Открыть результат</a>
       <button type="button" data-action="new">Новая задача</button>
     </section>`;
   host.appendChild(root);
@@ -365,7 +372,13 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const details = root.querySelector('.platform-development-intake__details');
   const detailInstruction = details.querySelector('[data-intake-instruction]');
   const detailStatus = details.querySelector('[data-intake-status]');
+  const detailRequestId = details.querySelector('[data-intake-request-id]');
+  const detailMutationId = details.querySelector('[data-intake-mutation-id]');
+  const detailRequestHash = details.querySelector('[data-intake-request-hash]');
+  const detailReplayed = details.querySelector('[data-intake-replayed]');
+  const detailDeliveryState = details.querySelector('[data-intake-delivery-state]');
   const blocker = details.querySelector('[data-intake-blocker]');
+  const resultLink = details.querySelector('[data-intake-result]');
   const key = draftKey(options);
   const pendingKey = platformDevelopmentIntakePendingStorageKey(options);
   let pendingRequest = restorePlatformDevelopmentIntakePendingRequest(options.storage, options);
@@ -403,6 +416,11 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     open.dataset.intakeState = failed ? 'needs_help' : terminalReady ? 'ready' : confirmed ? 'confirmed' : 'pending';
     open.setAttribute('aria-label', failed ? '! Нужна помощь' : terminalReady ? '▶ Готово к проверке' : confirmed ? '✓ Тикет создан' : '✓ Задача принята');
     detailInstruction.textContent = validated.request.instruction;
+    detailRequestId.textContent = validated.requestId;
+    detailMutationId.textContent = validated.mutationId;
+    detailRequestHash.textContent = validated.requestHash;
+    detailReplayed.textContent = String(validated.replayed);
+    detailDeliveryState.textContent = deliveryStatus;
     detailStatus.textContent = terminalNeedsHelp
       ? `NEEDS_HELP: ${validated.terminal.summary}`
       : terminalReady
@@ -415,6 +433,12 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
       ? validated.terminal.blocker.operatorAction
       : failed ? 'Нужна помощь с конфигурацией инженерного контура.' : '';
     blocker.hidden = !failed;
+    const resultUrl = terminalReady
+      ? validated.terminal.candidate.url
+      : confirmed ? validated.delivery.issueUrl : null;
+    resultLink.hidden = !resultUrl;
+    if (resultUrl) resultLink.href = resultUrl;
+    else resultLink.removeAttribute('href');
     form.hidden = true;
     open.hidden = false;
     open.setAttribute('aria-controls', details.id);

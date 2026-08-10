@@ -1057,6 +1057,16 @@ body {
 .platform-development-intake__details[hidden] { display: none; }
 .platform-development-intake__details p { margin: 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .platform-development-intake__details small { display: block; color: #acd0df; }
+.platform-development-intake__receipt { margin: 9px 0; }
+.platform-development-intake__receipt div { margin: 4px 0; }
+.platform-development-intake__receipt dt { color: #acd0df; }
+.platform-development-intake__receipt dd {
+  margin: 1px 0 0;
+  overflow-wrap: anywhere;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.platform-development-intake__result { display: inline-block; color: #9dffc1; }
+.platform-development-intake__result[hidden] { display: none; }
 .platform-development-intake__details button { margin-top: 9px; }
 .platform-development-intake__blocker { color: #ffd0c1; }
 .feed-bar:has(.platform-development-intake .game__operator-flag-form:not([hidden])),

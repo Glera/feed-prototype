@@ -451,6 +451,16 @@ try {
   await pendingStatus.waitFor({ state: 'visible' });
   assert.equal(await pendingStatus.textContent(),
     'Задача сохранена и ждёт синхронизации; изменения не опубликованы.');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-request-id]`).textContent(),
+    '11111111-1111-5111-8111-111111111111');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-mutation-id]`).textContent(),
+    postedRequests[0].mutationId);
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-request-hash]`).textContent(),
+    'c'.repeat(64));
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-replayed]`).textContent(),
+    'true');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-delivery-state]`).textContent(),
+    'queued');
   assert.equal(projectionItems[0].delivery.status, 'queued');
   assert.equal(projectionItems[0].delivery.nothingPublished, true);
   loseFirstPostResponse = false;
@@ -473,6 +483,10 @@ try {
   await confirmedStatus.waitFor({ state: 'visible' });
   assert.equal(await confirmedStatus.textContent(),
     'Инженерный тикет создан; изменения ещё не опубликованы.');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-delivery-state]`).textContent(),
+    'confirmed');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-result]`).getAttribute('href'),
+    'https://github.com/Glera/p4g-workspace-meta/issues/17');
 
   projectionItems = [receiptFor(postedRequests[0], {
     status: 'confirmed',
@@ -510,6 +524,8 @@ try {
   await confirmedStatus.waitFor({ state: 'visible' });
   assert.equal(await confirmedStatus.textContent(),
     'READY_TO_PLAY: Bounded candidate is ready for operator testing.');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-result]`).getAttribute('href'),
+    'https://example.test/candidate/17');
 
   await operator.locator(`${detailsSelector} [data-action="new"]`).click();
   const preservedDraft = 'Черновик после открытия системного выбора файла.';
@@ -702,7 +718,7 @@ try {
   await definitive.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
   await definitive.close();
 
-  console.log('operator development intake browser: actor/build gate, strict receipts, both GET fences, rejection, and exact retry verified');
+  console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, and capability fences verified');
 } finally {
   if (heldProjection) releaseHeldProjection();
   if (heldPost) releaseHeldPost();

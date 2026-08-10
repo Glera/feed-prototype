@@ -70,6 +70,13 @@ assert.deepEqual(persisted, {
   actorUserId: 42,
   request,
 });
+const changedRouteOptions = { ...pendingOptions, route: '/?different-entry=1' };
+assert.equal(platformDevelopmentIntakePendingStorageKey(changedRouteOptions), pendingKey);
+assert.deepEqual(
+  restorePlatformDevelopmentIntakePendingRequest(storage, changedRouteOptions),
+  request,
+  'a Telegram relaunch route must not orphan the immutable pending request',
+);
 values.set(pendingKey, JSON.stringify({ ...persisted, actorUserId: 43 }));
 assert.equal(restorePlatformDevelopmentIntakePendingRequest(storage, pendingOptions), null);
 assert.equal(values.has(pendingKey), false);
