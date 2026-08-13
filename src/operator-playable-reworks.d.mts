@@ -46,6 +46,10 @@ export function buildOperatorPlayableReworkRequest(input: {
   screenshot: OperatorPlayableReworkRequestV1['context']['screenshot'];
 }): Readonly<OperatorPlayableReworkRequestV1>;
 
+export function screenshotFromFile(
+  file: File | null,
+): Promise<Readonly<OperatorPlayableReworkRequestV1['context']['screenshot']>>;
+
 export function operatorPlayableReworkErrorMessage(error: unknown): string;
 
 export function operatorPlayableReworkControlKey(

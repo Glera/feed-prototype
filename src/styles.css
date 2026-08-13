@@ -878,6 +878,41 @@ body {
   font-size: 10px;
   line-height: 1.25;
 }
+
+.game__operator-playable-rework-screenshot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -2px 0 10px;
+  padding: 7px 9px;
+  border: 1px solid rgba(167, 197, 178, 0.28);
+  border-radius: 9px;
+  background: rgba(167, 197, 178, 0.08);
+}
+
+.game__operator-playable-rework-screenshot[hidden] { display: none; }
+
+.game__operator-playable-rework-screenshot span {
+  min-width: 0;
+  overflow: hidden;
+  color: #c6d7cc;
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.game__operator-playable-rework-screenshot button {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #dfe7e2;
+  font: inherit;
+}
 .game__operator-flag-actions { display: flex; gap: 8px; }
 .game__operator-flag-actions button {
   border: 0;

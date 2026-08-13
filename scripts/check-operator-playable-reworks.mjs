@@ -53,6 +53,10 @@ assert.equal(
   operatorPlayableReworkErrorMessage({ code: 'request_timeout' }),
   'Сервер не ответил вовремя. Повторите отправку.',
 );
+assert.equal(
+  operatorPlayableReworkErrorMessage({ code: 'playable_rework_screenshot_invalid' }),
+  'Не удалось обработать скриншот. Выберите другое изображение.',
+);
 assert.throws(() => buildOperatorPlayableReworkRequest({
   mutationId: randomUUID(), occurrence, instruction: 'Нельзя\u0000так', screenshot,
 }), (error) => error?.code === 'playable_rework_invalid');
@@ -87,4 +91,4 @@ assert.deepEqual(operatorPlayableReworkPresentation({
   state: 'claimed',
   execution: { state: 'accepted', code: null, summary: null, updatedAt: null },
 }), { state: 'claimed', icon: '✓', label: 'Задача принята', blocker: null });
-console.log('operator playable rework contract: 14 assertions');
+console.log('operator playable rework contract: 15 assertions');
