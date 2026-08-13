@@ -671,7 +671,6 @@ body {
   inset: 0 0 var(--bar-reserve) 0;   /* leave the bottom strip for the swipe bar */
   background: var(--platform-bg);
   touch-action: manipulation;
-  transition: top 0.34s var(--ease-snap), bottom 0.34s var(--ease-snap);
   /* Above the dark loading cover (.game::before, z:3; the slot wins the tie by
      DOM order), so a loading mechanic keeps its poster while the spinner (z:4)
      still turns above it. */
@@ -679,7 +678,8 @@ body {
 }
 /* Autoplay keeps the vertical "footage frame" composition, but never narrows the
    playable horizontally. Tapping to take over removes game--autoplay and expands
-   the slot back to the full area above the bottom bar. */
+   the slot back to the full area above the bottom bar. The inset changes in one
+   layout step: animating top/bottom would resize the live iframe every frame. */
 .game--autoplay .game__slot {
   top: var(--autoplay-frame-block-inset);
   bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
@@ -1375,7 +1375,7 @@ body {
   z-index: 5;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.2s ease-out, top 0.34s var(--ease-snap), bottom 0.34s var(--ease-snap);
+  transition: opacity 0.2s ease-out;
 }
 .game--autoplay .game__reel {
   top: var(--autoplay-frame-block-inset);

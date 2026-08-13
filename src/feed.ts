@@ -1001,8 +1001,8 @@ export class Feed {
       if (e.propertyName !== 'transform' || this.dragging) return;
       // Settle ONLY when the sliding PAGE (or the level-up page) finishes its transform
       // transition — NOT when an inner element's transform transition bubbles up here.
-      // The reel/slot autoplay scale (0.34s) and the reward buttons (0.16s) also fire
-      // 'transform' transitionend events; if we settled on those, settleSlide() would
+      // Reward buttons and other inner controls also fire 'transform'
+      // transitionend events; if we settled on those, settleSlide() would
       // render(false) mid-slide and SNAP the page into place with no animation. That
       // race is exactly why the arrival was sometimes animated and sometimes not.
       const t = e.target as HTMLElement | null;
@@ -6623,12 +6623,20 @@ export class Feed {
     this.incomingPosterOk.set(direction, false);
     el.dataset.mechanicIndex = String(target);
     img.src = this.coverForIndex(target);
+    this.syncIncomingPosterGeometry(target);
+  }
+
+  private syncIncomingPosterGeometry(target: number) {
     const game = this.games[target];
     const slot = game?.querySelector<HTMLElement>('.game__slot');
-    if (game && slot) {
-      // The autoplay footage frame is now real slot geometry rather than a
-      // transform, so offset* gives the resident poster the exact full-width
-      // box used by the arriving iframe.
+    if (!game || !slot) return;
+    for (const direction of RIDE_DIRECTIONS) {
+      if (this.incomingIndices.get(direction) !== target) continue;
+      const img = this.incomingImgs.get(direction);
+      if (!img) continue;
+      // Autoplay state can land after the resident identity is selected. Sync
+      // from the real slot on every state change so the early identity guard
+      // cannot preserve a stale pre-inset box.
       img.style.top = `${game.offsetTop + slot.offsetTop}px`;
       img.style.left = `${game.offsetLeft + slot.offsetLeft}px`;
       img.style.width = `${slot.offsetWidth}px`;
@@ -7268,7 +7276,7 @@ export class Feed {
     this.refreshOperatorControls();
   }
 
-  /** Pick the cover aspect bucket for THIS device from the real slot box (covers
+  /** Pick the cover aspect bucket for THIS device from the stable game area (covers
    *  are baked in two aspects — tall ~0.55, compact ~0.72 — see gen-covers). The
    *  poster is object-fit:fill'd into the slot, so the nearer-aspect bake stretches
    *  least. Threshold = midpoint of the two clusters (0.636). Idempotent; re-run on
@@ -7276,9 +7284,18 @@ export class Feed {
    *  aspect. */
   private coverBucket = '';
   private pickCoverBucket() {
+    const game = this.viewport.querySelector<HTMLElement>('.game');
     const slot = this.viewport.querySelector<HTMLElement>('.game__slot');
     let w = window.innerWidth, h = Math.max(1, window.innerHeight - 146);
-    if (slot && slot.offsetWidth && slot.offsetHeight) { w = slot.offsetWidth; h = slot.offsetHeight; }
+    if (game?.offsetWidth && game.offsetHeight) {
+      w = game.offsetWidth;
+      // Before mountFeedBar the unmodified slot is the stable base geometry;
+      // afterwards the fixed bar is the authoritative reserved height. Never
+      // read the autoplay-inset slot here: its state belongs to a page, not to
+      // the viewport's cover aspect.
+      const reserved = this.feedBarEl?.offsetHeight ?? 0;
+      h = Math.max(1, reserved ? game.offsetHeight - reserved : (slot?.offsetHeight || game.offsetHeight));
+    }
     this.dbgSlot = { w: Math.round(w), h: Math.round(h), a: +(w / h).toFixed(3) };
     // Buckets measured IN Telegram: mobile ~0.65 (Android 0.63 / iPhone 0.64–0.66),
     // desktop ~0.80. Threshold = midpoint 0.72 → mobile ('') vs desktop ('.c').
@@ -7527,12 +7544,9 @@ export class Feed {
         } catch { /* cross-origin */ }
       }
       // Cold arrival: a staged CURRENT frame stays host-paused while it loads,
-      // so the api gate above can't run and the slot sat at scale(1) — the
-      // preloader filled the full frame, then the freshly revealed game
-      // visibly shrank into the 0.92 autoplay frame (the "expands then
-      // squeezes back" report). Pre-scale while loading so the mechanic
-      // reveals INSIDE the frame it will live in. Manual runs keep
-      // full-bleed — they never get the autoplay frame.
+      // so the api gate above can't run. Apply the vertical autoplay inset
+      // before reveal so the preloader and mechanic use the same box. Manual
+      // runs keep full-bleed — they never get the autoplay frame.
       if (!active && isCurrent && !manual && !this.frameReady.has(i)
         && !this.earnedThisCycle.has(i) && !this.failedThisCycle.has(i)) {
         active = true;
@@ -7628,12 +7642,14 @@ export class Feed {
 
   private setAutoplayUi(i: number, active: boolean, preview: boolean = false) {
     const game = this.games[i];
+    const activeChanged = this.autoplayUiActive.has(i) !== active;
     const previewChanged = !!game?.classList.contains('game--autoplay-preview') !== preview;
-    if (this.autoplayUiActive.has(i) === active && !previewChanged) return;
+    if (!activeChanged && !previewChanged) return;
     if (active) this.autoplayUiActive.add(i);
     else this.autoplayUiActive.delete(i);
     game?.classList.toggle('game--autoplay', active);
     game?.classList.toggle('game--autoplay-preview', preview);
+    this.syncIncomingPosterGeometry(i);
   }
 
   private primeIncomingAutoplayPreview(indices: number[]) {

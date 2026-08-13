@@ -1,15 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const layoutProofDir = process.env.P4G_LAYOUT_PROOF_DIR || '';
-const layoutProofPlayableUrl = process.env.P4G_LAYOUT_PROOF_PLAYABLE_URL || '';
 let origin = '';
 
 const json = (response, value, status = 200) => {
@@ -155,12 +153,18 @@ const swipeCurrent = async (page, direction, { inspectRide = false, repeatDuring
     const ride = await page.locator(`.incoming-poster[data-direction="${direction}"]`).evaluate((element) => {
       const image = element.querySelector('img');
       const matrix = new DOMMatrixReadOnly(getComputedStyle(element).transform);
+      const target = document.querySelectorAll('.page')[Number(element.dataset.mechanicIndex)]
+        ?.querySelector('.game__slot');
+      const imageRect = image?.getBoundingClientRect();
+      const targetRect = target?.getBoundingClientRect();
       return {
         zIndex: getComputedStyle(element).zIndex,
         y: matrix.m42,
         complete: Boolean(image?.complete),
         naturalWidth: image?.naturalWidth ?? 0,
         mechanicIndex: Number(element.dataset.mechanicIndex),
+        imageSize: imageRect ? { width: imageRect.width, height: imageRect.height } : null,
+        targetSize: targetRect ? { width: targetRect.width, height: targetRect.height } : null,
       };
     });
     const dragDebug = await page.evaluate(() => ({
@@ -183,6 +187,12 @@ const swipeCurrent = async (page, direction, { inspectRide = false, repeatDuring
     );
     assert.ok(direction < 0 ? ride.y < -1 : ride.y > 1, `unexpected ride transform ${ride.y}`);
     assert.equal(ride.complete && ride.naturalWidth > 0, true, 'the riding card must already be raster-ready');
+    assert.ok(ride.imageSize && ride.targetSize, 'resident and target slot geometry must be measurable');
+    assert.ok(
+      Math.abs(ride.imageSize.width - ride.targetSize.width) < 0.5
+        && Math.abs(ride.imageSize.height - ride.targetSize.height) < 0.5,
+      `resident poster geometry drifted from target slot: ${JSON.stringify(ride)}`,
+    );
   }
   await page.mouse.move(x, endY, { steps: 4 });
   await page.mouse.up();
@@ -212,11 +222,15 @@ const assertAutoplayFrameGeometry = async (page, label) => {
     const gameRect = game.getBoundingClientRect();
     const slotRect = slot.getBoundingClientRect();
     const frameRect = frame.getBoundingClientRect();
+    const frameDocument = frame instanceof HTMLIFrameElement ? frame.contentDocument : null;
     return {
       game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
       slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
       frame: { left: frameRect.left, right: frameRect.right, top: frameRect.top, bottom: frameRect.bottom },
-      overflowX: Math.max(game.scrollWidth - game.clientWidth, slot.scrollWidth - slot.clientWidth),
+      documentOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      frameOverflowX: frameDocument
+        ? frameDocument.documentElement.scrollWidth - frameDocument.documentElement.clientWidth
+        : null,
     };
   });
   assert.ok(geometry, `${label}: autoplay geometry is unavailable`);
@@ -234,7 +248,8 @@ const assertAutoplayFrameGeometry = async (page, label) => {
     geometry.slot.top > geometry.game.top && geometry.slot.bottom < geometry.game.bottom,
     `${label}: autoplay must retain a vertical footage frame: ${JSON.stringify(geometry)}`,
   );
-  assert.equal(geometry.overflowX, 0, `${label}: autoplay introduced horizontal overflow`);
+  assert.equal(geometry.documentOverflowX, 0, `${label}: feed introduced horizontal overflow`);
+  assert.equal(geometry.frameOverflowX, 0, `${label}: playable introduced horizontal clipping/overflow`);
 };
 
 const runViewport = async (browser, viewport, label) => {
@@ -254,26 +269,6 @@ const runViewport = async (browser, viewport, label) => {
   assert.ok(count > 2, `${label}: fixture needs a real ring`);
   assert.equal(await currentIndex(page), 0, `${label}: feed must start at the first card`);
   await assertAutoplayFrameGeometry(page, `${label}/first-playable`);
-
-  if (label === 'mobile/TMA' && layoutProofDir && layoutProofPlayableUrl) {
-    mkdirSync(layoutProofDir, { recursive: true });
-    const directPage = await context.newPage();
-    await directPage.goto(layoutProofPlayableUrl, { waitUntil: 'networkidle' });
-    await directPage.screenshot({ path: path.join(layoutProofDir, 'two-dots-direct-390x844.png') });
-    await directPage.close();
-
-    const frame = page.locator('.page--in-viewport .game__frame').first();
-    await frame.evaluate((element, url) => {
-      if (!(element instanceof HTMLIFrameElement)) throw new Error('feed frame is unavailable');
-      element.src = url;
-    }, layoutProofPlayableUrl);
-    await frame.evaluate((element) => new Promise((resolve) => {
-      element.addEventListener('load', resolve, { once: true });
-      setTimeout(resolve, 3000);
-    }));
-    await assertAutoplayFrameGeometry(page, `${label}/exact-two-dots-source`);
-    await page.screenshot({ path: path.join(layoutProofDir, 'two-dots-feed-390x844.png') });
-  }
 
   await page.waitForFunction((expected) => {
     const layer = document.querySelector('.incoming-poster[data-direction="-1"]');
@@ -337,8 +332,9 @@ const runViewport = async (browser, viewport, label) => {
 const browser = await chromium.launch();
 try {
   await runViewport(browser, { width: 390, height: 844 }, 'mobile/TMA');
+  await runViewport(browser, { width: 390, height: 760 }, 'short-mobile/TMA');
   await runViewport(browser, { width: 1280, height: 800 }, 'desktop');
-  console.log('feed navigation browser checks passed for mobile/TMA and desktop');
+  console.log('feed navigation browser checks passed for exact, short mobile/TMA and desktop');
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
