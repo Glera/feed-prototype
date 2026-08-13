@@ -1,3 +1,8 @@
+import {
+  candidateFeedStartParamRequested,
+  decodeCandidateFeedStartParam,
+} from './candidate-feed-start-param.mjs';
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PLAYABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -53,9 +58,10 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 }
 
 /** Any candidate-feed parameter selects the fail-closed read-only entry mode. */
-export function candidateFeedPreviewRequested(search: string): boolean {
+export function candidateFeedPreviewRequested(search: string, startParam: string | null = null): boolean {
   const query = new URLSearchParams(search);
-  return Object.values(CANDIDATE_FEED_PARAMS).some((name) => query.has(name));
+  return Object.values(CANDIDATE_FEED_PARAMS).some((name) => query.has(name))
+    || candidateFeedStartParamRequested(startParam);
 }
 
 export function candidateFeedPreviewUrl(
@@ -81,32 +87,12 @@ export function candidateFeedPreviewUrl(
  * Resolve one immutable same-origin candidate from its static review binding.
  * No caller-authored URL is accepted; invalid or partial identities throw.
  */
-export async function resolveCandidateFeedPreview(
-  search: string,
-  origin = location.origin,
-  fetchBinding: typeof fetch = fetch,
-): Promise<CandidateFeedPreviewIdentity | null> {
-  const query = new URLSearchParams(search);
-  if (!candidateFeedPreviewRequested(search)) return null;
-  if (query.has('base')) throw new Error('candidate_feed_base_override_forbidden');
-
-  const readExact = (name: string): string => {
-    const values = query.getAll(name);
-    if (values.length !== 1 || values[0] !== values[0].trim()) {
-      throw new Error('candidate_feed_identity_invalid');
-    }
-    return values[0];
-  };
-  const releaseId = readExact(CANDIDATE_FEED_PARAMS.releaseId).toLowerCase();
-  const playableId = readExact(CANDIDATE_FEED_PARAMS.playableId);
-  const candidateArtifactDigest = readExact(CANDIDATE_FEED_PARAMS.artifactDigest);
-  const reviewBindingDigest = readExact(CANDIDATE_FEED_PARAMS.bindingDigest);
-  if (!UUID.test(releaseId) || !PLAYABLE_ID.test(playableId)
-    || !DIGEST.test(candidateArtifactDigest) || !DIGEST.test(reviewBindingDigest)) {
-    throw new Error('candidate_feed_identity_invalid');
-  }
-
-  const candidatePath = `/playable-previews/${releaseId}/${playableId}.html`;
+async function fetchCandidateBinding(
+  releaseId: string,
+  reviewBindingDigest: string,
+  origin: string,
+  fetchBinding: typeof fetch,
+): Promise<CandidateReviewBinding> {
   const bindingPath = `/playable-previews/${releaseId}/review-binding.json`;
   const bindingUrl = new URL(bindingPath, origin);
   if (bindingUrl.origin !== origin || bindingUrl.pathname !== bindingPath) {
@@ -133,7 +119,75 @@ export async function resolveCandidateFeedPreview(
   }
   const binding = parseBinding(decoded);
   if (!binding || binding.releaseId.toLowerCase() !== releaseId
-    || binding.playableId !== playableId || binding.candidatePath !== candidatePath
+    || !UUID.test(binding.releaseId) || !PLAYABLE_ID.test(binding.playableId)
+    || !DIGEST.test(binding.candidateArtifactDigest)
+    || binding.candidatePath !== `/playable-previews/${releaseId}/${binding.playableId}.html`) {
+    throw new Error('candidate_feed_binding_mismatch');
+  }
+  return binding;
+}
+
+/**
+ * Resolve one immutable same-origin candidate from either the original query
+ * identity or the compact Telegram start parameter. The compact token carries
+ * the release id plus the full binding digest; the verified binding supplies
+ * the playable and artifact identities it cryptographically commits.
+ */
+export async function resolveCandidateFeedPreview(
+  search: string,
+  origin = location.origin,
+  fetchBinding: typeof fetch = fetch,
+  startParam: string | null = null,
+): Promise<CandidateFeedPreviewIdentity | null> {
+  const query = new URLSearchParams(search);
+  const queryRequested = Object.values(CANDIDATE_FEED_PARAMS).some((name) => query.has(name));
+  if (!queryRequested && !candidateFeedStartParamRequested(startParam)) return null;
+  if (query.has('base')) throw new Error('candidate_feed_base_override_forbidden');
+
+  if (!queryRequested) {
+    const compact = decodeCandidateFeedStartParam(startParam);
+    if (!compact) throw new Error('candidate_feed_start_param_invalid');
+    const binding = await fetchCandidateBinding(
+      compact.releaseId,
+      compact.reviewBindingDigest,
+      origin,
+      fetchBinding,
+    );
+    if (binding.review.kind !== 'source'
+      || binding.review.reworkRequestId !== null
+      || typeof binding.review.sourceId !== 'string'
+      || !PLAYABLE_ID.test(binding.review.sourceId)
+      || typeof binding.review.sourceCommit !== 'string'
+      || !/^[0-9a-f]{40}$/.test(binding.review.sourceCommit)) {
+      throw new Error('candidate_feed_start_source_binding_required');
+    }
+    return Object.freeze({
+      releaseId: compact.releaseId,
+      playableId: binding.playableId,
+      candidatePath: binding.candidatePath,
+      candidateArtifactDigest: binding.candidateArtifactDigest,
+      reviewBindingDigest: compact.reviewBindingDigest,
+    });
+  }
+
+  const readExact = (name: string): string => {
+    const values = query.getAll(name);
+    if (values.length !== 1 || values[0] !== values[0].trim()) {
+      throw new Error('candidate_feed_identity_invalid');
+    }
+    return values[0];
+  };
+  const releaseId = readExact(CANDIDATE_FEED_PARAMS.releaseId).toLowerCase();
+  const playableId = readExact(CANDIDATE_FEED_PARAMS.playableId);
+  const candidateArtifactDigest = readExact(CANDIDATE_FEED_PARAMS.artifactDigest);
+  const reviewBindingDigest = readExact(CANDIDATE_FEED_PARAMS.bindingDigest);
+  if (!UUID.test(releaseId) || !PLAYABLE_ID.test(playableId)
+    || !DIGEST.test(candidateArtifactDigest) || !DIGEST.test(reviewBindingDigest)) {
+    throw new Error('candidate_feed_identity_invalid');
+  }
+  const binding = await fetchCandidateBinding(releaseId, reviewBindingDigest, origin, fetchBinding);
+  const candidatePath = `/playable-previews/${releaseId}/${playableId}.html`;
+  if (binding.playableId !== playableId || binding.candidatePath !== candidatePath
     || binding.candidateArtifactDigest !== candidateArtifactDigest) {
     throw new Error('candidate_feed_binding_mismatch');
   }

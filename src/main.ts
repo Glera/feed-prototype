@@ -1,7 +1,7 @@
 import './styles.css';
 import { createFeed } from './feed';
 import { setCandidatePlayableOverlay, setMechanicVersions } from './playables';
-import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam, setTelegramReadOnlyPreviewMode } from './telegram';
+import { initTelegram, getInitData, getStartParam, hasTelegramHostContext, hasTelegramLaunchUserIdentity, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam, setTelegramReadOnlyPreviewMode } from './telegram';
 import { initTelemetry, setTelemetryReadOnlyPreviewMode } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, apiSessionRequired, type ChallengeView, type PublicIslandView, type SessionResp } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
@@ -9,9 +9,12 @@ import { feedRosterSnapshotForBoot, loadVerifiedFeedRosterSessionSnapshot } from
 import { userScopedStorage } from './user-scope';
 import { candidateReviewReleaseIdFromParam } from './candidate-review';
 import { candidateFeedPreviewRequested, resolveCandidateFeedPreview } from './candidate-feed-preview';
+import { candidateFeedStartParamRequested } from './candidate-feed-start-param.mjs';
 
 const query = new URLSearchParams(location.search);
-const candidateFeedRequested = candidateFeedPreviewRequested(location.search);
+const startParam = getStartParam();
+const candidateFeedStartRequested = candidateFeedStartParamRequested(startParam);
+const candidateFeedRequested = candidateFeedPreviewRequested(location.search, startParam);
 setTelegramReadOnlyPreviewMode(candidateFeedRequested);
 setTelemetryReadOnlyPreviewMode(candidateFeedRequested);
 
@@ -53,7 +56,16 @@ function mountCandidateFeedBadge(): void {
 // the await entirely (getStartParam is sync) → no added boot latency.
 async function boot(): Promise<void> {
   try {
-    const candidate = await resolveCandidateFeedPreview(location.search);
+    if (candidateFeedStartRequested
+      && (!hasTelegramHostContext() || !hasTelegramLaunchUserIdentity())) {
+      throw new Error('candidate_feed_start_operator_identity_required');
+    }
+    const candidate = await resolveCandidateFeedPreview(
+      location.search,
+      location.origin,
+      fetch,
+      startParam,
+    );
     setCandidatePlayableOverlay(candidate);
   } catch {
     failCandidateFeedPreview();
@@ -140,10 +152,10 @@ async function boot(): Promise<void> {
     mountFeed();
   }
 }
-const startParam = getStartParam();
-const labAuthLaunch = catalogLabAuthRequested({ search: location.search, startParam });
+const routedStartParam = getStartParam() ?? startParam;
+const labAuthLaunch = catalogLabAuthRequested({ search: location.search, startParam: routedStartParam });
 const candidateReviewQuery = query.get('candidateReview');
-const candidateReviewReleaseId = candidateReviewReleaseIdFromParam(startParam)
+const candidateReviewReleaseId = candidateReviewReleaseIdFromParam(routedStartParam)
   || candidateReviewReleaseIdFromParam(candidateReviewQuery ? `pr_${candidateReviewQuery}` : null);
 
 if (candidateFeedRequested) {
@@ -168,6 +180,6 @@ if (candidateFeedRequested) {
 // Debug panel lives on the feed bar (left of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
 if (!candidateFeedRequested && !candidateReviewReleaseId && !labAuthLaunch
-  && (query.get('diag') === '1' || startParam === 'diag')) {
+  && (query.get('diag') === '1' || routedStartParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
 }

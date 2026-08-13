@@ -252,7 +252,12 @@ initData/auth, статус `/session`, живой лог событий, сбр
 | `?apidelay=<ms>` | Dev-задержка API (≤ 30000). |
 
 Telegram `start_param` дополнительно понимает: `diag`, голый UUID (челлендж),
-`i_<userId>` (остров), `f_<code>` (инвайт в друзья).
+`i_<userId>` (остров), `f_<code>` (инвайт в друзья), а также ровно
+64-символьный `_…` source-preview token для candidate Feed. Последний хранит
+v5 release UUID и полный SHA-256 review binding без усечения; playable/artifact
+берутся только из проверенного same-origin binding. `_tgr_…` остаётся
+Telegram campaign namespace и candidate-маршрутом не считается. Query-URL
+`candidateFeed*` и `pr_<releaseId>` работают независимо и без изменений.
 
 ### Превью карты помощи
 

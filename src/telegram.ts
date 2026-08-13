@@ -49,6 +49,24 @@ export function getTelegramIdentityInitData(): string | null {
   }
 }
 
+/** Compact candidate startapp may read local operator state but never call the
+ * backend. Require an actual Telegram-projected user identity rather than the
+ * plain-browser `?initData=` development override before entering that lane. */
+export function hasTelegramLaunchUserIdentity(): boolean {
+  try {
+    const webApp = (window as any).Telegram?.WebApp;
+    const raw = webApp?.initData;
+    if (typeof raw !== 'string' || raw.length < 1) return false;
+    const unsafeId = webApp?.initDataUnsafe?.user?.id;
+    if (Number.isSafeInteger(unsafeId) && unsafeId > 0) return true;
+    const rawUser = new URLSearchParams(raw).get('user');
+    const user = rawUser ? JSON.parse(rawUser) as { id?: unknown } : null;
+    return typeof user?.id === 'number' && Number.isSafeInteger(user.id) && user.id > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** True only when the page is hosted by a real Telegram WebView.
  *
  * telegram-web-app.js also creates `Telegram.WebApp` in an ordinary browser,

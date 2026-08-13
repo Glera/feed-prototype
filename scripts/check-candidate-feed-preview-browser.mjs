@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
+import { encodeCandidateFeedStartParam } from '../src/candidate-feed-start-param.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const releaseId = '8b447be0-f961-482e-aa03-b419d5f1492d';
@@ -28,6 +29,28 @@ const binding = {
 };
 const bindingBytes = Buffer.from(JSON.stringify(binding));
 const reviewBindingDigest = createHash('sha256').update(bindingBytes).digest('hex');
+const sourceReleaseId = '9c558cf1-239d-5aa5-9dc9-0cfdf6cd37fe';
+const sourceCandidatePath = `/playable-previews/${sourceReleaseId}/${playableId}.html`;
+const sourceCandidateArtifactDigest = '8'.repeat(64);
+const sourceBinding = {
+  schema: 'feed.playable-release-review-binding.v1',
+  releaseId: sourceReleaseId,
+  playableId,
+  candidatePath: sourceCandidatePath,
+  candidateArtifactDigest: sourceCandidateArtifactDigest,
+  review: {
+    kind: 'source',
+    reworkRequestId: null,
+    sourceId: 'solitaire-v1',
+    sourceCommit: '7'.repeat(40),
+  },
+};
+const sourceBindingBytes = Buffer.from(JSON.stringify(sourceBinding));
+const sourceReviewBindingDigest = createHash('sha256').update(sourceBindingBytes).digest('hex');
+const candidateStartParam = encodeCandidateFeedStartParam({
+  releaseId: sourceReleaseId,
+  reviewBindingDigest: sourceReviewBindingDigest,
+});
 const rosterEntries = [
   {
     builtinMappingId: '11111111-1111-4111-8111-111111111111',
@@ -102,7 +125,16 @@ const server = createServer((request, response) => {
     response.setHeader('content-length', String(bindingBytes.length));
     return response.end(bindingBytes);
   }
+  if (url.pathname === `/playable-previews/${sourceReleaseId}/review-binding.json`) {
+    response.setHeader('content-type', 'application/json; charset=utf-8');
+    response.setHeader('content-length', String(sourceBindingBytes.length));
+    return response.end(sourceBindingBytes);
+  }
   if (url.pathname === candidatePath) {
+    response.setHeader('content-type', 'text/html; charset=utf-8');
+    return response.end(playableHtml(playableId, true));
+  }
+  if (url.pathname === sourceCandidatePath) {
     response.setHeader('content-type', 'text/html; charset=utf-8');
     return response.end(playableHtml(playableId, true));
   }
@@ -223,6 +255,34 @@ try {
   assert.deepEqual(storageAfterWin, storageBeforeWin,
     'candidate result mutated durable player storage for a later authenticated flush');
 
+  const startAppUrl = new URL(origin);
+  startAppUrl.searchParams.set('tgWebAppStartParam', candidateStartParam);
+  startAppUrl.searchParams.set('tgWebAppPlatform', 'android');
+  await page.goto(startAppUrl.toString(), { waitUntil: 'domcontentloaded' });
+  await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
+  assert.equal(await page.locator('.page').first().locator('.game__label').textContent(), playableId);
+  const startFrameUrl = new URL((await page.locator('.page').first().locator('iframe').getAttribute('src')) || '', origin);
+  assert.equal(startFrameUrl.pathname, sourceCandidatePath);
+  assert.equal(startFrameUrl.searchParams.get('reviewBinding'), sourceReviewBindingDigest);
+  assert.equal(startFrameUrl.searchParams.get('artifact'), sourceCandidateArtifactDigest);
+  assert.equal(requests.some((entry) => entry.includes('/api/session')), false,
+    `startapp candidate preview inherited Telegram session authority: ${requests.join(', ')}`);
+  assert.equal(requests.some((entry) => entry.startsWith('POST /api/')), false,
+    `startapp candidate preview emitted a backend mutation: ${requests.join(', ')}`);
+
+  for (const malformed of [
+    candidateStartParam.slice(0, -1),
+    `${candidateStartParam}A`,
+    `${candidateStartParam.slice(0, -1)}${candidateStartParam.endsWith('A') ? 'B' : 'A'}`,
+  ]) {
+    const invalidStart = new URL(origin);
+    invalidStart.searchParams.set('tgWebAppStartParam', malformed);
+    invalidStart.searchParams.set('tgWebAppPlatform', 'android');
+    await page.goto(invalidStart.toString(), { waitUntil: 'domcontentloaded' });
+    await page.getByText('Candidate недоступен', { exact: true }).waitFor({ state: 'visible' });
+    assert.equal(await page.locator('iframe').count(), 0, 'malformed startapp token fell back to ordinary feed');
+  }
+
   const badDigest = new URL(validUrl);
   badDigest.searchParams.set('candidateFeedBinding', '0'.repeat(64));
   await page.goto(badDigest.toString(), { waitUntil: 'domcontentloaded' });
@@ -240,6 +300,19 @@ try {
   await page.goto(partial.toString(), { waitUntil: 'domcontentloaded' });
   await page.getByText('Candidate недоступен', { exact: true }).waitFor({ state: 'visible' });
   assert.equal(await page.locator('iframe').count(), 0, 'partial identity fell back to the ordinary feed');
+
+  const unauthenticated = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await unauthenticated.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: `window.Telegram={WebApp:{initData:'',initDataUnsafe:{start_param:${JSON.stringify(candidateStartParam)}},platform:'unknown',ready(){},expand(){},disableVerticalSwipes(){},setHeaderColor(){},setBackgroundColor(){},lockOrientation(){},onEvent(){},offEvent(){}}};`,
+  }));
+  const unauthenticatedPage = await unauthenticated.newPage();
+  await unauthenticatedPage.goto(startAppUrl.toString(), { waitUntil: 'domcontentloaded' });
+  await unauthenticatedPage.getByText('Candidate недоступен', { exact: true }).waitFor({ state: 'visible' });
+  assert.equal(await unauthenticatedPage.locator('iframe').count(), 0,
+    'startapp candidate mounted without Telegram user identity');
+  await unauthenticated.close();
 
   await context.close();
 } finally {
