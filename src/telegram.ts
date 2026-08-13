@@ -33,6 +33,12 @@ type AnyTG = any;
  *  backend from a plain browser. */
 export function getInitData(): string | null {
   if (readOnlyPreviewMode) return null;
+  return getTelegramIdentityInitData();
+}
+
+/** Signed identity bytes remain readable for local user scoping even when the
+ *  candidate proof deliberately disables every authenticated API call. */
+export function getTelegramIdentityInitData(): string | null {
   try {
     const d = (window as any).Telegram?.WebApp?.initData;
     if (typeof d === 'string' && d.length > 0) return d;

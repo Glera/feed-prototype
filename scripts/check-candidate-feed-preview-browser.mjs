@@ -139,7 +139,7 @@ assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 
 const telegramSdk = `window.Telegram={WebApp:{
 initData:'query_id=candidate&user=%7B%22id%22%3A42%7D&hash=candidate',
-initDataUnsafe:{user:{id:42},start_param:null},platform:'android',
+initDataUnsafe:{start_param:null},platform:'android',
 ready(){},expand(){},requestFullscreen(){},disableVerticalSwipes(){},
 setHeaderColor(){},setBackgroundColor(){},lockOrientation(){},onEvent(){},offEvent(){},
 HapticFeedback:{impactOccurred(){},notificationOccurred(){},selectionChanged(){}}
