@@ -153,12 +153,18 @@ const swipeCurrent = async (page, direction, { inspectRide = false, repeatDuring
     const ride = await page.locator(`.incoming-poster[data-direction="${direction}"]`).evaluate((element) => {
       const image = element.querySelector('img');
       const matrix = new DOMMatrixReadOnly(getComputedStyle(element).transform);
+      const target = document.querySelectorAll('.page')[Number(element.dataset.mechanicIndex)]
+        ?.querySelector('.game__slot');
+      const imageRect = image?.getBoundingClientRect();
+      const targetRect = target?.getBoundingClientRect();
       return {
         zIndex: getComputedStyle(element).zIndex,
         y: matrix.m42,
         complete: Boolean(image?.complete),
         naturalWidth: image?.naturalWidth ?? 0,
         mechanicIndex: Number(element.dataset.mechanicIndex),
+        imageSize: imageRect ? { width: imageRect.width, height: imageRect.height } : null,
+        targetSize: targetRect ? { width: targetRect.width, height: targetRect.height } : null,
       };
     });
     const dragDebug = await page.evaluate(() => ({
@@ -181,6 +187,12 @@ const swipeCurrent = async (page, direction, { inspectRide = false, repeatDuring
     );
     assert.ok(direction < 0 ? ride.y < -1 : ride.y > 1, `unexpected ride transform ${ride.y}`);
     assert.equal(ride.complete && ride.naturalWidth > 0, true, 'the riding card must already be raster-ready');
+    assert.ok(ride.imageSize && ride.targetSize, 'resident and target slot geometry must be measurable');
+    assert.ok(
+      Math.abs(ride.imageSize.width - ride.targetSize.width) < 0.5
+        && Math.abs(ride.imageSize.height - ride.targetSize.height) < 0.5,
+      `resident poster geometry drifted from target slot: ${JSON.stringify(ride)}`,
+    );
   }
   await page.mouse.move(x, endY, { steps: 4 });
   await page.mouse.up();
@@ -202,6 +214,44 @@ const currentRuntime = (page) => page.evaluate(() => {
   };
 });
 
+const assertAutoplayFrameGeometry = async (page, label) => {
+  const geometry = await page.locator('.page--in-viewport .game--autoplay').first().evaluate((game) => {
+    const slot = game.querySelector('.game__slot');
+    const frame = game.querySelector('.game__frame');
+    if (!(slot instanceof HTMLElement) || !(frame instanceof HTMLElement)) return null;
+    const gameRect = game.getBoundingClientRect();
+    const slotRect = slot.getBoundingClientRect();
+    const frameRect = frame.getBoundingClientRect();
+    const frameDocument = frame instanceof HTMLIFrameElement ? frame.contentDocument : null;
+    return {
+      game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
+      slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
+      frame: { left: frameRect.left, right: frameRect.right, top: frameRect.top, bottom: frameRect.bottom },
+      documentOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      frameOverflowX: frameDocument
+        ? frameDocument.documentElement.scrollWidth - frameDocument.documentElement.clientWidth
+        : null,
+    };
+  });
+  assert.ok(geometry, `${label}: autoplay geometry is unavailable`);
+  assert.ok(
+    Math.abs(geometry.slot.left - geometry.game.left) < 0.5
+      && Math.abs(geometry.slot.right - geometry.game.right) < 0.5,
+    `${label}: autoplay must preserve the full feed width: ${JSON.stringify(geometry)}`,
+  );
+  assert.ok(
+    Math.abs(geometry.frame.left - geometry.slot.left) < 0.5
+      && Math.abs(geometry.frame.right - geometry.slot.right) < 0.5,
+    `${label}: iframe must fill the full-width slot: ${JSON.stringify(geometry)}`,
+  );
+  assert.ok(
+    geometry.slot.top > geometry.game.top && geometry.slot.bottom < geometry.game.bottom,
+    `${label}: autoplay must retain a vertical footage frame: ${JSON.stringify(geometry)}`,
+  );
+  assert.equal(geometry.documentOverflowX, 0, `${label}: feed introduced horizontal overflow`);
+  assert.equal(geometry.frameOverflowX, 0, `${label}: playable introduced horizontal clipping/overflow`);
+};
+
 const runViewport = async (browser, viewport, label) => {
   const context = await browser.newContext({ viewport });
   await context.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
@@ -218,6 +268,7 @@ const runViewport = async (browser, viewport, label) => {
   const count = await page.locator('.page').count();
   assert.ok(count > 2, `${label}: fixture needs a real ring`);
   assert.equal(await currentIndex(page), 0, `${label}: feed must start at the first card`);
+  await assertAutoplayFrameGeometry(page, `${label}/first-playable`);
 
   await page.waitForFunction((expected) => {
     const layer = document.querySelector('.incoming-poster[data-direction="-1"]');
@@ -229,6 +280,11 @@ const runViewport = async (browser, viewport, label) => {
   await waitForSettledIndex(page, count - 1);
 
   await swipeCurrent(page, 1, { inspectRide: true });
+  await waitForSettledIndex(page, 0);
+  await pointerClick(page, page.locator('[data-bar-tab="feed"]'));
+  await waitForSettledIndex(page, 1);
+  await assertAutoplayFrameGeometry(page, `${label}/unrelated-playable`);
+  await swipeCurrent(page, -1);
   await waitForSettledIndex(page, 0);
 
   await pointerClick(page, page.locator('[data-bar-tab="collections"]'));
@@ -275,9 +331,10 @@ const runViewport = async (browser, viewport, label) => {
 
 const browser = await chromium.launch();
 try {
-  await runViewport(browser, { width: 390, height: 760 }, 'mobile/TMA');
+  await runViewport(browser, { width: 390, height: 844 }, 'mobile/TMA');
+  await runViewport(browser, { width: 390, height: 760 }, 'short-mobile/TMA');
   await runViewport(browser, { width: 1280, height: 800 }, 'desktop');
-  console.log('feed navigation browser checks passed for mobile/TMA and desktop');
+  console.log('feed navigation browser checks passed for exact, short mobile/TMA and desktop');
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
