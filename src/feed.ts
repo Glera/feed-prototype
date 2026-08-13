@@ -9,6 +9,7 @@ import {
   mechanicAssetUrls,
   mechanicIsAvailable,
   mechanicReleaseIdentity,
+  candidatePlayableOverlay,
   type Playable,
 } from './playables';
 // Series-reward gift icons (inlined into the single-file feed bundle). One is picked
@@ -914,6 +915,7 @@ export class Feed {
   private preloaderEl: HTMLElement | null = null;
   private initialTarget = 0;
   private initialSessionPromise: Promise<SessionResp> | null;
+  private readonly readOnlyPreview: boolean;
 
   // When the user taps to take over an autoplay demo, restart the mechanic from
   // scratch (fresh level) by default. `?takeover=continue` keeps the old behavior
@@ -962,6 +964,7 @@ export class Feed {
     rosterActivationId: string | null = null,
     friendAcceptCode: string | null = null,
     initialSessionPromise: Promise<SessionResp> | null = null,
+    readOnlyPreview = false,
   ) {
     this.viewport = viewport;
     this.feedEl = feedEl;
@@ -973,6 +976,7 @@ export class Feed {
     this.publicIsland = publicIsland;
     this.friendAcceptCode = friendAcceptCode;
     this.initialSessionPromise = initialSessionPromise;
+    this.readOnlyPreview = readOnlyPreview;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     const initialPlayableId = this.playables[this.realIndex()]?.id;
@@ -1060,6 +1064,10 @@ export class Feed {
   // apiSession returns null → we keep the existing in-memory behaviour).
   private async bootServer(): Promise<void> {
     track('session_start', { entry: getStartParam() ? 'challenge' : 'direct', start_param: getStartParam() });
+    if (this.readOnlyPreview) {
+      this.settleServerSeed();
+      return;
+    }
     // Telegram can restore a cached WebView shell without restoring signed
     // initData. Previously that state looked like a healthy baked feed while
     // every authenticated surface (including generated discovery) silently
@@ -3556,6 +3564,7 @@ export class Feed {
     solveMs: number,
     starsOverride?: number,
   ): Promise<ConfirmedBalances | null> {
+    if (this.readOnlyPreview) return Promise.resolve(null);
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return Promise.resolve(null);
     // Use the same deterministic run-id roll as the backend, so the reward row
@@ -3599,6 +3608,7 @@ export class Feed {
     catalog: CatalogFeedSlot,
     completedLevel: number,
   ): Promise<boolean> {
+    if (this.readOnlyPreview) return Promise.resolve(false);
     const level = catalog.bundle?.levels[completedLevel - 1];
     const ticket = catalog.ticketRequest;
     if (!level || !catalog.bundle || !ticket
@@ -5169,6 +5179,7 @@ export class Feed {
   }
 
   private persistSeriesReward(i: number): void {
+    if (this.readOnlyPreview) return;
     const series = this.series;
     const reward = series?.reward ?? 0;
     const mechanicId = this.playables[i]?.id;
@@ -5193,6 +5204,7 @@ export class Feed {
   }
 
   private queueCatalogChestResult(i: number): Promise<boolean> {
+    if (this.readOnlyPreview) return Promise.resolve(false);
     const series = this.series;
     const catalog = series?.index === i ? series.catalog : null;
     if (!series || !catalog?.bundle || !catalog.ticketRequest) return Promise.resolve(false);
@@ -10804,6 +10816,19 @@ export function createFeed(
   }
   let order = [...resolution.playables];
   let rosterEntries = [...resolution.entries];
+  const candidateOverlay = candidatePlayableOverlay();
+  if (candidateOverlay) {
+    const candidateIndex = order.findIndex((playable) => playable.id === candidateOverlay.playableId);
+    if (candidateIndex < 0) throw new Error('candidate_feed_target_not_in_live_roster');
+    if (candidateIndex > 0) {
+      order = [order[candidateIndex], ...order.slice(0, candidateIndex), ...order.slice(candidateIndex + 1)];
+      rosterEntries = [
+        rosterEntries[candidateIndex],
+        ...rosterEntries.slice(0, candidateIndex),
+        ...rosterEntries.slice(candidateIndex + 1),
+      ];
+    }
+  }
   let ch = challenge;
   // Arriving via a challenge deep-link: put the challenged mechanic first so the
   // recipient lands right on it (no runtime pager surgery). If it isn't in the
@@ -10841,5 +10866,6 @@ export function createFeed(
     resolution.source === 'roster' ? resolution.activationId : null,
     friendAcceptCode,
     initialSessionPromise,
+    candidateOverlay !== null,
   );
 }

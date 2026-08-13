@@ -17,7 +17,7 @@
  * Device-owned preferences (sound, a generator client id, …) deliberately do NOT
  * belong here: they describe the device, not the player.
  */
-import { getInitData } from './telegram';
+import { getTelegramIdentityInitData } from './telegram';
 
 /** The authenticated Telegram user id, or null when there is no identity. */
 export function telegramUserId(): string | null {
@@ -30,7 +30,7 @@ export function telegramUserId(): string | null {
   // hydrated `initDataUnsafe` (and in harnesses that pass `?initData=`), so the
   // scope does not silently collapse to device-wide in precisely those cases.
   try {
-    const rawUser = new URLSearchParams(getInitData() ?? '').get('user');
+    const rawUser = new URLSearchParams(getTelegramIdentityInitData() ?? '').get('user');
     const parsed = rawUser ? JSON.parse(rawUser) as { id?: unknown } : null;
     if (parsed && typeof parsed.id === 'number' && Number.isSafeInteger(parsed.id)) return String(parsed.id);
   } catch { /* dev initData without a parseable user */ }

@@ -4,6 +4,7 @@ import {
   type PlayableReleaseDecisionReceipt,
   type PlayableReleaseSummary,
 } from './api';
+import { candidateFeedPreviewUrl } from './candidate-feed-preview';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -276,8 +277,13 @@ export function mountPlayableCandidateReview(
   restart.className = 'lab-auth__button lab-auth__button--quiet candidate-review__restart';
   restart.textContent = 'Перезапустить candidate';
   restart.disabled = true;
+  const feedPreview = document.createElement('button');
+  feedPreview.type = 'button';
+  feedPreview.className = 'lab-auth__button lab-auth__button--quiet candidate-review__feed';
+  feedPreview.textContent = 'Проверить в реальной ленте';
+  feedPreview.disabled = true;
   slot.append(frame, takeover);
-  root.append(heading, context, checklistHeading, checklist, slot, status, restart);
+  root.append(heading, context, checklistHeading, checklist, slot, status, restart, feedPreview);
 
   let destroyed = false;
   let bindingValid = false;
@@ -301,6 +307,7 @@ export function mountPlayableCandidateReview(
     status.textContent = message;
     takeover.disabled = true;
     restart.disabled = true;
+    feedPreview.disabled = true;
     root.dataset.state = 'invalid';
     emit();
   };
@@ -409,6 +416,15 @@ export function mountPlayableCandidateReview(
     if (!bindingValid || !manual) return;
     setFrameSource(false);
   });
+  feedPreview.addEventListener('click', () => {
+    if (!bindingValid || !review) return;
+    location.assign(candidateFeedPreviewUrl({
+      releaseId: summary.publishId,
+      playableId: summary.playableId,
+      candidateArtifactDigest: review.candidateArtifactDigest,
+      reviewBindingDigest: review.reviewBindingDigest,
+    }).toString());
+  });
   const onVisibility = (): void => {
     if (!bindingValid) return;
     post('setHostPaused', { paused: document.hidden });
@@ -426,6 +442,7 @@ export function mountPlayableCandidateReview(
       await loadReviewBinding(summary, review);
       if (destroyed) return;
       bindingValid = true;
+      feedPreview.disabled = false;
       root.dataset.releaseId = summary.publishId;
       setFrameSource(true);
     } catch {
