@@ -103,7 +103,10 @@ async function boot(): Promise<void> {
   // /session, and its mapping ids end up on that player's feed decisions.
   let initialSessionPromise: Promise<SessionResp> | null = null;
   let rosterSnapshot = null;
-  if (getInitData()) {
+  if (candidateFeedRequested) {
+    const storage = userScopedStorage(localStorage);
+    rosterSnapshot = await loadVerifiedFeedRosterSessionSnapshot(storage);
+  } else if (getInitData()) {
     const storage = userScopedStorage(localStorage);
     const persisted = await loadVerifiedFeedRosterSessionSnapshot(storage);
     initialSessionPromise = apiSessionRequired();

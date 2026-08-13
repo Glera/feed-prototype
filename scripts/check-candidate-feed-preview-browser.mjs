@@ -28,6 +28,41 @@ const binding = {
 };
 const bindingBytes = Buffer.from(JSON.stringify(binding));
 const reviewBindingDigest = createHash('sha256').update(bindingBytes).digest('hex');
+const rosterEntries = [
+  {
+    builtinMappingId: '11111111-1111-4111-8111-111111111111',
+    playableId: 'marble-sort-swipe',
+    variantId: '11111111-1111-1111-1111-111111111111',
+    catalogMechanic: 'marble-sort',
+    mappingDigest: '1'.repeat(64),
+    mappingState: 'active',
+  },
+  {
+    builtinMappingId: '22222222-2222-4222-8222-222222222222',
+    playableId,
+    variantId: '22222222-2222-2222-2222-222222222222',
+    catalogMechanic: 'solitaire/klondike',
+    mappingDigest: '2'.repeat(64),
+    mappingState: 'active',
+  },
+  {
+    builtinMappingId: '33333333-3333-4333-8333-333333333333',
+    playableId: 'merge-locked-v1-swipe',
+    variantId: '33333333-3333-3333-3333-333333333333',
+    catalogMechanic: 'merge/locked',
+    mappingDigest: '3'.repeat(64),
+    mappingState: 'active',
+  },
+];
+const roster = {
+  schema: 'feed.roster-config.v1',
+  activationId: '44444444-4444-4444-8444-444444444444',
+  rosterHash: createHash('sha256').update(JSON.stringify({
+    entries: rosterEntries.map((entry) => ({ builtinMappingId: entry.builtinMappingId })),
+    schema: 'feed.roster-config.v1',
+  })).digest('hex'),
+  entries: rosterEntries,
+};
 const requests = [];
 let origin = '';
 
@@ -44,8 +79,9 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:${candidate
 const id=${JSON.stringify(id)};
 const candidate=${JSON.stringify(candidate)};
 const record=(type)=>{const key='__candidate_feed_commands';const values=JSON.parse(parent.sessionStorage.getItem(key)||'[]');values.push({id,type});parent.sessionStorage.setItem(key,JSON.stringify(values));};
-const send=(type)=>parent.postMessage({source:'playable',id,type},'*');
+const send=(type,extra={})=>parent.postMessage({source:'playable',id,type,...extra},'*');
 addEventListener('message',(event)=>{if(event.source!==parent||event.data?.target!=='playable-swipe')return;record(event.data.type);if(event.data.type==='prepareInteractive')send('interactive_ready');});
+document.querySelector('#marker').addEventListener('click',()=>send('completed',{success:true}));
 addEventListener('load',()=>send('static_ready'));
 </script></body></html>`;
 
@@ -124,12 +160,17 @@ try {
     contentType: 'application/javascript',
     body: telegramSdk,
   }));
+  await context.addInitScript((snapshot) => {
+    if (window === window.top) localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
+  }, roster);
   const page = await context.newPage();
   await page.goto(validUrl, { waitUntil: 'domcontentloaded' });
   await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
   await page.waitForFunction(() => window.__feedWarm?.().current === 0);
   assert.equal(await page.locator('.page').first().locator('.game__label').textContent(), playableId);
-  assert.equal(await page.locator('.page').nth(1).locator('.game__label').textContent(), 'merge-locked-v1-swipe');
+  assert.equal(await page.locator('.page').nth(1).locator('.game__label').textContent(), 'marble-sort-swipe');
+  assert.equal(await page.locator('.session-auth-banner').count(), 0,
+    'read-only TMA candidate preview rendered a false authentication rejection');
 
   const frame = page.locator('.page').first().locator('iframe');
   await frame.waitFor({ state: 'attached' });
@@ -155,8 +196,8 @@ try {
   await page.waitForTimeout(520);
   const neighbor = page.locator('.page--in-viewport iframe').first();
   const neighborUrl = new URL((await neighbor.getAttribute('src')) || '', origin);
-  assert.equal(neighborUrl.pathname, '/merge-locked-v1-swipe.html');
-  await neighbor.contentFrame().getByText('LIVE NEIGHBOR merge-locked-v1-swipe', { exact: true }).waitFor();
+  assert.equal(neighborUrl.pathname, '/marble-sort-swipe.html');
+  await neighbor.contentFrame().getByText('LIVE NEIGHBOR marble-sort-swipe', { exact: true }).waitFor();
 
   await page.goto(validUrl, { waitUntil: 'domcontentloaded' });
   await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
@@ -166,6 +207,21 @@ try {
   const manualFrameUrl = new URL((await page.locator('.page--in-viewport iframe').getAttribute('src')) || '', origin);
   assert.equal(manualFrameUrl.pathname, candidatePath);
   assert.equal(manualFrameUrl.searchParams.get('auto'), '0');
+  const storageBeforeWin = await page.evaluate(() => Object.fromEntries(
+    Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+      .filter((key) => key !== null)
+      .map((key) => [key, localStorage.getItem(key)]),
+  ));
+  await page.locator('.page--in-viewport iframe').contentFrame()
+    .getByText('EXACT IMMUTABLE CANDIDATE', { exact: true }).click();
+  await page.waitForTimeout(600);
+  const storageAfterWin = await page.evaluate(() => Object.fromEntries(
+    Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
+      .filter((key) => key !== null)
+      .map((key) => [key, localStorage.getItem(key)]),
+  ));
+  assert.deepEqual(storageAfterWin, storageBeforeWin,
+    'candidate result mutated durable player storage for a later authenticated flush');
 
   const badDigest = new URL(validUrl);
   badDigest.searchParams.set('candidateFeedBinding', '0'.repeat(64));
