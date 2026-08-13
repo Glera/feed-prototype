@@ -34,6 +34,27 @@ export interface MechanicManifestEntry {
 }
 type MechanicManifestValue = string | MechanicManifestEntry;
 let MECH_MANIFEST: Record<string, MechanicManifestValue> = {};
+export interface CandidatePlayableOverlay {
+  releaseId: string;
+  playableId: string;
+  candidatePath: string;
+  candidateArtifactDigest: string;
+  reviewBindingDigest: string;
+}
+let CANDIDATE_OVERLAY: CandidatePlayableOverlay | null = null;
+
+export function setCandidatePlayableOverlay(overlay: CandidatePlayableOverlay | null): void {
+  CANDIDATE_OVERLAY = overlay ? Object.freeze({ ...overlay }) : null;
+}
+
+export function candidatePlayableOverlay(): CandidatePlayableOverlay | null {
+  return CANDIDATE_OVERLAY;
+}
+
+function candidateOverlayFor(id: string): CandidatePlayableOverlay | null {
+  return CANDIDATE_OVERLAY?.playableId === id ? CANDIDATE_OVERLAY : null;
+}
+
 export function setMechanicVersions(m: Record<string, MechanicManifestValue> | null | undefined): void {
   if (m && typeof m === 'object') MECH_MANIFEST = m;
 }
@@ -74,6 +95,8 @@ export function mechanicIsAvailable(id: string): boolean {
   return manifestEntry(id) !== null;
 }
 function mechanicVersion(id: string): string {
+  const candidate = candidateOverlayFor(id);
+  if (candidate) return candidate.candidateArtifactDigest.slice(0, 12);
   return manifestEntry(id)?.version || BUILD_TAG;   // shared HTML → shared cache-bust hash
 }
 
@@ -91,6 +114,7 @@ export function mechanicPrefetchBytes(id: string): number | null {
 }
 
 export function mechanicAssetUrls(id: string): string[] {
+  if (candidateOverlayFor(id)) return [];
   const assets = manifestEntry(id)?.assets;
   if (!Array.isArray(assets) || assets.length === 0) return [];
   let base = new URLSearchParams(location.search).get('base') || './';
@@ -157,9 +181,10 @@ export const PLAYABLES: Playable[] = [
 /** Resolve a playable's HTML URL. Relative by default (same Render site);
  *  override the host with `?base=…` for local development. */
 export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: boolean; series?: string; level?: number } = {}): string {
+  const candidate = candidateOverlayFor(id);
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
-  const url = `${base}${htmlFileFor(id)}.html`;   // may alias to another mechanic's build
+  const url = candidate?.candidatePath ?? `${base}${htmlFileFor(id)}.html`;   // may alias to another mechanic's build
   const params = new URLSearchParams();
   if (options.hostPaused) params.set('hostPaused', '1');
   if (options.auto !== undefined) params.set('auto', options.auto ? '1' : '0');
@@ -169,6 +194,10 @@ export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: 
   // Which built-in LEVEL the mechanic should load (e.g. pins series: level 1, 2…).
   // The mechanic reads `?level=` at boot (main.ts currentLevelIdx).
   if (options.level != null) params.set('level', String(options.level));
+  if (candidate) {
+    params.set('reviewBinding', candidate.reviewBindingDigest);
+    params.set('artifact', candidate.candidateArtifactDigest);
+  }
   // Cache-bust: per-mechanic content hash (falls back to the feed build tag) so
   // the WebView refetches a mechanic's sibling HTML exactly when its bundle changed.
   params.set('v', mechanicVersion(id));
@@ -178,6 +207,11 @@ export function playableUrl(id: string, options: { hostPaused?: boolean; auto?: 
 
 /** Exact URL referenced by exported SWIPE HTML, including its payload hash. */
 export function playablePayloadUrl(id: string): string {
+  const candidate = candidateOverlayFor(id);
+  if (candidate) {
+    const payloadPath = candidate.candidatePath.replace(/\.html$/, '.payload.js');
+    return `${payloadPath}?v=${candidate.candidateArtifactDigest.slice(0, 12)}`;
+  }
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
   return `${base}${htmlFileFor(id)}.payload.js?v=${mechanicVersion(id)}`;

@@ -426,6 +426,10 @@ try {
   assert.equal(candidateFrameUrl.pathname, candidatePath);
   assert.equal(candidateFrameUrl.searchParams.get('auto'), '1');
   assert.equal(candidateFrameUrl.searchParams.get('reviewBinding'), reviewBindingDigest);
+  const feedPreview = review.getByRole('button', { name: 'Проверить в реальной ленте' });
+  assert.equal(await feedPreview.count(), 1);
+  assert.equal(await feedPreview.isDisabled(), false,
+    'real-feed candidate proof remained unavailable after exact binding verification');
   await enabledPage.waitForFunction(() => {
     const commands = JSON.parse(sessionStorage.getItem('__candidate_review_host_commands') || '[]');
     return ['setHostPaused', 'prepareInteractive', 'startAutoPlay'].every((type) => commands.includes(type));
@@ -588,6 +592,28 @@ try {
   assert.equal(labLinkRequests.some((entry) => entry.includes('/api/session')), false,
     `Lab review link booted session: ${labLinkRequests.join(', ')}`);
   await labLinkPage.close();
+
+  const feedLinkPage = await newPage();
+  await feedLinkPage.goto(`${origin}/?candidateReview=${releaseId}&keep=1`, { waitUntil: 'domcontentloaded' });
+  const feedLink = feedLinkPage.getByRole('button', { name: 'Проверить в реальной ленте' });
+  await feedLink.waitFor({ state: 'visible' });
+  await feedLinkPage.waitForFunction(() => {
+    const button = [...document.querySelectorAll('button')]
+      .find((entry) => entry.textContent === 'Проверить в реальной ленте');
+    return button instanceof HTMLButtonElement && !button.disabled;
+  });
+  await feedLink.click();
+  await feedLinkPage.waitForURL((url) => url.searchParams.has('candidateFeedRelease'));
+  const feedLinkUrl = new URL(feedLinkPage.url());
+  assert.equal(feedLinkUrl.origin, origin);
+  assert.equal(feedLinkUrl.searchParams.get('candidateFeedRelease'), releaseId);
+  assert.equal(feedLinkUrl.searchParams.get('candidateFeedPlayable'), playableId);
+  assert.equal(feedLinkUrl.searchParams.get('candidateFeedArtifact'), candidateArtifactDigest);
+  assert.equal(feedLinkUrl.searchParams.get('candidateFeedBinding'), reviewBindingDigest);
+  assert.equal(feedLinkUrl.searchParams.get('keep'), '1');
+  assert.equal(feedLinkUrl.searchParams.has('candidateReview'), false);
+  assert.equal(feedLinkUrl.searchParams.has('base'), false);
+  await feedLinkPage.close();
 
   const returnSession = enabledPage.waitForResponse((response) =>
     response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/session');

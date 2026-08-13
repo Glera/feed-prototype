@@ -18,6 +18,13 @@
 
 import { resolveTelegramStartParam } from './telegram-start-param.mjs';
 
+let readOnlyPreviewMode = false;
+
+/** Candidate-in-feed proof must never inherit authenticated mutation authority. */
+export function setTelegramReadOnlyPreviewMode(enabled: boolean): void {
+  readOnlyPreviewMode = enabled;
+}
+
 type AnyTG = any;
 
 /** Raw Telegram initData for the `Authorization: tma <initData>` header. Null
@@ -25,6 +32,7 @@ type AnyTG = any;
  *  features. `?initData=` query override is a DEV convenience for testing the
  *  backend from a plain browser. */
 export function getInitData(): string | null {
+  if (readOnlyPreviewMode) return null;
   try {
     const d = (window as any).Telegram?.WebApp?.initData;
     if (typeof d === 'string' && d.length > 0) return d;

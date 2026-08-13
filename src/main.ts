@@ -1,28 +1,64 @@
 import './styles.css';
 import { createFeed } from './feed';
-import { setMechanicVersions } from './playables';
-import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam } from './telegram';
-import { initTelemetry } from './telemetry';
+import { setCandidatePlayableOverlay, setMechanicVersions } from './playables';
+import { initTelegram, getInitData, getStartParam, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam, setTelegramReadOnlyPreviewMode } from './telegram';
+import { initTelemetry, setTelemetryReadOnlyPreviewMode } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, apiSessionRequired, type ChallengeView, type PublicIslandView, type SessionResp } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 import { feedRosterSnapshotForBoot, loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 import { userScopedStorage } from './user-scope';
 import { candidateReviewReleaseIdFromParam } from './candidate-review';
+import { candidateFeedPreviewRequested, resolveCandidateFeedPreview } from './candidate-feed-preview';
+
+const query = new URLSearchParams(location.search);
+const candidateFeedRequested = candidateFeedPreviewRequested(location.search);
+setTelegramReadOnlyPreviewMode(candidateFeedRequested);
+setTelemetryReadOnlyPreviewMode(candidateFeedRequested);
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
 initTelegram();
 // Telemetry (D3): flush the event queue on background/close. Events themselves
 // are emitted from the feed; no-op network outside Telegram.
-initTelemetry();
+if (!candidateFeedRequested) initTelemetry();
 
 const viewport = document.getElementById('viewport')!;
 const feedEl = document.getElementById('feed')!;
+
+function failCandidateFeedPreview(): void {
+  document.body.classList.add('candidate-feed-preview-open');
+  viewport.replaceChildren();
+  feedEl.replaceChildren();
+  const error = document.createElement('section');
+  error.className = 'candidate-feed-preview__error';
+  error.dataset.testid = 'candidate-feed-preview-error';
+  const title = document.createElement('strong');
+  title.textContent = 'Candidate недоступен';
+  const detail = document.createElement('span');
+  detail.textContent = 'Immutable binding не подтверждён. Обычная лента не открыта.';
+  error.append(title, detail);
+  document.body.appendChild(error);
+}
+
+function mountCandidateFeedBadge(): void {
+  const badge = document.createElement('div');
+  badge.className = 'candidate-feed-preview__badge';
+  badge.dataset.testid = 'candidate-feed-preview-badge';
+  badge.textContent = 'Кандидат — не опубликовано';
+  document.body.appendChild(badge);
+}
 
 // If launched from a challenge deep-link (start_param = challenge id), fetch it
 // first so the feed can open on the challenged mechanic. Normal launches skip
 // the await entirely (getStartParam is sync) → no added boot latency.
 async function boot(): Promise<void> {
+  try {
+    const candidate = await resolveCandidateFeedPreview(location.search);
+    setCandidatePlayableOverlay(candidate);
+  } catch {
+    failCandidateFeedPreview();
+    return;
+  }
   // Per-mechanic cache-bust manifest (content hashes, written by export-swipe.sh).
   // Fetched no-store + cb so even a stale-cached feed pulls the CURRENT versions →
   // a changed mechanic's iframe URL busts without needing a full app cache clear.
@@ -35,8 +71,10 @@ async function boot(): Promise<void> {
   let publicIsland: PublicIslandView | null = null;
   // Telegram deep-link start_param OR ?c=<id> (set when tapping an inbox card, which
   // reloads — reusing the same landing path).
-  const sp = getStartParam() || new URLSearchParams(location.search).get('c');
-  if (isChallengeParam(sp)) {
+  const sp = candidateFeedRequested
+    ? null
+    : getStartParam() || new URLSearchParams(location.search).get('c');
+  if (!candidateFeedRequested && isChallengeParam(sp)) {
     challenge = await apiGetChallenge(sp!);   // null if offline / not found → boots normally
   }
   // Operator decision (F005): VITE_ISLAND_ENABLED gates the ENTIRE social surface,
@@ -51,7 +89,7 @@ async function boot(): Promise<void> {
   const ownerId = islandEnabled
     ? (islandOwnerFromParam(sp) || (Number.isSafeInteger(queryOwner) && queryOwner > 0 ? queryOwner : null))
     : null;
-  if (ownerId != null) {
+  if (!candidateFeedRequested && ownerId != null) {
     try { publicIsland = await apiPublicIsland(ownerId); } catch { /* unavailable/private → normal feed */ }
   }
   // Friend-invite deep link (startapp=f_<code>): the feed accepts it after the
@@ -78,24 +116,36 @@ async function boot(): Promise<void> {
       ? persisted
       : await feedRosterSnapshotForBoot(persisted, initial?.feedRoster);
   }
-  createFeed(
-    viewport,
-    feedEl,
-    challenge,
-    publicIsland,
-    rosterSnapshot,
-    friendAcceptCode,
-    initialSessionPromise,
-  );
+  const mountFeed = (): void => {
+    createFeed(
+      viewport,
+      feedEl,
+      challenge,
+      publicIsland,
+      rosterSnapshot,
+      friendAcceptCode,
+      initialSessionPromise,
+    );
+  };
+  if (candidateFeedRequested) try {
+    mountFeed();
+    mountCandidateFeedBadge();
+  } catch {
+    failCandidateFeedPreview();
+    return;
+  } else {
+    mountFeed();
+  }
 }
-const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
 const labAuthLaunch = catalogLabAuthRequested({ search: location.search, startParam });
 const candidateReviewQuery = query.get('candidateReview');
 const candidateReviewReleaseId = candidateReviewReleaseIdFromParam(startParam)
   || candidateReviewReleaseIdFromParam(candidateReviewQuery ? `pr_${candidateReviewQuery}` : null);
 
-if (candidateReviewReleaseId) {
+if (candidateFeedRequested) {
+  void boot();
+} else if (candidateReviewReleaseId) {
   // READY deep-link: resolve only this server-owned immutable release. This
   // focused path never boots the feed or reads its mutable roster/manifest.
   void import('./candidate-review').then((module) =>
@@ -114,7 +164,7 @@ if (candidateReviewReleaseId) {
 // right on screen (no desktop console in Telegram).
 // Debug panel lives on the feed bar (left of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
-if (!candidateReviewReleaseId && !labAuthLaunch
+if (!candidateFeedRequested && !candidateReviewReleaseId && !labAuthLaunch
   && (query.get('diag') === '1' || startParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
 }

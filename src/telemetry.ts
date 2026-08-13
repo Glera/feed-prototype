@@ -27,6 +27,7 @@ const sessionId: string =
 
 let queue: Ev[] = [];
 let timer: number | null = null;
+let readOnlyPreviewMode = false;
 
 // Ring buffer of emitted events for the on-device debug panel (not the network
 // queue — this survives flushes so the log stays visible).
@@ -41,7 +42,17 @@ export function getEventLog(): { t: string; name: string; props?: Record<string,
   return log;
 }
 
+/** Immutable candidate proof never inherits authenticated or best-effort writes. */
+export function setTelemetryReadOnlyPreviewMode(enabled: boolean): void {
+  readOnlyPreviewMode = enabled;
+  if (!enabled) return;
+  queue = [];
+  if (timer != null) window.clearTimeout(timer);
+  timer = null;
+}
+
 export function track(name: string, props?: Record<string, unknown>, runId?: string): void {
+  if (readOnlyPreviewMode) return;
   const client_ts = new Date().toISOString();
   queue.push({ session_id: sessionId, name, props, client_ts, run_id: runId });
   log.push({ t: client_ts.slice(11, 19), name, props: runId ? { ...props, run_id: runId } : props });
@@ -52,7 +63,7 @@ export function track(name: string, props?: Record<string, unknown>, runId?: str
 /** Regular flush via fetch (keepalive so an in-flight one survives a nav). */
 function flush(): void {
   if (timer != null) { window.clearTimeout(timer); timer = null; }
-  if (queue.length === 0) return;
+  if (readOnlyPreviewMode || queue.length === 0) return;
   const events = queue;
   queue = [];
   const body = JSON.stringify({ events, init_data: getInitData() });
@@ -74,7 +85,7 @@ function flush(): void {
 /** Terminal flush on background/close — sendBeacon (survives unload). */
 function beaconFlush(): void {
   if (timer != null) { window.clearTimeout(timer); timer = null; }
-  if (queue.length === 0) return;
+  if (readOnlyPreviewMode || queue.length === 0) return;
   const events = queue;
   queue = [];
   const payload = JSON.stringify({ events, init_data: getInitData() });

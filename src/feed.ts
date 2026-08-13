@@ -9,6 +9,7 @@ import {
   mechanicAssetUrls,
   mechanicIsAvailable,
   mechanicReleaseIdentity,
+  candidatePlayableOverlay,
   type Playable,
 } from './playables';
 // Series-reward gift icons (inlined into the single-file feed bundle). One is picked
@@ -10804,6 +10805,19 @@ export function createFeed(
   }
   let order = [...resolution.playables];
   let rosterEntries = [...resolution.entries];
+  const candidateOverlay = candidatePlayableOverlay();
+  if (candidateOverlay) {
+    const candidateIndex = order.findIndex((playable) => playable.id === candidateOverlay.playableId);
+    if (candidateIndex < 0) throw new Error('candidate_feed_target_not_in_live_roster');
+    if (candidateIndex > 0) {
+      order = [order[candidateIndex], ...order.slice(0, candidateIndex), ...order.slice(candidateIndex + 1)];
+      rosterEntries = [
+        rosterEntries[candidateIndex],
+        ...rosterEntries.slice(0, candidateIndex),
+        ...rosterEntries.slice(candidateIndex + 1),
+      ];
+    }
+  }
   let ch = challenge;
   // Arriving via a challenge deep-link: put the challenged mechanic first so the
   // recipient lands right on it (no runtime pager surgery). If it isn't in the

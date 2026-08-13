@@ -4566,3 +4566,46 @@ body {
 }
 .mission-history__source { color: #c9d3e4; font: 700 12px/1.2 system-ui, sans-serif; }
 .mission-history__amount { color: #ffd07a; font: 900 13px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+
+/* Exact immutable candidate inside the ordinary Feed shell. This label stays
+   above all game/HUD layers and carries no product decision control. */
+.candidate-feed-preview__badge {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  left: 50%;
+  z-index: 5000;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 24px);
+  padding: 7px 12px;
+  border: 1px solid rgba(255, 214, 102, 0.58);
+  border-radius: 999px;
+  background: rgba(18, 20, 28, 0.92);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  color: #ffe49a;
+  font: 850 12px/1.15 system-ui, -apple-system, sans-serif;
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.candidate-feed-preview-open {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  background: #090b13;
+  color: #fff;
+}
+.candidate-feed-preview__error {
+  display: grid;
+  gap: 7px;
+  width: min(340px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 18px;
+  background: #151925;
+  text-align: center;
+}
+.candidate-feed-preview__error strong { font: 900 18px/1.2 system-ui, sans-serif; }
+.candidate-feed-preview__error span { color: #adb7c9; font: 700 13px/1.4 system-ui, sans-serif; }
+.candidate-review__feed { width: 100%; margin-top: 8px; }
