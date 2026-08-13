@@ -5767,9 +5767,8 @@ export class Feed {
       this.posterEls[i] = poster;
       // No cover art shipped → the standard platform card (data URI, can't fail).
       poster.addEventListener('error', () => { poster.src = RIDE_PLACEHOLDER_SRC; }, { once: true });
-      // INSIDE the slot: the poster then shares the iframe's exact box AND the
-      // autoplay "footage frame" scale (.game--autoplay .game__slot 0.92), so
-      // it never reads bigger than the mechanic it stands in for.
+      // INSIDE the slot: the poster shares the iframe's exact autoplay/manual
+      // box, so it never reads bigger than the mechanic it stands in for.
       slot.appendChild(poster);
 
       const spinner = document.createElement('div');
@@ -6613,7 +6612,7 @@ export class Feed {
   }
 
   /** Point one resident layer at its adjacent mechanic's poster and copy the
-   *  arriving page's slot box (page-local, includes the autoplay 0.92 scale). */
+   *  arriving page's autoplay slot box. */
   private updateIncomingPoster(direction: RideDirection) {
     const el = this.incomingEls.get(direction);
     const img = this.incomingImgs.get(direction);
@@ -6627,19 +6626,15 @@ export class Feed {
     const game = this.games[target];
     const slot = game?.querySelector<HTMLElement>('.game__slot');
     if (game && slot) {
-      // UNSCALED layout box via offset* (transforms don't affect it), then
-      // replicate the autoplay footage-frame scale explicitly — an arriving
-      // page is always in autoplay-preview, but its game--autoplay class may
-      // land AFTER this measurement, so reading getBoundingClientRect here
-      // raced it and the poster rode in 8% larger than the mechanic
-      // (.game--autoplay .game__slot { transform: scale(0.92) } — keep in
-      // sync with styles.css).
+      // The autoplay footage frame is now real slot geometry rather than a
+      // transform, so offset* gives the resident poster the exact full-width
+      // box used by the arriving iframe.
       img.style.top = `${game.offsetTop + slot.offsetTop}px`;
       img.style.left = `${game.offsetLeft + slot.offsetLeft}px`;
       img.style.width = `${slot.offsetWidth}px`;
       img.style.height = `${slot.offsetHeight}px`;
-      img.style.transform = 'scale(0.92)';
-      img.style.transformOrigin = '50% 50%';
+      img.style.transform = '';
+      img.style.transformOrigin = '';
     }
   }
 

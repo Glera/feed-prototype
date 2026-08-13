@@ -623,6 +623,7 @@ body {
    Fills the page below the stories rail. All in-game gestures live here and
    must NOT page the feed. */
 .game {
+  --autoplay-frame-block-inset: 4%;
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
@@ -670,20 +671,19 @@ body {
   inset: 0 0 var(--bar-reserve) 0;   /* leave the bottom strip for the swipe bar */
   background: var(--platform-bg);
   touch-action: manipulation;
-  transform-origin: 50% 50%;   /* scale from the CENTRE — autoplay frame gaps on ALL sides */
-  transition: transform 0.34s var(--ease-snap);
+  transition: top 0.34s var(--ease-snap), bottom 0.34s var(--ease-snap);
   /* Above the dark loading cover (.game::before, z:3; the slot wins the tie by
-     DOM order): the slot's transform makes it an atomic stacking context, so
-     without this the cover painted OVER the in-slot poster — a poster that had
-     just ridden in vanished into the dark preloader (flicker). With the slot on
-     top, a loading mechanic keeps its poster; the spinner (z:4) still turns
-     above it, and posterless slots show the same platform-bg as the cover. */
+     DOM order), so a loading mechanic keeps its poster while the spinner (z:4)
+     still turns above it. */
   z-index: 3;
 }
-/* Autoplay: the game sits slightly inset (a dark "footage frame" around it), anchored
-   to the bottom bar. Tapping to take over removes game--autoplay → it expands back to
-   full (flush to the bar in both states). GPU transform (no iframe resize) — smooth. */
-.game--autoplay .game__slot { transform: scale(0.92); }
+/* Autoplay keeps the vertical "footage frame" composition, but never narrows the
+   playable horizontally. Tapping to take over removes game--autoplay and expands
+   the slot back to the full area above the bottom bar. */
+.game--autoplay .game__slot {
+  top: var(--autoplay-frame-block-inset);
+  bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
+}
 .game__frame {
   width: 100%;
   height: 100%;
@@ -708,8 +708,7 @@ body {
    win/fail overlays (z:5). The 120ms fade delay lets the live frame composite
    underneath before the poster lifts. */
 .game__poster {
-  /* Lives INSIDE .game__slot — same box as the iframe, and inherits the
-     autoplay footage-frame scale, so poster and mechanic always match. */
+  /* Lives INSIDE .game__slot, so poster and mechanic always share one box. */
   position: absolute;
   inset: 0;
   width: 100%;
@@ -1376,13 +1375,13 @@ body {
   z-index: 5;
   pointer-events: none;
   opacity: 0;
-  /* Scale in lock-step with the shrunken game (.game__slot scale 0.92, same box +
-     origin) so the corners, PLAY and timecode sit neatly at the edges of the smaller
-     mechanic. Centre origin → frame gaps on all sides, matching the slot. */
-  transform-origin: 50% 50%;
-  transition: opacity 0.2s ease-out, transform 0.34s var(--ease-snap);
+  transition: opacity 0.2s ease-out, top 0.34s var(--ease-snap), bottom 0.34s var(--ease-snap);
 }
-.game--autoplay .game__reel { opacity: 1; transform: scale(0.92); }
+.game--autoplay .game__reel {
+  top: var(--autoplay-frame-block-inset);
+  bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
+  opacity: 1;
+}
 /* But NOT while the frame is the dark loading / arriving / preview placeholder — the
    reel (corners, PLAY, scanlines, timecode) AND the "tap to play or swipe" hint appear
    only once the live mechanic shows (i.e. together with autoplay starting). */

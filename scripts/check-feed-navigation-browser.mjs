@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const layoutProofDir = process.env.P4G_LAYOUT_PROOF_DIR || '';
+const layoutProofPlayableUrl = process.env.P4G_LAYOUT_PROOF_PLAYABLE_URL || '';
 let origin = '';
 
 const json = (response, value, status = 200) => {
@@ -202,6 +204,39 @@ const currentRuntime = (page) => page.evaluate(() => {
   };
 });
 
+const assertAutoplayFrameGeometry = async (page, label) => {
+  const geometry = await page.locator('.page--in-viewport .game--autoplay').first().evaluate((game) => {
+    const slot = game.querySelector('.game__slot');
+    const frame = game.querySelector('.game__frame');
+    if (!(slot instanceof HTMLElement) || !(frame instanceof HTMLElement)) return null;
+    const gameRect = game.getBoundingClientRect();
+    const slotRect = slot.getBoundingClientRect();
+    const frameRect = frame.getBoundingClientRect();
+    return {
+      game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
+      slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
+      frame: { left: frameRect.left, right: frameRect.right, top: frameRect.top, bottom: frameRect.bottom },
+      overflowX: Math.max(game.scrollWidth - game.clientWidth, slot.scrollWidth - slot.clientWidth),
+    };
+  });
+  assert.ok(geometry, `${label}: autoplay geometry is unavailable`);
+  assert.ok(
+    Math.abs(geometry.slot.left - geometry.game.left) < 0.5
+      && Math.abs(geometry.slot.right - geometry.game.right) < 0.5,
+    `${label}: autoplay must preserve the full feed width: ${JSON.stringify(geometry)}`,
+  );
+  assert.ok(
+    Math.abs(geometry.frame.left - geometry.slot.left) < 0.5
+      && Math.abs(geometry.frame.right - geometry.slot.right) < 0.5,
+    `${label}: iframe must fill the full-width slot: ${JSON.stringify(geometry)}`,
+  );
+  assert.ok(
+    geometry.slot.top > geometry.game.top && geometry.slot.bottom < geometry.game.bottom,
+    `${label}: autoplay must retain a vertical footage frame: ${JSON.stringify(geometry)}`,
+  );
+  assert.equal(geometry.overflowX, 0, `${label}: autoplay introduced horizontal overflow`);
+};
+
 const runViewport = async (browser, viewport, label) => {
   const context = await browser.newContext({ viewport });
   await context.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
@@ -218,6 +253,27 @@ const runViewport = async (browser, viewport, label) => {
   const count = await page.locator('.page').count();
   assert.ok(count > 2, `${label}: fixture needs a real ring`);
   assert.equal(await currentIndex(page), 0, `${label}: feed must start at the first card`);
+  await assertAutoplayFrameGeometry(page, `${label}/first-playable`);
+
+  if (label === 'mobile/TMA' && layoutProofDir && layoutProofPlayableUrl) {
+    mkdirSync(layoutProofDir, { recursive: true });
+    const directPage = await context.newPage();
+    await directPage.goto(layoutProofPlayableUrl, { waitUntil: 'networkidle' });
+    await directPage.screenshot({ path: path.join(layoutProofDir, 'two-dots-direct-390x844.png') });
+    await directPage.close();
+
+    const frame = page.locator('.page--in-viewport .game__frame').first();
+    await frame.evaluate((element, url) => {
+      if (!(element instanceof HTMLIFrameElement)) throw new Error('feed frame is unavailable');
+      element.src = url;
+    }, layoutProofPlayableUrl);
+    await frame.evaluate((element) => new Promise((resolve) => {
+      element.addEventListener('load', resolve, { once: true });
+      setTimeout(resolve, 3000);
+    }));
+    await assertAutoplayFrameGeometry(page, `${label}/exact-two-dots-source`);
+    await page.screenshot({ path: path.join(layoutProofDir, 'two-dots-feed-390x844.png') });
+  }
 
   await page.waitForFunction((expected) => {
     const layer = document.querySelector('.incoming-poster[data-direction="-1"]');
@@ -229,6 +285,11 @@ const runViewport = async (browser, viewport, label) => {
   await waitForSettledIndex(page, count - 1);
 
   await swipeCurrent(page, 1, { inspectRide: true });
+  await waitForSettledIndex(page, 0);
+  await pointerClick(page, page.locator('[data-bar-tab="feed"]'));
+  await waitForSettledIndex(page, 1);
+  await assertAutoplayFrameGeometry(page, `${label}/unrelated-playable`);
+  await swipeCurrent(page, -1);
   await waitForSettledIndex(page, 0);
 
   await pointerClick(page, page.locator('[data-bar-tab="collections"]'));
@@ -275,7 +336,7 @@ const runViewport = async (browser, viewport, label) => {
 
 const browser = await chromium.launch();
 try {
-  await runViewport(browser, { width: 390, height: 760 }, 'mobile/TMA');
+  await runViewport(browser, { width: 390, height: 844 }, 'mobile/TMA');
   await runViewport(browser, { width: 1280, height: 800 }, 'desktop');
   console.log('feed navigation browser checks passed for mobile/TMA and desktop');
 } finally {
