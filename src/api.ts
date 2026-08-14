@@ -5,7 +5,7 @@
  * → these all resolve to null and callers fall back to in-memory behaviour, so
  * the feed works unchanged in a plain browser / AppLovin.
  */
-import { getInitData } from './telegram';
+import { getInitData, getTelegramIdentityInitData } from './telegram';
 import type {
   CatalogRuntimeIdentityV1,
   CatalogTicketLevelSpecBundle,
@@ -322,10 +322,24 @@ export interface SessionResp {
   development_intake_context?: { buildSha: string };
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
+  developerFeedAdoption?: DeveloperFeedAdoptionV1;
   /** Mission slice v0: present (true) only for an enrolled dogfood account while
    *  `ENABLE_MISSION_READ` is on. Absent is how every other payload stays
    *  byte-identical to the pre-mission build. */
   mission_dogfood?: boolean;
+}
+
+export interface DeveloperFeedAdoptionV1 {
+  schema: 'feed.playable-source-preview-adoption.v1';
+  releaseId: string;
+  playableId: string;
+  candidatePath: string;
+  candidateArtifactDigest: string;
+  reviewBindingDigest: string;
+  sourceCommit: string;
+  receiptDigest: string;
+  audience: 'exact-user';
+  publicRollout: false;
 }
 
 export interface PlatformDevelopmentIntakeResponseV1 {
@@ -658,6 +672,17 @@ export function apiSession(): Promise<SessionResp | null> {
  * fresh WebApp credential before catalog content is reachable. */
 export function apiSessionRequired(): Promise<SessionResp> {
   return postRequired<SessionResp>('/api/session');
+}
+
+function sourcePreviewTmaHeader(): Record<string, string> {
+  const initData = getTelegramIdentityInitData();
+  if (!initData) throw new ApiRequestError(401, 'Telegram source-preview identity is unavailable');
+  return { Authorization: `tma ${initData}` };
+}
+
+/** The candidate surface stays globally read-only; only these two calls use its signed TMA identity. */
+export function apiSourcePreviewSessionRequired(): Promise<SessionResp> {
+  return postRequired<SessionResp>('/api/session', undefined, undefined, sourcePreviewTmaHeader());
 }
 
 export interface ResultIn {
@@ -1752,6 +1777,22 @@ export function apiPlayableReleaseDecision(
   return postRequired<PlayableReleaseDecisionReceipt>(
     `/api/operator/playable-releases/${encodeURIComponent(releaseId)}/decision`,
     payload,
+  );
+}
+
+export function apiAdoptSourcePreview(
+  releaseId: string,
+  payload: {
+    schema: 'feed.playable-source-preview-adoption.v1';
+    mutationId: string;
+    reviewBindingDigest: string;
+  },
+): Promise<PlayableReleaseDecisionReceipt> {
+  return postRequired<PlayableReleaseDecisionReceipt>(
+    `/api/operator/playable-releases/${encodeURIComponent(releaseId)}/developer-adoption`,
+    payload,
+    undefined,
+    sourcePreviewTmaHeader(),
   );
 }
 

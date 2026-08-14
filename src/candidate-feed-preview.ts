@@ -23,6 +23,14 @@ export interface CandidateFeedPreviewIdentity {
   reviewBindingDigest: string;
 }
 
+export interface DeveloperFeedAdoptionIdentity extends CandidateFeedPreviewIdentity {
+  schema: 'feed.playable-source-preview-adoption.v1';
+  sourceCommit: string;
+  receiptDigest: string;
+  audience: 'exact-user';
+  publicRollout: false;
+}
+
 interface CandidateReviewBinding {
   schema: 'feed.playable-release-review-binding.v1';
   releaseId: string;
@@ -198,4 +206,43 @@ export async function resolveCandidateFeedPreview(
     candidateArtifactDigest,
     reviewBindingDigest,
   });
+}
+
+/** Revalidate the actor-bound backend projection against the immutable static binding. */
+export async function resolveDeveloperFeedAdoption(
+  value: unknown,
+  origin = location.origin,
+  fetchBinding: typeof fetch = fetch,
+): Promise<DeveloperFeedAdoptionIdentity> {
+  if (!exactKeys(value, [
+    'schema', 'releaseId', 'playableId', 'candidatePath', 'candidateArtifactDigest',
+    'reviewBindingDigest', 'sourceCommit', 'receiptDigest', 'audience', 'publicRollout',
+  ])) throw new Error('developer_feed_adoption_invalid');
+  const identity = value as DeveloperFeedAdoptionIdentity;
+  if (identity.schema !== 'feed.playable-source-preview-adoption.v1'
+    || !UUID.test(identity.releaseId) || !PLAYABLE_ID.test(identity.playableId)
+    || !DIGEST.test(identity.candidateArtifactDigest)
+    || !DIGEST.test(identity.reviewBindingDigest)
+    || !DIGEST.test(identity.receiptDigest)
+    || !/^[0-9a-f]{40}$/.test(identity.sourceCommit)
+    || identity.audience !== 'exact-user' || identity.publicRollout !== false
+    || identity.candidatePath
+      !== `/playable-previews/${identity.releaseId.toLowerCase()}/${identity.playableId}.html`) {
+    throw new Error('developer_feed_adoption_invalid');
+  }
+  const binding = await fetchCandidateBinding(
+    identity.releaseId.toLowerCase(),
+    identity.reviewBindingDigest,
+    origin,
+    fetchBinding,
+  );
+  if (binding.playableId !== identity.playableId
+    || binding.candidatePath !== identity.candidatePath
+    || binding.candidateArtifactDigest !== identity.candidateArtifactDigest
+    || binding.review.kind !== 'source'
+    || binding.review.reworkRequestId !== null
+    || binding.review.sourceCommit !== identity.sourceCommit) {
+    throw new Error('developer_feed_adoption_binding_mismatch');
+  }
+  return Object.freeze({ ...identity, releaseId: identity.releaseId.toLowerCase() });
 }

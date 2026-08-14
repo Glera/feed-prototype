@@ -4589,6 +4589,44 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.candidate-feed-preview__badge--developer {
+  border-color: rgba(118, 221, 180, 0.62);
+  color: #baf5d9;
+}
+.candidate-feed-adoption {
+  position: fixed;
+  right: 12px;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 14px);
+  left: 12px;
+  z-index: 5100;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 18px;
+  background: rgba(18, 20, 28, 0.95);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42);
+  color: #fff;
+  font: 750 12px/1.25 system-ui, -apple-system, sans-serif;
+}
+.candidate-feed-adoption__button,
+.candidate-feed-adoption__open {
+  min-height: 42px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 13px;
+  background: #ffcf55;
+  color: #16130a;
+  font: 900 13px/1 system-ui, -apple-system, sans-serif;
+}
+.candidate-feed-adoption__button:disabled { opacity: 0.7; }
+.candidate-feed-adoption__status { color: #adb7c9; }
+.candidate-feed-adoption__open {
+  grid-column: 2;
+  background: #baf5d9;
+}
 .candidate-feed-preview-open {
   display: grid;
   min-height: 100dvh;
