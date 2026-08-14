@@ -151,6 +151,7 @@ async function boot(): Promise<void> {
       try {
         const adopted = await resolveDeveloperFeedAdoption(initial.developerFeedAdoption);
         setCandidatePlayableOverlay(adopted);
+        setTelemetryReadOnlyPreviewMode(true);
         developerOverlayMounted = true;
       } catch { /* invalid/tampered dev adoption fails closed to the public manifest */ }
     }
@@ -164,6 +165,7 @@ async function boot(): Promise<void> {
       rosterSnapshot,
       friendAcceptCode,
       initialSessionPromise,
+      { readOnlyPreview: candidateFeedRequested },
     );
   };
   if (candidateFeedRequested) try {
