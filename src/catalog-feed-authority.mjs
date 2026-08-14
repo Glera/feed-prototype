@@ -298,6 +298,27 @@ export function generatedInsertionTarget(currentIndex, pageCount, blocked = [], 
   return null;
 }
 
+/** Keep an exact immutable candidate page outside generated-card replacement. */
+export function generatedInsertionBlockedIndices(
+  playableIds,
+  blocked = [],
+  candidatePlayableId = null,
+) {
+  if (!Array.isArray(playableIds)
+    || playableIds.some((value) => typeof value !== 'string' || !PLAYABLE_RE.test(value))
+    || !Array.isArray(blocked)
+    || blocked.some((value) => !Number.isInteger(value) || value < 0 || value >= playableIds.length)
+    || (candidatePlayableId !== null
+      && (typeof candidatePlayableId !== 'string' || !PLAYABLE_RE.test(candidatePlayableId)))) return null;
+  const unavailable = new Set(blocked);
+  if (candidatePlayableId !== null) {
+    for (let index = 0; index < playableIds.length; index += 1) {
+      if (playableIds[index] === candidatePlayableId) unavailable.add(index);
+    }
+  }
+  return Object.freeze([...unavailable]);
+}
+
 /** Immutable, content-addressed host cover. No player device captures frames. */
 export function catalogGeneratedPreviewUrl({
   baseUrl,

@@ -105,6 +105,7 @@ import {
   catalogFeedUsesBuiltinImpression,
   generatedProvenanceLabel,
   catalogRecallRecoveryEffect,
+  generatedInsertionBlockedIndices,
   generatedInsertionTarget,
   rememberPlayedCatalogCanary,
   validateCatalogCanaryAuthorityResult,
@@ -1499,7 +1500,13 @@ export class Feed {
   private planGeneratedInsertion(): void {
     if (this.generatedOfferState !== 'ready' || !this.generatedOffer
       || this.generatedTargetIndex !== null) return;
-    const blocked = [...this.catalogSlots.keys()];
+    const candidateBlocked = generatedInsertionBlockedIndices(
+      this.playables.map((playable) => playable.id),
+      [...this.catalogSlots.keys()],
+      candidatePlayableOverlay()?.playableId ?? null,
+    );
+    if (candidateBlocked === null) return;
+    const blocked = [...candidateBlocked];
     if (this.activeChallenge) {
       for (let index = 0; index < this.N; index += 1) {
         if (this.playables[index]?.id === this.activeChallenge.mechanic_id) blocked.push(index);
@@ -5755,12 +5762,14 @@ export class Feed {
   // ── Build DOM ──────────────────────────────────────────────────────────
   private build() {
     const frag = document.createDocumentFragment();
+    const candidateOverlay = candidatePlayableOverlay();
     this.playables.forEach((p, i) => {
       const page = document.createElement('div');
       page.className = 'page';
 
       const game = document.createElement('div');
       game.className = 'game game--loading';
+      if (candidateOverlay?.playableId === p.id) game.classList.add('game--candidate-overlay');
 
       const slot = document.createElement('div');
       slot.className = 'game__slot';
