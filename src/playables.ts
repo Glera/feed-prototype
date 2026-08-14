@@ -40,6 +40,7 @@ export interface CandidatePlayableOverlay {
   candidatePath: string;
   candidateArtifactDigest: string;
   reviewBindingDigest: string;
+  sourceCommit?: string;
 }
 let CANDIDATE_OVERLAY: CandidatePlayableOverlay | null = null;
 
@@ -81,6 +82,16 @@ export interface MechanicReleaseIdentity {
 
 /** Exact static identity shown in the operator-only mobile rework form. */
 export function mechanicReleaseIdentity(id: string): MechanicReleaseIdentity | null {
+  const candidate = candidateOverlayFor(id);
+  if (candidate) {
+    if (!/^[0-9a-f]{64}$/.test(candidate.candidateArtifactDigest)
+      || !/^[0-9a-f]{40}$/.test(candidate.sourceCommit || '')) return null;
+    return Object.freeze({
+      version: candidate.candidateArtifactDigest.slice(0, 12),
+      sourceCommit: candidate.sourceCommit!,
+      runtimeArtifactDigest: `sha256:${candidate.candidateArtifactDigest}`,
+    });
+  }
   const entry = manifestEntry(id);
   if (!entry || !/^sha256:[0-9a-f]{64}$/.test(entry.runtimeArtifactDigest || '')) return null;
   return Object.freeze({

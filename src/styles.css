@@ -684,11 +684,11 @@ body {
   top: var(--autoplay-frame-block-inset);
   bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
 }
-/* An exact immutable candidate is already fenced to the operator-only overlay.
-   Give that dogfood surface the whole real gameplay rectangle: source geometry
-   and review evidence must be judged against the slot that would ship, while
-   ordinary/public autoplay keeps its existing vertical footage composition. */
-.game--candidate-overlay.game--autoplay .game__slot {
+/* The read-only source preview judges the immutable candidate against the full
+   gameplay rectangle. Once adopted into the ordinary developer feed, autoplay
+   deliberately keeps the host-owned vertical inset above; tapping to take over
+   removes game--autoplay and expands to the full manual rectangle. */
+.game--candidate-read-only-preview.game--autoplay .game__slot {
   top: 0;
   bottom: var(--bar-reserve);
 }
@@ -1390,7 +1390,7 @@ body {
   bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
   opacity: 1;
 }
-.game--candidate-overlay.game--autoplay .game__reel {
+.game--candidate-read-only-preview.game--autoplay .game__reel {
   top: 0;
   bottom: var(--bar-reserve);
 }

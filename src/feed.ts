@@ -917,6 +917,7 @@ export class Feed {
   private initialTarget = 0;
   private initialSessionPromise: Promise<SessionResp> | null;
   private readonly readOnlyPreview: boolean;
+  private readonly suppressGameplayEffects: boolean;
 
   // When the user taps to take over an autoplay demo, restart the mechanic from
   // scratch (fresh level) by default. `?takeover=continue` keeps the old behavior
@@ -966,6 +967,7 @@ export class Feed {
     friendAcceptCode: string | null = null,
     initialSessionPromise: Promise<SessionResp> | null = null,
     readOnlyPreview = false,
+    suppressGameplayEffects = readOnlyPreview,
   ) {
     this.viewport = viewport;
     this.feedEl = feedEl;
@@ -978,10 +980,13 @@ export class Feed {
     this.friendAcceptCode = friendAcceptCode;
     this.initialSessionPromise = initialSessionPromise;
     this.readOnlyPreview = readOnlyPreview;
+    this.suppressGameplayEffects = suppressGameplayEffects;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     const initialPlayableId = this.playables[this.realIndex()]?.id;
-    if (initialPlayableId) this.beginControlPlaneDecision(this.realIndex(), initialPlayableId);
+    if (initialPlayableId && !this.suppressGameplayEffects) {
+      this.beginControlPlaneDecision(this.realIndex(), initialPlayableId);
+    }
     this.pickCoverBucket();   // decide tall/compact cover aspect BEFORE any cover loads
     if (this.HOLD_COVER) document.documentElement.classList.add('holdcover');
     this.buildIncoming();
@@ -1112,7 +1117,7 @@ export class Feed {
     // Initialize the authenticated durable queue only after /session has
     // created/refreshed the user row. This avoids a first-run FK race while
     // still flushing any events persisted by an earlier app launch.
-    initControlPlane();
+    if (!this.suppressGameplayEffects) initControlPlane();
     this.authenticatedUserId = typeof session.user.id === 'number'
       && Number.isSafeInteger(session.user.id) && session.user.id > 0
       ? session.user.id
@@ -1129,6 +1134,16 @@ export class Feed {
       session.development_intake_available,
       session.development_intake_context,
     );
+    if (session.backend_version) {
+      this.backendVersion = session.backend_version;
+      this.renderVersionLabel();
+    }
+    // An adopted immutable candidate is an authenticated operator surface, not
+    // a public gameplay occurrence. Keep its server-owned controls available,
+    // but never flush/credit results, missions, daily state, social state,
+    // generated allocations or public control-plane exposure from candidate
+    // bytes under the roster's production identity.
+    if (this.suppressGameplayEffects) return;
     // Boot AND every foreground land here, which is exactly where the UNLOCKED /
     // FULFILLED ceremonies are owed from the read API (each shown once, by
     // watermark).
@@ -1137,10 +1152,6 @@ export class Feed {
     this.applyServerBalance(session.balance);
     if (typeof session.puzzles === 'number') this.applyServerPuzzles(session.puzzles);
     await this.syncDaily(false);
-    if (session.backend_version) {
-      this.backendVersion = session.backend_version;
-      this.renderVersionLabel();
-    }
     this.applyConfirmedBalances(await flushResults());
     await this.syncDaily(false);
     void this.refreshChallengeRail();
@@ -1162,7 +1173,7 @@ export class Feed {
    * browser may spend idle time on this work, but no feed slot waits for it.
    */
   private scheduleGeneratedOfferPrefetch(): void {
-    if (!this.catalogDogfoodEnabled || this.sessionAuthenticationRejected
+    if (this.suppressGameplayEffects || !this.catalogDogfoodEnabled || this.sessionAuthenticationRejected
       || this.generatedPrefetchScheduled
       || ['loading', 'ready', 'reserved'].includes(this.generatedOfferState)) return;
     this.generatedPrefetchScheduled = true;
@@ -1181,7 +1192,7 @@ export class Feed {
   }
 
   private scheduleGeneratedOfferRetry(): void {
-    if (!this.catalogDogfoodEnabled || this.sessionAuthenticationRejected
+    if (this.suppressGameplayEffects || !this.catalogDogfoodEnabled || this.sessionAuthenticationRejected
       || this.generatedOfferRetryTimer !== null) return;
     const delays = [5_000, 15_000, 60_000];
     const delay = delays[Math.min(this.generatedOfferRetryAttempt, delays.length - 1)];
@@ -1735,7 +1746,7 @@ export class Feed {
   }
 
   private beginControlPlaneDecision(i: number, playableId: string): ControlPlaneExposure | null {
-    if (!controlPlaneEnabled()) return null;
+    if (this.suppressGameplayEffects || !controlPlaneEnabled()) return null;
     // A deep-link challenge is a forced social slot, not a choice by the
     // built-in feed policy. Until that slot has its own server-bound contract,
     // exclude it rather than falsely attributing its view/attempt to builtin.
@@ -2680,6 +2691,10 @@ export class Feed {
       this.showSessionAuthBanner();
       return;
     }
+    if (this.suppressGameplayEffects) {
+      await this.syncSessionBootstrap();
+      return;
+    }
     // Telegram may freeze requestIdleCallback or an authenticated fetch while
     // hiding the WebView.  Those callbacks are not a durable scheduler: after
     // a restore, invalidate only an unfinished background preparation and let
@@ -3542,13 +3557,14 @@ export class Feed {
   }
 
   private warmRunTicket(ticket: RunTicketRequest): void {
-    if (!getInitData()) return;
+    if (this.suppressGameplayEffects || !getInitData()) return;
     void queueRunTicketStart(ticket).then((started) => {
       if (started.confirmed > 0) void flushResults();
     });
   }
 
   private ticketForRun(i: number, runId: string): RunTicketRequest | null {
+    if (this.suppressGameplayEffects) return null;
     if (this.series?.index === i) return this.series.ticket;
     const existing = this.runTickets.get(runId);
     if (existing) return existing;
@@ -3571,7 +3587,7 @@ export class Feed {
     solveMs: number,
     starsOverride?: number,
   ): Promise<ConfirmedBalances | null> {
-    if (this.readOnlyPreview) return Promise.resolve(null);
+    if (this.suppressGameplayEffects) return Promise.resolve(null);
     const mechanicId = this.playables[i]?.id;
     if (!mechanicId) return Promise.resolve(null);
     // Use the same deterministic run-id roll as the backend, so the reward row
@@ -3615,7 +3631,7 @@ export class Feed {
     catalog: CatalogFeedSlot,
     completedLevel: number,
   ): Promise<boolean> {
-    if (this.readOnlyPreview) return Promise.resolve(false);
+    if (this.suppressGameplayEffects) return Promise.resolve(false);
     const level = catalog.bundle?.levels[completedLevel - 1];
     const ticket = catalog.ticketRequest;
     if (!level || !catalog.bundle || !ticket
@@ -5186,7 +5202,7 @@ export class Feed {
   }
 
   private persistSeriesReward(i: number): void {
-    if (this.readOnlyPreview) return;
+    if (this.suppressGameplayEffects) return;
     const series = this.series;
     const reward = series?.reward ?? 0;
     const mechanicId = this.playables[i]?.id;
@@ -5211,7 +5227,7 @@ export class Feed {
   }
 
   private queueCatalogChestResult(i: number): Promise<boolean> {
-    if (this.readOnlyPreview) return Promise.resolve(false);
+    if (this.suppressGameplayEffects) return Promise.resolve(false);
     const series = this.series;
     const catalog = series?.index === i ? series.catalog : null;
     if (!series || !catalog?.bundle || !catalog.ticketRequest) return Promise.resolve(false);
@@ -5769,7 +5785,10 @@ export class Feed {
 
       const game = document.createElement('div');
       game.className = 'game game--loading';
-      if (candidateOverlay?.playableId === p.id) game.classList.add('game--candidate-overlay');
+      if (candidateOverlay?.playableId === p.id) {
+        game.classList.add('game--candidate-overlay');
+        if (this.readOnlyPreview) game.classList.add('game--candidate-read-only-preview');
+      }
 
       const slot = document.createElement('div');
       slot.className = 'game__slot';
@@ -10800,6 +10819,7 @@ export function createFeed(
   rosterSnapshot: FeedRosterSessionV1 | null = null,
   friendAcceptCode: string | null = null,
   initialSessionPromise: Promise<SessionResp> | null = null,
+  mode: Readonly<{ readOnlyPreview: boolean }> | undefined = undefined,
 ) {
   const resolution: FeedRosterResolutionV1 = resolveFeedRosterSession(
     rosterSnapshot,
@@ -10826,6 +10846,8 @@ export function createFeed(
   let order = [...resolution.playables];
   let rosterEntries = [...resolution.entries];
   const candidateOverlay = candidatePlayableOverlay();
+  if (candidateOverlay && !mode) throw new Error('candidate_feed_mode_required');
+  const readOnlyPreview = mode?.readOnlyPreview ?? false;
   if (candidateOverlay) {
     const candidateIndex = order.findIndex((playable) => playable.id === candidateOverlay.playableId);
     if (candidateIndex < 0) throw new Error('candidate_feed_target_not_in_live_roster');
@@ -10875,6 +10897,7 @@ export function createFeed(
     resolution.source === 'roster' ? resolution.activationId : null,
     friendAcceptCode,
     initialSessionPromise,
+    readOnlyPreview,
     candidateOverlay !== null,
   );
 }
