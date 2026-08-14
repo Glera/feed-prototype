@@ -225,13 +225,17 @@ const build = spawnSync('npm', ['run', 'build'], {
 });
 assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 
-const telegramSdk = `window.Telegram={WebApp:{
-initData:'query_id=candidate&user=%7B%22id%22%3A42%7D&hash=candidate',
-initDataUnsafe:{start_param:null},platform:'android',
+const telegramSdk = `(()=>{const launch=new URLSearchParams(location.search).get('tgWebAppStartParam');
+if(launch)sessionStorage.setItem('__test_tg_start_param',launch);
+const start=sessionStorage.getItem('__test_tg_start_param');
+const initData=new URLSearchParams({query_id:'candidate',user:JSON.stringify({id:42}),...(start?{start_param:start}:{}),hash:'candidate'}).toString();
+window.Telegram={WebApp:{
+initData,
+initDataUnsafe:{start_param:start,user:{id:42}},platform:'android',
 ready(){},expand(){},requestFullscreen(){},disableVerticalSwipes(){},
 setHeaderColor(){},setBackgroundColor(){},lockOrientation(){},onEvent(){},offEvent(){},
 HapticFeedback:{impactOccurred(){},notificationOccurred(){},selectionChanged(){}}
-}};`;
+}}})();`;
 
 const query = new URLSearchParams({
   candidateFeedRelease: releaseId,
@@ -324,11 +328,24 @@ try {
   assert.equal(startFrameUrl.searchParams.get('artifact'), sourceCandidateArtifactDigest);
   assert.equal(requests.filter((entry) => entry === 'POST /api/session').length, 1,
     `startapp candidate did not perform exactly one bounded identity bootstrap: ${requests.join(', ')}`);
-  assert.equal(requests.some((entry) => entry.startsWith('POST /api/results')), false,
-    `candidate preview inherited unrelated product mutation authority: ${requests.join(', ')}`);
+  assert.deepEqual(
+    [...new Set(requests.filter((entry) => entry.startsWith('POST /api/'))
+      .map((entry) => entry.replace(/[?].*$/, '')))].sort(),
+    ['POST /api/session'],
+    `candidate preview exceeded its exact POST allow-list before adoption: ${requests.join(', ')}`,
+  );
   await page.getByText('Добавить в dev-ленту', { exact: true }).click();
   await page.getByText('Добавлено в dev-ленту', { exact: true }).waitFor({ state: 'visible' });
   assert.equal(adoptionPosts, 1);
+  assert.deepEqual(
+    [...new Set(requests.filter((entry) => entry.startsWith('POST /api/'))
+      .map((entry) => entry.replace(/[?].*$/, '')))].sort(),
+    [
+      `POST /api/operator/playable-releases/${sourceReleaseId}/developer-adoption`,
+      'POST /api/session',
+    ].sort(),
+    `candidate preview exceeded its exact POST allow-list after adoption: ${requests.join(', ')}`,
+  );
   assert.equal(await page.getByText('Аудитория: Только мне', { exact: true }).count(), 1);
   await page.getByText('Открыть dev-ленту', { exact: true }).click();
   await page.getByText('Dev-лента · Только мне', { exact: true }).waitFor({ state: 'visible' });
@@ -336,6 +353,8 @@ try {
   await adoptedFrame.waitFor({ state: 'attached' });
   assert.equal(new URL((await adoptedFrame.getAttribute('src')) || '', origin).pathname, sourceCandidatePath);
   assert.equal(adoptionPosts, 1, 'normal dev feed replayed the adoption mutation');
+  assert.equal(await page.getByText('Кандидат — не опубликовано', { exact: true }).count(), 0,
+    'one-shot handoff restored the physical Telegram candidate start_param');
 
   for (const malformed of [
     candidateStartParam.slice(0, -1),

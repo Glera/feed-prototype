@@ -10,10 +10,12 @@ import { userScopedStorage } from './user-scope';
 import { candidateReviewReleaseIdFromParam } from './candidate-review';
 import { candidateFeedPreviewRequested, resolveCandidateFeedPreview, resolveDeveloperFeedAdoption, type CandidateFeedPreviewIdentity } from './candidate-feed-preview';
 import { candidateFeedStartParamRequested } from './candidate-feed-start-param.mjs';
-import { mountCandidateFeedAdoption } from './candidate-feed-adoption';
+import { consumeDeveloperFeedHandoff, mountCandidateFeedAdoption } from './candidate-feed-adoption';
 
 const query = new URLSearchParams(location.search);
-const startParam = getStartParam();
+const restoredStartParam = getStartParam();
+const developerFeedHandoff = consumeDeveloperFeedHandoff(restoredStartParam);
+const startParam = developerFeedHandoff ? null : restoredStartParam;
 const candidateFeedStartRequested = candidateFeedStartParamRequested(startParam);
 const candidateFeedRequested = candidateFeedPreviewRequested(location.search, startParam);
 setTelegramReadOnlyPreviewMode(candidateFeedRequested);
@@ -168,7 +170,7 @@ async function boot(): Promise<void> {
     mountFeed();
     mountCandidateFeedBadge();
     if (candidate) {
-      const adoption = mountCandidateFeedAdoption(candidate, candidateSession);
+      const adoption = mountCandidateFeedAdoption(candidate, candidateSession, startParam);
       if (adoption) document.body.appendChild(adoption);
     }
   } catch {
@@ -179,7 +181,7 @@ async function boot(): Promise<void> {
     if (developerOverlayMounted) mountDeveloperFeedBadge();
   }
 }
-const routedStartParam = getStartParam() ?? startParam;
+const routedStartParam = startParam;
 const labAuthLaunch = catalogLabAuthRequested({ search: location.search, startParam: routedStartParam });
 const candidateReviewQuery = query.get('candidateReview');
 const candidateReviewReleaseId = candidateReviewReleaseIdFromParam(routedStartParam)

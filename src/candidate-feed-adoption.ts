@@ -6,9 +6,24 @@ import {
   type SessionResp,
 } from './api';
 import type { CandidateFeedPreviewIdentity } from './candidate-feed-preview';
+import { candidateFeedStartParamRequested } from './candidate-feed-start-param.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^[0-9a-f]{64}$/;
+const DEVELOPER_FEED_HANDOFF_KEY = 'candidate_feed_developer_handoff_once_v1';
+
+export function consumeDeveloperFeedHandoff(startParam: string | null): boolean {
+  let armed: string | null = null;
+  try {
+    armed = sessionStorage.getItem(DEVELOPER_FEED_HANDOFF_KEY);
+    sessionStorage.removeItem(DEVELOPER_FEED_HANDOFF_KEY);
+  } catch {
+    return false;
+  }
+  return typeof startParam === 'string'
+    && candidateFeedStartParamRequested(startParam)
+    && armed === startParam;
+}
 
 function exactAdoption(
   value: DeveloperFeedAdoptionV1 | undefined,
@@ -45,7 +60,13 @@ function exactReceipt(
     && value.successor === null && DIGEST.test(value.receiptDigest);
 }
 
-function openDeveloperFeed(): void {
+function openDeveloperFeed(startParam: string): void {
+  if (!candidateFeedStartParamRequested(startParam)) return;
+  try {
+    sessionStorage.setItem(DEVELOPER_FEED_HANDOFF_KEY, startParam);
+  } catch {
+    return;
+  }
   const url = new URL('/', location.origin);
   location.replace(url.toString());
 }
@@ -53,6 +74,7 @@ function openDeveloperFeed(): void {
 export function mountCandidateFeedAdoption(
   candidate: CandidateFeedPreviewIdentity,
   session: SessionResp | null,
+  startParam: string | null,
 ): HTMLElement | null {
   const actorUserId = session?.user?.id;
   if (!session?.operator_level_flagging_available
@@ -75,7 +97,9 @@ export function mountCandidateFeedAdoption(
   open.className = 'candidate-feed-adoption__open';
   open.textContent = 'Открыть dev-ленту';
   open.hidden = true;
-  open.addEventListener('click', openDeveloperFeed);
+  open.addEventListener('click', () => {
+    if (startParam !== null) openDeveloperFeed(startParam);
+  });
   panel.append(label, button, status, open);
 
   let pending = false;
