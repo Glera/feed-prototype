@@ -21,6 +21,7 @@ let lookupRequests = 0;
 let releaseDecision = null;
 const decisionRequests = [];
 const deviceDecisionRequests = [];
+let omitMachineBinding = false;
 const releaseId = '8b447be0-f961-482e-aa03-b419d5f1492d';
 const playableId = 'solitaire-v1-swipe';
 const candidatePath = `/playable-previews/${releaseId}/${playableId}.html`;
@@ -194,10 +195,15 @@ const server = createServer((request, response) => {
     request.on('end', () => {
       const body = JSON.parse(raw);
       deviceDecisionRequests.push(body);
+      if (body.authorizationId !== desktopIntakeAuthorization().authorizationId
+        || body.expectedDecisionVersion !== 0
+        || !['56789-ABCDE', '6789A-BCDEF'].includes(body.userCode)) {
+        return json(response, { code: 'device_authorization_fixture_mismatch' }, 409);
+      }
       const authorization = desktopIntakeAuthorization();
       authorization.state = body.decision === 'approve' ? 'approved' : 'denied';
       authorization.decisionVersion = 1;
-      if (body.decision === 'approve' && body.submitterMachine) {
+      if (body.decision === 'approve' && body.submitterMachine && !omitMachineBinding) {
         authorization.submitterMachine = body.submitterMachine;
       }
       return json(response, authorization);
@@ -335,7 +341,6 @@ window.Telegram = {
     setBackgroundColor() {},
     lockOrientation() {},
     onEvent() {},
-    showConfirm(_message, callback) { callback(true); },
     close() {
       const key = '__catalog_lab_browser_close_calls';
       sessionStorage.setItem(key, String(Number(sessionStorage.getItem(key) || 0) + 1));
@@ -531,12 +536,26 @@ try {
   const machineApprove = enabledPage.getByRole('button', { name: 'Approve', exact: true });
   assert.equal(await machineApprove.isDisabled(), true,
     'desktop intake approval was enabled before explicit machine selection');
+  await machineApprove.evaluate((entry) => { entry.disabled = false; entry.click(); });
+  assert.equal(deviceDecisionRequests.length, 0,
+    'network-level guard allowed desktop approval without a selected machine');
+  assert.match((await enabledPage.locator('.lab-auth__status').filter({ hasText: /Choose Mac A/ }).textContent()) || '', /Choose Mac A/);
   await enabledPage.getByLabel('Mac A — Platform').check();
   assert.equal(await machineApprove.isDisabled(), false);
+  omitMachineBinding = true;
+  enabledPage.once('dialog', (dialog) => dialog.accept());
+  await machineApprove.click();
+  await enabledPage.getByText(/server did not confirm this Mac binding/).waitFor({ state: 'visible' });
+  assert.equal(deviceDecisionRequests.length, 1,
+    'unconfirmed binding did not make exactly one fail-closed request');
+  assert.equal(await machineApprove.isDisabled(), false,
+    'operator could not retry after an unconfirmed server binding');
+  omitMachineBinding = false;
+  enabledPage.once('dialog', (dialog) => dialog.accept());
   await machineApprove.click();
   await enabledPage.getByText(/is bound to Mac A — Platform/).waitFor({ state: 'visible' });
-  assert.equal(deviceDecisionRequests.length, 1);
-  assert.deepEqual(deviceDecisionRequests[0], {
+  assert.equal(deviceDecisionRequests.length, 2);
+  assert.deepEqual(deviceDecisionRequests[1], {
     authorizationId: desktopIntakeAuthorization().authorizationId,
     userCode: '56789-ABCDE',
     expectedDecisionVersion: 0,
@@ -550,10 +569,11 @@ try {
   await enabledPage.getByRole('button', { name: 'Review request' }).click();
   await enabledPage.getByTestId('catalog-lab-submitter-machine').waitFor({ state: 'visible' });
   await enabledPage.getByLabel('Mac B — Content / Labs').check();
+  enabledPage.once('dialog', (dialog) => dialog.accept());
   await enabledPage.getByRole('button', { name: 'Deny', exact: true }).click();
   await enabledPage.getByText('Request denied').waitFor({ state: 'visible' });
-  assert.equal(deviceDecisionRequests.length, 2);
-  assert.deepEqual(deviceDecisionRequests[1], {
+  assert.equal(deviceDecisionRequests.length, 3);
+  assert.deepEqual(deviceDecisionRequests[2], {
     authorizationId: desktopIntakeAuthorization().authorizationId,
     userCode: '6789A-BCDEF',
     expectedDecisionVersion: 0,

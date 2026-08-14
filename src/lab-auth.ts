@@ -27,13 +27,17 @@ const DESKTOP_INTAKE_SCOPE = 'operator:flags:write';
 type Decision = 'approve' | 'deny';
 
 function requiresSubmitterMachine(authorization: CatalogLabDeviceAuthorization): boolean {
-  return !authorization.promotionSummary
-    && authorization.scopes.length === 1
-    && authorization.scopes[0] === DESKTOP_INTAKE_SCOPE;
+  // Treat any occurrence of the privileged desktop-intake scope as requiring
+  // an explicit binding. The backend still owns the exact single-scope
+  // contract and rejects mixed/invalid scope sets; the client must never make
+  // a server contract expansion silently disable the operator control.
+  return authorization.scopes.includes(DESKTOP_INTAKE_SCOPE);
 }
 
-function submitterMachineLabel(machine: CatalogLabSubmitterMachine): string {
-  return machine === 'mac-a' ? 'Mac A — Platform' : 'Mac B — Content / Labs';
+function submitterMachineLabel(machine: unknown): string {
+  if (machine === 'mac-a') return 'Mac A — Platform';
+  if (machine === 'mac-b') return 'Mac B — Content / Labs';
+  return `Unknown workspace binding (${String(machine)})`;
 }
 
 function normalizeUserCode(value: string): string | null {
@@ -259,6 +263,9 @@ function lookupErrorMessage(error: unknown): string {
 
 function decisionErrorMessage(error: unknown): string {
   if (!(error instanceof ApiRequestError)) return 'Could not save the decision. Try again.';
+  if (error.code === 'device_authorization_machine_binding_unconfirmed') {
+    return 'The server did not confirm this Mac binding. No desktop access is considered ready.';
+  }
   switch (error.status) {
     case 0: return 'Cannot reach the server. Your decision was not confirmed.';
     case 404: return 'This request is no longer available.';
@@ -379,7 +386,9 @@ export async function mountCatalogLabAuth(): Promise<void> {
   const submitterMachineLegend = document.createElement('legend');
   submitterMachineLegend.textContent = 'Which trusted workspace started this request?';
   const submitterMachineHelp = document.createElement('p');
+  submitterMachineHelp.id = 'catalog-lab-submitter-machine-help';
   submitterMachineHelp.textContent = 'Choose explicitly. The computer name and one-time code never decide this binding.';
+  submitterMachine.setAttribute('aria-describedby', submitterMachineHelp.id);
   const submitterMachineChoices = document.createElement('div');
   submitterMachineChoices.className = 'lab-auth__machine-choices';
   const machineInputs = new Map<CatalogLabSubmitterMachine, HTMLInputElement>();
@@ -566,9 +575,12 @@ export async function mountCatalogLabAuth(): Promise<void> {
         ? [detail('Bound workspace', submitterMachineLabel(authorization.submitterMachine))]
         : []),
     );
-    submitterMachine.hidden = !machineRequired;
+    const pending = authorization.state === 'pending';
+    submitterMachine.hidden = !machineRequired || !pending;
+    if (machineRequired && pending) approve.setAttribute('aria-describedby', submitterMachineHelp.id);
+    else approve.removeAttribute('aria-describedby');
     for (const radio of machineInputs.values()) {
-      radio.disabled = !machineRequired || authorization.state !== 'pending';
+      radio.disabled = !machineRequired || !pending;
     }
     let candidateReviewElement: HTMLElement | null = null;
     if (playableRelease) {
@@ -603,7 +615,6 @@ export async function mountCatalogLabAuth(): Promise<void> {
         : promotionArtifact ? 'Approve exact raster world'
           : playableRelease ? 'Принять и опубликовать' : 'Approve exact publication'
       : 'Approve';
-    const pending = authorization.state === 'pending';
     decisionButtons.hidden = !pending;
     updateApprovalDisabled();
     if (!pending) {
@@ -741,6 +752,8 @@ export async function mountCatalogLabAuth(): Promise<void> {
 
   const decide = async (decision: Decision): Promise<void> => {
     if (decisionPending || !activeAuthorization || !activeCode) return;
+    const authorization = activeAuthorization;
+    const code = activeCode;
     if (decision === 'approve' && !activeCandidateSafe) {
       decisionStatus.textContent = 'Публикация заблокирована: in-platform candidate review не завершён.';
       return;
@@ -750,33 +763,52 @@ export async function mountCatalogLabAuth(): Promise<void> {
       decisionStatus.textContent = 'Choose Mac A or Mac B before approving this desktop intake identity.';
       return;
     }
+    const confirmedMachine = decision === 'approve' && machineRequired
+      ? activeSubmitterMachine
+      : null;
     const verb = decision === 'approve' ? 'Approve' : 'Deny';
-    const promotion = activeAuthorization.promotionSummary;
+    const promotion = authorization.promotionSummary;
+    decisionPending = true;
+    approve.disabled = true;
+    deny.disabled = true;
+    requestReset.disabled = true;
+    for (const radio of machineInputs.values()) radio.disabled = true;
     const confirmed = await showConfirm(
       decision === 'approve'
         ? promotion
         ? `${verb} exact publication ${promotion.publishId} with content hash ${promotion.contentHash}?`
-          : machineRequired && activeSubmitterMachine
-            ? `${verb} “${activeAuthorization.clientName}” as ${submitterMachineLabel(activeSubmitterMachine)} for ${scopeLabel(activeAuthorization.scopes)}?`
-            : `${verb} “${activeAuthorization.clientName}” for ${scopeLabel(activeAuthorization.scopes)}?`
-        : `${verb} the access request from “${activeAuthorization.clientName}”?`,
+          : machineRequired && confirmedMachine
+            ? `${verb} “${authorization.clientName}” as ${submitterMachineLabel(confirmedMachine)} for ${scopeLabel(authorization.scopes)}?`
+            : `${verb} “${authorization.clientName}” for ${scopeLabel(authorization.scopes)}?`
+        : `${verb} the access request from “${authorization.clientName}”?`,
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      decisionPending = false;
+      requestReset.disabled = false;
+      deny.disabled = false;
+      for (const radio of machineInputs.values()) radio.disabled = !machineRequired;
+      updateApprovalDisabled();
+      return;
+    }
 
-    decisionPending = true;
-    approve.disabled = true;
-    deny.disabled = true;
     decisionStatus.textContent = decision === 'approve' ? 'Approving…' : 'Denying…';
     try {
       const result = await apiCatalogLabDecision({
-        authorizationId: activeAuthorization.authorizationId,
-        userCode: activeCode,
-        expectedDecisionVersion: activeAuthorization.decisionVersion,
+        authorizationId: authorization.authorizationId,
+        userCode: code,
+        expectedDecisionVersion: authorization.decisionVersion,
         decision,
-        ...(decision === 'approve' && machineRequired && activeSubmitterMachine
-          ? { submitterMachine: activeSubmitterMachine }
+        ...(confirmedMachine
+          ? { submitterMachine: confirmedMachine }
           : {}),
       });
+      if (confirmedMachine && result.submitterMachine !== confirmedMachine) {
+        throw new ApiRequestError(
+          409,
+          'Backend did not confirm the selected desktop submitter binding',
+          'device_authorization_machine_binding_unconfirmed',
+        );
+      }
       clearSensitiveCode();
       activeAuthorization = null;
       activeCandidateReview?.destroy();
@@ -804,6 +836,12 @@ export async function mountCatalogLabAuth(): Promise<void> {
       decisionStatus.textContent = decisionErrorMessage(error);
     } finally {
       decisionPending = false;
+      requestReset.disabled = false;
+      const requestStillPending = activeAuthorization?.state === 'pending';
+      for (const radio of machineInputs.values()) {
+        radio.disabled = !requestStillPending || !activeAuthorization
+          || !requiresSubmitterMachine(activeAuthorization);
+      }
       updateApprovalDisabled();
       deny.disabled = false;
     }
