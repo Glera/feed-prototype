@@ -55,6 +55,7 @@ const playableReworkRequests = [];
 let playableReworkProjectionState = 'open';
 let playableReworkExecution = { state: 'accepted', code: null, summary: null, updatedAt: null };
 let playableReworkReleaseExecution = null;
+let playableReworkListRequests = 0;
 let operatorCapability = true;
 let origin = '';
 
@@ -131,6 +132,7 @@ const server = createServer(async (request, response) => {
     });
   }
   if (request.method === 'GET' && url.pathname === '/api/operator-playable-reworks') {
+    playableReworkListRequests += 1;
     const body = playableReworkRequests.at(-1) || null;
     return json(response, {
       schema: 'feed.playable-rework-list.v1',
@@ -141,6 +143,8 @@ const server = createServer(async (request, response) => {
         claimedAt: playableReworkProjectionState === 'claimed' ? new Date().toISOString() : null,
         closedAt: null,
         closeReceiptDigest: null, createdAt: body.context.capturedAt,
+        sourceAdapter: 'telegram', queueDisposition: 'active_batch',
+        batchPresent: true, queueCounts: { active: 1, queued: 0 },
         execution: structuredClone(playableReworkExecution),
         ...(playableReworkReleaseExecution
           ? { releaseExecution: structuredClone(playableReworkReleaseExecution) } : {}),
@@ -275,6 +279,17 @@ try {
       const switchBox = await page.locator('.feed-bar__switch').boundingBox();
       assert.ok(reworkBox.x >= switchBox.x + switchBox.width,
         `${label} overlaps the centered product buttons at ${width}px`);
+      const badge = rework.locator('[data-rework-count]:not([hidden])');
+      if (await badge.count()) {
+        const badgeBox = await badge.boundingBox();
+        const overflow = await rework.locator('.game__operator-flag-open')
+          .evaluate((element) => getComputedStyle(element).overflow);
+        assert.equal(overflow, 'visible', `${label} clips the queue count badge at ${width}px`);
+        assert.ok(badgeBox && badgeBox.width >= 16 && badgeBox.height >= 16,
+          `${label} queue count badge is not readable at ${width}px`);
+        assert.ok(badgeBox.x >= 0 && badgeBox.y >= 0 && badgeBox.x + badgeBox.width <= width,
+          `${label} queue count badge escapes the viewport at ${width}px`);
+      }
     }
     await page.setViewportSize({ width: 390, height: 760 });
   };
@@ -301,9 +316,18 @@ try {
   await rework.locator('button[type="submit"]').click();
   await rework.locator('.game__operator-flag-status')
     .filter({ hasText: 'Сервер не ответил вовремя' }).waitFor({ timeout: 3000 });
+  const listRequestsBeforeAccepted = playableReworkListRequests;
   await rework.locator('button[type="submit"]').click();
   await rework.locator('.game__operator-flag-status')
-    .filter({ hasText: 'ждёт подключения Labs' }).waitFor({ timeout: 3000 });
+    .filter({ hasText: 'Такое замечание уже сохранено' }).waitFor({ timeout: 3000 });
+  for (let attempt = 0; attempt < 40 && playableReworkListRequests === listRequestsBeforeAccepted; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(playableReworkListRequests > listRequestsBeforeAccepted,
+    'confirmed submission did not start a durable queue refresh independently of the control timer');
+  await page.waitForTimeout(500);
+  assert.match(await rework.locator('.game__operator-flag-status').innerText(), /уже сохранено/,
+    'an immediate queue refresh must not remount away the durable submit receipt');
   assert.equal(playableReworkRequests.length, 2);
   assert.deepEqual(playableReworkRequests[1], playableReworkRequests[0],
     'transport retry must replay the exact mutationId, capturedAt and request bytes');
@@ -313,14 +337,14 @@ try {
   assert.equal(playableReworkRequests[0].runtime.artifactDigest, `sha256:${'b'.repeat(64)}`);
   assert.equal(playableReworkRequests[0].context.runId, 'fresh-run-from-phone');
   assert.equal(playableReworkRequests[0].context.screenshot.reason, 'not_attached');
-  const acceptedButton = rework.locator('.game__operator-flag-open[aria-label="✓ Задача принята"]');
+  const acceptedButton = rework.locator('.game__operator-flag-open[aria-label="В работе · добавить замечание"]');
   await acceptedButton.waitFor({ state: 'visible', timeout: 3000 });
   await assertReworkGeometry('accepted mechanic task');
   await acceptedButton.click();
   const immediateDetails = rework.locator('.game__operator-playable-rework-details');
   await immediateDetails.waitFor({ state: 'visible', timeout: 3000 });
   assert.equal(
-    await immediateDetails.locator('[data-rework-task-instruction]').textContent(),
+    await immediateDetails.locator('.game__operator-playable-rework-item p').first().textContent(),
     'Увеличить подпись на текущем экране',
     'the newly accepted task must disclose its exact instruction before restart',
   );
@@ -340,7 +364,7 @@ try {
   // is required to make a newly activated mechanic visible.
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector(`iframe[title="${nextRoster.entries[0].playableId}"]`, { timeout: 5000 });
-  await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="✓ Задача принята"]')
+  await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="В работе · добавить замечание"]')
     .waitFor({ timeout: 5000 });
   assert.equal(
     await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open').isDisabled(),
@@ -351,13 +375,13 @@ try {
   const taskDetails = page.locator('.feed-bar .game__operator-playable-rework-details');
   await taskDetails.waitFor({ state: 'visible', timeout: 3000 });
   assert.equal(
-    await taskDetails.locator('[data-rework-task-instruction]').textContent(),
+    await taskDetails.locator('.game__operator-playable-rework-item p').first().textContent(),
     'Увеличить подпись на текущем экране',
     'the accepted label must disclose the exact durable instruction',
   );
   assert.match(
-    await taskDetails.locator('[data-rework-task-created]').textContent(),
-    /^Отправлено /,
+    await taskDetails.locator('.game__operator-playable-rework-item-heading small').textContent(),
+    /Telegram · /,
     'the accepted task disclosure must identify when it was submitted',
   );
   await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open').click();
@@ -389,9 +413,12 @@ try {
       && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
     page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
   ]);
-  const preparingButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="… Готовится"]');
+  const preparingButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="В работе · добавить замечание"]');
   await preparingButton.waitFor({ timeout: 5000 });
-  assert.equal(await preparingButton.getAttribute('data-rework-state'), 'preparing');
+  assert.equal(await preparingButton.getAttribute('data-rework-state'), 'active');
+  await preparingButton.click();
+  assert.match(await page.locator('.game__operator-playable-rework-details').innerText(), /Готовится/);
+  await preparingButton.click();
 
   // A failed release affects only this durable task and discloses its reason.
   await page.waitForTimeout(1_100);
@@ -409,7 +436,7 @@ try {
       && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
     page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
   ]);
-  const blockedButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Нужна помощь"]');
+  const blockedButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="Нужна помощь · добавить замечание"]');
   await blockedButton.waitFor({ timeout: 5000 });
   assert.equal(await blockedButton.getAttribute('data-rework-state'), 'needs_help');
   await blockedButton.click();
@@ -451,8 +478,11 @@ try {
       && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
     page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
   ]);
-  await page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="! Готово к проверке"]')
-    .waitFor({ timeout: 5000 });
+  const readyButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="В работе · добавить замечание"]');
+  await readyButton.waitFor({ timeout: 5000 });
+  await readyButton.click();
+  assert.match(await page.locator('.game__operator-playable-rework-details').innerText(), /Готово к проверке/);
+  await readyButton.click();
   await assertReworkGeometry('READY mechanic task');
 
   for (let retry = 0; retry < 80

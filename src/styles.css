@@ -1267,30 +1267,49 @@ body {
   min-height: 30px;
 }
 .feed-bar .game__operator-playable-rework .game__operator-flag-open {
+  position: relative;
   width: 32px;
   height: 30px;
   margin: 0;
   padding: 0;
-  overflow: hidden;
+  overflow: visible;
   border-color: rgba(202, 169, 255, 0.5);
   border-radius: 10px;
   font-size: 15px;
   line-height: 1;
 }
-.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="open"] {
+.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="active"] {
   border-color: rgba(125, 255, 176, 0.56);
   color: #9dffc1;
 }
-.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="claimed"] {
+.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="queued"] {
   border-color: rgba(255, 224, 138, 0.62);
   color: #ffe08a;
 }
-.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="blocked"] {
+.feed-bar .game__operator-playable-rework .game__operator-flag-open[data-rework-state="needs_help"] {
   border-color: rgba(255, 143, 105, 0.86);
   background: rgba(150, 47, 25, 0.34);
   color: #ffb096;
   box-shadow: 0 0 0 2px rgba(255, 111, 71, 0.12);
 }
+.game__operator-playable-rework-count {
+  position: absolute;
+  right: -6px;
+  top: -7px;
+  min-width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  border: 1px solid rgba(255,255,255,0.7);
+  border-radius: 999px;
+  background: #6f4bc9;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 14px;
+  text-align: center;
+}
+.game__operator-playable-rework-count[hidden] { display: none; }
 .game__operator-playable-rework-blocker {
   margin-top: 10px;
   padding-top: 9px;
@@ -1310,6 +1329,68 @@ body {
 }
 .feed-bar .game__operator-playable-rework .game__operator-playable-rework-details {
   margin: 0;
+}
+.game__operator-playable-rework-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.game__operator-playable-rework-summary small { margin-top: 3px; }
+.game__operator-playable-rework-summary button {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 9px;
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  font-size: 19px;
+}
+.game__operator-playable-rework-list {
+  display: grid;
+  gap: 8px;
+}
+.game__operator-playable-rework-item {
+  padding: 9px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 9px;
+  background: rgba(255,255,255,0.04);
+}
+.game__operator-playable-rework-item[data-queue-disposition="active_batch"] {
+  border-color: rgba(125,255,176,0.3);
+}
+.game__operator-playable-rework-item[data-queue-disposition="queued"] {
+  border-color: rgba(255,224,138,0.3);
+}
+.game__operator-playable-rework-item-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.game__operator-playable-rework-item-heading b { margin: 0; }
+.game__operator-playable-rework-item-heading small { margin: 0; text-align: right; }
+.game__operator-playable-rework-item > small { margin-top: 5px; }
+.game__operator-playable-rework-detail-actions {
+  position: sticky;
+  bottom: -10px;
+  margin: 10px -12px -10px;
+  padding: 9px 12px 10px;
+  background: rgba(10,18,15,0.98);
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+.game__operator-playable-rework-detail-actions button {
+  width: 100%;
+  min-height: 42px;
+  border: 0;
+  border-radius: 9px;
+  background: #a879ff;
+  color: #160c26;
+  font: inherit;
+  font-weight: 800;
 }
 .feed-bar:has(.game__operator-playable-rework .game__operator-flag-form:not([hidden])),
 .feed-bar:has(.game__operator-playable-rework .game__operator-playable-rework-details:not([hidden])) {

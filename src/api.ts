@@ -435,9 +435,19 @@ export interface OperatorPlayableReworkResponseV1 {
   replayed?: boolean;
 }
 
+export interface OperatorPlayableReworkQueueItemV1 extends OperatorPlayableReworkResponseV1 {
+  sourceAdapter: 'telegram' | 'codex';
+  queueDisposition: 'active_batch' | 'queued' | 'duplicate_of' | 'closed';
+  batchPresent: boolean;
+  queueCounts: {
+    active: number;
+    queued: number;
+  };
+}
+
 export interface OperatorPlayableReworkListV1 {
   schema: 'feed.playable-rework-list.v1';
-  items: OperatorPlayableReworkResponseV1[];
+  items: OperatorPlayableReworkQueueItemV1[];
 }
 
 /** Capture one exact built-in playable rework from the signed TMA session. */

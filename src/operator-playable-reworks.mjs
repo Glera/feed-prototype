@@ -290,8 +290,94 @@ const formatScreenshotBytes = (value) => value < 1_000_000
   ? `${Math.max(1, Math.round(value / 1_000))} КБ`
   : `${(value / 1_000_000).toFixed(1)} МБ`;
 
-export function operatorPlayableReworkControlKey(occurrence, existing) {
-  return `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${existing?.requestId || ''}:${existing?.state || ''}:${existing?.execution?.state || ''}:${existing?.execution?.updatedAt || ''}:${existing?.releaseExecution?.state || ''}:${existing?.releaseExecution?.updatedAt || ''}`;
+const QUEUE_DISPOSITIONS = new Set(['active_batch', 'queued', 'duplicate_of', 'closed']);
+const SOURCE_ADAPTERS = new Set(['telegram', 'codex']);
+const preservedInstruction = (value) => typeof value === 'string'
+  && value.trim().length >= 1 && value.length <= 2_000
+  && new TextEncoder().encode(value).length <= 8_000
+  && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value);
+
+export function isOperatorPlayableReworkQueueItem(value, playableId = undefined) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    && UUID.test(value.requestId)
+    && ['open', 'claimed', 'closed'].includes(value.state)
+    && SOURCE_ADAPTERS.has(value.sourceAdapter)
+    && QUEUE_DISPOSITIONS.has(value.queueDisposition)
+    && typeof value.batchPresent === 'boolean'
+    && Boolean(value.queueCounts) && typeof value.queueCounts === 'object'
+    && Number.isInteger(value.queueCounts.active) && value.queueCounts.active >= 0 && value.queueCounts.active <= 200
+    && Number.isInteger(value.queueCounts.queued) && value.queueCounts.queued >= 0 && value.queueCounts.queued <= 200
+    && Boolean(value.request) && typeof value.request === 'object'
+    && value.request.schema === 'feed.playable-rework.request.v1'
+    && typeof value.request.playableId === 'string'
+    && (playableId === undefined || value.request.playableId === playableId)
+    && preservedInstruction(value.request.instruction)
+    && Boolean(value.request.context) && typeof value.request.context === 'object'
+    && typeof value.request.context.capturedAt === 'string';
+}
+
+export function groupOperatorPlayableReworkQueue(items) {
+  const groups = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!isOperatorPlayableReworkQueueItem(item)
+      || !['open', 'claimed'].includes(item.state)
+      || item.queueDisposition === 'closed') continue;
+    const group = groups.get(item.request.playableId) || [];
+    group.push(item);
+    groups.set(item.request.playableId, group);
+  }
+  for (const group of groups.values()) {
+    group.sort((left, right) => {
+      const byCreated = String(right.createdAt || right.request.context.capturedAt)
+        .localeCompare(String(left.createdAt || left.request.context.capturedAt));
+      return byCreated || left.requestId.localeCompare(right.requestId);
+    });
+  }
+  return groups;
+}
+
+export function operatorPlayableReworkQueuePresentation(queue) {
+  const items = Array.isArray(queue) ? queue : [];
+  const locallyActive = items.filter((item) => item?.queueDisposition === 'active_batch').length;
+  const hasBatch = locallyActive > 0 || items.some((item) => item?.batchPresent === true);
+  const active = hasBatch ? Math.max(
+    locallyActive,
+    items.reduce((count, item) => Math.max(count, item?.queueCounts?.active || 0), 0),
+  ) : 0;
+  const queued = Math.max(
+    items.filter((item) => item?.queueDisposition === 'queued').length,
+    items.reduce((count, item) => Math.max(count, item?.queueCounts?.queued || 0), 0),
+  );
+  const duplicates = items.filter((item) => item?.queueDisposition === 'duplicate_of').length;
+  const needsHelp = items.some((item) => ['needs_help', 'blocked'].includes(
+    operatorPlayableReworkPresentation(item).state,
+  ));
+  if (needsHelp) return Object.freeze({
+    state: 'needs_help', label: 'Нужна помощь · добавить замечание',
+    active, queued, duplicates, unresolved: items.length,
+  });
+  if (hasBatch && queued > 0) return Object.freeze({
+    state: 'queued', label: `В работе · ещё ${queued}`,
+    active, queued, duplicates, unresolved: items.length,
+  });
+  if (hasBatch) return Object.freeze({
+    state: 'active', label: 'В работе · добавить замечание',
+    active, queued, duplicates, unresolved: items.length,
+  });
+  return Object.freeze({
+    state: 'idle', label: '✎ Доработать механику',
+    active, queued, duplicates, unresolved: items.length,
+  });
+}
+
+export function operatorPlayableReworkControlKey(occurrence, queue = []) {
+  const queueKey = (Array.isArray(queue) ? queue : []).map((item) => [
+    item.requestId, item.state, item.queueDisposition, item.batchPresent,
+    item.queueCounts?.active, item.queueCounts?.queued,
+    item.execution?.state, item.execution?.updatedAt,
+    item.releaseExecution?.state, item.releaseExecution?.updatedAt,
+  ].join(':')).join('|');
+  return `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${queueKey}`;
 }
 
 export function operatorPlayableReworkPresentation(task) {
@@ -328,14 +414,17 @@ export function mountOperatorPlayableReworkControl(host, options) {
     fail('playable_rework_invalid', 'control options are invalid');
   }
   const occurrence = options.occurrence;
-  const existing = options.existing?.request?.playableId === occurrence.playableId
-    && ['open', 'claimed'].includes(options.existing.state)
-    ? options.existing : null;
+  const queue = (Array.isArray(options.queue) ? options.queue : [])
+    .filter((item) => isOperatorPlayableReworkQueueItem(item, occurrence.playableId));
+  const queuePresentation = operatorPlayableReworkQueuePresentation(queue);
   const root = document.createElement('section');
   const controlId = `playable-rework-${controlSequence += 1}`;
   root.className = 'game__operator-flag game__operator-playable-rework';
+  root.dataset.reworkState = queuePresentation.state;
   root.innerHTML = `
-    <button class="game__operator-flag-open" type="button" aria-expanded="false" aria-controls="${controlId}-form" aria-label="✎ Доработать механику" title="Доработать механику">✎</button>
+    <button class="game__operator-flag-open" type="button" aria-expanded="false" aria-controls="${controlId}-form">
+      <span aria-hidden="true">✎</span><span class="game__operator-playable-rework-count" data-rework-count hidden></span>
+    </button>
     <form class="game__operator-flag-form" id="${controlId}-form" hidden>
       <label>Что поправить
         <textarea name="instruction" rows="3" required placeholder="Например: увеличить номиналы карт" aria-describedby="${controlId}-dictation-hint"></textarea>
@@ -358,13 +447,13 @@ export function mountOperatorPlayableReworkControl(host, options) {
       <output class="game__operator-flag-status" aria-live="polite"></output>
     </form>
     <section class="game__operator-playable-rework-details" id="${controlId}-details" hidden>
-      <b>Запрошенная правка</b>
-      <p data-rework-task-instruction></p>
-      <small data-rework-task-created></small>
-      <div class="game__operator-playable-rework-blocker" data-rework-task-blocker hidden>
-        <b>Почему остановилось</b>
-        <p data-rework-task-blocker-summary></p>
-        <small>В ленту изменения не опубликованы.</small>
+      <header class="game__operator-playable-rework-summary">
+        <div><b data-rework-summary></b><small data-rework-counts></small></div>
+        <button type="button" data-action="close-details" aria-label="Закрыть список">×</button>
+      </header>
+      <div class="game__operator-playable-rework-list" data-rework-list></div>
+      <div class="game__operator-playable-rework-detail-actions">
+        <button type="button" data-action="add-feedback">Добавить замечание</button>
       </div>
     </section>`;
   host.appendChild(root);
@@ -379,34 +468,63 @@ export function mountOperatorPlayableReworkControl(host, options) {
   const screenshotName = form.querySelector('[data-rework-screenshot-name]');
   const removeScreenshot = form.querySelector('[data-action="remove-screenshot"]');
   const details = root.querySelector('.game__operator-playable-rework-details');
-  const taskInstruction = details.querySelector('[data-rework-task-instruction]');
-  const taskCreated = details.querySelector('[data-rework-task-created]');
-  const taskBlocker = details.querySelector('[data-rework-task-blocker]');
-  const taskBlockerSummary = details.querySelector('[data-rework-task-blocker-summary]');
-  let acceptedTask = existing;
-  const renderAcceptedTask = (task) => {
-    acceptedTask = task;
-    open.disabled = false;
-    const presentation = operatorPlayableReworkPresentation(task);
-    open.textContent = presentation.icon;
-    open.dataset.reworkState = presentation.state;
-    const stateLabel = `${presentation.icon} ${presentation.label}`;
-    open.setAttribute('aria-label', stateLabel);
-    open.title = presentation.label;
-    taskInstruction.textContent = task.request.instruction || 'Описание задачи недоступно.';
+  const summary = details.querySelector('[data-rework-summary]');
+  const counts = details.querySelector('[data-rework-counts]');
+  const list = details.querySelector('[data-rework-list]');
+  const countBadge = root.querySelector('[data-rework-count]');
+  open.dataset.reworkState = queuePresentation.state;
+  open.setAttribute('aria-label', queuePresentation.label);
+  open.title = queuePresentation.label;
+  countBadge.textContent = String(queuePresentation.unresolved);
+  countBadge.hidden = queuePresentation.unresolved === 0;
+  summary.textContent = queuePresentation.label;
+  counts.textContent = [
+    queuePresentation.active ? `активно ${queuePresentation.active}` : '',
+    queuePresentation.queued ? `в очереди ${queuePresentation.queued}` : '',
+    queuePresentation.duplicates ? `возможных дублей ${queuePresentation.duplicates}` : '',
+  ].filter(Boolean).join(' · ') || 'Новых замечаний пока нет';
+  const dispositionLabels = {
+    active_batch: 'В работе', queued: 'В очереди',
+    duplicate_of: 'Возможный дубль', closed: 'Завершено',
+  };
+  const sourceLabels = { telegram: 'Telegram', codex: 'Codex' };
+  for (const task of queue) {
+    const article = document.createElement('article');
+    article.className = 'game__operator-playable-rework-item';
+    article.dataset.queueDisposition = task.queueDisposition;
+    const itemHeading = document.createElement('div');
+    itemHeading.className = 'game__operator-playable-rework-item-heading';
+    const itemState = document.createElement('b');
+    itemState.textContent = dispositionLabels[task.queueDisposition];
+    const itemMeta = document.createElement('small');
     const createdAt = task.createdAt || task.request.context?.capturedAt || '';
     const created = createdAt ? new Date(createdAt) : null;
-    taskCreated.textContent = created && !Number.isNaN(created.valueOf())
-      ? `Отправлено ${created.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}`
-      : '';
-    taskCreated.hidden = !taskCreated.textContent;
-    taskBlockerSummary.textContent = presentation.blocker || '';
-    taskBlocker.hidden = presentation.blocker === null;
-    details.hidden = true;
-    open.setAttribute('aria-controls', details.id);
-    open.setAttribute('aria-expanded', 'false');
-  };
-  if (existing) renderAcceptedTask(existing);
+    const createdLabel = created && !Number.isNaN(created.valueOf())
+      ? created.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })
+      : 'время недоступно';
+    itemMeta.textContent = `${sourceLabels[task.sourceAdapter]} · ${createdLabel}`;
+    itemHeading.append(itemState, itemMeta);
+    const itemInstruction = document.createElement('p');
+    itemInstruction.textContent = task.request.instruction;
+    article.append(itemHeading, itemInstruction);
+    const lifecycle = operatorPlayableReworkPresentation(task);
+    if (lifecycle.blocker) {
+      const blocker = document.createElement('div');
+      blocker.className = 'game__operator-playable-rework-blocker';
+      const blockerHeading = document.createElement('b');
+      blockerHeading.textContent = 'Почему остановилось';
+      const blockerSummary = document.createElement('p');
+      blockerSummary.dataset.reworkTaskBlockerSummary = '';
+      blockerSummary.textContent = lifecycle.blocker;
+      blocker.append(blockerHeading, blockerSummary);
+      article.append(blocker);
+    } else if (!['open', 'claimed'].includes(lifecycle.state)) {
+      const lifecycleLabel = document.createElement('small');
+      lifecycleLabel.textContent = lifecycle.label;
+      article.append(lifecycleLabel);
+    }
+    list.append(article);
+  }
   let destroyed = false;
   let submitting = false;
   let pendingRequest = null;
@@ -428,16 +546,29 @@ export function mountOperatorPlayableReworkControl(host, options) {
   root.addEventListener('pointerdown', (event) => event.stopPropagation());
   root.addEventListener('pointerup', (event) => event.stopPropagation());
   root.addEventListener('click', (event) => event.stopPropagation());
+  const showForm = () => {
+    status.textContent = '';
+    details.hidden = true;
+    form.hidden = false;
+    open.hidden = true;
+    open.setAttribute('aria-controls', form.id);
+    open.setAttribute('aria-expanded', 'true');
+    instruction.focus();
+  };
   open.addEventListener('click', () => {
-    if (acceptedTask) {
+    if (queue.length > 0) {
       details.hidden = !details.hidden;
+      open.setAttribute('aria-controls', details.id);
       open.setAttribute('aria-expanded', String(!details.hidden));
       return;
     }
-    form.hidden = false;
-    open.hidden = true;
-    open.setAttribute('aria-expanded', 'true');
-    instruction.focus();
+    showForm();
+  });
+  details.querySelector('[data-action="add-feedback"]').addEventListener('click', showForm);
+  details.querySelector('[data-action="close-details"]').addEventListener('click', () => {
+    details.hidden = true;
+    open.setAttribute('aria-expanded', 'false');
+    open.focus({ preventScroll: true });
   });
   dictate.addEventListener('click', () => {
     instruction.focus();
@@ -463,7 +594,14 @@ export function mountOperatorPlayableReworkControl(host, options) {
     form.hidden = true;
     open.hidden = false;
     open.setAttribute('aria-expanded', 'false');
-    open.focus({ preventScroll: true });
+    if (queue.length > 0) {
+      details.hidden = false;
+      open.setAttribute('aria-controls', details.id);
+      open.setAttribute('aria-expanded', 'true');
+      details.querySelector('[data-action="close-details"]').focus({ preventScroll: true });
+    } else {
+      open.focus({ preventScroll: true });
+    }
   });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -483,21 +621,28 @@ export function mountOperatorPlayableReworkControl(host, options) {
         });
       }
       status.textContent = 'Сохраняю…';
-      await options.submit(pendingRequest);
+      const receipt = await options.submit(pendingRequest);
       if (destroyed) return;
-      status.textContent = 'Задача сохранена ✓ · ждёт подключения Labs';
-      form.querySelectorAll('textarea,input,button').forEach((element) => { element.disabled = true; });
-      submitting = false;
-      root.setAttribute('aria-busy', 'false');
-      const acceptedRequest = pendingRequest;
+      status.textContent = receipt?.replayed
+        ? 'Такое замечание уже сохранено.'
+        : queuePresentation.active > 0
+          ? 'Замечание сохранено. Текущая правка уже в работе — это попадёт в следующий пакет.'
+          : 'Замечание сохранено.';
+      root.dataset.reworkSubmitResult = receipt?.replayed ? 'replayed' : 'saved';
       setTimeout(() => {
         if (!destroyed) {
+          form.reset();
+          pendingRequest = null;
+          renderScreenshotSelection();
+          setSubmitting(false);
           form.hidden = true;
           open.hidden = false;
-          renderAcceptedTask({ state: 'open', request: acceptedRequest, createdAt: acceptedRequest.context.capturedAt });
+          open.setAttribute('aria-expanded', 'false');
+          status.textContent = '';
           open.focus({ preventScroll: true });
+          void options.refresh?.();
         }
-      }, 1200);
+      }, 2_400);
     } catch (error) {
       if (error?.code === 'playable_rework_stale') pendingRequest = null;
       if (destroyed) return;
@@ -506,7 +651,8 @@ export function mountOperatorPlayableReworkControl(host, options) {
     }
   });
   return Object.freeze({
-    key: operatorPlayableReworkControlKey(occurrence, existing),
+    key: operatorPlayableReworkControlKey(occurrence, queue),
+    playableId: occurrence.playableId,
     destroy() { destroyed = true; root.remove(); },
   });
 }

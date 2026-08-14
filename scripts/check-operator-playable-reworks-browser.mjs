@@ -26,18 +26,50 @@ const occurrence = {
   level: null,
   runId: null,
 };
+const request = (id, instruction) => ({
+  schema: 'feed.playable-rework.request.v1', mutationId: id,
+  playableId: occurrence.playableId, mappingId: occurrence.mappingId,
+  rosterActivationId: occurrence.rosterActivationId, runtime: occurrence.runtime,
+  context: {
+    feedPosition: occurrence.feedPosition, level: null, runId: null,
+    capturedAt: '2026-08-14T12:00:00.000Z',
+    screenshot: { kind: 'unavailable', reason: 'not_attached', mimeType: null, dataUrl: null },
+  },
+  instruction,
+});
+const queue = new URL(location.href).searchParams.has('queue') ? [
+  {
+    requestId: '66666666-6666-5666-8666-666666666666', state: 'open',
+    sourceAdapter: 'telegram', queueDisposition: 'active_batch', batchPresent: true,
+    queueCounts: { active: 1, queued: 1 },
+    request: request('66666666-6666-5666-8666-666666666666', 'Исправить центрирование.'),
+    createdAt: '2026-08-14T12:00:00.000Z',
+  },
+  {
+    requestId: '77777777-7777-5777-8777-777777777777', state: 'open',
+    sourceAdapter: 'codex', queueDisposition: 'queued', batchPresent: false,
+    queueCounts: { active: 1, queued: 1 },
+    request: request('77777777-7777-5777-8777-777777777777', 'Перезапечь обложку.'),
+    createdAt: '2026-08-14T12:05:00.000Z',
+  },
+] : [];
 window.lastRequest = null;
 window.submitGate = Promise.resolve();
 window.submitError = false;
+window.submitReplay = false;
+window.refreshes = 0;
 window.normalizeScreenshot = screenshotFromFile;
 window.control = mountOperatorPlayableReworkControl(document.querySelector('#host'), {
   occurrence,
+  queue,
   createMutationId: () => '55555555-5555-5555-8555-555555555555',
   submit: async (request) => {
     window.lastRequest = request;
     await window.submitGate;
     if (window.submitError) throw Object.assign(new Error('offline'), { status: 0 });
+    return { replayed: window.submitReplay };
   },
+  refresh: () => { window.refreshes += 1; },
 });
 </script></body></html>`;
 
@@ -141,6 +173,10 @@ try {
   await page.evaluate(() => { window.submitError = true; });
   await page.locator('button[type="submit"]').click();
   await page.waitForFunction(() => document.querySelector('.game__operator-flag-status')?.textContent.includes('Нет связи'));
+  await page.locator('[data-action="cancel"]').click();
+  await page.locator('.game__operator-flag-open').click();
+  assert.equal(await page.locator('.game__operator-flag-status').innerText(), '',
+    'a fresh capture must not inherit the previous attempt status');
   await page.locator('textarea[name="instruction"]').fill('Сделать автоплей понятнее после retry.');
   await page.evaluate(() => { window.lastRequest = null; window.submitError = false; });
   await page.evaluate(() => {
@@ -157,11 +193,49 @@ try {
   assert.match(screenshot.dataUrl, /^data:image\/jpeg;base64,/);
   assert.ok(screenshot.dataUrl.length <= 500_000, 'normalized screenshot exceeds transport budget');
   await page.evaluate(() => window.releaseSubmit());
-  assert.equal(await page.locator('.game__operator-flag-status').innerText(), 'Задача сохранена ✓ · ждёт подключения Labs');
+  assert.equal(await page.locator('.game__operator-flag-status').innerText(), 'Замечание сохранено.');
   await page.close();
+
+  const queuePage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await queuePage.goto(`${origin}/?queue=1`, { waitUntil: 'domcontentloaded' });
+  const queueOpen = queuePage.locator('.game__operator-flag-open');
+  assert.equal(await queueOpen.getAttribute('aria-label'), 'В работе · ещё 1');
+  assert.equal(await queuePage.locator('[data-rework-count]').innerText(), '2');
+  await queueOpen.click();
+  const details = queuePage.locator('.game__operator-playable-rework-details');
+  await details.waitFor({ state: 'visible' });
+  assert.equal(await details.locator('.game__operator-playable-rework-item').count(), 2);
+  assert.match(await details.innerText(), /Исправить центрирование\./);
+  assert.match(await details.innerText(), /Перезапечь обложку\./);
+  assert.match(await details.innerText(), /Telegram/);
+  assert.match(await details.innerText(), /Codex/);
+  await details.locator('[data-action="add-feedback"]').click();
+  await queuePage.locator('[data-action="cancel"]').click();
+  assert.equal(
+    await details.locator('[data-action="close-details"]').evaluate((element) => document.activeElement === element),
+    true,
+    'cancelling queue capture must focus the reopened queue details',
+  );
+  await details.locator('[data-action="add-feedback"]').click();
+  await queuePage.locator('textarea[name="instruction"]').fill('Добавить ещё одно замечание.');
+  await queuePage.locator('button[type="submit"]').click();
+  await queuePage.locator('.game__operator-flag-status')
+    .filter({ hasText: 'это попадёт в следующий пакет' }).waitFor();
+  assert.equal(await queuePage.locator('.game__operator-playable-rework').getAttribute('data-rework-submit-result'), 'saved');
+  await queuePage.waitForFunction(() => window.refreshes === 1);
+  assert.equal(await queueOpen.evaluate((element) => document.activeElement === element), true,
+    'successful queue capture must restore focus to the persistent action');
+  await queueOpen.click();
+  await details.locator('[data-action="add-feedback"]').click();
+  await queuePage.locator('textarea[name="instruction"]').fill('Повторить сохранённое замечание.');
+  await queuePage.evaluate(() => { window.submitReplay = true; });
+  await queuePage.locator('button[type="submit"]').click();
+  await queuePage.locator('.game__operator-flag-status')
+    .filter({ hasText: 'Такое замечание уже сохранено' }).waitFor();
+  await queuePage.close();
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
 }
 
-console.log('operator playable rework browser: large phone screenshot + remove + submit PASS');
+console.log('operator playable rework browser: screenshot + always-open queue capture PASS');

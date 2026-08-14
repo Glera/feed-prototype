@@ -3,6 +3,9 @@ import { randomUUID } from 'node:crypto';
 
 import {
   buildOperatorPlayableReworkRequest,
+  groupOperatorPlayableReworkQueue,
+  isOperatorPlayableReworkQueueItem,
+  operatorPlayableReworkQueuePresentation,
   operatorPlayableReworkPresentation,
   operatorPlayableReworkErrorMessage,
 } from '../src/operator-playable-reworks.mjs';
@@ -91,4 +94,78 @@ assert.deepEqual(operatorPlayableReworkPresentation({
   state: 'claimed',
   execution: { state: 'accepted', code: null, summary: null, updatedAt: null },
 }), { state: 'claimed', icon: '✓', label: 'Задача принята', blocker: null });
-console.log('operator playable rework contract: 15 assertions');
+const queueItem = ({ disposition, active, queued, sourceAdapter = 'telegram', blocked = false }) => ({
+  requestId: randomUUID(),
+  state: 'open',
+  sourceAdapter,
+  queueDisposition: disposition,
+  batchPresent: disposition === 'active_batch',
+  queueCounts: { active, queued },
+  request,
+  createdAt: request.context.capturedAt,
+  ...(blocked ? {
+    execution: {
+      state: 'blocked', code: 'manual_authoring_required',
+      summary: 'Обычная разработка поставлена в очередь.', updatedAt: request.context.capturedAt,
+    },
+  } : {}),
+});
+const active = queueItem({ disposition: 'active_batch', active: 1, queued: 0 });
+assert.equal(isOperatorPlayableReworkQueueItem(active, occurrence.playableId), true);
+assert.equal(isOperatorPlayableReworkQueueItem({ ...active, sourceAdapter: 'caller' }), false);
+assert.deepEqual(operatorPlayableReworkQueuePresentation([active]), {
+  state: 'active', label: 'В работе · добавить замечание',
+  active: 1, queued: 0, duplicates: 0, unresolved: 1,
+});
+const activeWithQueued = queueItem({ disposition: 'active_batch', active: 1, queued: 1 });
+const queued = queueItem({ disposition: 'queued', active: 1, queued: 1, sourceAdapter: 'codex' });
+assert.deepEqual(operatorPlayableReworkQueuePresentation([activeWithQueued, queued]), {
+  state: 'queued', label: 'В работе · ещё 1',
+  active: 1, queued: 1, duplicates: 0, unresolved: 2,
+});
+const blocked = queueItem({ disposition: 'active_batch', active: 1, queued: 1, blocked: true });
+assert.deepEqual(operatorPlayableReworkQueuePresentation([blocked, queued]), {
+  state: 'needs_help', label: 'Нужна помощь · добавить замечание',
+  active: 1, queued: 1, duplicates: 0, unresolved: 2,
+});
+const duplicate = queueItem({ disposition: 'duplicate_of', active: 0, queued: 0 });
+assert.deepEqual(operatorPlayableReworkQueuePresentation([duplicate]), {
+  state: 'idle', label: '✎ Доработать механику',
+  active: 0, queued: 0, duplicates: 1, unresolved: 1,
+});
+const waiting = {
+  ...queueItem({ disposition: 'queued', active: 0, queued: 1, sourceAdapter: 'codex' }),
+  createdAt: '2026-08-14T12:05:00.000Z',
+};
+assert.deepEqual(operatorPlayableReworkQueuePresentation([waiting]), {
+  state: 'idle', label: '✎ Доработать механику',
+  active: 0, queued: 1, duplicates: 0, unresolved: 1,
+});
+const staleActiveCount = {
+  ...waiting,
+  queueCounts: { active: 1, queued: 1 },
+};
+assert.deepEqual(operatorPlayableReworkQueuePresentation([staleActiveCount]), {
+  state: 'idle', label: '✎ Доработать механику',
+  active: 0, queued: 1, duplicates: 0, unresolved: 1,
+}, 'server count drift cannot invent an active batch without row-level evidence');
+const multiline = {
+  ...waiting,
+  requestId: randomUUID(),
+  createdAt: '2026-08-14T12:10:00.000Z',
+  request: { ...request, instruction: 'Первая строка\nВторая строка.' },
+};
+const successor = {
+  ...active,
+  requestId: randomUUID(),
+  request: { ...request, schema: 'feed.playable-rework.successor.v1' },
+};
+const malformed = { ...active, requestId: randomUUID(), sourceAdapter: 'caller' };
+const groups = groupOperatorPlayableReworkQueue([successor, malformed, waiting, multiline]);
+assert.deepEqual([...groups.keys()], [occurrence.playableId]);
+assert.deepEqual(
+  groups.get(occurrence.playableId).map((item) => item.requestId),
+  [multiline.requestId, waiting.requestId],
+  'grouping keeps valid multiline feedback, rejects successors and sorts deterministically',
+);
+console.log('operator playable rework contract: capture + queue assertions passed');
