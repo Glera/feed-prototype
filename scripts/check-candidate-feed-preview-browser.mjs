@@ -8,6 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 import { encodeCandidateFeedStartParam } from '../src/candidate-feed-start-param.mjs';
+import {
+  generatedInsertionBlockedIndices,
+  generatedInsertionTarget,
+} from '../src/catalog-feed-authority.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const releaseId = '8b447be0-f961-482e-aa03-b419d5f1492d';
@@ -88,8 +92,23 @@ const roster = {
 };
 const requests = [];
 let adoptionPosts = 0;
+let generatedOfferPosts = 0;
 let adopted = false;
 let origin = '';
+
+const candidateOverlayPlayableIds = [
+  playableId,
+  ...rosterEntries.filter((entry) => entry.playableId !== playableId)
+    .map((entry) => entry.playableId),
+];
+const candidateBlocked = generatedInsertionBlockedIndices(
+  candidateOverlayPlayableIds,
+  [],
+  playableId,
+);
+assert.deepEqual(candidateBlocked, [0], 'exact candidate page was not reserved from generated insertion');
+assert.equal(generatedInsertionTarget(0, candidateOverlayPlayableIds.length, candidateBlocked, 2), 2,
+  'generated insertion did not remain available on a non-candidate page');
 
 const json = (response, value, status = 200) => {
   response.statusCode = status;
@@ -99,7 +118,9 @@ const json = (response, value, status = 200) => {
 
 const playableHtml = (id, candidate = false) => `<!doctype html><html><head><style>
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:${candidate ? '#71491f' : '#17325a'}}
-#marker{display:grid;place-items:center;width:100%;height:100%;color:white;font:700 18px system-ui}
+#marker{position:relative;display:grid;place-items:center;width:100%;height:100%;color:white;font:700 18px system-ui}
+#candidate-hud{position:absolute;top:11.5%;left:50%;width:40px;height:10px;transform:translate(-50%,-50%)}
+#candidate-board{position:absolute;top:50%;left:50%;width:10px;height:10px;transform:translate(-50%,-50%)}
 </style></head><body><div id="marker">${candidate ? 'EXACT IMMUTABLE CANDIDATE' : `LIVE NEIGHBOR ${id}`}</div><script>
 const id=${JSON.stringify(id)};
 const candidate=${JSON.stringify(candidate)};
@@ -108,7 +129,61 @@ const send=(type,extra={})=>parent.postMessage({source:'playable',id,type,...ext
 addEventListener('message',(event)=>{if(event.source!==parent||event.data?.target!=='playable-swipe')return;record(event.data.type);if(event.data.type==='prepareInteractive')send('interactive_ready');});
 document.querySelector('#marker').addEventListener('click',()=>send('completed',{success:true}));
 addEventListener('load',()=>send('static_ready'));
+if(candidate){for(const id of ['candidate-hud','candidate-board']){const el=document.createElement('div');el.id=id;document.querySelector('#marker').appendChild(el);}}
 </script></body></html>`;
+
+const candidateSurfaceGeometry = async (page) => page.locator('.page--in-viewport .game').first().evaluate((game) => {
+  const slot = game.querySelector('.game__slot');
+  const frame = game.querySelector('.game__frame');
+  if (!(slot instanceof HTMLElement) || !(frame instanceof HTMLIFrameElement)) return null;
+  const gameRect = game.getBoundingClientRect();
+  const slotRect = slot.getBoundingClientRect();
+  const frameRect = frame.getBoundingClientRect();
+  const boardRect = frame.contentDocument?.querySelector('#candidate-board')?.getBoundingClientRect();
+  const hudRect = frame.contentDocument?.querySelector('#candidate-hud')?.getBoundingClientRect();
+  return {
+    candidate: game.classList.contains('game--candidate-overlay'),
+    autoplay: game.classList.contains('game--autoplay'),
+    game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
+    slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
+    frame: { left: frameRect.left, right: frameRect.right, top: frameRect.top, bottom: frameRect.bottom },
+    inner: { width: frame.contentWindow?.innerWidth ?? 0, height: frame.contentWindow?.innerHeight ?? 0 },
+    board: boardRect ? {
+      centerX: frameRect.left + boardRect.left + boardRect.width / 2,
+      centerY: frameRect.top + boardRect.top + boardRect.height / 2,
+    } : null,
+    hud: hudRect ? {
+      centerX: frameRect.left + hudRect.left + hudRect.width / 2,
+      centerY: frameRect.top + hudRect.top + hudRect.height / 2,
+    } : null,
+  };
+});
+
+const assertCandidateSurfaceGeometry = async (page, label) => {
+  const geometry = await candidateSurfaceGeometry(page);
+  assert.ok(geometry?.candidate, `${label}: exact candidate surface class is absent: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.autoplay, `${label}: geometry was sampled outside autoplay: ${JSON.stringify(geometry)}`);
+  assert.ok(Math.abs(geometry.slot.left - geometry.game.left) <= 2,
+    `${label}: candidate slot left edge drifted: ${JSON.stringify(geometry)}`);
+  assert.ok(Math.abs(geometry.slot.right - geometry.game.right) <= 2,
+    `${label}: candidate slot right edge drifted: ${JSON.stringify(geometry)}`);
+  assert.ok(Math.abs(geometry.slot.top - geometry.game.top) <= 2,
+    `${label}: candidate slot top edge drifted: ${JSON.stringify(geometry)}`);
+  assert.ok(Math.abs(geometry.frame.left - geometry.game.left) <= 2
+    && Math.abs(geometry.frame.right - geometry.game.right) <= 2
+    && Math.abs(geometry.frame.top - geometry.game.top) <= 2,
+  `${label}: candidate iframe does not fill the available gameplay rectangle: ${JSON.stringify(geometry)}`);
+  const expectedCenterX = (geometry.game.left + geometry.game.right) / 2;
+  const expectedGameplayHeight = geometry.slot.bottom - geometry.game.top;
+  assert.ok(geometry.board
+    && Math.abs(geometry.board.centerX - expectedCenterX) <= 0.5
+    && Math.abs(geometry.board.centerY - (geometry.game.top + expectedGameplayHeight / 2)) <= 0.5,
+  `${label}: candidate board is not centred in the full gameplay rectangle: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.hud
+    && Math.abs(geometry.hud.centerX - expectedCenterX) <= 0.5
+    && Math.abs(geometry.hud.centerY - (geometry.game.top + expectedGameplayHeight * 0.115)) <= 0.5,
+    `${label}: candidate HUD is not centred in the full gameplay rectangle: ${JSON.stringify(geometry)}`);
+};
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
@@ -206,6 +281,24 @@ const server = createServer(async (request, response) => {
       receiptDigest: '6'.repeat(64), replayed: false,
     }, 201);
   }
+  if (url.pathname === '/api/feed/generated-offer' && request.method === 'POST') {
+    assert.match(String(request.headers.authorization || ''), /^tma query_id=candidate/);
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    assert.deepEqual(Object.keys(body).sort(), ['requestId', 'schema']);
+    assert.equal(body.schema, 'feed.generated-offer-request.v1');
+    assert.match(body.requestId, /^[0-9a-f-]{36}$/);
+    generatedOfferPosts += 1;
+    return json(response, {
+      schema: 'feed.generated-offer-result.v1',
+      requestId: body.requestId,
+      outcome: 'no_offer',
+      selectionMode: null,
+      selectionReason: null,
+      allocation: null,
+    });
+  }
   if (url.pathname.startsWith('/api/')) return json(response, { code: 'unexpected_api_call' }, 500);
   response.statusCode = 404;
   response.end();
@@ -220,7 +313,13 @@ origin = `http://127.0.0.1:${server.address().port}`;
 const build = spawnSync('npm', ['run', 'build'], {
   cwd: root,
   encoding: 'utf8',
-  env: { ...process.env, VITE_API_BASE: origin },
+  env: {
+    ...process.env,
+    VITE_API_BASE: origin,
+    VITE_CONTROL_PLANE_ENABLED: 'true',
+    VITE_CATALOG_PLAYER_V2_ENABLED: 'true',
+    VITE_FEED_EFFECTFUL_AUTHORITY_ENABLED: 'true',
+  },
   timeout: 180_000,
 });
 assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
@@ -277,6 +376,8 @@ try {
     return ['setHostPaused', 'prepareInteractive', 'startAutoPlay']
       .every((type) => commands.some((entry) => entry.id === 'solitaire-v1-swipe' && entry.type === type));
   });
+  await page.locator('.page--in-viewport .game--candidate-overlay.game--autoplay').waitFor({ state: 'visible' });
+  await assertCandidateSurfaceGeometry(page, 'query candidate preview');
   await page.waitForTimeout(5_100);
   assert.equal(requests.some((entry) => entry.includes('/api/session')), false,
     `candidate preview inherited Telegram session authority: ${requests.join(', ')}`);
@@ -290,6 +391,17 @@ try {
   const neighborUrl = new URL((await neighbor.getAttribute('src')) || '', origin);
   assert.equal(neighborUrl.pathname, '/marble-sort-swipe.html');
   await neighbor.contentFrame().getByText('LIVE NEIGHBOR marble-sort-swipe', { exact: true }).waitFor();
+  const neighborGeometry = await page.locator('.page--in-viewport .game').first().evaluate((game) => {
+    const slot = game.querySelector('.game__slot');
+    if (!(slot instanceof HTMLElement)) return null;
+    return {
+      candidate: game.classList.contains('game--candidate-overlay'),
+      gameTop: game.getBoundingClientRect().top,
+      slotTop: slot.getBoundingClientRect().top,
+    };
+  });
+  assert.ok(neighborGeometry && !neighborGeometry.candidate && neighborGeometry.slotTop > neighborGeometry.gameTop,
+    `ordinary neighbor lost the public autoplay composition: ${JSON.stringify(neighborGeometry)}`);
 
   await page.goto(validUrl, { waitUntil: 'domcontentloaded' });
   await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
@@ -352,6 +464,27 @@ try {
   const adoptedFrame = page.locator('.page').first().locator('iframe');
   await adoptedFrame.waitFor({ state: 'attached' });
   assert.equal(new URL((await adoptedFrame.getAttribute('src')) || '', origin).pathname, sourceCandidatePath);
+  await adoptedFrame.contentFrame().getByText('EXACT IMMUTABLE CANDIDATE', { exact: true }).waitFor();
+  await page.locator('.page--in-viewport .game--candidate-overlay.game--autoplay').waitFor({ state: 'visible' });
+  await assertCandidateSurfaceGeometry(page, 'adopted developer feed');
+  await page.waitForTimeout(1_050);
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  });
+  for (let attempt = 0; attempt < 40
+    && generatedOfferPosts === 0;
+    attempt += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(generatedOfferPosts, 1,
+    `persisted pageshow did not run the generated-offer path exactly once: ${requests.join(', ')}`);
+  const restoredCandidateSurfaces = await page.locator('.game--candidate-overlay').evaluateAll((games) => games.map((game) => ({
+    playableId: game.querySelector('.game__label')?.textContent ?? null,
+    path: game.querySelector('iframe')?.getAttribute('src') ?? null,
+  })));
+  assert.deepEqual(restoredCandidateSurfaces.map((surface) => surface.playableId), [playableId],
+    `BFCache restore leaked candidate geometry to another page: ${JSON.stringify(restoredCandidateSurfaces)}`);
+  assert.equal(new URL(restoredCandidateSurfaces[0].path || '', origin).pathname, sourceCandidatePath,
+    'BFCache restore replaced the exact candidate iframe');
+  await assertCandidateSurfaceGeometry(page, 'adopted developer feed after BFCache pageshow');
   assert.equal(adoptionPosts, 1, 'normal dev feed replayed the adoption mutation');
   assert.equal(await page.getByText('Кандидат — не опубликовано', { exact: true }).count(), 0,
     'one-shot handoff restored the physical Telegram candidate start_param');

@@ -173,6 +173,11 @@ export function generatedInsertionTarget(
   blocked?: number[],
   minimumDistance?: number,
 ): number | null;
+export function generatedInsertionBlockedIndices(
+  playableIds: string[],
+  blocked?: number[],
+  candidatePlayableId?: string | null,
+): readonly number[] | null;
 export function catalogGeneratedPreviewUrl(options: {
   baseUrl: string;
   contentHash: string;

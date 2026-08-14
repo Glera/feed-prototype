@@ -684,6 +684,14 @@ body {
   top: var(--autoplay-frame-block-inset);
   bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
 }
+/* An exact immutable candidate is already fenced to the operator-only overlay.
+   Give that dogfood surface the whole real gameplay rectangle: source geometry
+   and review evidence must be judged against the slot that would ship, while
+   ordinary/public autoplay keeps its existing vertical footage composition. */
+.game--candidate-overlay.game--autoplay .game__slot {
+  top: 0;
+  bottom: var(--bar-reserve);
+}
 .game__frame {
   width: 100%;
   height: 100%;
@@ -1381,6 +1389,10 @@ body {
   top: var(--autoplay-frame-block-inset);
   bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
   opacity: 1;
+}
+.game--candidate-overlay.game--autoplay .game__reel {
+  top: 0;
+  bottom: var(--bar-reserve);
 }
 /* But NOT while the frame is the dark loading / arriving / preview placeholder — the
    reel (corners, PLAY, scanlines, timecode) AND the "tap to play or swipe" hint appear
