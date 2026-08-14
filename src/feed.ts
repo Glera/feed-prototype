@@ -5785,6 +5785,12 @@ export class Feed {
 
       const game = document.createElement('div');
       game.className = 'game game--loading';
+      // A validated candidate overlay is also the authority for the bounded
+      // platform-presentation dogfood session. Apply the candidate framing to
+      // every live roster entry in that exact session so desktop aspect checks
+      // cover real neighbours too. The same roster is exercised separately
+      // without an overlay as the unaffected ordinary/public control.
+      if (candidateOverlay) game.classList.add('game--candidate-feed-presentation');
       if (candidateOverlay?.playableId === p.id) {
         game.classList.add('game--candidate-overlay');
         if (this.readOnlyPreview) game.classList.add('game--candidate-read-only-preview');
@@ -6670,6 +6676,15 @@ export class Feed {
     const game = this.games[target];
     const slot = game?.querySelector<HTMLElement>('.game__slot');
     if (!game || !slot) return;
+    const candidateTargetScale = game.classList.contains('game--candidate-feed-presentation')
+      && game.classList.contains('game--autoplay')
+      ? Number.parseFloat(getComputedStyle(game).getPropertyValue('--candidate-autoplay-scale'))
+      : 1;
+    const scale = Number.isFinite(candidateTargetScale) && candidateTargetScale > 0
+      ? candidateTargetScale
+      : 1;
+    const width = slot.offsetWidth * scale;
+    const height = slot.offsetHeight * scale;
     for (const direction of RIDE_DIRECTIONS) {
       if (this.incomingIndices.get(direction) !== target) continue;
       const img = this.incomingImgs.get(direction);
@@ -6677,10 +6692,14 @@ export class Feed {
       // Autoplay state can land after the resident identity is selected. Sync
       // from the real slot on every state change so the early identity guard
       // cannot preserve a stale pre-inset box.
-      img.style.top = `${game.offsetTop + slot.offsetTop}px`;
-      img.style.left = `${game.offsetLeft + slot.offsetLeft}px`;
-      img.style.width = `${slot.offsetWidth}px`;
-      img.style.height = `${slot.offsetHeight}px`;
+      // Reading getBoundingClientRect() here would capture progress zero: this
+      // method runs synchronously when the autoplay class starts its 360ms
+      // transform. Compute the settled target box from the layout dimensions
+      // instead, centred exactly like transform-origin 50% 50%.
+      img.style.top = `${game.offsetTop + slot.offsetTop + (slot.offsetHeight - height) / 2}px`;
+      img.style.left = `${game.offsetLeft + slot.offsetLeft + (slot.offsetWidth - width) / 2}px`;
+      img.style.width = `${width}px`;
+      img.style.height = `${height}px`;
       img.style.transform = '';
       img.style.transformOrigin = '';
     }
