@@ -624,6 +624,7 @@ body {
    must NOT page the feed. */
 .game {
   --autoplay-frame-block-inset: 4%;
+  --candidate-autoplay-scale: 0.92;
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
@@ -691,6 +692,23 @@ body {
 .game--candidate-read-only-preview.game--autoplay .game__slot {
   top: 0;
   bottom: var(--bar-reserve);
+}
+/* Issue #119 exact-user platform presentation candidate. The full playable
+   surface keeps its original layout viewport and is scaled uniformly, so
+   circles/cells cannot be stretched on Telegram Desktop. The same scale on X
+   and Y creates balanced proportional framing; takeover removes only this
+   transform and lets the existing slot expand with a bounded ease-out. This
+   class exists only when a validated candidate overlay owns the session — the
+   ordinary/public feed keeps the shipped vertical-footage composition above. */
+.game--candidate-feed-presentation .game__slot {
+  transform-origin: 50% 50%;
+  transition: transform 360ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+.game--candidate-feed-presentation.game--autoplay .game__slot {
+  top: 0;
+  bottom: var(--bar-reserve);
+  transform: scale(var(--candidate-autoplay-scale));
 }
 .game__frame {
   width: 100%;
@@ -1393,6 +1411,16 @@ body {
 .game--candidate-read-only-preview.game--autoplay .game__reel {
   top: 0;
   bottom: var(--bar-reserve);
+}
+.game--candidate-feed-presentation.game--autoplay .game__reel {
+  top: 0;
+  bottom: var(--bar-reserve);
+  transform: scale(var(--candidate-autoplay-scale));
+  transform-origin: 50% 50%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .game--candidate-feed-presentation .game__slot { transition: none; }
 }
 /* But NOT while the frame is the dark loading / arriving / preview placeholder — the
    reel (corners, PLAY, scanlines, timecode) AND the "tap to play or swipe" hint appear

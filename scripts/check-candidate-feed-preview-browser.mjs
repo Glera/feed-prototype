@@ -81,6 +81,30 @@ const rosterEntries = [
     mappingDigest: '3'.repeat(64),
     mappingState: 'active',
   },
+  {
+    builtinMappingId: '55555555-5555-4555-8555-555555555555',
+    playableId: 'arrows-v1-swipe',
+    variantId: '55555555-5555-1555-1555-555555555555',
+    catalogMechanic: 'arrows/base',
+    mappingDigest: '5'.repeat(64),
+    mappingState: 'active',
+  },
+  {
+    builtinMappingId: '66666666-6666-4666-8666-666666666666',
+    playableId: 'minesweeper-v1-swipe',
+    variantId: '66666666-6666-1666-1666-666666666666',
+    catalogMechanic: 'minesweeper/base',
+    mappingDigest: '6'.repeat(64),
+    mappingState: 'active',
+  },
+  {
+    builtinMappingId: '77777777-7777-4777-8777-777777777777',
+    playableId: 'orthogonal-link-v1-swipe',
+    variantId: '77777777-7777-1777-1777-777777777777',
+    catalogMechanic: 'connect/orthogonal-link-v1',
+    mappingDigest: '7'.repeat(64),
+    mappingState: 'active',
+  },
 ];
 const roster = {
   schema: 'feed.roster-config.v1',
@@ -142,67 +166,109 @@ const candidateSurfaceGeometry = async (page) => page.locator('.page--in-viewpor
   const frameRect = frame.getBoundingClientRect();
   const boardRect = frame.contentDocument?.querySelector('#candidate-board')?.getBoundingClientRect();
   const hudRect = frame.contentDocument?.querySelector('#candidate-hud')?.getBoundingClientRect();
+  const slotStyle = getComputedStyle(slot);
+  const matrix = new DOMMatrixReadOnly(slotStyle.transform);
+  const scaleX = frameRect.width / frame.offsetWidth;
+  const scaleY = frameRect.height / frame.offsetHeight;
+  const layoutTop = gameRect.top + slot.offsetTop;
+  const layoutLeft = gameRect.left + slot.offsetLeft;
   return {
     candidate: game.classList.contains('game--candidate-overlay'),
+    sessionPresentation: game.classList.contains('game--candidate-feed-presentation'),
     autoplay: game.classList.contains('game--autoplay'),
     game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
     slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
     frame: { left: frameRect.left, right: frameRect.right, top: frameRect.top, bottom: frameRect.bottom },
-    inner: { width: frame.contentWindow?.innerWidth ?? 0, height: frame.contentWindow?.innerHeight ?? 0 },
+    layout: {
+      left: layoutLeft,
+      right: layoutLeft + slot.offsetWidth,
+      top: layoutTop,
+      bottom: layoutTop + slot.offsetHeight,
+      width: slot.offsetWidth,
+      height: slot.offsetHeight,
+    },
+    transform: { scaleX: matrix.a, scaleY: matrix.d },
+    transition: { duration: slotStyle.transitionDuration, timing: slotStyle.transitionTimingFunction },
     board: boardRect ? {
-      centerX: frameRect.left + boardRect.left + boardRect.width / 2,
-      centerY: frameRect.top + boardRect.top + boardRect.height / 2,
+      centerX: frameRect.left + (boardRect.left + boardRect.width / 2) * scaleX,
+      centerY: frameRect.top + (boardRect.top + boardRect.height / 2) * scaleY,
     } : null,
     hud: hudRect ? {
-      centerX: frameRect.left + hudRect.left + hudRect.width / 2,
-      centerY: frameRect.top + hudRect.top + hudRect.height / 2,
+      centerX: frameRect.left + (hudRect.left + hudRect.width / 2) * scaleX,
+      centerY: frameRect.top + (hudRect.top + hudRect.height / 2) * scaleY,
     } : null,
   };
 });
 
-const assertCandidateSurfaceGeometry = async (page, label) => {
-  const geometry = await candidateSurfaceGeometry(page);
-  assert.ok(geometry?.candidate, `${label}: exact candidate surface class is absent: ${JSON.stringify(geometry)}`);
-  assert.ok(geometry.autoplay, `${label}: geometry was sampled outside autoplay: ${JSON.stringify(geometry)}`);
-  assert.ok(Math.abs(geometry.slot.left - geometry.game.left) <= 2,
-    `${label}: candidate slot left edge drifted: ${JSON.stringify(geometry)}`);
-  assert.ok(Math.abs(geometry.slot.right - geometry.game.right) <= 2,
-    `${label}: candidate slot right edge drifted: ${JSON.stringify(geometry)}`);
-  assert.ok(Math.abs(geometry.slot.top - geometry.game.top) <= 2,
-    `${label}: candidate slot top edge drifted: ${JSON.stringify(geometry)}`);
-  assert.ok(Math.abs(geometry.frame.left - geometry.game.left) <= 2
-    && Math.abs(geometry.frame.right - geometry.game.right) <= 2
-    && Math.abs(geometry.frame.top - geometry.game.top) <= 2,
-  `${label}: candidate iframe does not fill the available gameplay rectangle: ${JSON.stringify(geometry)}`);
-  const expectedCenterX = (geometry.game.left + geometry.game.right) / 2;
-  const expectedGameplayHeight = geometry.slot.bottom - geometry.game.top;
-  assert.ok(geometry.board
-    && Math.abs(geometry.board.centerX - expectedCenterX) <= 0.5
-    && Math.abs(geometry.board.centerY - (geometry.game.top + expectedGameplayHeight / 2)) <= 0.5,
-  `${label}: candidate board is not centred in the full gameplay rectangle: ${JSON.stringify(geometry)}`);
-  assert.ok(geometry.hud
-    && Math.abs(geometry.hud.centerX - expectedCenterX) <= 0.5
-    && Math.abs(geometry.hud.centerY - (geometry.game.top + expectedGameplayHeight * 0.115)) <= 0.5,
-    `${label}: candidate HUD is not centred in the full gameplay rectangle: ${JSON.stringify(geometry)}`);
-};
-
-const assertAdoptedAutoplayGeometry = async (page, label, ordinaryReference) => {
-  const geometry = await candidateSurfaceGeometry(page);
-  assert.ok(geometry?.candidate && geometry.autoplay,
-    `${label}: adopted candidate is not in autoplay: ${JSON.stringify(geometry)}`);
-  assert.ok(Math.abs(geometry.slot.left - geometry.game.left) <= 2
-    && Math.abs(geometry.slot.right - geometry.game.right) <= 2,
-  `${label}: adopted autoplay lost full feed width: ${JSON.stringify(geometry)}`);
-  assert.ok(geometry.slot.top > geometry.game.top && geometry.slot.bottom < geometry.game.bottom,
-    `${label}: adopted autoplay lost its intentional vertical inset: ${JSON.stringify(geometry)}`);
-  assert.ok(Math.abs((geometry.slot.top - geometry.game.top) - ordinaryReference.topInset) <= 0.5
-    && Math.abs((geometry.game.bottom - geometry.slot.bottom) - ordinaryReference.bottomInset) <= 0.5,
-  `${label}: adopted autoplay differs from the host-owned vertical composition: ${JSON.stringify({ geometry, ordinaryReference })}`);
+const assertUniformSessionAutoplayGeometry = (geometry, label) => {
+  assert.ok(geometry?.sessionPresentation && geometry.autoplay,
+    `${label}: exact candidate presentation is not in autoplay: ${JSON.stringify(geometry)}`);
+  const margins = {
+    left: geometry.slot.left - geometry.layout.left,
+    right: geometry.layout.right - geometry.slot.right,
+    top: geometry.slot.top - geometry.layout.top,
+    bottom: geometry.layout.bottom - geometry.slot.bottom,
+  };
+  assert.ok(Math.abs(margins.left - margins.right) <= 2
+    && Math.abs(margins.top - margins.bottom) <= 2,
+  `${label}: autoplay framing is not centred on both axes: ${JSON.stringify({ geometry, margins })}`);
+  assert.ok(margins.left > 0 && margins.top > 0,
+    `${label}: candidate framing must inset the complete surface on both axes: ${JSON.stringify({ geometry, margins })}`);
+  assert.ok(Math.abs(geometry.transform.scaleX - geometry.transform.scaleY) <= 0.001,
+    `${label}: candidate surface uses non-uniform scale: ${JSON.stringify(geometry)}`);
+  assert.ok(Math.abs(geometry.transform.scaleX - 0.92) <= 0.005,
+    `${label}: candidate surface uses the wrong bounded scale: ${JSON.stringify(geometry)}`);
   assert.ok(Math.abs(geometry.frame.left - geometry.slot.left) <= 2
     && Math.abs(geometry.frame.right - geometry.slot.right) <= 2
     && Math.abs(geometry.frame.top - geometry.slot.top) <= 2
     && Math.abs(geometry.frame.bottom - geometry.slot.bottom) <= 2,
-  `${label}: iframe drifted from the adopted autoplay slot: ${JSON.stringify(geometry)}`);
+  `${label}: iframe drifted from the uniformly framed slot: ${JSON.stringify(geometry)}`);
+};
+
+const waitForCandidateAutoplayScale = async (page) => page.waitForFunction(() => {
+  const slot = document.querySelector('.page--in-viewport .game--candidate-feed-presentation.game--autoplay .game__slot');
+  if (!(slot instanceof HTMLElement)) return false;
+  const matrix = new DOMMatrixReadOnly(getComputedStyle(slot).transform);
+  return Math.abs(matrix.a - 0.92) <= 0.005 && Math.abs(matrix.d - 0.92) <= 0.005;
+});
+
+const advanceToPlayable = async (page, expected, maxSteps = 24) => {
+  const seen = [];
+  for (let step = 0; step <= maxSteps; step += 1) {
+    const label = await page.locator('.page--in-viewport .game__label').first().textContent();
+    seen.push(label);
+    if (label === expected) return;
+    const current = await page.evaluate(() => window.__feedWarm?.().current);
+    await page.locator('[data-bar-tab="feed"]').click();
+    await page.waitForFunction((prior) => window.__feedWarm?.().current !== prior, current);
+    await page.waitForTimeout(520);
+  }
+  assert.fail(`did not reach ${expected}; seen ${seen.join(' -> ')}`);
+};
+
+const assertCandidateSurfaceGeometry = async (page, label) => {
+  await waitForCandidateAutoplayScale(page);
+  const geometry = await candidateSurfaceGeometry(page);
+  assert.ok(geometry?.candidate, `${label}: exact candidate surface class is absent: ${JSON.stringify(geometry)}`);
+  assertUniformSessionAutoplayGeometry(geometry, label);
+  const expectedCenterX = (geometry.frame.left + geometry.frame.right) / 2;
+  const expectedGameplayHeight = geometry.frame.bottom - geometry.frame.top;
+  assert.ok(geometry.board
+    && Math.abs(geometry.board.centerX - expectedCenterX) <= 0.5
+    && Math.abs(geometry.board.centerY - (geometry.frame.top + expectedGameplayHeight / 2)) <= 0.5,
+  `${label}: candidate board is not centred in the framed gameplay rectangle: ${JSON.stringify(geometry)}`);
+  assert.ok(geometry.hud
+    && Math.abs(geometry.hud.centerX - expectedCenterX) <= 0.5
+    && Math.abs(geometry.hud.centerY - (geometry.frame.top + expectedGameplayHeight * 0.115)) <= 0.5,
+    `${label}: candidate HUD is not centred in the framed gameplay rectangle: ${JSON.stringify(geometry)}`);
+};
+
+const assertAdoptedAutoplayGeometry = async (page, label) => {
+  await waitForCandidateAutoplayScale(page);
+  const geometry = await candidateSurfaceGeometry(page);
+  assert.ok(geometry?.candidate && geometry.autoplay,
+    `${label}: adopted candidate is not in autoplay: ${JSON.stringify(geometry)}`);
+  assertUniformSessionAutoplayGeometry(geometry, label);
   return geometry;
 };
 
@@ -214,6 +280,29 @@ const pointerClick = async (page, locator) => {
   await page.mouse.down();
   await page.mouse.up();
 };
+
+const armTakeoverTransitionProbe = async (page) => page.evaluate(() => {
+  const slot = document.querySelector('.page--in-viewport .game--candidate-feed-presentation.game--autoplay .game__slot');
+  if (!(slot instanceof HTMLElement)) return false;
+  window.__issue119TakeoverTransition = new Promise((resolve) => {
+    const onRun = (event) => {
+      if (event.target !== slot || event.propertyName !== 'transform') return;
+      slot.removeEventListener('transitionrun', onRun);
+      resolve({
+        propertyName: event.propertyName,
+        elapsedTime: event.elapsedTime,
+        duration: getComputedStyle(slot).transitionDuration,
+        timing: getComputedStyle(slot).transitionTimingFunction,
+      });
+    };
+    slot.addEventListener('transitionrun', onRun);
+  });
+  return true;
+});
+
+const readTakeoverTransitionProbe = async (page) => page.evaluate(
+  () => window.__issue119TakeoverTransition,
+);
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
@@ -237,6 +326,21 @@ const server = createServer(async (request, response) => {
       version: 'live-marble',
       sourceCommit: '3'.repeat(40),
       runtimeArtifactDigest: `sha256:${'3'.repeat(64)}`,
+    },
+    'arrows-v1-swipe': {
+      version: 'live-arrows',
+      sourceCommit: 'a'.repeat(40),
+      runtimeArtifactDigest: `sha256:${'a'.repeat(64)}`,
+    },
+    'minesweeper-v1-swipe': {
+      version: 'live-minesweeper',
+      sourceCommit: 'c'.repeat(40),
+      runtimeArtifactDigest: `sha256:${'c'.repeat(64)}`,
+    },
+    'orthogonal-link-v1-swipe': {
+      version: 'live-two-dots',
+      sourceCommit: 'd'.repeat(40),
+      runtimeArtifactDigest: `sha256:${'d'.repeat(64)}`,
     },
   });
   if (url.pathname === `/playable-previews/${releaseId}/review-binding.json`) {
@@ -378,17 +482,18 @@ const build = spawnSync('npm', ['run', 'build'], {
 });
 assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
 
-const telegramSdk = `(()=>{const launch=new URLSearchParams(location.search).get('tgWebAppStartParam');
+const telegramSdkFor = (platform) => `(()=>{const launch=new URLSearchParams(location.search).get('tgWebAppStartParam');
 if(launch)sessionStorage.setItem('__test_tg_start_param',launch);
 const start=sessionStorage.getItem('__test_tg_start_param');
 const initData=new URLSearchParams({query_id:'candidate',user:JSON.stringify({id:42}),...(start?{start_param:start}:{}),hash:'candidate'}).toString();
 window.Telegram={WebApp:{
 initData,
-initDataUnsafe:{start_param:start,user:{id:42}},platform:'android',
+initDataUnsafe:{start_param:start,user:{id:42}},platform:${JSON.stringify(platform)},
 ready(){},expand(){},requestFullscreen(){},disableVerticalSwipes(){},
 setHeaderColor(){},setBackgroundColor(){},lockOrientation(){},onEvent(){},offEvent(){},
 HapticFeedback:{impactOccurred(){},notificationOccurred(){},selectionChanged(){}}
 }}})();`;
+const telegramSdk = telegramSdkFor('android');
 
 const query = new URLSearchParams({
   candidateFeedRelease: releaseId,
@@ -399,6 +504,40 @@ const query = new URLSearchParams({
 const validUrl = `${origin}/?${query}`;
 const browser = await chromium.launch({ headless: true });
 try {
+  const ordinaryContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await ordinaryContext.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: telegramSdk,
+  }));
+  await ordinaryContext.addInitScript((snapshot) => {
+    if (window === window.top) localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
+  }, roster);
+  const ordinaryPage = await ordinaryContext.newPage();
+  await ordinaryPage.goto(origin, { waitUntil: 'domcontentloaded' });
+  await ordinaryPage.locator('.page--in-viewport .game--autoplay').waitFor({ state: 'visible' });
+  await ordinaryPage.locator('.feed-bar__lab').waitFor({ state: 'visible' });
+  assert.equal(await ordinaryPage.locator('.page--in-viewport .game__label').first().textContent(), 'marble-sort-swipe');
+  const ordinaryControl = await ordinaryPage.locator('.page--in-viewport .game').first().evaluate((game) => {
+    const slot = game.querySelector('.game__slot');
+    if (!(slot instanceof HTMLElement)) return null;
+    const gameRect = game.getBoundingClientRect();
+    const slotRect = slot.getBoundingClientRect();
+    return {
+      sessionPresentation: game.classList.contains('game--candidate-feed-presentation'),
+      game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
+      slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
+    };
+  });
+  assert.ok(ordinaryControl && !ordinaryControl.sessionPresentation
+    && Math.abs(ordinaryControl.slot.left - ordinaryControl.game.left) <= 2
+    && Math.abs(ordinaryControl.slot.right - ordinaryControl.game.right) <= 2
+    && ordinaryControl.slot.top > ordinaryControl.game.top,
+  `ordinary/public Marble control did not retain the shipped vertical-only composition: ${JSON.stringify(ordinaryControl)}`);
+  await ordinaryContext.close();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  requests.length = 0;
+
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
   await context.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
     status: 200,
@@ -438,7 +577,46 @@ try {
   assert.equal(requests.some((entry) => entry.startsWith('POST /api/')), false,
     `candidate preview emitted a backend mutation: ${requests.join(', ')}`);
 
-  await page.locator('[data-bar-tab="feed"]').click();
+  const autoplaySurface = page.locator('.page--in-viewport .game__autoplay').first();
+  const autoplayBox = await autoplaySurface.boundingBox();
+  assert.ok(autoplayBox, 'candidate autoplay surface has no pointer box');
+  await page.mouse.move(autoplayBox.x + autoplayBox.width / 2, autoplayBox.y + autoplayBox.height / 2);
+  await page.mouse.down();
+  await page.waitForFunction(() => {
+    const targetGame = document.querySelectorAll('.page')[1]?.querySelector('.game');
+    const image = document.querySelector('.incoming-poster[data-direction="1"] img');
+    return targetGame?.classList.contains('game--autoplay')
+      && image instanceof HTMLImageElement
+      && Number.parseFloat(image.style.width) > 0;
+  });
+  const incomingTarget = await page.evaluate(() => {
+    const targetGame = document.querySelectorAll('.page')[1]?.querySelector('.game');
+    const slot = targetGame?.querySelector('.game__slot');
+    const image = document.querySelector('.incoming-poster[data-direction="1"] img');
+    if (!(targetGame instanceof HTMLElement)
+      || !(slot instanceof HTMLElement)
+      || !(image instanceof HTMLImageElement)) return null;
+    const scale = Number.parseFloat(getComputedStyle(targetGame).getPropertyValue('--candidate-autoplay-scale'));
+    return {
+      actual: {
+        top: Number.parseFloat(image.style.top),
+        left: Number.parseFloat(image.style.left),
+        width: Number.parseFloat(image.style.width),
+        height: Number.parseFloat(image.style.height),
+      },
+      expected: {
+        top: targetGame.offsetTop + slot.offsetTop + (slot.offsetHeight - slot.offsetHeight * scale) / 2,
+        left: targetGame.offsetLeft + slot.offsetLeft + (slot.offsetWidth - slot.offsetWidth * scale) / 2,
+        width: slot.offsetWidth * scale,
+        height: slot.offsetHeight * scale,
+      },
+    };
+  });
+  assert.ok(incomingTarget && Object.keys(incomingTarget.actual).every((key) =>
+    Math.abs(incomingTarget.actual[key] - incomingTarget.expected[key]) <= 0.5),
+  `incoming poster did not use the settled candidate target box: ${JSON.stringify(incomingTarget)}`);
+  await page.mouse.move(autoplayBox.x + autoplayBox.width / 2, autoplayBox.y + 40, { steps: 4 });
+  await page.mouse.up();
   await page.waitForFunction(() => window.__feedWarm?.().current === 1);
   await page.waitForTimeout(520);
   const neighbor = page.locator('.page--in-viewport iframe').first();
@@ -450,14 +628,35 @@ try {
     if (!(slot instanceof HTMLElement)) return null;
     return {
       candidate: game.classList.contains('game--candidate-overlay'),
+      sessionPresentation: game.classList.contains('game--candidate-feed-presentation'),
       gameTop: game.getBoundingClientRect().top,
       gameBottom: game.getBoundingClientRect().bottom,
       slotTop: slot.getBoundingClientRect().top,
       slotBottom: slot.getBoundingClientRect().bottom,
     };
   });
-  assert.ok(neighborGeometry && !neighborGeometry.candidate && neighborGeometry.slotTop > neighborGeometry.gameTop,
-    `ordinary neighbor lost the public autoplay composition: ${JSON.stringify(neighborGeometry)}`);
+  assert.ok(neighborGeometry && !neighborGeometry.candidate && neighborGeometry.sessionPresentation,
+    `live neighbour did not inherit the exact candidate-session presentation: ${JSON.stringify(neighborGeometry)}`);
+  await waitForCandidateAutoplayScale(page);
+  assertUniformSessionAutoplayGeometry(
+    await candidateSurfaceGeometry(page),
+    'candidate session/live marble control',
+  );
+
+  for (const expected of [
+    'merge-locked-v1-swipe',
+    'arrows-v1-swipe',
+    'minesweeper-v1-swipe',
+    'orthogonal-link-v1-swipe',
+  ]) {
+    await advanceToPlayable(page, expected);
+    await page.locator('.page--in-viewport .game--autoplay').waitFor({ state: 'visible' });
+    await waitForCandidateAutoplayScale(page);
+    assertUniformSessionAutoplayGeometry(
+      await candidateSurfaceGeometry(page),
+      `candidate session/${expected}`,
+    );
+  }
 
   await page.goto(validUrl, { waitUntil: 'domcontentloaded' });
   await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
@@ -534,14 +733,7 @@ try {
   await page.locator('.page--in-viewport .game--candidate-overlay.game--autoplay').waitFor({ state: 'visible' });
   assert.equal(await page.locator('.game--candidate-read-only-preview').count(), 0,
     'adopted developer Feed retained the source-preview read-only mode');
-  const adoptedAutoplayGeometry = await assertAdoptedAutoplayGeometry(
-    page,
-    'adopted developer feed',
-    {
-      topInset: neighborGeometry.slotTop - neighborGeometry.gameTop,
-      bottomInset: neighborGeometry.gameBottom - neighborGeometry.slotBottom,
-    },
-  );
+  const adoptedAutoplayGeometry = await assertAdoptedAutoplayGeometry(page, 'adopted developer feed');
   await page.locator('.feed-bar__lab').waitFor({ state: 'visible' });
   await page.locator('.feed-bar__debug').waitFor({ state: 'visible' });
   await page.locator('.platform-development-intake__open').waitFor({ state: 'visible' });
@@ -575,8 +767,20 @@ try {
   assert.notEqual(playableReworkPosts[0].runtime.artifactDigest, `sha256:${'5'.repeat(64)}`,
     'adopted mechanic rework fell back to the public manifest runtime');
   await rework.locator('form').waitFor({ state: 'hidden', timeout: 3_000 });
+  assert.equal(await armTakeoverTransitionProbe(page), true,
+    'candidate takeover transition could not be armed');
   await pointerClick(page, page.locator('.page--in-viewport .game--autoplay .game__autoplay').first());
   await page.locator('.page--in-viewport .game--manual').waitFor({ state: 'visible' });
+  const takeoverTransition = await readTakeoverTransitionProbe(page);
+  assert.deepEqual(takeoverTransition, {
+    propertyName: 'transform',
+    elapsedTime: 0,
+    duration: '0.36s',
+    timing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+  }, `candidate takeover did not start the exact ease-out transform: ${JSON.stringify(takeoverTransition)}`);
+  assert.equal(adoptedAutoplayGeometry.transition.duration, '0.36s');
+  assert.equal(adoptedAutoplayGeometry.transition.timing, 'cubic-bezier(0.16, 1, 0.3, 1)');
+  await page.waitForTimeout(360);
   const adoptedManualGeometry = await candidateSurfaceGeometry(page);
   assert.ok(adoptedManualGeometry && !adoptedManualGeometry.autoplay,
     `candidate did not enter manual mode: ${JSON.stringify(adoptedManualGeometry)}`);
@@ -587,6 +791,9 @@ try {
   assert.ok((adoptedManualGeometry.slot.bottom - adoptedManualGeometry.slot.top)
     > (adoptedAutoplayGeometry.slot.bottom - adoptedAutoplayGeometry.slot.top),
   'autoplay to manual did not visibly expand the adopted candidate');
+  assert.ok((adoptedManualGeometry.slot.right - adoptedManualGeometry.slot.left)
+    > (adoptedAutoplayGeometry.slot.right - adoptedAutoplayGeometry.slot.left),
+  'autoplay to manual did not expand the candidate horizontally');
   await page.waitForTimeout(1_050);
   await page.evaluate(() => {
     window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
@@ -660,6 +867,58 @@ try {
   assert.equal(await unauthenticatedPage.locator('iframe').count(), 0,
     'startapp candidate mounted without Telegram user identity');
   await unauthenticated.close();
+
+  const desktop = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await desktop.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: telegramSdkFor('tdesktop'),
+  }));
+  await desktop.addInitScript((snapshot) => {
+    if (window === window.top) localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
+  }, roster);
+  const desktopPage = await desktop.newPage();
+  await desktopPage.goto(validUrl, { waitUntil: 'domcontentloaded' });
+  await desktopPage.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
+  await desktopPage.locator('.page--in-viewport .game--candidate-overlay.game--autoplay').waitFor({ state: 'visible' });
+  await assertCandidateSurfaceGeometry(desktopPage, 'desktop candidate preview');
+  for (const expected of [
+    'arrows-v1-swipe',
+    'minesweeper-v1-swipe',
+    'orthogonal-link-v1-swipe',
+  ]) {
+    await advanceToPlayable(desktopPage, expected);
+    await desktopPage.locator('.page--in-viewport .game--autoplay').waitFor({ state: 'visible' });
+    await waitForCandidateAutoplayScale(desktopPage);
+    assertUniformSessionAutoplayGeometry(
+      await candidateSurfaceGeometry(desktopPage),
+      `desktop candidate session/${expected}`,
+    );
+  }
+  await desktopPage.goto(validUrl, { waitUntil: 'domcontentloaded' });
+  await desktopPage.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
+  await assertAdoptedAutoplayGeometry(desktopPage, 'desktop candidate takeover start');
+  assert.equal(await desktopPage.evaluate(() => window.Telegram?.WebApp?.platform), 'tdesktop',
+    'desktop proof did not exercise the Telegram Desktop host projection');
+  assert.equal(await armTakeoverTransitionProbe(desktopPage), true,
+    'desktop candidate takeover transition could not be armed');
+  await pointerClick(desktopPage, desktopPage.locator('.page--in-viewport .game__autoplay').first());
+  await desktopPage.locator('.page--in-viewport .game--manual').waitFor({ state: 'visible' });
+  const desktopTransition = await readTakeoverTransitionProbe(desktopPage);
+  assert.deepEqual(desktopTransition, {
+    propertyName: 'transform',
+    elapsedTime: 0,
+    duration: '0.36s',
+    timing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+  }, `desktop takeover did not start the exact ease-out transform: ${JSON.stringify(desktopTransition)}`);
+  await desktopPage.waitForTimeout(360);
+  const desktopManual = await candidateSurfaceGeometry(desktopPage);
+  assert.ok(desktopManual && !desktopManual.autoplay
+    && Math.abs(desktopManual.slot.left - desktopManual.game.left) <= 2
+    && Math.abs(desktopManual.slot.right - desktopManual.game.right) <= 2
+    && Math.abs(desktopManual.slot.top - desktopManual.game.top) <= 2,
+  `desktop takeover did not finish at the full manual rectangle: ${JSON.stringify(desktopManual)}`);
+  await desktop.close();
 
   await context.close();
 } finally {
