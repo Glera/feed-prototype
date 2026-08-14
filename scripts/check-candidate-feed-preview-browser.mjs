@@ -87,6 +87,8 @@ const roster = {
   entries: rosterEntries,
 };
 const requests = [];
+let adoptionPosts = 0;
+let adopted = false;
 let origin = '';
 
 const json = (response, value, status = 200) => {
@@ -108,7 +110,7 @@ document.querySelector('#marker').addEventListener('click',()=>send('completed',
 addEventListener('load',()=>send('static_ready'));
 </script></body></html>`;
 
-const server = createServer((request, response) => {
+const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
   requests.push(`${request.method} ${url.pathname}${url.search}`);
   if (url.pathname === '/' || url.pathname === '/index.html') {
@@ -149,6 +151,60 @@ const server = createServer((request, response) => {
   if (/^\/[A-Za-z0-9._-]+\.payload\.js$/.test(url.pathname)) {
     response.setHeader('content-type', 'application/javascript; charset=utf-8');
     return response.end('/* live neighbor payload */');
+  }
+  if (url.pathname === '/api/session' && request.method === 'POST') {
+    assert.match(String(request.headers.authorization || ''), /^tma query_id=candidate/);
+    return json(response, {
+      user: { id: 42, ref_code: null }, ref_code: null, balance: 0, is_new: false,
+      catalog_lab_authorization_available: true,
+      operator_level_flagging_available: true,
+      feedRoster: roster,
+      ...(adopted ? { developerFeedAdoption: {
+        schema: 'feed.playable-source-preview-adoption.v1',
+        releaseId: sourceReleaseId,
+        playableId,
+        candidatePath: sourceCandidatePath,
+        candidateArtifactDigest: sourceCandidateArtifactDigest,
+        reviewBindingDigest: sourceReviewBindingDigest,
+        sourceCommit: '7'.repeat(40),
+        receiptDigest: '6'.repeat(64),
+        audience: 'exact-user',
+        publicRollout: false,
+      } } : {}),
+    });
+  }
+  if (url.pathname === `/api/operator/playable-releases/${sourceReleaseId}/developer-adoption`
+    && request.method === 'POST') {
+    assert.match(String(request.headers.authorization || ''), /^tma query_id=candidate/);
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    assert.deepEqual(Object.keys(body).sort(), ['mutationId', 'reviewBindingDigest', 'schema']);
+    assert.equal(body.schema, 'feed.playable-source-preview-adoption.v1');
+    assert.equal(body.reviewBindingDigest, sourceReviewBindingDigest);
+    assert.match(body.mutationId, /^[0-9a-f-]{36}$/);
+    adoptionPosts += 1;
+    adopted = true;
+    return json(response, {
+      schema: 'feed.playable-release-decision.receipt.v1',
+      decisionSchema: 'feed.playable-release-decision.v1',
+      decisionId: '11111111-1111-4111-8111-111111111119',
+      mutationId: body.mutationId,
+      releaseId: sourceReleaseId,
+      actorUserId: 42,
+      reviewBindingDigest: sourceReviewBindingDigest,
+      candidateArtifactDigest: sourceCandidateArtifactDigest,
+      decision: 'accept', instruction: null,
+      audience: 'exact-user', publicRollout: false,
+      authorization: {
+        schema: 'feed.playable-release-authorization-disposition.v1',
+        state: 'awaiting_exact_authorization', itemCount: 0,
+        itemsDigest: '5'.repeat(64), items: [],
+      },
+      successor: null,
+      decidedAt: '2026-08-14T09:00:00.000Z',
+      receiptDigest: '6'.repeat(64), replayed: false,
+    }, 201);
   }
   if (url.pathname.startsWith('/api/')) return json(response, { code: 'unexpected_api_call' }, 500);
   response.statusCode = 404;
@@ -260,15 +316,26 @@ try {
   startAppUrl.searchParams.set('tgWebAppPlatform', 'android');
   await page.goto(startAppUrl.toString(), { waitUntil: 'domcontentloaded' });
   await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
+  await page.getByText('Добавить в dev-ленту', { exact: true }).waitFor({ state: 'visible' });
   assert.equal(await page.locator('.page').first().locator('.game__label').textContent(), playableId);
   const startFrameUrl = new URL((await page.locator('.page').first().locator('iframe').getAttribute('src')) || '', origin);
   assert.equal(startFrameUrl.pathname, sourceCandidatePath);
   assert.equal(startFrameUrl.searchParams.get('reviewBinding'), sourceReviewBindingDigest);
   assert.equal(startFrameUrl.searchParams.get('artifact'), sourceCandidateArtifactDigest);
-  assert.equal(requests.some((entry) => entry.includes('/api/session')), false,
-    `startapp candidate preview inherited Telegram session authority: ${requests.join(', ')}`);
-  assert.equal(requests.some((entry) => entry.startsWith('POST /api/')), false,
-    `startapp candidate preview emitted a backend mutation: ${requests.join(', ')}`);
+  assert.equal(requests.filter((entry) => entry === 'POST /api/session').length, 1,
+    `startapp candidate did not perform exactly one bounded identity bootstrap: ${requests.join(', ')}`);
+  assert.equal(requests.some((entry) => entry.startsWith('POST /api/results')), false,
+    `candidate preview inherited unrelated product mutation authority: ${requests.join(', ')}`);
+  await page.getByText('Добавить в dev-ленту', { exact: true }).click();
+  await page.getByText('Добавлено в dev-ленту', { exact: true }).waitFor({ state: 'visible' });
+  assert.equal(adoptionPosts, 1);
+  assert.equal(await page.getByText('Аудитория: Только мне', { exact: true }).count(), 1);
+  await page.getByText('Открыть dev-ленту', { exact: true }).click();
+  await page.getByText('Dev-лента · Только мне', { exact: true }).waitFor({ state: 'visible' });
+  const adoptedFrame = page.locator('.page').first().locator('iframe');
+  await adoptedFrame.waitFor({ state: 'attached' });
+  assert.equal(new URL((await adoptedFrame.getAttribute('src')) || '', origin).pathname, sourceCandidatePath);
+  assert.equal(adoptionPosts, 1, 'normal dev feed replayed the adoption mutation');
 
   for (const malformed of [
     candidateStartParam.slice(0, -1),

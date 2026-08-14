@@ -3,13 +3,14 @@ import { createFeed } from './feed';
 import { setCandidatePlayableOverlay, setMechanicVersions } from './playables';
 import { initTelegram, getInitData, getStartParam, hasTelegramHostContext, hasTelegramLaunchUserIdentity, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam, setTelegramReadOnlyPreviewMode } from './telegram';
 import { initTelemetry, setTelemetryReadOnlyPreviewMode } from './telemetry';
-import { apiGetChallenge, apiPublicIsland, apiSessionRequired, type ChallengeView, type PublicIslandView, type SessionResp } from './api';
+import { apiGetChallenge, apiPublicIsland, apiSessionRequired, apiSourcePreviewSessionRequired, type ChallengeView, type PublicIslandView, type SessionResp } from './api';
 import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 import { feedRosterSnapshotForBoot, loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 import { userScopedStorage } from './user-scope';
 import { candidateReviewReleaseIdFromParam } from './candidate-review';
-import { candidateFeedPreviewRequested, resolveCandidateFeedPreview } from './candidate-feed-preview';
+import { candidateFeedPreviewRequested, resolveCandidateFeedPreview, resolveDeveloperFeedAdoption, type CandidateFeedPreviewIdentity } from './candidate-feed-preview';
 import { candidateFeedStartParamRequested } from './candidate-feed-start-param.mjs';
+import { mountCandidateFeedAdoption } from './candidate-feed-adoption';
 
 const query = new URLSearchParams(location.search);
 const startParam = getStartParam();
@@ -51,22 +52,36 @@ function mountCandidateFeedBadge(): void {
   document.body.appendChild(badge);
 }
 
+function mountDeveloperFeedBadge(): void {
+  const badge = document.createElement('div');
+  badge.className = 'candidate-feed-preview__badge candidate-feed-preview__badge--developer';
+  badge.dataset.testid = 'developer-feed-badge';
+  badge.textContent = 'Dev-лента · Только мне';
+  document.body.appendChild(badge);
+}
+
 // If launched from a challenge deep-link (start_param = challenge id), fetch it
 // first so the feed can open on the challenged mechanic. Normal launches skip
 // the await entirely (getStartParam is sync) → no added boot latency.
 async function boot(): Promise<void> {
+  let candidate: CandidateFeedPreviewIdentity | null = null;
+  let candidateSession: SessionResp | null = null;
+  let developerOverlayMounted = false;
   try {
     if (candidateFeedStartRequested
       && (!hasTelegramHostContext() || !hasTelegramLaunchUserIdentity())) {
       throw new Error('candidate_feed_start_operator_identity_required');
     }
-    const candidate = await resolveCandidateFeedPreview(
+    candidate = await resolveCandidateFeedPreview(
       location.search,
       location.origin,
       fetch,
       startParam,
     );
     setCandidatePlayableOverlay(candidate);
+    if (candidateFeedStartRequested) {
+      candidateSession = await apiSourcePreviewSessionRequired();
+    }
   } catch {
     failCandidateFeedPreview();
     return;
@@ -130,6 +145,13 @@ async function boot(): Promise<void> {
     rosterSnapshot = initial === timeout
       ? persisted
       : await feedRosterSnapshotForBoot(persisted, initial?.feedRoster);
+    if (initial !== timeout && initial?.developerFeedAdoption) {
+      try {
+        const adopted = await resolveDeveloperFeedAdoption(initial.developerFeedAdoption);
+        setCandidatePlayableOverlay(adopted);
+        developerOverlayMounted = true;
+      } catch { /* invalid/tampered dev adoption fails closed to the public manifest */ }
+    }
   }
   const mountFeed = (): void => {
     createFeed(
@@ -145,11 +167,16 @@ async function boot(): Promise<void> {
   if (candidateFeedRequested) try {
     mountFeed();
     mountCandidateFeedBadge();
+    if (candidate) {
+      const adoption = mountCandidateFeedAdoption(candidate, candidateSession);
+      if (adoption) document.body.appendChild(adoption);
+    }
   } catch {
     failCandidateFeedPreview();
     return;
   } else {
     mountFeed();
+    if (developerOverlayMounted) mountDeveloperFeedBadge();
   }
 }
 const routedStartParam = getStartParam() ?? startParam;
