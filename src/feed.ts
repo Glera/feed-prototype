@@ -56,6 +56,7 @@ import {
   type CatalogRunTicketViewV2, type CatalogRunTicketViewV3,
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
   type SessionResp,
+  type OperatorPlayableReworkQueueItemV1,
   type OperatorPlayableReworkResponseV1,
   type PlatformDevelopmentIntakeResponseV1,
 } from './api';
@@ -188,6 +189,7 @@ import {
 } from './operator-level-flags.mjs';
 import {
   mountOperatorPlayableReworkControl,
+  groupOperatorPlayableReworkQueue,
   operatorPlayableReworkControlKey,
   type OperatorPlayableReworkControl,
   type OperatorPlayableReworkOccurrence,
@@ -763,8 +765,10 @@ export class Feed {
   private operatorLevelFlaggingAvailable = false;
   private operatorLevelFlagControl: OperatorLevelFlagControl | null = null;
   private operatorPlayableReworkControl: OperatorPlayableReworkControl | null = null;
-  private operatorPlayableReworks = new Map<string, OperatorPlayableReworkResponseV1>();
+  private operatorPlayableReworks = new Map<string, OperatorPlayableReworkQueueItemV1[]>();
   private operatorPlayableReworkSyncEpoch = 0;
+  private operatorPlayableReworkControlHoldUntil = 0;
+  private operatorPlayableReworkControlRefreshTimer: number | null = null;
   private developmentIntakeAvailable = false;
   private platformDevelopmentIntakeControl: PlatformDevelopmentIntakeControl | null = null;
   private platformDevelopmentIntakeLatest: PlatformDevelopmentIntakeResponseV1 | null = null;
@@ -2872,23 +2876,19 @@ export class Feed {
     return response;
   }
 
-  private async refreshOperatorPlayableReworks(): Promise<void> {
+  private async refreshOperatorPlayableReworks(refreshControl = true): Promise<void> {
     const epoch = ++this.operatorPlayableReworkSyncEpoch;
     try {
       const projection = await apiListOperatorPlayableReworksRequired();
       if (epoch !== this.operatorPlayableReworkSyncEpoch || !this.operatorLevelFlaggingAvailable
         || projection?.schema !== 'feed.playable-rework-list.v1'
         || !Array.isArray(projection.items)) return;
-      const next = new Map<string, OperatorPlayableReworkResponseV1>();
-      for (const item of projection.items) {
-        if (!item || !['open', 'claimed'].includes(item.state)
-          || typeof item.requestId !== 'string'
-          || typeof item.request?.playableId !== 'string'
-          || next.has(item.request.playableId)) continue;
-        next.set(item.request.playableId, item);
-      }
+      const next = groupOperatorPlayableReworkQueue(projection.items) as Map<
+        string,
+        OperatorPlayableReworkQueueItemV1[]
+      >;
       this.operatorPlayableReworks = next;
-      this.refreshOperatorPlayableReworkControl();
+      if (refreshControl) this.refreshOperatorPlayableReworkControl();
     } catch {
       // The operator surface is fail-quiet: gameplay stays available and a
       // later foreground sync rehydrates the durable task projection.
@@ -3001,11 +3001,27 @@ export class Feed {
 
   private refreshOperatorPlayableReworkControl(): void {
     const occurrence = this.currentOperatorPlayableReworkOccurrence();
-    const existing = occurrence ? this.operatorPlayableReworks.get(occurrence.playableId) || null : null;
+    const queue = occurrence ? this.operatorPlayableReworks.get(occurrence.playableId) || [] : [];
     const key = occurrence
-      ? operatorPlayableReworkControlKey(occurrence, existing)
+      ? operatorPlayableReworkControlKey(occurrence, queue)
       : null;
     if (this.operatorPlayableReworkControl?.key === key) return;
+    const holdRemaining = this.operatorPlayableReworkControlHoldUntil - Date.now();
+    if (holdRemaining > 0 && occurrence
+      && this.operatorPlayableReworkControl?.playableId === occurrence.playableId) {
+      if (this.operatorPlayableReworkControlRefreshTimer === null) {
+        this.operatorPlayableReworkControlRefreshTimer = window.setTimeout(() => {
+          this.operatorPlayableReworkControlRefreshTimer = null;
+          this.operatorPlayableReworkControlHoldUntil = 0;
+          this.refreshOperatorPlayableReworkControl();
+        }, holdRemaining);
+      }
+      return;
+    }
+    if (this.operatorPlayableReworkControlRefreshTimer !== null) {
+      window.clearTimeout(this.operatorPlayableReworkControlRefreshTimer);
+      this.operatorPlayableReworkControlRefreshTimer = null;
+    }
     this.operatorPlayableReworkControl?.destroy();
     this.operatorPlayableReworkControl = null;
     if (!occurrence) return;
@@ -3017,7 +3033,7 @@ export class Feed {
     if (!host) return;
     this.operatorPlayableReworkControl = mountOperatorPlayableReworkControl(host, {
       occurrence,
-      existing,
+      queue,
       createMutationId: ticketUid,
       resolveOccurrence: () => {
         const current = this.currentOperatorPlayableReworkOccurrence();
@@ -3030,7 +3046,7 @@ export class Feed {
 
   private async submitOperatorPlayableRework(
     request: OperatorPlayableReworkRequestV1,
-  ): Promise<void> {
+  ): Promise<OperatorPlayableReworkResponseV1> {
     const current = this.currentOperatorPlayableReworkOccurrence();
     const expected = `${request.playableId}:${request.mappingId}:${request.rosterActivationId}:${request.runtime.artifactDigest}`;
     const actual = current
@@ -3044,7 +3060,11 @@ export class Feed {
       || response.request.mutationId !== request.mutationId) {
       throw new ApiRequestError(503, 'Playable rework receipt differs', 'playable_rework_receipt_invalid');
     }
-    this.operatorPlayableReworks.set(request.playableId, response);
+    this.operatorPlayableReworkControlHoldUntil = Date.now() + 2_500;
+    void this.refreshOperatorPlayableReworks(false).finally(() => {
+      window.setTimeout(() => void this.refreshOperatorPlayableReworks(), 2_400);
+    });
+    return response;
   }
 
   private requireProjectedOperatorFlagEvent(eventId: string | null): void {
