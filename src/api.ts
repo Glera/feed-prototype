@@ -1600,6 +1600,7 @@ export async function apiChallengeInbox(): Promise<ChallengeInboxItem[]> {
 // ── Catalog Lab device authorization (dev users only) ──────────────────────
 
 export type CatalogLabDeviceState = 'pending' | 'approved' | 'denied' | 'consumed';
+export type CatalogLabSubmitterMachine = 'mac-a' | 'mac-b';
 
 export interface CatalogPromotionSummaryLevel {
   ordinal: number;
@@ -1747,6 +1748,7 @@ export interface CatalogLabDeviceAuthorization {
   state: CatalogLabDeviceState;
   expiresAt: string;
   decisionVersion: number;
+  submitterMachine?: CatalogLabSubmitterMachine;
   promotionSummary?: CatalogPromotionSummary;
 }
 
@@ -1812,6 +1814,7 @@ export function apiCatalogLabDecision(payload: {
   userCode: string;
   expectedDecisionVersion: number;
   decision: 'approve' | 'deny';
+  submitterMachine?: CatalogLabSubmitterMachine;
 }): Promise<CatalogLabDeviceAuthorization> {
   return postRequired<CatalogLabDeviceAuthorization>('/api/admin/device-auth/decision', payload);
 }

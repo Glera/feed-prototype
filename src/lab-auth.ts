@@ -6,6 +6,7 @@ import {
   apiRevokeCatalogLabToken,
   type CatalogLabDeviceAuthorization,
   type CatalogLabGrantView,
+  type CatalogLabSubmitterMachine,
   type CatalogPromotionSummary,
 } from './api';
 import { showConfirm } from './telegram';
@@ -21,8 +22,23 @@ import {
 
 const USER_CODE_ALPHABET = new Set('23456789ABCDEFGHJKMNPQRSTUVWXYZ');
 const REVOKE_REASON = 'revoked from Telegram Catalog Lab panel';
+const DESKTOP_INTAKE_SCOPE = 'operator:flags:write';
 
 type Decision = 'approve' | 'deny';
+
+function requiresSubmitterMachine(authorization: CatalogLabDeviceAuthorization): boolean {
+  // Treat any occurrence of the privileged desktop-intake scope as requiring
+  // an explicit binding. The backend still owns the exact single-scope
+  // contract and rejects mixed/invalid scope sets; the client must never make
+  // a server contract expansion silently disable the operator control.
+  return authorization.scopes.includes(DESKTOP_INTAKE_SCOPE);
+}
+
+function submitterMachineLabel(machine: unknown): string {
+  if (machine === 'mac-a') return 'Mac A — Platform';
+  if (machine === 'mac-b') return 'Mac B — Content / Labs';
+  return `Unknown workspace binding (${String(machine)})`;
+}
 
 function normalizeUserCode(value: string): string | null {
   const compact = value.trim().toUpperCase().replace(/[\s-]/g, '');
@@ -247,6 +263,9 @@ function lookupErrorMessage(error: unknown): string {
 
 function decisionErrorMessage(error: unknown): string {
   if (!(error instanceof ApiRequestError)) return 'Could not save the decision. Try again.';
+  if (error.code === 'device_authorization_machine_binding_unconfirmed') {
+    return 'The server did not confirm this Mac binding. No desktop access is considered ready.';
+  }
   switch (error.status) {
     case 0: return 'Cannot reach the server. Your decision was not confirmed.';
     case 404: return 'This request is no longer available.';
@@ -360,6 +379,37 @@ export async function mountCatalogLabAuth(): Promise<void> {
   const requestWarning = document.createElement('p');
   requestWarning.className = 'lab-auth__notice';
   requestWarning.textContent = 'Approval lets this computer submit validated evaluation results. It does not grant feed, reset, or model API access.';
+  const submitterMachine = document.createElement('fieldset');
+  submitterMachine.className = 'lab-auth__machine';
+  submitterMachine.hidden = true;
+  submitterMachine.dataset.testid = 'catalog-lab-submitter-machine';
+  const submitterMachineLegend = document.createElement('legend');
+  submitterMachineLegend.textContent = 'Which trusted workspace started this request?';
+  const submitterMachineHelp = document.createElement('p');
+  submitterMachineHelp.id = 'catalog-lab-submitter-machine-help';
+  submitterMachineHelp.textContent = 'Choose explicitly. The computer name and one-time code never decide this binding.';
+  submitterMachine.setAttribute('aria-describedby', submitterMachineHelp.id);
+  const submitterMachineChoices = document.createElement('div');
+  submitterMachineChoices.className = 'lab-auth__machine-choices';
+  const machineInputs = new Map<CatalogLabSubmitterMachine, HTMLInputElement>();
+  for (const [value, labelText] of [
+    ['mac-a', 'Mac A — Platform'],
+    ['mac-b', 'Mac B — Content / Labs'],
+  ] as const) {
+    const label = document.createElement('label');
+    label.className = 'lab-auth__machine-choice';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'catalog-lab-submitter-machine';
+    radio.value = value;
+    radio.disabled = true;
+    const labelCopy = document.createElement('span');
+    labelCopy.textContent = labelText;
+    label.append(radio, labelCopy);
+    submitterMachineChoices.appendChild(label);
+    machineInputs.set(value, radio);
+  }
+  submitterMachine.append(submitterMachineLegend, submitterMachineHelp, submitterMachineChoices);
   const decisionButtons = document.createElement('div');
   decisionButtons.className = 'lab-auth__actions';
   const deny = button('Deny', 'lab-auth__button--danger');
@@ -374,6 +424,7 @@ export async function mountCatalogLabAuth(): Promise<void> {
     requestTitle,
     requestDetails,
     requestWarning,
+    submitterMachine,
     decisionButtons,
     decisionStatus,
     requestReset,
@@ -424,6 +475,7 @@ export async function mountCatalogLabAuth(): Promise<void> {
 
   let activeCode = '';
   let activeAuthorization: CatalogLabDeviceAuthorization | null = null;
+  let activeSubmitterMachine: CatalogLabSubmitterMachine | null = null;
   let decisionPending = false;
   let activeCandidateSafe = true;
   let activeCandidateReview: MountedCandidateReview | null = null;
@@ -434,10 +486,24 @@ export async function mountCatalogLabAuth(): Promise<void> {
     input.value = '';
   };
 
+  const resetSubmitterMachine = (): void => {
+    activeSubmitterMachine = null;
+    for (const radio of machineInputs.values()) radio.checked = false;
+  };
+
+  const updateApprovalDisabled = (): void => {
+    const machineRequired = activeAuthorization != null
+      && requiresSubmitterMachine(activeAuthorization);
+    approve.disabled = decisionPending
+      || !activeCandidateSafe
+      || (machineRequired && activeSubmitterMachine == null);
+  };
+
   const showUnavailable = (): void => {
     activeCandidateReview?.destroy();
     activeCandidateReview = null;
     clearSensitiveCode();
+    resetSubmitterMachine();
     activeAuthorization = null;
     activeCandidateSafe = true;
     codeSection.hidden = true;
@@ -451,6 +517,7 @@ export async function mountCatalogLabAuth(): Promise<void> {
     activeCandidateReview?.destroy();
     activeCandidateReview = null;
     clearSensitiveCode();
+    resetSubmitterMachine();
     activeAuthorization = null;
     title.textContent = 'Authorize a Lab computer';
     copy.textContent = 'Enter the one-time code shown by Mechanic Lab. Review the device and permission before you approve it.';
@@ -467,10 +534,12 @@ export async function mountCatalogLabAuth(): Promise<void> {
   const renderRequest = (authorization: CatalogLabDeviceAuthorization): void => {
     activeCandidateReview?.destroy();
     activeCandidateReview = null;
+    resetSubmitterMachine();
     const promotion = authorization.promotionSummary;
     const promotionBatch = promotion?.schema === 'catalog.promotion-summary-batch.v1';
     const promotionArtifact = promotion?.schema === 'catalog.artifact-promotion-summary.v1';
     const playableRelease = promotion?.schema === 'feed.playable-release-summary.v1';
+    const machineRequired = requiresSubmitterMachine(authorization);
     activeCandidateSafe = !playableRelease;
     title.textContent = promotion
       ? promotionBatch
@@ -502,12 +571,22 @@ export async function mountCatalogLabAuth(): Promise<void> {
       detail('Instance ID', authorization.clientInstanceId),
       detail('Permission', scopeLabel(authorization.scopes)),
       detail('Request expires', formatDate(authorization.expiresAt)),
+      ...(authorization.submitterMachine
+        ? [detail('Bound workspace', submitterMachineLabel(authorization.submitterMachine))]
+        : []),
     );
+    const pending = authorization.state === 'pending';
+    submitterMachine.hidden = !machineRequired || !pending;
+    if (machineRequired && pending) approve.setAttribute('aria-describedby', submitterMachineHelp.id);
+    else approve.removeAttribute('aria-describedby');
+    for (const radio of machineInputs.values()) {
+      radio.disabled = !machineRequired || !pending;
+    }
     let candidateReviewElement: HTMLElement | null = null;
     if (playableRelease) {
       const updateCandidateState = (state: CandidateReviewState): void => {
         activeCandidateSafe = state.approvalReady;
-        approve.disabled = decisionPending || !activeCandidateSafe;
+        updateApprovalDisabled();
         if (authorization.state !== 'pending' || decisionPending) return;
         decisionStatus.textContent = state.error ?? (state.approvalReady
           ? 'In-platform review session готова к exact approval.'
@@ -536,9 +615,8 @@ export async function mountCatalogLabAuth(): Promise<void> {
         : promotionArtifact ? 'Approve exact raster world'
           : playableRelease ? 'Принять и опубликовать' : 'Approve exact publication'
       : 'Approve';
-    const pending = authorization.state === 'pending';
     decisionButtons.hidden = !pending;
-    approve.disabled = pending && !activeCandidateSafe;
+    updateApprovalDisabled();
     if (!pending) {
       clearSensitiveCode();
       decisionStatus.textContent = authorization.state === 'consumed'
@@ -546,7 +624,10 @@ export async function mountCatalogLabAuth(): Promise<void> {
         : `This request is already ${authorization.state}.`;
     } else {
       decisionStatus.textContent = activeCandidateSafe
-        ? '' : playableRelease
+        ? machineRequired
+          ? 'Choose Mac A or Mac B before approving this desktop intake identity.'
+          : ''
+        : playableRelease
           ? 'Публикация заблокирована до valid in-platform review и ручного takeover.'
           : '';
     }
@@ -631,6 +712,15 @@ export async function mountCatalogLabAuth(): Promise<void> {
     formStatus.textContent = '';
   });
 
+  for (const [machine, radio] of machineInputs) {
+    radio.addEventListener('change', () => {
+      if (!radio.checked || !activeAuthorization || !requiresSubmitterMachine(activeAuthorization)) return;
+      activeSubmitterMachine = machine;
+      decisionStatus.textContent = '';
+      updateApprovalDisabled();
+    });
+  }
+
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const normalized = normalizeUserCode(input.value);
@@ -662,32 +752,63 @@ export async function mountCatalogLabAuth(): Promise<void> {
 
   const decide = async (decision: Decision): Promise<void> => {
     if (decisionPending || !activeAuthorization || !activeCode) return;
+    const authorization = activeAuthorization;
+    const code = activeCode;
     if (decision === 'approve' && !activeCandidateSafe) {
       decisionStatus.textContent = 'Публикация заблокирована: in-platform candidate review не завершён.';
       return;
     }
+    const machineRequired = requiresSubmitterMachine(activeAuthorization);
+    if (decision === 'approve' && machineRequired && activeSubmitterMachine == null) {
+      decisionStatus.textContent = 'Choose Mac A or Mac B before approving this desktop intake identity.';
+      return;
+    }
+    const confirmedMachine = decision === 'approve' && machineRequired
+      ? activeSubmitterMachine
+      : null;
     const verb = decision === 'approve' ? 'Approve' : 'Deny';
-    const promotion = activeAuthorization.promotionSummary;
+    const promotion = authorization.promotionSummary;
+    decisionPending = true;
+    approve.disabled = true;
+    deny.disabled = true;
+    requestReset.disabled = true;
+    for (const radio of machineInputs.values()) radio.disabled = true;
     const confirmed = await showConfirm(
       decision === 'approve'
         ? promotion
         ? `${verb} exact publication ${promotion.publishId} with content hash ${promotion.contentHash}?`
-          : `${verb} “${activeAuthorization.clientName}” for ${scopeLabel(activeAuthorization.scopes)}?`
-        : `${verb} the access request from “${activeAuthorization.clientName}”?`,
+          : machineRequired && confirmedMachine
+            ? `${verb} “${authorization.clientName}” as ${submitterMachineLabel(confirmedMachine)} for ${scopeLabel(authorization.scopes)}?`
+            : `${verb} “${authorization.clientName}” for ${scopeLabel(authorization.scopes)}?`
+        : `${verb} the access request from “${authorization.clientName}”?`,
     );
-    if (!confirmed) return;
+    if (!confirmed) {
+      decisionPending = false;
+      requestReset.disabled = false;
+      deny.disabled = false;
+      for (const radio of machineInputs.values()) radio.disabled = !machineRequired;
+      updateApprovalDisabled();
+      return;
+    }
 
-    decisionPending = true;
-    approve.disabled = true;
-    deny.disabled = true;
     decisionStatus.textContent = decision === 'approve' ? 'Approving…' : 'Denying…';
     try {
       const result = await apiCatalogLabDecision({
-        authorizationId: activeAuthorization.authorizationId,
-        userCode: activeCode,
-        expectedDecisionVersion: activeAuthorization.decisionVersion,
+        authorizationId: authorization.authorizationId,
+        userCode: code,
+        expectedDecisionVersion: authorization.decisionVersion,
         decision,
+        ...(confirmedMachine
+          ? { submitterMachine: confirmedMachine }
+          : {}),
       });
+      if (confirmedMachine && result.submitterMachine !== confirmedMachine) {
+        throw new ApiRequestError(
+          409,
+          'Backend did not confirm the selected desktop submitter binding',
+          'device_authorization_machine_binding_unconfirmed',
+        );
+      }
       clearSensitiveCode();
       activeAuthorization = null;
       activeCandidateReview?.destroy();
@@ -701,7 +822,9 @@ export async function mountCatalogLabAuth(): Promise<void> {
           ? promotion.schema === 'feed.playable-release-summary.v1'
             ? `“${result.clientName}” теперь может опубликовать только этот exact playable release.`
             : `“${result.clientName}” can now complete the short-lived exchange for this exact series only.`
-          : `“${result.clientName}” can now complete the short-lived token exchange. You can revoke it below at any time.`
+          : result.submitterMachine
+            ? `“${result.clientName}” is bound to ${submitterMachineLabel(result.submitterMachine)} and can submit only through that server-owned desktop identity.`
+            : `“${result.clientName}” can now complete the short-lived token exchange. You can revoke it below at any time.`
         : `“${result.clientName}” was not granted access.`;
       successSection.hidden = false;
       if (decision === 'approve') void refreshTokenList();
@@ -713,7 +836,13 @@ export async function mountCatalogLabAuth(): Promise<void> {
       decisionStatus.textContent = decisionErrorMessage(error);
     } finally {
       decisionPending = false;
-      approve.disabled = !activeCandidateSafe;
+      requestReset.disabled = false;
+      const requestStillPending = activeAuthorization?.state === 'pending';
+      for (const radio of machineInputs.values()) {
+        radio.disabled = !requestStillPending || !activeAuthorization
+          || !requiresSubmitterMachine(activeAuthorization);
+      }
+      updateApprovalDisabled();
       deny.disabled = false;
     }
   };

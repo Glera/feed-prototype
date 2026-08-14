@@ -20,6 +20,8 @@ let sessionRequests = 0;
 let lookupRequests = 0;
 let releaseDecision = null;
 const decisionRequests = [];
+const deviceDecisionRequests = [];
+let omitMachineBinding = false;
 const releaseId = '8b447be0-f961-482e-aa03-b419d5f1492d';
 const playableId = 'solitaire-v1-swipe';
 const candidatePath = `/playable-previews/${releaseId}/${playableId}.html`;
@@ -116,6 +118,16 @@ const playableReleaseAuthorization = () => ({
   },
 });
 
+const desktopIntakeAuthorization = () => ({
+  authorizationId: '4b447be0-f961-482e-aa03-b419d5f1492d',
+  clientName: 'Codex desktop intake',
+  clientInstanceId: '4435ba2d-34cb-4590-841d-7edbb52ba598',
+  scopes: ['operator:flags:write'],
+  state: 'pending',
+  expiresAt: '2026-08-14T19:30:00.000Z',
+  decisionVersion: 0,
+});
+
 const json = (response, value, status = 200) => {
   response.statusCode = status;
   response.setHeader('content-type', 'application/json');
@@ -172,7 +184,31 @@ const server = createServer((request, response) => {
     lookupRequests += 1;
     const authorization = playableReleaseAuthorization();
     if (lookupRequests >= 3) authorization.promotionSummary.review.candidatePath = `/playable-previews/unsafe/${playableId}.html`;
-    return json(response, lookupRequests === 1 ? artifactAuthorization : authorization);
+    return json(response, lookupRequests === 1
+      ? artifactAuthorization
+      : lookupRequests >= 4 ? desktopIntakeAuthorization() : authorization);
+  }
+  if (request.method === 'POST' && url.pathname === '/api/admin/device-auth/decision') {
+    let raw = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { raw += chunk; });
+    request.on('end', () => {
+      const body = JSON.parse(raw);
+      deviceDecisionRequests.push(body);
+      if (body.authorizationId !== desktopIntakeAuthorization().authorizationId
+        || body.expectedDecisionVersion !== 0
+        || !['56789-ABCDE', '6789A-BCDEF'].includes(body.userCode)) {
+        return json(response, { code: 'device_authorization_fixture_mismatch' }, 409);
+      }
+      const authorization = desktopIntakeAuthorization();
+      authorization.state = body.decision === 'approve' ? 'approved' : 'denied';
+      authorization.decisionVersion = 1;
+      if (body.decision === 'approve' && body.submitterMachine && !omitMachineBinding) {
+        authorization.submitterMachine = body.submitterMachine;
+      }
+      return json(response, authorization);
+    });
+    return;
   }
   if (request.method === 'GET'
     && url.pathname === `/api/operator/playable-releases/${releaseId}/review`) {
@@ -396,6 +432,8 @@ try {
   assert.match((await artifactSummary.textContent()) || '', new RegExp(`sha256:${'4'.repeat(64)}`));
   assert.match((await artifactSummary.textContent()) || '', new RegExp('f'.repeat(64)));
   assert.equal(await enabledPage.getByRole('button', { name: 'Approve exact raster world' }).count(), 1);
+  assert.equal(await enabledPage.getByTestId('catalog-lab-submitter-machine').isHidden(), true,
+    'ordinary publication approval exposed a desktop machine binding');
   await enabledPage.getByRole('button', { name: 'Use another code' }).click();
 
   await enabledPage.getByLabel('One-time code').fill('34567-89ABC');
@@ -487,6 +525,60 @@ try {
   assert.equal(await enabledPage.getByText('Исходная задача недоступна. Candidate review и публикация заблокированы.').count(), 1);
   assert.equal(await enabledPage.getByRole('button', { name: 'Принять и опубликовать' }).isDisabled(), true);
   await enabledPage.getByRole('button', { name: 'Use another code' }).click();
+
+  // Desktop intake is the one scope which requires an operator-selected,
+  // server-owned machine binding. Client names and one-time codes never infer it.
+  await enabledPage.getByLabel('One-time code').fill('56789-ABCDE');
+  await enabledPage.getByRole('button', { name: 'Review request' }).click();
+  const machineSelector = enabledPage.getByTestId('catalog-lab-submitter-machine');
+  await machineSelector.waitFor({ state: 'visible' });
+  assert.match((await machineSelector.textContent()) || '', /computer name and one-time code never decide/i);
+  const machineApprove = enabledPage.getByRole('button', { name: 'Approve', exact: true });
+  assert.equal(await machineApprove.isDisabled(), true,
+    'desktop intake approval was enabled before explicit machine selection');
+  await machineApprove.evaluate((entry) => { entry.disabled = false; entry.click(); });
+  assert.equal(deviceDecisionRequests.length, 0,
+    'network-level guard allowed desktop approval without a selected machine');
+  assert.match((await enabledPage.locator('.lab-auth__status').filter({ hasText: /Choose Mac A/ }).textContent()) || '', /Choose Mac A/);
+  await enabledPage.getByLabel('Mac A — Platform').check();
+  assert.equal(await machineApprove.isDisabled(), false);
+  omitMachineBinding = true;
+  enabledPage.once('dialog', (dialog) => dialog.accept());
+  await machineApprove.click();
+  await enabledPage.getByText(/server did not confirm this Mac binding/).waitFor({ state: 'visible' });
+  assert.equal(deviceDecisionRequests.length, 1,
+    'unconfirmed binding did not make exactly one fail-closed request');
+  assert.equal(await machineApprove.isDisabled(), false,
+    'operator could not retry after an unconfirmed server binding');
+  omitMachineBinding = false;
+  enabledPage.once('dialog', (dialog) => dialog.accept());
+  await machineApprove.click();
+  await enabledPage.getByText(/is bound to Mac A — Platform/).waitFor({ state: 'visible' });
+  assert.equal(deviceDecisionRequests.length, 2);
+  assert.deepEqual(deviceDecisionRequests[1], {
+    authorizationId: desktopIntakeAuthorization().authorizationId,
+    userCode: '56789-ABCDE',
+    expectedDecisionVersion: 0,
+    decision: 'approve',
+    submitterMachine: 'mac-a',
+  });
+
+  // Denial remains identity-neutral and cannot bind either machine.
+  await enabledPage.getByRole('button', { name: 'Check another code' }).click();
+  await enabledPage.getByLabel('One-time code').fill('6789A-BCDEF');
+  await enabledPage.getByRole('button', { name: 'Review request' }).click();
+  await enabledPage.getByTestId('catalog-lab-submitter-machine').waitFor({ state: 'visible' });
+  await enabledPage.getByLabel('Mac B — Content / Labs').check();
+  enabledPage.once('dialog', (dialog) => dialog.accept());
+  await enabledPage.getByRole('button', { name: 'Deny', exact: true }).click();
+  await enabledPage.getByText('Request denied').waitFor({ state: 'visible' });
+  assert.equal(deviceDecisionRequests.length, 3);
+  assert.deepEqual(deviceDecisionRequests[2], {
+    authorizationId: desktopIntakeAuthorization().authorizationId,
+    userCode: '6789A-BCDEF',
+    expectedDecisionVersion: 0,
+    decision: 'deny',
+  });
 
   // READY Telegram deep-link resolves only the requested server-owned release.
   // It owns the two safe product outcomes and never boots the normal feed.

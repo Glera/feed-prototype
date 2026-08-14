@@ -314,6 +314,42 @@ body.lab-auth-open #viewport { display: none; }
   color: #c2cce1;
 }
 .lab-auth__notice--unavailable strong { color: #ffcf9d; font-size: 15px; }
+.lab-auth__machine {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid rgba(126, 166, 255, 0.3);
+  border-radius: 14px;
+  background: rgba(63, 91, 156, 0.12);
+}
+.lab-auth__machine legend {
+  padding: 0 5px;
+  color: #dce5fb;
+  font-size: 13px;
+  font-weight: 750;
+}
+.lab-auth__machine p { margin: 0; color: #8997b5; font-size: 12px; line-height: 1.45; }
+.lab-auth__machine-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lab-auth__machine-choice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid rgba(151, 170, 213, 0.22);
+  border-radius: 11px;
+  color: #dce5fb;
+  background: rgba(5, 8, 16, 0.42);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.lab-auth__machine-choice:has(input:checked) {
+  border-color: #77e8ba;
+  background: rgba(71, 201, 149, 0.14);
+}
+.lab-auth__machine-choice input { accent-color: #47c995; }
 .lab-auth__success { text-align: center; }
 .lab-auth__success-mark {
   display: grid;
@@ -470,6 +506,7 @@ body.lab-auth-open #viewport { display: none; }
   .lab-auth__detail { grid-template-columns: 1fr; gap: 3px; }
   .lab-auth__actions { flex-direction: column-reverse; }
   .lab-auth__actions .lab-auth__button { width: 100%; }
+  .lab-auth__machine-choices { grid-template-columns: 1fr; }
   .candidate-review__detail { grid-template-columns: 1fr; gap: 2px; }
   .candidate-decision__actions { grid-template-columns: 1fr; }
 }
