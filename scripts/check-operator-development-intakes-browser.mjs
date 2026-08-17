@@ -21,6 +21,9 @@ const INSTRUCTION = 'Сделать подпись версии заметнее
 const RACE_INSTRUCTION = 'Не позволить старой проекции заменить новую задачу.';
 const DURING_POST_INSTRUCTION = 'Не позволить GET во время POST заменить receipt.';
 const REJECTED_INSTRUCTION = 'Сервер может окончательно отклонить этот запрос.';
+const SCREENSHOT_INSTRUCTION = 'Приложить обычный скриншот с телефона без правок.';
+const DETACHED_INSTRUCTION = 'Отправить задачу без скриншота, снимок убрали до отправки.';
+const UNDECODABLE_INSTRUCTION = 'Отдать задачу, даже если снимок не удалось открыть.';
 const intakeSelector = '.platform-development-intake';
 const openSelector = '.platform-development-intake__open';
 const formSelector = `${intakeSelector} form`;
@@ -416,6 +419,10 @@ try {
     'the restored immutable request remained editable');
   assert.equal(await operator.locator(`${formSelector} input[name="screenshot"]`).isDisabled(), true,
     'reload allowed a pending screenshot identity to be replaced');
+  assert.equal(
+    await operator.locator(`${formSelector} [data-action="remove-screenshot"]`).isDisabled(), true,
+    'a restored pending request left «Удалить» able to detach its frozen screenshot identity',
+  );
 
   const retryResponse = operator.waitForResponse((response) =>
     response.request().method() === 'POST'
@@ -520,6 +527,9 @@ try {
   await readySession;
   await readyProjection;
   await operator.locator(`${openSelector}[data-intake-state="ready"]`).waitFor({ state: 'visible' });
+  assert.equal(await operator.locator(openSelector).getAttribute('aria-label'),
+    '▶ Можно проверить',
+    'terminal-ready must read in the current operator status vocabulary');
   await operator.locator(openSelector).click();
   await confirmedStatus.waitFor({ state: 'visible' });
   assert.equal(await confirmedStatus.textContent(),
@@ -718,7 +728,229 @@ try {
   await definitive.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
   await definitive.close();
 
-  console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, and capability fences verified');
+  // 10. An unedited full-resolution phone screenshot is prepared on device: the
+  // form shows one removable preview, «Удалить» detaches it before submit, and
+  // the re-attached file is downscaled and re-encoded into the bounded inline
+  // wire value. There is no upload endpoint — the data URL is the whole
+  // transport, so it must land inside the exact request budget.
+  projectionItems = [];
+  const capture = await newPage();
+  const captureSession = awaitSession(capture);
+  const captureProjection = capture.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await capture.goto(`${origin}/?browserCase=screenshot-capture`, { waitUntil: 'domcontentloaded' });
+  await captureSession;
+  await captureProjection;
+  await capture.locator(openSelector).waitFor({ state: 'visible' });
+  await capture.locator(openSelector).click();
+  await capture.locator(`${formSelector} textarea[name="instruction"]`).fill(SCREENSHOT_INSTRUCTION);
+
+  const phonePngDataUrl = await capture.evaluate(async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 720;
+    canvas.height = 1_280;
+    const context = canvas.getContext('2d');
+    const pixels = context.createImageData(canvas.width, canvas.height);
+    let seed = 0x12345678;
+    for (let index = 0; index < pixels.data.length; index += 4) {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      pixels.data[index] = seed & 255;
+      pixels.data[index + 1] = (seed >>> 8) & 255;
+      pixels.data[index + 2] = (seed >>> 16) & 255;
+      pixels.data[index + 3] = 255;
+    }
+    context.putImageData(pixels, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = reject;
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(blob);
+    });
+  });
+  const phonePng = Buffer.from(phonePngDataUrl.split(',')[1], 'base64');
+  assert.ok(phonePng.length > 380_000,
+    'the fixture must exceed the former hard-reject screenshot limit');
+
+  const captureInput = capture.locator(`${formSelector} input[name="screenshot"]`);
+  const captureSelection = capture.locator(`${formSelector} [data-intake-screenshot]`);
+  const attachPhoneScreenshot = () => captureInput.setInputFiles({
+    name: 'phone-screenshot.png', mimeType: 'image/png', buffer: phonePng,
+  });
+  await attachPhoneScreenshot();
+  await captureSelection.waitFor({ state: 'visible' });
+  assert.match(await captureSelection.innerText(), /phone-screenshot\.png/);
+  assert.match(await captureSelection.innerText(), /подготовим автоматически/);
+
+  await captureSelection.locator('[data-action="remove-screenshot"]').click();
+  await captureSelection.waitFor({ state: 'hidden' });
+  assert.equal(await captureInput.inputValue(), '',
+    'removing the preview left the detached screenshot on the form');
+
+  // «Удалить» before submit is an honest detach, not a hidden attachment: the
+  // durable request carries the exact «unavailable» value.
+  await capture.locator(`${formSelector} textarea[name="instruction"]`).fill(DETACHED_INSTRUCTION);
+  const postsBeforeDetached = postedRequests.length;
+  const detachedPost = capture.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/development-intake'
+      && response.ok());
+  await capture.locator(`${formSelector} button[type="submit"]`).click();
+  await detachedPost;
+  assert.equal(postedRequests.length, postsBeforeDetached + 1,
+    'the detached capture did not issue exactly one mutation');
+  assert.equal(postedRequests[postsBeforeDetached].instruction, DETACHED_INSTRUCTION);
+  assert.deepEqual(postedRequests[postsBeforeDetached].screenshot, {
+    kind: 'unavailable',
+    reason: 'not_attached',
+    mimeType: null,
+    dataUrl: null,
+  }, 'a screenshot removed before submit still reached the durable request');
+  await capture.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
+  await capture.locator(openSelector).click();
+  await capture.locator(`${detailsSelector} [data-action="new"]`).click();
+  await capture.locator(`${formSelector} textarea[name="instruction"]`).fill(SCREENSHOT_INSTRUCTION);
+
+  await attachPhoneScreenshot();
+  await captureSelection.waitFor({ state: 'visible' });
+  const postsBeforeCapture = postedRequests.length;
+  const capturePost = capture.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/development-intake'
+      && response.ok());
+  // Preparation is awaited for seconds. The form is latched synchronously, in
+  // the same turn as the submit, so nothing can detach or replace the exact
+  // attachment that is already being inlined into the immutable request.
+  const latched = await capture.evaluate((selector) => {
+    const form = document.querySelector(`${selector} form`);
+    form.requestSubmit(form.querySelector('button[type="submit"]'));
+    const disabled = (target) => form.querySelector(target).disabled;
+    return {
+      status: document.querySelector(`${selector} output`).textContent,
+      file: disabled('input[name="screenshot"]'),
+      remove: disabled('[data-action="remove-screenshot"]'),
+      instruction: disabled('textarea[name="instruction"]'),
+      dictate: disabled('[data-action="dictate"]'),
+      submit: disabled('button[type="submit"]'),
+    };
+  }, intakeSelector);
+  await capturePost;
+  const { status: latchedStatus, ...latchedControls } = latched;
+  assert.equal(latchedStatus, 'Подготавливаю скриншот…',
+    'the latch was not observed while the attached screenshot was being prepared');
+  assert.deepEqual(latchedControls, {
+    file: true,
+    remove: true,
+    instruction: true,
+    dictate: true,
+    submit: true,
+  }, 'the intake form stayed editable while its attached screenshot was being prepared');
+  assert.equal(postedRequests.length, postsBeforeCapture + 1,
+    'the prepared capture did not issue exactly one mutation');
+  const captured = postedRequests[postsBeforeCapture];
+  assert.equal(captured.instruction, SCREENSHOT_INSTRUCTION);
+  assert.equal(captured.screenshot.kind, 'data_url');
+  assert.equal(captured.screenshot.reason, null);
+  assert.equal(captured.screenshot.mimeType, 'image/jpeg',
+    'an oversized phone screenshot must be prepared, not rejected');
+  assert.match(captured.screenshot.dataUrl, /^data:image\/jpeg;base64,/);
+  assert.ok(captured.screenshot.dataUrl.length <= 524_288,
+    'the prepared screenshot exceeded the request wire budget');
+  assert.ok(captured.screenshot.dataUrl.length < phonePngDataUrl.length,
+    'the prepared screenshot was not downscaled below its source');
+  await capture.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
+  const capturePending = await capture.evaluate(() => {
+    const key = Object.keys(localStorage).find((item) =>
+      item.startsWith('platform-development-intake-pending:v1:'));
+    return key ? localStorage.getItem(key) : null;
+  });
+  assert.equal(capturePending, null,
+    'an accepted receipt must release the immutable pending screenshot record');
+  await capture.close();
+
+  // 11. An attachment the device cannot decode fails in the intake's own typed
+  // vocabulary — only a `development_intake_screenshot_invalid` failure renders
+  // this exact text, every other failure renders «Не удалось сохранить задачу.».
+  // Nothing reaches the durable API and the latched form is handed back intact.
+  projectionItems = [];
+  const undecodablePng = Buffer.concat([
+    // The real header of the phone screenshot above (720×1280 parses), followed
+    // by bytes that are not image data at all. It stays over the passthrough
+    // budget so preparation actually has to decode it.
+    phonePng.subarray(0, 33),
+    Buffer.alloc(400_000, 0x5a),
+  ]);
+  assert.ok(undecodablePng.length > 370_000,
+    'the undecodable fixture must exceed the screenshot passthrough budget');
+  const undecodable = await newPage();
+  const undecodableSession = awaitSession(undecodable);
+  const undecodableProjection = undecodable.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await undecodable.goto(`${origin}/?browserCase=undecodable-screenshot`, { waitUntil: 'domcontentloaded' });
+  await undecodableSession;
+  await undecodableProjection;
+  await undecodable.locator(openSelector).waitFor({ state: 'visible' });
+  await undecodable.locator(openSelector).click();
+  await undecodable.locator(`${formSelector} textarea[name="instruction"]`).fill(UNDECODABLE_INSTRUCTION);
+  const undecodableInput = undecodable.locator(`${formSelector} input[name="screenshot"]`);
+  const undecodableSelection = undecodable.locator(`${formSelector} [data-intake-screenshot]`);
+  const undecodableRemove = undecodableSelection.locator('[data-action="remove-screenshot"]');
+  await undecodableInput.setInputFiles({
+    name: 'phone-screenshot.png', mimeType: 'image/png', buffer: undecodablePng,
+  });
+  await undecodableSelection.waitFor({ state: 'visible' });
+  const postsBeforeUndecodable = postedRequests.length;
+  await undecodable.locator(`${formSelector} button[type="submit"]`).click();
+  await undecodable.waitForFunction(() => {
+    const text = document.querySelector('.platform-development-intake output')?.textContent ?? '';
+    return text !== '' && text !== 'Подготавливаю скриншот…';
+  });
+  assert.equal(await undecodable.locator(`${intakeSelector} output`).textContent(),
+    'Не удалось обработать скриншот. Выберите другое изображение.',
+    'an undecodable attachment did not surface the typed screenshot failure vocabulary');
+  assert.equal(postedRequests.length, postsBeforeUndecodable,
+    'an undecodable attachment reached the durable API');
+  assert.equal(await undecodable.evaluate(() => Object.keys(localStorage).some((key) =>
+    key.startsWith('platform-development-intake-pending:v1:'))), false,
+  'a failed preparation left an immutable pending record behind');
+  assert.equal(await undecodableInput.isDisabled(), false,
+    'a failed preparation kept the file input latched');
+  assert.equal(await undecodableRemove.isDisabled(), false,
+    'a failed preparation kept «Удалить» latched');
+  assert.equal(await undecodable.locator(`${formSelector} [data-action="dictate"]`).isDisabled(), false,
+    'a failed preparation kept dictation latched');
+  assert.equal(await undecodable.locator(`${formSelector} textarea[name="instruction"]`).isEditable(), true,
+    'a failed preparation kept the instruction latched');
+  assert.equal(await undecodable.locator(`${formSelector} button[type="submit"]`).isDisabled(), false,
+    'a failed preparation kept submit latched');
+
+  // The re-enabled form is usable in place: detaching the undecodable file and
+  // submitting the same instruction needs no reload of the Mini App.
+  await undecodableRemove.click();
+  await undecodableSelection.waitFor({ state: 'hidden' });
+  const recoveredPost = undecodable.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/development-intake'
+      && response.ok());
+  await undecodable.locator(`${formSelector} button[type="submit"]`).click();
+  await recoveredPost;
+  assert.equal(postedRequests.length, postsBeforeUndecodable + 1,
+    'the recovered submit did not issue exactly one mutation');
+  assert.equal(postedRequests[postsBeforeUndecodable].instruction, UNDECODABLE_INSTRUCTION);
+  assert.deepEqual(postedRequests[postsBeforeUndecodable].screenshot, {
+    kind: 'unavailable',
+    reason: 'not_attached',
+    mimeType: null,
+    dataUrl: null,
+  }, 'the recovered submit carried the undecodable attachment anyway');
+  await undecodable.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
+  await undecodable.close();
+
+  console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, prepared screenshot capture, submit latch, typed screenshot failure, and capability fences verified');
 } finally {
   if (heldProjection) releaseHeldProjection();
   if (heldPost) releaseHeldPost();

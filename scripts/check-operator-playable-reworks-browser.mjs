@@ -7,7 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const moduleSource = readFileSync(path.join(root, 'src/operator-playable-reworks.mjs'));
+// The control is served as its real ES module graph, so its shared imports
+// (screenshot preparation) resolve exactly as they do in the production bundle.
+const MODULE_PATH = /^\/[a-z0-9-]+\.mjs$/;
 let origin = '';
 
 const fixture = `<!doctype html>
@@ -75,9 +77,15 @@ window.control = mountOperatorPlayableReworkControl(document.querySelector('#hos
 
 const server = createServer((request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
-  if (url.pathname === '/operator-playable-reworks.mjs') {
-    response.setHeader('content-type', 'application/javascript; charset=utf-8');
-    response.end(moduleSource);
+  if (MODULE_PATH.test(url.pathname)) {
+    try {
+      const source = readFileSync(path.join(root, 'src', url.pathname.slice(1)));
+      response.setHeader('content-type', 'application/javascript; charset=utf-8');
+      response.end(source);
+    } catch {
+      response.statusCode = 404;
+      response.end();
+    }
     return;
   }
   if (url.pathname === '/' || url.pathname === '/index.html') {
