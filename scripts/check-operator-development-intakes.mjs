@@ -91,6 +91,56 @@ values.set(pendingKey, 'x'.repeat(600_001));
 assert.equal(restorePlatformDevelopmentIntakePendingRequest(storage, pendingOptions), null);
 assert.equal(values.has(pendingKey), false);
 
+// A locally prepared screenshot is the whole transport: there is no upload, so
+// the inline data URL must stay inside the exact request wire budget and still
+// fit the immutable pending record that survives a lost response.
+const DATA_URL_PREFIX = 'data:image/jpeg;base64,';
+const jpegDataUrl = (chars) => `${DATA_URL_PREFIX}${'A'.repeat(chars - DATA_URL_PREFIX.length)}`;
+const preparedScreenshot = {
+  kind: 'data_url', reason: null, mimeType: 'image/jpeg', dataUrl: jpegDataUrl(500_000),
+};
+const preparedRequest = buildPlatformDevelopmentIntakeRequest({
+  ...input, mutationId: randomUUID(), screenshot: preparedScreenshot,
+});
+assert.deepEqual(preparedRequest.screenshot, preparedScreenshot);
+assert.doesNotThrow(() => buildPlatformDevelopmentIntakeRequest({
+  ...input,
+  mutationId: randomUUID(),
+  screenshot: { ...preparedScreenshot, dataUrl: jpegDataUrl(524_288) },
+}));
+assert.throws(
+  () => buildPlatformDevelopmentIntakeRequest({
+    ...input,
+    mutationId: randomUUID(),
+    screenshot: { ...preparedScreenshot, dataUrl: jpegDataUrl(524_289) },
+  }),
+  (error) => error?.code === 'development_intake_invalid',
+  'the request wire budget for one inline screenshot must stay exact',
+);
+assert.throws(
+  () => buildPlatformDevelopmentIntakeRequest({
+    ...input, mutationId: randomUUID(), screenshot: { ...preparedScreenshot, mimeType: 'image/webp' },
+  }),
+  (error) => error?.code === 'development_intake_invalid',
+);
+assert.throws(
+  () => buildPlatformDevelopmentIntakeRequest({
+    ...input, mutationId: randomUUID(), screenshot: { ...preparedScreenshot, mimeType: 'image/png' },
+  }),
+  (error) => error?.code === 'development_intake_invalid',
+  'the declared mime type must bind the exact data URL prefix',
+);
+assert.equal(
+  persistPlatformDevelopmentIntakePendingRequest(storage, pendingOptions, preparedRequest),
+  true,
+  'a prepared screenshot must fit the durable pending record',
+);
+assert.deepEqual(
+  restorePlatformDevelopmentIntakePendingRequest(storage, pendingOptions),
+  preparedRequest,
+);
+values.delete(pendingKey);
+
 const receipt = {
   schema: 'platform.development-intake.response.v1',
   requestId: '11111111-1111-5111-8111-111111111111',

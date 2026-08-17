@@ -21,6 +21,7 @@ const INSTRUCTION = 'Сделать подпись версии заметнее
 const RACE_INSTRUCTION = 'Не позволить старой проекции заменить новую задачу.';
 const DURING_POST_INSTRUCTION = 'Не позволить GET во время POST заменить receipt.';
 const REJECTED_INSTRUCTION = 'Сервер может окончательно отклонить этот запрос.';
+const SCREENSHOT_INSTRUCTION = 'Приложить обычный скриншот с телефона без правок.';
 const intakeSelector = '.platform-development-intake';
 const openSelector = '.platform-development-intake__open';
 const formSelector = `${intakeSelector} form`;
@@ -718,7 +719,101 @@ try {
   await definitive.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
   await definitive.close();
 
-  console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, and capability fences verified');
+  // 10. An unedited full-resolution phone screenshot is prepared on device: the
+  // form shows one removable preview, «Удалить» detaches it before submit, and
+  // the re-attached file is downscaled and re-encoded into the bounded inline
+  // wire value. There is no upload endpoint — the data URL is the whole
+  // transport, so it must land inside the exact request budget.
+  projectionItems = [];
+  const capture = await newPage();
+  const captureSession = awaitSession(capture);
+  const captureProjection = capture.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await capture.goto(`${origin}/?browserCase=screenshot-capture`, { waitUntil: 'domcontentloaded' });
+  await captureSession;
+  await captureProjection;
+  await capture.locator(openSelector).waitFor({ state: 'visible' });
+  await capture.locator(openSelector).click();
+  await capture.locator(`${formSelector} textarea[name="instruction"]`).fill(SCREENSHOT_INSTRUCTION);
+
+  const phonePngDataUrl = await capture.evaluate(async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 720;
+    canvas.height = 1_280;
+    const context = canvas.getContext('2d');
+    const pixels = context.createImageData(canvas.width, canvas.height);
+    let seed = 0x12345678;
+    for (let index = 0; index < pixels.data.length; index += 4) {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      pixels.data[index] = seed & 255;
+      pixels.data[index + 1] = (seed >>> 8) & 255;
+      pixels.data[index + 2] = (seed >>> 16) & 255;
+      pixels.data[index + 3] = 255;
+    }
+    context.putImageData(pixels, 0, 0);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = reject;
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(blob);
+    });
+  });
+  const phonePng = Buffer.from(phonePngDataUrl.split(',')[1], 'base64');
+  assert.ok(phonePng.length > 380_000,
+    'the fixture must exceed the former hard-reject screenshot limit');
+
+  const captureInput = capture.locator(`${formSelector} input[name="screenshot"]`);
+  const captureSelection = capture.locator(`${formSelector} [data-intake-screenshot]`);
+  const attachPhoneScreenshot = () => captureInput.setInputFiles({
+    name: 'phone-screenshot.png', mimeType: 'image/png', buffer: phonePng,
+  });
+  await attachPhoneScreenshot();
+  await captureSelection.waitFor({ state: 'visible' });
+  assert.match(await captureSelection.innerText(), /phone-screenshot\.png/);
+  assert.match(await captureSelection.innerText(), /подготовим автоматически/);
+
+  await captureSelection.locator('[data-action="remove-screenshot"]').click();
+  await captureSelection.waitFor({ state: 'hidden' });
+  assert.equal(await captureInput.inputValue(), '',
+    'removing the preview left the detached screenshot on the form');
+
+  await attachPhoneScreenshot();
+  await captureSelection.waitFor({ state: 'visible' });
+  const postsBeforeCapture = postedRequests.length;
+  const capturePost = capture.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/development-intake'
+      && response.ok());
+  await capture.locator(`${formSelector} button[type="submit"]`).click();
+  await capturePost;
+  assert.equal(postedRequests.length, postsBeforeCapture + 1,
+    'the prepared capture did not issue exactly one mutation');
+  const captured = postedRequests[postsBeforeCapture];
+  assert.equal(captured.instruction, SCREENSHOT_INSTRUCTION);
+  assert.equal(captured.screenshot.kind, 'data_url');
+  assert.equal(captured.screenshot.reason, null);
+  assert.equal(captured.screenshot.mimeType, 'image/jpeg',
+    'an oversized phone screenshot must be prepared, not rejected');
+  assert.match(captured.screenshot.dataUrl, /^data:image\/jpeg;base64,/);
+  assert.ok(captured.screenshot.dataUrl.length <= 524_288,
+    'the prepared screenshot exceeded the request wire budget');
+  assert.ok(captured.screenshot.dataUrl.length < phonePngDataUrl.length,
+    'the prepared screenshot was not downscaled below its source');
+  await capture.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
+  const capturePending = await capture.evaluate(() => {
+    const key = Object.keys(localStorage).find((item) =>
+      item.startsWith('platform-development-intake-pending:v1:'));
+    return key ? localStorage.getItem(key) : null;
+  });
+  assert.equal(capturePending, null,
+    'an accepted receipt must release the immutable pending screenshot record');
+  await capture.close();
+
+  console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, prepared screenshot capture, and capability fences verified');
 } finally {
   if (heldProjection) releaseHeldProjection();
   if (heldPost) releaseHeldPost();

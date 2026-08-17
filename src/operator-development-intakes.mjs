@@ -1,3 +1,9 @@
+import {
+  prepareScreenshotFromFile,
+  screenshotSelectionLabel,
+  screenshotSelectionMarkup,
+} from './operator-screenshot.mjs';
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -10,6 +16,7 @@ const DELIVERY_STATUSES = new Set([
 ]);
 const TERMINAL_STATUSES = new Set(['READY_TO_PLAY', 'NEEDS_HELP']);
 const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429]);
+const SCREENSHOT_INVALID = 'development_intake_screenshot_invalid';
 let controlSequence = 0;
 
 const fail = (code, message) => {
@@ -192,29 +199,6 @@ export function platformDevelopmentIntakeFailureDisposition(error) {
     : 'retry';
 }
 
-function screenshotFromFile(file) {
-  if (!file) return Promise.resolve(Object.freeze({
-    kind: 'unavailable', reason: 'not_attached', mimeType: null, dataUrl: null,
-  }));
-  if (!['image/jpeg', 'image/png'].includes(file.type) || file.size > 380_000) {
-    return Promise.reject(Object.assign(
-      new Error('screenshot must be JPG/PNG up to 380 KB'),
-      { code: 'development_intake_screenshot_invalid' },
-    ));
-  }
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(Object.assign(
-      new Error('screenshot could not be read'),
-      { code: 'development_intake_screenshot_invalid' },
-    ));
-    reader.onload = () => resolve(Object.freeze({
-      kind: 'data_url', reason: null, mimeType: file.type, dataUrl: reader.result,
-    }));
-    reader.readAsDataURL(file);
-  });
-}
-
 function draftKey(options) {
   return `platform-development-intake-draft:v1:${options.actorUserId}:${options.buildSha}:${options.route}`;
 }
@@ -339,8 +323,9 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
         <small id="${controlId}-dictation-hint">Откроется клавиатура — нажмите на ней 🎤</small>
       </div>
       <label>Скриншот (необязательно)
-        <input name="screenshot" type="file" accept="image/jpeg,image/png">
+        <input name="screenshot" type="file" accept="image/*">
       </label>
+      ${screenshotSelectionMarkup('intake')}
       <div class="game__operator-flag-actions">
         <button type="submit">Отдать в работу</button>
         <button type="button" data-action="cancel">Отмена</button>
@@ -379,6 +364,9 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const detailDeliveryState = details.querySelector('[data-intake-delivery-state]');
   const blocker = details.querySelector('[data-intake-blocker]');
   const resultLink = details.querySelector('[data-intake-result]');
+  const screenshotSelection = form.querySelector('[data-intake-screenshot]');
+  const screenshotName = form.querySelector('[data-intake-screenshot-name]');
+  const removeScreenshot = form.querySelector('[data-action="remove-screenshot"]');
   const key = draftKey(options);
   const pendingKey = platformDevelopmentIntakePendingStorageKey(options);
   let pendingRequest = restorePlatformDevelopmentIntakePendingRequest(options.storage, options);
@@ -386,11 +374,26 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   let accepted = null;
   let destroyed = false;
 
+  // The attached file is only a local preview: it is prepared and inlined into
+  // the immutable request at submit, and «Удалить» detaches it before then.
+  const renderScreenshotSelection = () => {
+    const selected = file.files?.[0] || null;
+    screenshotName.textContent = screenshotSelectionLabel(selected);
+    screenshotSelection.hidden = selected === null;
+  };
+  const releaseScreenshotField = () => {
+    file.value = '';
+    file.disabled = false;
+    removeScreenshot.disabled = false;
+    renderScreenshotSelection();
+  };
+
   const renderPending = () => {
     if (!pendingRequest) return;
     instruction.value = pendingRequest.instruction;
     instruction.readOnly = true;
     file.disabled = true;
+    removeScreenshot.disabled = true;
     submit.textContent = 'Повторить сохранение';
     status.textContent = 'Есть незавершённая отправка — повторите сохранение.';
   };
@@ -469,6 +472,18 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     instruction.setSelectionRange?.(end, end);
   });
   instruction.addEventListener('input', () => storeDraft(options.storage, key, instruction.value));
+  file.addEventListener('change', () => {
+    if (file.disabled) return;
+    status.textContent = '';
+    renderScreenshotSelection();
+  });
+  removeScreenshot.addEventListener('click', () => {
+    if (removeScreenshot.disabled) return;
+    file.value = '';
+    status.textContent = '';
+    renderScreenshotSelection();
+    file.focus({ preventScroll: true });
+  });
   form.querySelector('[data-action="cancel"]').addEventListener('click', () => {
     form.hidden = true;
     open.hidden = false;
@@ -482,8 +497,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     submit.disabled = false;
     submit.textContent = 'Отдать в работу';
     status.textContent = '';
-    file.value = '';
-    file.disabled = false;
+    releaseScreenshotField();
     instruction.readOnly = false;
     details.hidden = true;
     form.hidden = false;
@@ -497,16 +511,22 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     event.preventDefault();
     if (destroyed || submit.disabled) return;
     submit.disabled = true;
-    status.textContent = 'Сохраняю…';
+    const selectedFile = pendingRequest ? null : (file.files?.[0] || null);
+    status.textContent = selectedFile ? 'Подготавливаю скриншот…' : 'Сохраняю…';
     try {
       if (!pendingRequest) {
+        // One unedited phone screenshot is downscaled and inlined here; there
+        // is no upload endpoint, so nothing leaves the request itself.
+        const screenshot = await prepareScreenshotFromFile(selectedFile, SCREENSHOT_INVALID);
+        if (destroyed) return;
+        status.textContent = 'Сохраняю…';
         const request = buildPlatformDevelopmentIntakeRequest({
           mutationId: options.createMutationId(),
           instruction: instruction.value,
           surface: options.surface,
           route: options.route,
           buildSha: options.buildSha,
-          screenshot: await screenshotFromFile(file.files?.[0] || null),
+          screenshot,
         });
         if (!persistPlatformDevelopmentIntakePendingRequest(options.storage, options, request)) {
           fail('development_intake_pending_not_persisted', 'pending request could not be persisted');
@@ -528,14 +548,14 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
         pendingRequest = null;
         instruction.value = originalInstruction;
         instruction.readOnly = false;
-        file.value = '';
-        file.disabled = false;
+        releaseScreenshotField();
         submit.textContent = 'Отдать в работу';
         storeDraft(options.storage, key, originalInstruction);
         status.textContent = 'Запрос отклонён сервером. Исправьте описание и отправьте снова.';
       } else {
-        status.textContent = error?.code === 'development_intake_screenshot_invalid'
-          ? 'Скриншот должен быть JPG/PNG до 380 КБ.' : 'Не удалось сохранить задачу.';
+        status.textContent = error?.code === SCREENSHOT_INVALID
+          ? 'Не удалось обработать скриншот. Выберите другое изображение.'
+          : 'Не удалось сохранить задачу.';
       }
       submit.disabled = false;
     }
