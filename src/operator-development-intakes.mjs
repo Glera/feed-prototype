@@ -354,6 +354,8 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const file = form.elements.namedItem('screenshot');
   const status = root.querySelector('output');
   const submit = form.querySelector('button[type="submit"]');
+  const dictate = form.querySelector('[data-action="dictate"]');
+  const cancel = form.querySelector('[data-action="cancel"]');
   const details = root.querySelector('.platform-development-intake__details');
   const detailInstruction = details.querySelector('[data-intake-instruction]');
   const detailStatus = details.querySelector('[data-intake-status]');
@@ -373,6 +375,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   instruction.value = pendingRequest?.instruction ?? safeDraft(options.storage, key);
   let accepted = null;
   let destroyed = false;
+  let submitting = false;
 
   // The attached file is only a local preview: it is prepared and inlined into
   // the immutable request at submit, and «Удалить» detaches it before then.
@@ -386,6 +389,21 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     file.disabled = false;
     removeScreenshot.disabled = false;
     renderScreenshotSelection();
+  };
+  // Submit latches the whole composition until the attempt reaches a terminal
+  // outcome: preparation is awaited for seconds, and a detach or a replacement
+  // during it would inline one image while the form shows another.
+  const setSubmitting = (value) => {
+    submitting = value;
+    root.setAttribute('aria-busy', String(value));
+    [instruction, file, submit, dictate, removeScreenshot, cancel]
+      .forEach((element) => { element.disabled = value; });
+    // Releasing the latch never releases the attachment identity that an
+    // unfinished request already froze into its durable pending record.
+    if (!value && pendingRequest) {
+      file.disabled = true;
+      removeScreenshot.disabled = true;
+    }
   };
 
   const renderPending = () => {
@@ -466,25 +484,25 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     open.setAttribute('aria-expanded', 'true');
     instruction.focus();
   });
-  form.querySelector('[data-action="dictate"]').addEventListener('click', () => {
+  dictate.addEventListener('click', () => {
     instruction.focus();
     const end = instruction.value.length;
     instruction.setSelectionRange?.(end, end);
   });
   instruction.addEventListener('input', () => storeDraft(options.storage, key, instruction.value));
   file.addEventListener('change', () => {
-    if (file.disabled) return;
+    if (submitting || file.disabled) return;
     status.textContent = '';
     renderScreenshotSelection();
   });
   removeScreenshot.addEventListener('click', () => {
-    if (removeScreenshot.disabled) return;
+    if (submitting || removeScreenshot.disabled) return;
     file.value = '';
     status.textContent = '';
     renderScreenshotSelection();
     file.focus({ preventScroll: true });
   });
-  form.querySelector('[data-action="cancel"]').addEventListener('click', () => {
+  cancel.addEventListener('click', () => {
     form.hidden = true;
     open.hidden = false;
     open.setAttribute('aria-expanded', 'false');
@@ -494,7 +512,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     accepted = null;
     pendingRequest = null;
     removeStored(options.storage, pendingKey);
-    submit.disabled = false;
+    setSubmitting(false);
     submit.textContent = 'Отдать в работу';
     status.textContent = '';
     releaseScreenshotField();
@@ -509,9 +527,9 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (destroyed || submit.disabled) return;
-    submit.disabled = true;
+    if (destroyed || submitting || submit.disabled) return;
     const selectedFile = pendingRequest ? null : (file.files?.[0] || null);
+    setSubmitting(true);
     status.textContent = selectedFile ? 'Подготавливаю скриншот…' : 'Сохраняю…';
     try {
       if (!pendingRequest) {
@@ -557,7 +575,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
           ? 'Не удалось обработать скриншот. Выберите другое изображение.'
           : 'Не удалось сохранить задачу.';
       }
-      submit.disabled = false;
+      setSubmitting(false);
     }
   });
   return Object.freeze({
