@@ -521,6 +521,9 @@ try {
   await readySession;
   await readyProjection;
   await operator.locator(`${openSelector}[data-intake-state="ready"]`).waitFor({ state: 'visible' });
+  assert.equal(await operator.locator(openSelector).getAttribute('aria-label'),
+    '▶ Можно проверить',
+    'terminal-ready must read in the current operator status vocabulary');
   await operator.locator(openSelector).click();
   await confirmedStatus.waitFor({ state: 'visible' });
   assert.equal(await confirmedStatus.textContent(),

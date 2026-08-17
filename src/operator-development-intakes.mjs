@@ -417,7 +417,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     const confirmed = deliveryStatus === 'confirmed';
     open.textContent = failed ? '!' : terminalReady ? '▶' : '✓';
     open.dataset.intakeState = failed ? 'needs_help' : terminalReady ? 'ready' : confirmed ? 'confirmed' : 'pending';
-    open.setAttribute('aria-label', failed ? '! Нужна помощь' : terminalReady ? '▶ Готово к проверке' : confirmed ? '✓ Тикет создан' : '✓ Задача принята');
+    open.setAttribute('aria-label', failed ? '! Нужна помощь' : terminalReady ? '▶ Можно проверить' : confirmed ? '✓ Тикет создан' : '✓ Задача принята');
     detailInstruction.textContent = validated.request.instruction;
     detailRequestId.textContent = validated.requestId;
     detailMutationId.textContent = validated.mutationId;
