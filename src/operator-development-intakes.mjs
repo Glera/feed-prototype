@@ -1,3 +1,4 @@
+import { observeOperatorFormViewport } from './operator-form-viewport.mjs';
 import {
   prepareScreenshotFromFile,
   screenshotSelectionLabel,
@@ -369,6 +370,8 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const screenshotSelection = form.querySelector('[data-intake-screenshot]');
   const screenshotName = form.querySelector('[data-intake-screenshot-name]');
   const removeScreenshot = form.querySelector('[data-action="remove-screenshot"]');
+  // The keyboard must never push the field being typed into off the screen.
+  const formViewport = observeOperatorFormViewport(form);
   const key = draftKey(options);
   const pendingKey = platformDevelopmentIntakePendingStorageKey(options);
   let pendingRequest = restorePlatformDevelopmentIntakePendingRequest(options.storage, options);
@@ -579,7 +582,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     }
   });
   return Object.freeze({
-    destroy() { destroyed = true; root.remove(); },
+    destroy() { destroyed = true; formViewport.release(); root.remove(); },
     update(receipt) {
       // A foreground projection must not close an actively composed follow-up
       // (notably when the OS file picker backgrounds and restores the TMA).
