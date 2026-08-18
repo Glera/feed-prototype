@@ -4775,6 +4775,148 @@ body {
   border-color: rgba(118, 221, 180, 0.62);
   color: #baf5d9;
 }
+
+/* «Изменения dev-ленты» — the read-only inventory behind the dev badge.
+   The badge is the only tappable element while the sheet is closed, so the
+   surface root stays transparent to pointers. Bottom-anchored card + scrim,
+   the same idiom as the friend list; no backdrop-filter (perf rule). */
+.dev-diff-surface {
+  position: fixed;
+  inset: 0;
+  z-index: 5200;
+  pointer-events: none;
+}
+.dev-diff-surface[hidden] { display: none; }
+.dev-diff__badge {
+  top: calc(var(--safe-top) + 8px);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  appearance: none;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.dev-diff__badge-count {
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #6f4bc9;
+  color: #fff;
+  font: 900 9px/15px system-ui, sans-serif;
+  text-align: center;
+}
+.dev-diff__badge-count[hidden] { display: none; }
+.dev-diff {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: end center;
+  pointer-events: auto;
+}
+.dev-diff[hidden] { display: none; }
+.dev-diff__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 8, 12, 0.55);
+}
+.dev-diff__card {
+  position: relative;
+  box-sizing: border-box;
+  width: min(420px, 92%);
+  max-height: min(78%, 620px);
+  margin-bottom: calc(var(--bar-reserve) + 16px);
+  padding: 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  background: #141d28;
+  box-shadow: 0 26px 60px rgba(0, 0, 0, 0.5);
+  color: #fff;
+  animation: dev-diff-in 0.2s ease;
+}
+@keyframes dev-diff-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.dev-diff__h { margin: 0 0 4px; font: 800 16px/1.2 system-ui, sans-serif; }
+.dev-diff__empty {
+  margin: 10px 0 0;
+  color: #9dffc1;
+  font: 700 13px/1.35 system-ui, sans-serif;
+}
+.dev-diff__body { display: grid; gap: 14px; margin-top: 12px; }
+.dev-diff__group { display: grid; gap: 7px; }
+.dev-diff__group-title {
+  margin: 0;
+  color: #7f8b9e;
+  font: 800 10px/1.2 system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.dev-diff__none { margin: 0; color: #aeb8c9; font: 600 12px/1.35 system-ui, sans-serif; }
+.dev-diff__row {
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  font: 12px/1.4 system-ui, sans-serif;
+}
+.dev-diff__row[data-tone="ok"] { border-color: rgba(125, 255, 176, 0.3); }
+.dev-diff__row[data-tone="warn"] { border-color: rgba(255, 224, 138, 0.3); }
+.dev-diff__row[data-tone="error"] { border-color: rgba(255, 143, 105, 0.42); }
+.dev-diff__row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dev-diff__row-head b { overflow-wrap: anywhere; font-size: 13px; }
+.dev-diff__status { flex: none; color: #c9d3e4; font-weight: 700; text-align: right; }
+.dev-diff__row[data-tone="ok"] .dev-diff__status { color: #9dffc1; }
+.dev-diff__row[data-tone="warn"] .dev-diff__status { color: #ffe08a; }
+.dev-diff__row[data-tone="error"] .dev-diff__status { color: #ffb096; }
+.dev-diff__adopted,
+.dev-diff__counts { display: block; margin-top: 6px; color: #aeb8c9; font-size: 10px; }
+.dev-diff__adopted { color: #baf5d9; font-weight: 800; }
+.dev-diff__detail { margin: 7px 0 0; color: #c7d0df; overflow-wrap: anywhere; }
+.dev-diff__blocker { margin: 7px 0 0; color: #ffd0c1; overflow-wrap: anywhere; }
+.dev-diff__identity { margin: 8px 0 0; display: grid; gap: 3px; }
+.dev-diff__identity[hidden] { display: none; }
+.dev-diff__identity > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.dev-diff__identity dt { flex: none; color: #7f8b9e; font-size: 10px; }
+.dev-diff__identity dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #c7d0df;
+  font-size: 11px;
+  text-align: right;
+}
+.dev-diff__mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dev-diff__action {
+  margin-top: 9px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font: 800 11px/1 system-ui, sans-serif;
+}
+.dev-diff__close {
+  width: 100%;
+  margin-top: 12px;
+  padding: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font: 800 14px/1 system-ui, sans-serif;
+}
 .candidate-feed-adoption {
   position: fixed;
   right: 12px;

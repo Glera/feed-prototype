@@ -54,21 +54,12 @@ function mountCandidateFeedBadge(): void {
   document.body.appendChild(badge);
 }
 
-function mountDeveloperFeedBadge(): void {
-  const badge = document.createElement('div');
-  badge.className = 'candidate-feed-preview__badge candidate-feed-preview__badge--developer';
-  badge.dataset.testid = 'developer-feed-badge';
-  badge.textContent = 'Dev-лента · Только мне';
-  document.body.appendChild(badge);
-}
-
 // If launched from a challenge deep-link (start_param = challenge id), fetch it
 // first so the feed can open on the challenged mechanic. Normal launches skip
 // the await entirely (getStartParam is sync) → no added boot latency.
 async function boot(): Promise<void> {
   let candidate: CandidateFeedPreviewIdentity | null = null;
   let candidateSession: SessionResp | null = null;
-  let developerOverlayMounted = false;
   try {
     if (candidateFeedStartRequested
       && (!hasTelegramHostContext() || !hasTelegramLaunchUserIdentity())) {
@@ -152,7 +143,6 @@ async function boot(): Promise<void> {
         const adopted = await resolveDeveloperFeedAdoption(initial.developerFeedAdoption);
         setCandidatePlayableOverlay(adopted);
         setTelemetryReadOnlyPreviewMode(true);
-        developerOverlayMounted = true;
       } catch { /* invalid/tampered dev adoption fails closed to the public manifest */ }
     }
   }
@@ -179,8 +169,10 @@ async function boot(): Promise<void> {
     failCandidateFeedPreview();
     return;
   } else {
+    // The `Dev-лента · Только мне` badge is owned by the feed itself: it is the
+    // entry point of the read-only «Изменения dev-ленты» inventory, which needs
+    // the operator capabilities and rework queue the feed already holds.
     mountFeed();
-    if (developerOverlayMounted) mountDeveloperFeedBadge();
   }
 }
 const routedStartParam = startParam;

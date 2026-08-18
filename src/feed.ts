@@ -203,6 +203,11 @@ import {
   type PlatformDevelopmentIntakeControl,
   type PlatformDevelopmentIntakeRequestV1,
 } from './operator-development-intakes.mjs';
+import {
+  mountDeveloperFeedDiffSurface,
+  type DeveloperFeedDiffInput,
+  type DeveloperFeedDiffSurface,
+} from './developer-feed-diff.mjs';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
@@ -770,6 +775,10 @@ export class Feed {
   private operatorPlayableReworkControlHoldUntil = 0;
   private operatorPlayableReworkControlRefreshTimer: number | null = null;
   private developmentIntakeAvailable = false;
+  // Read-only «Изменения dev-ленты»: the dev badge + its inventory sheet. It is
+  // a projection of state this class already holds (rework queue, platform
+  // intake receipt, adopted candidate) — it never issues a request of its own.
+  private developerFeedDiffSurface: DeveloperFeedDiffSurface | null = null;
   private platformDevelopmentIntakeControl: PlatformDevelopmentIntakeControl | null = null;
   private platformDevelopmentIntakeLatest: PlatformDevelopmentIntakeResponseV1 | null = null;
   private platformDevelopmentIntakeSyncEpoch = 0;
@@ -996,6 +1005,10 @@ export class Feed {
     this.buildIncoming();
     this.mountHud();
     this.mountFeedBar();
+    // An adopted candidate is known before the first /session, so the dev badge
+    // exists from the first frame in that route; the operator capabilities add
+    // to it when the session bootstrap lands.
+    this.refreshDeveloperFeedDiff();
     this.measure();
     this.render(false);
     this.updateIncomingPosters();
@@ -2776,6 +2789,68 @@ export class Feed {
       void this.refreshOperatorPlayableReworks();
     }
     this.refreshOperatorControls();
+    this.refreshDeveloperFeedDiff();
+  }
+
+  // ── «Изменения dev-ленты» (read-only) ────────────────────────────────────
+  // Slice 1 of selective promotion: an inventory of what this operator's dev
+  // feed carries that the public feed does not. Every field is already in
+  // memory — the sheet adds no request, no route and no mutation authority.
+  private developerFeedDiffInput(): DeveloperFeedDiffInput {
+    // The dev badge follows the operator surfaces themselves: the same two
+    // server capabilities that decide whether `Доработать` exists at all.
+    const operatorSurfacesActive = !this.readOnlyPreview
+      && (this.operatorLevelFlaggingAvailable || this.developmentIntakeAvailable);
+    // A resolved overlay outside the read-only candidate route is exactly the
+    // developer-feed adoption main.ts used to badge.
+    const overlay = this.readOnlyPreview ? null : candidatePlayableOverlay();
+    return {
+      operatorSurfacesActive,
+      platform: {
+        sourceSha: typeof __PLATFORM_SOURCE_SHA__ === 'string' ? __PLATFORM_SOURCE_SHA__ : null,
+        stamp: typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : null,
+      },
+      reworks: this.operatorLevelFlaggingAvailable
+        ? Array.from(this.operatorPlayableReworks.entries())
+        : [],
+      platformIntake: this.developmentIntakeAvailable
+        ? this.platformDevelopmentIntakeLatest
+        : null,
+      adoption: overlay,
+      // No operator-readable endpoint exposes catalog active-release/candidate
+      // identity to this client, so the row stays honestly empty here.
+      catalog: null,
+    };
+  }
+
+  private refreshDeveloperFeedDiff(): void {
+    const input = this.developerFeedDiffInput();
+    if (!input.operatorSurfacesActive && !input.adoption) {
+      this.developerFeedDiffSurface?.destroy();
+      this.developerFeedDiffSurface = null;
+      return;
+    }
+    if (this.developerFeedDiffSurface) {
+      this.developerFeedDiffSurface.update(input);
+      return;
+    }
+    this.developerFeedDiffSurface = mountDeveloperFeedDiffSurface(document.body, {
+      input,
+      onShowMechanic: (playableId) => this.showMechanicCard(playableId),
+    });
+  }
+
+  /** Jump to a mechanic's card, where `Доработать механику` already lives. */
+  private showMechanicCard(playableId: string): void {
+    const idx = this.playables.findIndex((p) => p.id === playableId);
+    if (idx < 0) return;
+    const currentPos = Math.round(this.pos);
+    const currentIndex = this.indexForPos(currentPos);
+    if (idx === currentIndex) return;
+    const forward = (idx - currentIndex + this.N) % this.N;
+    const backward = forward - this.N;
+    const step = Math.abs(backward) < forward ? backward : forward;
+    window.setTimeout(() => this.goTo(currentPos + step, true), 0);
   }
 
   private applyDevelopmentIntakeCapability(value: unknown, context: unknown): void {
@@ -2790,10 +2865,12 @@ export class Feed {
       this.platformDevelopmentIntakeControl?.destroy();
       this.platformDevelopmentIntakeControl = null;
       this.platformDevelopmentIntakeActorUserId = null;
+      this.refreshDeveloperFeedDiff();
       return;
     }
     this.refreshPlatformDevelopmentIntakeControl();
     void this.refreshPlatformDevelopmentIntakes();
+    this.refreshDeveloperFeedDiff();
   }
 
   private async refreshPlatformDevelopmentIntakes(): Promise<void> {
@@ -2806,6 +2883,7 @@ export class Feed {
         || this.platformDevelopmentIntakeActorUserId !== this.authenticatedUserId) return;
       const latest = projection.items[0] ?? null;
       this.platformDevelopmentIntakeLatest = latest;
+      this.refreshDeveloperFeedDiff();
       if (latest && this.platformDevelopmentIntakeControl) {
         this.platformDevelopmentIntakeControl.update(latest);
       } else {
@@ -2888,6 +2966,7 @@ export class Feed {
         OperatorPlayableReworkQueueItemV1[]
       >;
       this.operatorPlayableReworks = next;
+      this.refreshDeveloperFeedDiff();
       if (refreshControl) this.refreshOperatorPlayableReworkControl();
     } catch {
       // The operator surface is fail-quiet: gameplay stays available and a
