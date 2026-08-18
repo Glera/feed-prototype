@@ -15,6 +15,26 @@ let origin = '';
 const fixture = `<!doctype html>
 <html><body><div id="host"></div><script type="module">
 import { mountOperatorPlayableReworkControl, screenshotFromFile } from '/operator-playable-reworks.mjs';
+// ?viewport=1 reproduces the production composition this control actually ships
+// in: the real stylesheet, and the host inside the bottom feed bar. That is the
+// only place its popover geometry — anchored above the bar, growing upward —
+// can be measured against a shrinking (keyboard) viewport.
+if (new URL(location.href).searchParams.has('viewport')) {
+  const stylesheet = document.createElement('link');
+  stylesheet.rel = 'stylesheet';
+  stylesheet.href = '/styles.css';
+  document.head.append(stylesheet);
+  const viewport = document.createElement('div');
+  viewport.className = 'viewport';
+  const feed = document.createElement('div');
+  feed.className = 'feed';
+  const bar = document.createElement('div');
+  bar.className = 'feed-bar';
+  document.body.append(viewport);
+  viewport.append(feed);
+  feed.append(bar);
+  bar.append(document.querySelector('#host'));
+}
 const occurrence = {
   playableId: 'solitaire-v1-swipe',
   mappingId: '11111111-1111-5111-8111-111111111111',
@@ -77,6 +97,11 @@ window.control = mountOperatorPlayableReworkControl(document.querySelector('#hos
 
 const server = createServer((request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
+  if (url.pathname === '/styles.css') {
+    response.setHeader('content-type', 'text/css; charset=utf-8');
+    response.end(readFileSync(path.join(root, 'src', 'styles.css')));
+    return;
+  }
   if (MODULE_PATH.test(url.pathname)) {
     try {
       const source = readFileSync(path.join(root, 'src', url.pathname.slice(1)));
@@ -241,9 +266,65 @@ try {
   await queuePage.locator('.game__operator-flag-status')
     .filter({ hasText: 'Такое замечание уже сохранено' }).waitFor();
   await queuePage.close();
+
+  // The on-screen keyboard shrinks the visible viewport from the bottom. This
+  // popover is anchored above the feed bar and grows UPWARD, so the instruction
+  // textarea used to be pushed clean off the top of the screen and the operator
+  // typed blind (iOS Telegram dogfood on the sibling intake form,
+  // Glera/p4g-workspace-meta#108 comment 5324549317). The focused field must
+  // stay inside whatever height the keyboard leaves.
+  const keyboardPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await keyboardPage.goto(`${origin}/?viewport=1`, { waitUntil: 'domcontentloaded' });
+  await keyboardPage.waitForFunction(() => getComputedStyle(document.querySelector('.feed-bar')).position === 'absolute');
+  await keyboardPage.locator('.game__operator-flag-open').click();
+  const keyboardField = keyboardPage.locator('textarea[name="instruction"]');
+  await keyboardField.click();
+  await keyboardPage.evaluate(() => {
+    window.keptForm = document.querySelector('.game__operator-flag-form');
+  });
+  const focusedFieldVisible = () => keyboardPage.evaluate(() => {
+    const field = document.querySelector('textarea[name="instruction"]');
+    const rect = field.getBoundingClientRect();
+    return {
+      inView: rect.top >= 0 && rect.bottom <= window.innerHeight && rect.height > 0,
+      top: Math.round(rect.top),
+      bottom: Math.round(rect.bottom),
+      height: window.innerHeight,
+      focused: document.activeElement === field,
+    };
+  });
+  for (const height of [420, 330, 260]) {
+    await keyboardPage.setViewportSize({ width: 390, height });
+    await keyboardPage.waitForFunction((expected) => {
+      const rect = document.querySelector('textarea[name="instruction"]').getBoundingClientRect();
+      return window.innerHeight === expected && rect.top >= 0 && rect.bottom <= window.innerHeight;
+    }, height, { timeout: 5_000 }).catch(() => {});
+    const measured = await focusedFieldVisible();
+    assert.equal(measured.focused, true,
+      `the keyboard simulation lost focus at ${height}px`);
+    assert.equal(measured.inView, true,
+      `the focused rework field left the ${height}px viewport (${measured.top}..${measured.bottom})`);
+  }
+
+  // Cleanup is the control's own destroy path: the published viewport height is
+  // withdrawn and no later resize may re-assert anything.
+  await keyboardPage.evaluate(() => window.control.destroy());
+  assert.equal(
+    await keyboardPage.evaluate(() => window.keptForm.style.getPropertyValue('--operator-form-viewport')),
+    '',
+    'destroy left the published viewport height on the detached form',
+  );
+  await keyboardPage.setViewportSize({ width: 390, height: 520 });
+  await keyboardPage.waitForTimeout(600);
+  assert.equal(
+    await keyboardPage.evaluate(() => window.keptForm.style.getPropertyValue('--operator-form-viewport')),
+    '',
+    'a resize after destroy still reached a leaked visual-viewport listener',
+  );
+  await keyboardPage.close();
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
 }
 
-console.log('operator playable rework browser: screenshot + always-open queue capture PASS');
+console.log('operator playable rework browser: screenshot + always-open queue capture + keyboard viewport PASS');

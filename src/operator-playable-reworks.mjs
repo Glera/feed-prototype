@@ -1,3 +1,4 @@
+import { observeOperatorFormViewport } from './operator-form-viewport.mjs';
 import {
   prepareScreenshotFromFile,
   screenshotSelectionLabel,
@@ -261,6 +262,9 @@ export function mountOperatorPlayableReworkControl(host, options) {
   const counts = details.querySelector('[data-rework-counts]');
   const list = details.querySelector('[data-rework-list]');
   const countBadge = root.querySelector('[data-rework-count]');
+  // Same bar-anchored composition as the platform intake: the keyboard must
+  // never push the field being typed into off the screen.
+  const formViewport = observeOperatorFormViewport(form);
   open.dataset.reworkState = queuePresentation.state;
   open.setAttribute('aria-label', queuePresentation.label);
   open.title = queuePresentation.label;
@@ -440,6 +444,6 @@ export function mountOperatorPlayableReworkControl(host, options) {
   return Object.freeze({
     key: operatorPlayableReworkControlKey(occurrence, queue),
     playableId: occurrence.playableId,
-    destroy() { destroyed = true; root.remove(); },
+    destroy() { destroyed = true; formViewport.release(); root.remove(); },
   });
 }

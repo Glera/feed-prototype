@@ -950,7 +950,76 @@ try {
   await undecodable.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
   await undecodable.close();
 
-  console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, prepared screenshot capture, submit latch, typed screenshot failure, and capability fences verified');
+  // 12. The on-screen keyboard shrinks the visible viewport from the bottom.
+  // This form is anchored above the feed bar and grows UPWARD, so on a real iOS
+  // Telegram device the instruction textarea was pushed clean off the top of
+  // the screen and the operator typed blind (dogfood finding,
+  // Glera/p4g-workspace-meta#108 comment 5324549317). Resizing the page height
+  // with the textarea focused is the browser-fixture equivalent of that
+  // keyboard: the focused field must stay inside whatever height is left, and
+  // closing the form must stop the contract from asserting anything at all.
+  projectionItems = [];
+  const keyboard = await newPage();
+  const keyboardSession = awaitSession(keyboard);
+  const keyboardProjection = keyboard.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await keyboard.goto(`${origin}/?browserCase=keyboard-viewport`, { waitUntil: 'domcontentloaded' });
+  await keyboardSession;
+  await keyboardProjection;
+  await keyboard.locator(openSelector).waitFor({ state: 'visible' });
+  await keyboard.locator(openSelector).click();
+  const keyboardField = keyboard.locator(`${formSelector} textarea[name="instruction"]`);
+  await keyboardField.click();
+  await keyboardField.fill('Печатать вслепую нельзя — поле должно остаться на экране.');
+  const measureField = () => keyboard.evaluate((selector) => {
+    const form = document.querySelector(`${selector} form`);
+    const field = form.querySelector('textarea[name="instruction"]');
+    const rect = field.getBoundingClientRect();
+    return {
+      height: window.innerHeight,
+      top: Math.round(rect.top),
+      bottom: Math.round(rect.bottom),
+      inView: rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight,
+      focused: document.activeElement === field,
+      published: form.style.getPropertyValue('--operator-form-viewport'),
+    };
+  }, intakeSelector);
+  for (const height of [420, 330, 260]) {
+    await keyboard.setViewportSize({ width: 375, height });
+    await keyboard.waitForFunction((expected) => {
+      const field = document.querySelector('.platform-development-intake form textarea[name="instruction"]');
+      const rect = field.getBoundingClientRect();
+      return window.innerHeight === expected && rect.top >= 0 && rect.bottom <= window.innerHeight;
+    }, height, { timeout: 5_000 }).catch(() => {});
+    const measured = await measureField();
+    assert.equal(measured.focused, true,
+      `the keyboard simulation lost the focused intake field at ${height}px`);
+    assert.equal(measured.inView, true,
+      `the focused intake field left the ${height}px viewport (${measured.top}..${measured.bottom})`);
+    assert.equal(measured.published, `${height}px`,
+      `the visible height published to the intake form did not follow the ${height}px viewport`);
+  }
+
+  // Closing the form ends the contract: a later resize must publish nothing and
+  // must not move a single scroll offset behind the operator's back.
+  await keyboard.locator(`${formSelector} [data-action="cancel"]`).click();
+  const closedBefore = await keyboard.evaluate((selector) => ({
+    published: document.querySelector(`${selector} form`).style.getPropertyValue('--operator-form-viewport'),
+    feed: document.querySelector('.feed')?.scrollTop ?? null,
+    scrollY: window.scrollY,
+  }), intakeSelector);
+  await keyboard.setViewportSize({ width: 375, height: 540 });
+  await keyboard.waitForTimeout(600);
+  assert.deepEqual(await keyboard.evaluate((selector) => ({
+    published: document.querySelector(`${selector} form`).style.getPropertyValue('--operator-form-viewport'),
+    feed: document.querySelector('.feed')?.scrollTop ?? null,
+    scrollY: window.scrollY,
+  }), intakeSelector), closedBefore,
+  'a resize after the intake form closed still re-asserted field visibility');
+  await keyboard.close();
+
+  console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, prepared screenshot capture, submit latch, typed screenshot failure, keyboard-viewport field visibility, and capability fences verified');
 } finally {
   if (heldProjection) releaseHeldProjection();
   if (heldPost) releaseHeldPost();

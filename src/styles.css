@@ -908,6 +908,19 @@ body {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
 }
 .game__operator-flag-form[hidden] { display: none; }
+/* Both bar popovers (platform intake, mechanic rework) are anchored above the
+   bar and grow UPWARD, so the on-screen keyboard — which shrinks the visible
+   viewport from the bottom — used to push the instruction textarea clean off
+   the top of the screen and the operator typed blind (iOS Telegram dogfood,
+   meta#108). operator-form-viewport.mjs publishes the visible height here, so
+   the form bounds itself and scrolls internally instead of leaving the screen.
+   Without that custom property the bound is the full dynamic viewport, i.e.
+   the pre-existing unbounded layout. */
+.feed-bar .game__operator-flag-form {
+  max-height: calc(var(--operator-form-viewport, 100dvh) - var(--bar-reserve) - 26px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .game__operator-flag-form label { display: grid; gap: 5px; margin-bottom: 9px; }
 .game__operator-flag-form select,
 .game__operator-flag-form textarea {
