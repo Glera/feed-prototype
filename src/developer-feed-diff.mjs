@@ -395,7 +395,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       model = developerFeedDiffModel(next || {});
       if (open && !model.visible) closeSheet(false);
       renderBadge();
-      if (open) renderBody();
+      if (!open) return;
+      // A background projection refresh must not throw the operator back to the
+      // top of a list they are reading.
+      const scrollTop = card.scrollTop;
+      renderBody();
+      card.scrollTop = scrollTop;
     },
     close() { closeSheet(false); },
     destroy() {
