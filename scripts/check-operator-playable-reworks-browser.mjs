@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
+import {
+  OPERATOR_FORM_KEYBOARD_GEOMETRIES,
+  applyOperatorFormGeometry,
+  describeOperatorFormField,
+} from './operator-form-visibility.mjs';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // The control is served as its real ES module graph, so its shared imports
 // (screenshot preparation) resolve exactly as they do in the production bundle.
@@ -13,13 +19,16 @@ const MODULE_PATH = /^\/[a-z0-9-]+\.mjs$/;
 let origin = '';
 
 const fixture = `<!doctype html>
-<html><body><div id="host"></div><script type="module">
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body><div id="host"></div><script type="module">
 import { mountOperatorPlayableReworkControl, screenshotFromFile } from '/operator-playable-reworks.mjs';
+import { observeOperatorFormViewport } from '/operator-form-viewport.mjs';
 // ?viewport=1 reproduces the production composition this control actually ships
-// in: the real stylesheet, and the host inside the bottom feed bar. That is the
-// only place its popover geometry — anchored above the bar, growing upward —
-// can be measured against a shrinking (keyboard) viewport.
-if (new URL(location.href).searchParams.has('viewport')) {
+// in: the real stylesheet, and the host inside the bottom feed bar, inside the
+// .feed container that clips everything above the top zone. That is the only place its
+// popover geometry — anchored above the bar, growing upward — can be measured
+// against a shrinking (keyboard) viewport.
+const barComposition = () => {
   const stylesheet = document.createElement('link');
   stylesheet.rel = 'stylesheet';
   stylesheet.href = '/styles.css';
@@ -33,7 +42,40 @@ if (new URL(location.href).searchParams.has('viewport')) {
   document.body.append(viewport);
   viewport.append(feed);
   feed.append(bar);
-  bar.append(document.querySelector('#host'));
+  return bar;
+};
+if (new URL(location.href).searchParams.has('viewport')) {
+  barComposition().append(document.querySelector('#host'));
+}
+// ?fakeViewport=1 stages the case no browser harness can produce: a host that
+// shrinks the VISUAL viewport for the keyboard and leaves the LAYOUT viewport
+// alone (visualViewport.height < innerHeight, offsetTop > 0). Playwright's
+// setViewportSize always moves both, so without an injectable source the
+// divergent host is never exercised — and a bottom-anchored popover that is
+// only shortened there sinks further behind the keyboard. The helper is
+// measured directly, so it must carry the geometry on its own.
+if (new URL(location.href).searchParams.has('fakeViewport')) {
+  const bar = barComposition();
+  const holder = document.createElement('div');
+  holder.className = 'game__operator-playable-rework';
+  const form = document.createElement('form');
+  form.className = 'game__operator-flag-form';
+  form.innerHTML = '<label>Что поправить'
+    + '<textarea name="instruction" rows="4"></textarea></label>'
+    + '<p>наполнитель, чтобы форма была выше доступной полосы</p>'.repeat(6);
+  holder.append(form);
+  bar.append(holder);
+  class FakeVisualViewport extends EventTarget {
+    constructor(height, offsetTop) { super(); this.height = height; this.offsetTop = offsetTop; }
+    move(height, offsetTop, type) {
+      this.height = height;
+      this.offsetTop = offsetTop;
+      this.dispatchEvent(new Event(type));
+    }
+  }
+  window.fakeViewport = new FakeVisualViewport(300, 40);
+  window.fakeForm = form;
+  window.fakeObserver = observeOperatorFormViewport(form, { viewport: window.fakeViewport });
 }
 const occurrence = {
   playableId: 'solitaire-v1-swipe',
@@ -273,55 +315,130 @@ try {
   // typed blind (iOS Telegram dogfood on the sibling intake form,
   // Glera/p4g-workspace-meta#108 comment 5324549317). The focused field must
   // stay inside whatever height the keyboard leaves.
+  // "On screen" is asserted against every clipping ancestor, not against the
+  // window: this popover lives inside `.feed`, which clips everything above
+  // `--top-zone-h`, so a rect-in-viewport test passes on states where the field
+  // is entirely behind that edge.
   const keyboardPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await keyboardPage.goto(`${origin}/?viewport=1`, { waitUntil: 'domcontentloaded' });
   await keyboardPage.waitForFunction(() => getComputedStyle(document.querySelector('.feed-bar')).position === 'absolute');
   await keyboardPage.locator('.game__operator-flag-open').click();
-  const keyboardField = keyboardPage.locator('textarea[name="instruction"]');
-  await keyboardField.click();
+  const keyboardFieldSelector = '.game__operator-flag-form textarea[name="instruction"]';
+  await keyboardPage.locator(keyboardFieldSelector).click();
   await keyboardPage.evaluate(() => {
     window.keptForm = document.querySelector('.game__operator-flag-form');
   });
-  const focusedFieldVisible = () => keyboardPage.evaluate(() => {
-    const field = document.querySelector('textarea[name="instruction"]');
-    const rect = field.getBoundingClientRect();
-    return {
-      inView: rect.top >= 0 && rect.bottom <= window.innerHeight && rect.height > 0,
-      top: Math.round(rect.top),
-      bottom: Math.round(rect.bottom),
-      height: window.innerHeight,
-      focused: document.activeElement === field,
-    };
-  });
-  for (const height of [420, 330, 260]) {
-    await keyboardPage.setViewportSize({ width: 390, height });
-    await keyboardPage.waitForFunction((expected) => {
-      const rect = document.querySelector('textarea[name="instruction"]').getBoundingClientRect();
-      return window.innerHeight === expected && rect.top >= 0 && rect.bottom <= window.innerHeight;
-    }, height, { timeout: 5_000 }).catch(() => {});
-    const measured = await focusedFieldVisible();
+  for (const geometry of OPERATOR_FORM_KEYBOARD_GEOMETRIES) {
+    const measured = await applyOperatorFormGeometry(keyboardPage, geometry, keyboardFieldSelector);
+    const where = describeOperatorFormField(measured);
     assert.equal(measured.focused, true,
-      `the keyboard simulation lost focus at ${height}px`);
-    assert.equal(measured.inView, true,
-      `the focused rework field left the ${height}px viewport (${measured.top}..${measured.bottom})`);
+      `the keyboard simulation lost focus at ${geometry.name}`);
+    assert.equal(measured.visible, true,
+      `the focused rework field is clipped away at ${geometry.name}: ${where}`);
+    assert.equal(measured.hitsField, true,
+      `the rework field is not the element at its own centre at ${geometry.name}: ${where}`);
+    assert.equal(measured.formWithinClip, true,
+      `the rework popover itself overflows its clipping ancestor at ${geometry.name}: ${where}`);
+    assert.ok(/^\d+px$/.test(measured.published.maxHeight),
+      `no measured height was published to the rework form at ${geometry.name}`);
+    // `.feed` has no scrollbar and no gesture, so any offset on it is an engine
+    // caret-reveal that drags the whole bar — and this popover — off screen.
+    assert.equal(measured.feedScrollTop, 0,
+      `the feed was left displaced under the rework popover at ${geometry.name}: ${where}`);
   }
 
-  // Cleanup is the control's own destroy path: the published viewport height is
+  // Cleanup is the control's own destroy path: every published property is
   // withdrawn and no later resize may re-assert anything.
+  const publishedOn = (handle) => keyboardPage.evaluate((name) => {
+    const form = window[name];
+    return [
+      form.style.getPropertyValue('--operator-form-lift'),
+      form.style.getPropertyValue('--operator-form-max-height'),
+      form.style.getPropertyValue('--operator-form-field-max-height'),
+    ].join('|');
+  }, handle);
   await keyboardPage.evaluate(() => window.control.destroy());
-  assert.equal(
-    await keyboardPage.evaluate(() => window.keptForm.style.getPropertyValue('--operator-form-viewport')),
-    '',
-    'destroy left the published viewport height on the detached form',
-  );
+  assert.equal(await publishedOn('keptForm'), '||',
+    'destroy left a measured bound on the detached form');
   await keyboardPage.setViewportSize({ width: 390, height: 520 });
   await keyboardPage.waitForTimeout(600);
-  assert.equal(
-    await keyboardPage.evaluate(() => window.keptForm.style.getPropertyValue('--operator-form-viewport')),
-    '',
-    'a resize after destroy still reached a leaked visual-viewport listener',
-  );
+  assert.equal(await publishedOn('keptForm'), '||',
+    'a resize after destroy still reached a leaked visual-viewport listener');
   await keyboardPage.close();
+
+  // The divergent host: the visual viewport shrinks for the keyboard while the
+  // layout viewport does not. `setViewportSize` moves both, so this is staged
+  // through the helper's injectable viewport source. Bounding alone is wrong
+  // here — a bottom-anchored popover must also be LIFTED out from behind the
+  // keyboard, and the geometry has to follow visualViewport `scroll` (which iOS
+  // fires without a resize) as well as `resize`.
+  const divergent = await browser.newPage({ viewport: { width: 390, height: 600 } });
+  await divergent.goto(`${origin}/?fakeViewport=1`, { waitUntil: 'domcontentloaded' });
+  await divergent.waitForFunction(() => Boolean(window.fakeObserver)
+    && getComputedStyle(document.querySelector('.feed-bar')).position === 'absolute');
+  const divergentState = () => divergent.evaluate(() => {
+    const form = window.fakeForm;
+    const rect = form.getBoundingClientRect();
+    const feed = document.querySelector('.feed').getBoundingClientRect();
+    return {
+      lift: form.style.getPropertyValue('--operator-form-lift'),
+      maxHeight: form.style.getPropertyValue('--operator-form-max-height'),
+      fieldMaxHeight: form.style.getPropertyValue('--operator-form-field-max-height'),
+      formTop: Math.round(rect.top),
+      formBottom: Math.round(rect.bottom),
+      // The band the operator can actually see, per the injected source.
+      bandTop: window.fakeViewport.offsetTop,
+      bandBottom: window.fakeViewport.offsetTop + window.fakeViewport.height,
+      clipTop: Math.round(feed.top),
+      innerHeight: window.innerHeight,
+    };
+  });
+  await divergent.evaluate(() => window.fakeObserver.reveal());
+  let staged = await divergentState();
+  // innerHeight 600, visible band 40..340: the popover is anchored 60px above a
+  // bar that now sits behind the keyboard, so it must rise by the whole 260px
+  // gap and fit between the feed's top clip (88) and its lifted bottom (272).
+  assert.equal(staged.innerHeight, 600, 'the divergent fixture needs an exact 600px layout viewport');
+  assert.deepEqual(
+    { lift: staged.lift, maxHeight: staged.maxHeight, fieldMaxHeight: staged.fieldMaxHeight },
+    { lift: '260px', maxHeight: '184px', fieldMaxHeight: '158px' },
+    'the helper ignored a visual viewport that diverges from the layout viewport',
+  );
+  assert.deepEqual({ top: staged.formTop, bottom: staged.formBottom }, { top: 88, bottom: 272 },
+    'the popover did not move into the visible band of a divergent viewport');
+  assert.ok(staged.formBottom <= staged.bandBottom,
+    `the popover stayed behind the keyboard (${staged.formBottom} > ${staged.bandBottom})`);
+  assert.ok(staged.formTop >= staged.clipTop,
+    `the popover stayed behind the feed clip (${staged.formTop} < ${staged.clipTop})`);
+
+  // iOS pans the visual viewport under an open keyboard and reports it as
+  // `scroll` with no `resize` at all.
+  await divergent.evaluate(() => window.fakeViewport.move(240, 60, 'scroll'));
+  staged = await divergentState();
+  assert.deepEqual({ lift: staged.lift, maxHeight: staged.maxHeight, bottom: staged.formBottom },
+    { lift: '300px', maxHeight: '144px', bottom: 232 },
+    'a visual-viewport scroll without a resize left the popover behind the keyboard');
+
+  // Keyboard dismissed: the band is the whole layout viewport again, so the
+  // popover drops back to its designed anchor with no lift.
+  await divergent.evaluate(() => window.fakeViewport.move(600, 0, 'resize'));
+  staged = await divergentState();
+  assert.deepEqual({ lift: staged.lift, maxHeight: staged.maxHeight, bottom: staged.formBottom },
+    { lift: '0px', maxHeight: '444px', bottom: 532 },
+    'the popover did not return to its anchor once the visual viewport was whole again',
+  );
+
+  await divergent.evaluate(() => window.fakeObserver.release());
+  staged = await divergentState();
+  assert.deepEqual(
+    { lift: staged.lift, maxHeight: staged.maxHeight, fieldMaxHeight: staged.fieldMaxHeight },
+    { lift: '', maxHeight: '', fieldMaxHeight: '' },
+    'release left a measured bound behind on the divergent fixture',
+  );
+  await divergent.evaluate(() => window.fakeViewport.move(200, 100, 'resize'));
+  assert.equal((await divergentState()).maxHeight, '',
+    'a released observer still listened to its injected viewport source');
+  await divergent.close();
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));

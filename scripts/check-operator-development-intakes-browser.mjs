@@ -14,6 +14,12 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
+import {
+  OPERATOR_FORM_KEYBOARD_GEOMETRIES,
+  applyOperatorFormGeometry,
+  describeOperatorFormField,
+} from './operator-form-visibility.mjs';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const buildRoot = mkdtempSync(path.join(tmpdir(), 'operator-development-intakes-browser-'));
 const BUILD_SHA = 'b'.repeat(40);
@@ -956,8 +962,13 @@ try {
   // the screen and the operator typed blind (dogfood finding,
   // Glera/p4g-workspace-meta#108 comment 5324549317). Resizing the page height
   // with the textarea focused is the browser-fixture equivalent of that
-  // keyboard: the focused field must stay inside whatever height is left, and
-  // closing the form must stop the contract from asserting anything at all.
+  // keyboard.
+  //
+  // "On screen" is asserted against every clipping ancestor, not against the
+  // window: the popover lives inside `.feed`, which clips everything above
+  // `--top-zone-h`, so a rect-in-viewport test passes on states where the field
+  // is entirely behind that edge. It also has to hold with real Telegram safe
+  // areas, which push that clip 59px further down.
   projectionItems = [];
   const keyboard = await newPage();
   const keyboardSession = awaitSession(keyboard);
@@ -972,51 +983,54 @@ try {
   const keyboardField = keyboard.locator(`${formSelector} textarea[name="instruction"]`);
   await keyboardField.click();
   await keyboardField.fill('Печатать вслепую нельзя — поле должно остаться на экране.');
-  const measureField = () => keyboard.evaluate((selector) => {
-    const form = document.querySelector(`${selector} form`);
-    const field = form.querySelector('textarea[name="instruction"]');
-    const rect = field.getBoundingClientRect();
-    return {
-      height: window.innerHeight,
-      top: Math.round(rect.top),
-      bottom: Math.round(rect.bottom),
-      inView: rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight,
-      focused: document.activeElement === field,
-      published: form.style.getPropertyValue('--operator-form-viewport'),
-    };
-  }, intakeSelector);
-  for (const height of [420, 330, 260]) {
-    await keyboard.setViewportSize({ width: 375, height });
-    await keyboard.waitForFunction((expected) => {
-      const field = document.querySelector('.platform-development-intake form textarea[name="instruction"]');
-      const rect = field.getBoundingClientRect();
-      return window.innerHeight === expected && rect.top >= 0 && rect.bottom <= window.innerHeight;
-    }, height, { timeout: 5_000 }).catch(() => {});
-    const measured = await measureField();
+  const keyboardFieldSelector = `${formSelector} textarea[name="instruction"]`;
+  for (const geometry of OPERATOR_FORM_KEYBOARD_GEOMETRIES) {
+    const measured = await applyOperatorFormGeometry(keyboard, geometry, keyboardFieldSelector);
+    const where = describeOperatorFormField(measured);
     assert.equal(measured.focused, true,
-      `the keyboard simulation lost the focused intake field at ${height}px`);
-    assert.equal(measured.inView, true,
-      `the focused intake field left the ${height}px viewport (${measured.top}..${measured.bottom})`);
-    assert.equal(measured.published, `${height}px`,
-      `the visible height published to the intake form did not follow the ${height}px viewport`);
+      `the keyboard simulation lost the focused intake field at ${geometry.name}`);
+    assert.equal(measured.visible, true,
+      `the focused intake field is clipped away at ${geometry.name}: ${where}`);
+    assert.equal(measured.hitsField, true,
+      `the intake field is not the element at its own centre at ${geometry.name}: ${where}`);
+    assert.equal(measured.formWithinClip, true,
+      `the intake popover itself overflows its clipping ancestor at ${geometry.name}: ${where}`);
+    assert.ok(/^\d+px$/.test(measured.published.maxHeight),
+      `no measured height was published to the intake form at ${geometry.name}`);
+    // Playwright shrinks the layout viewport with the visual one, so the
+    // keyboard gap — and therefore the lift — is exactly zero here. The
+    // divergent host is covered deterministically by the rework contract.
+    assert.equal(measured.published.lift, '0px',
+      `the intake form was lifted without a keyboard gap at ${geometry.name}`);
+    // `.feed` has no scrollbar and no gesture, so any offset on it is an engine
+    // caret-reveal that drags the whole bar — and this popover — off screen.
+    assert.equal(measured.feedScrollTop, 0,
+      `the feed was left displaced under the intake popover at ${geometry.name}: ${where}`);
   }
 
-  // Closing the form ends the contract: a later resize must publish nothing and
-  // must not move a single scroll offset behind the operator's back.
+  // Closing the form ends the contract: nothing stays published, so reopening
+  // can never inherit a bound measured against a keyboard that is long gone,
+  // and a later resize must not move a single scroll offset.
   await keyboard.locator(`${formSelector} [data-action="cancel"]`).click();
-  const closedBefore = await keyboard.evaluate((selector) => ({
-    published: document.querySelector(`${selector} form`).style.getPropertyValue('--operator-form-viewport'),
-    feed: document.querySelector('.feed')?.scrollTop ?? null,
-    scrollY: window.scrollY,
-  }), intakeSelector);
+  const readClosed = () => keyboard.evaluate((selector) => {
+    const form = document.querySelector(`${selector} form`);
+    return {
+      published: [
+        form.style.getPropertyValue('--operator-form-lift'),
+        form.style.getPropertyValue('--operator-form-max-height'),
+        form.style.getPropertyValue('--operator-form-field-max-height'),
+      ].join('|'),
+      feed: document.querySelector('.feed')?.scrollTop ?? null,
+      scrollY: window.scrollY,
+    };
+  }, intakeSelector);
+  const closedBefore = await readClosed();
+  assert.equal(closedBefore.published, '||',
+    'the closed intake form kept a stale measured bound for its next open');
   await keyboard.setViewportSize({ width: 375, height: 540 });
   await keyboard.waitForTimeout(600);
-  assert.deepEqual(await keyboard.evaluate((selector) => ({
-    published: document.querySelector(`${selector} form`).style.getPropertyValue('--operator-form-viewport'),
-    feed: document.querySelector('.feed')?.scrollTop ?? null,
-    scrollY: window.scrollY,
-  }), intakeSelector), closedBefore,
-  'a resize after the intake form closed still re-asserted field visibility');
+  assert.deepEqual(await readClosed(), closedBefore,
+    'a resize after the intake form closed still re-asserted field visibility');
   await keyboard.close();
 
   console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, prepared screenshot capture, submit latch, typed screenshot failure, keyboard-viewport field visibility, and capability fences verified');
