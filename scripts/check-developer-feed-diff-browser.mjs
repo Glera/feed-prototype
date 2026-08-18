@@ -1,0 +1,559 @@
+/**
+ * Browser contract for the read-only «Изменения dev-ленты» inventory
+ * (selective promotion v1, slice 1).
+ *
+ * Two passes:
+ *  A. The real production build against a fake backend — the badge exists only
+ *     for an operator-capable session, tapping it opens the sheet, and every
+ *     row is a projection of data the client already fetched. No request is
+ *     issued by the sheet itself, and it carries no promotion control.
+ *  B. The module served as its own ES graph — destroy() must drop every
+ *     listener it added, including the document-level Escape handler.
+ */
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { chromium } from 'playwright';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const buildRoot = mkdtempSync(path.join(tmpdir(), 'developer-feed-diff-browser-'));
+const BUILD_SHA = 'b7c1d4e9a2f60358b1cc4d7e0a91f2635d8e4b07';
+const PLATFORM_VERSION = `2026-08-18 13:59 · ${BUILD_SHA.slice(0, 7)}`;
+const MODULE_PATH = /^\/[a-z0-9-]+\.mjs$/;
+// Screenshots are opt-in so CI stays byte-clean; the operator proof run points
+// this at a scratch directory.
+const screenshotDir = process.env.DEV_DIFF_SCREENSHOT_DIR || '';
+if (screenshotDir) mkdirSync(screenshotDir, { recursive: true });
+
+const badgeSelector = '[data-testid="developer-feed-badge"]';
+const sheetSelector = '[data-testid="dev-diff-sheet"]';
+const rowSelector = '[data-testid="dev-diff-row"]';
+
+let origin = '';
+let operatorLevelFlaggingAvailable = false;
+let developmentIntakeAvailable = false;
+let reworkItems = [];
+let intakeItems = [];
+const reworkListRequests = [];
+
+const json = (response, value, status = 200) => {
+  response.statusCode = status;
+  response.setHeader('content-type', 'application/json');
+  response.end(JSON.stringify(value));
+};
+
+const sessionResponse = () => ({
+  user: { id: 42, ref_code: 'dev-diff-fixture' },
+  ref_code: 'dev-diff-fixture',
+  balance: 0,
+  puzzles: 0,
+  is_new: false,
+  backend_version: 'dev-diff-fixture',
+  catalog_lab_authorization_available: false,
+  operator_level_flagging_available: operatorLevelFlaggingAvailable,
+  development_intake_available: developmentIntakeAvailable,
+  ...(developmentIntakeAvailable
+    ? { development_intake_context: { buildSha: BUILD_SHA } }
+    : {}),
+  builtin_feed_bindings: {
+    schema: 'feed.builtin-bindings.v1',
+    available: false,
+    unavailable_reason: 'browser_fixture',
+    by_playable_id: {},
+  },
+});
+
+const reworkItem = ({
+  requestId,
+  playableId,
+  instruction,
+  releaseExecution = undefined,
+  execution = undefined,
+  queueDisposition = 'active_batch',
+  queueCounts = { active: 1, queued: 0 },
+  createdAt = '2026-08-18T09:00:00.000Z',
+}) => ({
+  schema: 'feed.playable-rework.v1',
+  requestId,
+  actorUserId: 42,
+  requestHash: 'c'.repeat(64),
+  state: 'claimed',
+  sourceAdapter: 'telegram',
+  queueDisposition,
+  batchPresent: true,
+  queueCounts,
+  releaseId: null,
+  claimedAt: createdAt,
+  closedAt: null,
+  closeReceiptDigest: null,
+  ...(execution ? { execution } : {}),
+  ...(releaseExecution ? { releaseExecution } : {}),
+  createdAt,
+  request: {
+    schema: 'feed.playable-rework.request.v1',
+    mutationId: requestId,
+    playableId,
+    mappingId: '11111111-1111-5111-8111-111111111111',
+    rosterActivationId: '22222222-2222-5222-8222-222222222222',
+    runtime: {
+      version: 'fixture-v1',
+      artifactDigest: `sha256:${'3'.repeat(64)}`,
+      sourceCommit: '4'.repeat(40),
+    },
+    context: {
+      feedPosition: 6,
+      level: null,
+      runId: null,
+      capturedAt: createdAt,
+      screenshot: { kind: 'unavailable', reason: null, mimeType: null, dataUrl: null },
+    },
+    instruction,
+  },
+});
+
+const intakeReceipt = () => ({
+  schema: 'platform.development-intake.response.v1',
+  requestId: '33333333-3333-5333-8333-333333333333',
+  mutationId: '44444444-4444-5444-8444-444444444444',
+  requestHash: 'e'.repeat(64),
+  delivery: {
+    deliveryId: '55555555-5555-5555-8555-555555555555',
+    status: 'confirmed',
+    issueUrl: 'https://github.com/Glera/p4g-workspace-meta/issues/118',
+    nothingPublished: true,
+  },
+  terminal: null,
+  request: {
+    schema: 'platform.development-intake.request.v1',
+    mutationId: '44444444-4444-5444-8444-444444444444',
+    instruction: 'Сделать подпись версии заметнее.',
+    surface: 'feed',
+    route: '/',
+    buildSha: BUILD_SHA,
+    capturedAt: '2026-08-18T09:05:00.000Z',
+    screenshot: { kind: 'unavailable', reason: 'not_captured', mimeType: null, dataUrl: null },
+  },
+  replayed: false,
+  createdAt: '2026-08-18T09:05:01.000Z',
+});
+
+const fakePlayable = `<!doctype html><html><body><canvas></canvas><script>
+const id = location.pathname.split('/').pop().replace(/\\.html$/, '');
+const send = (type) => parent.postMessage({ source: 'playable', id, type }, '*');
+addEventListener('message', (event) => {
+  if (event.data?.target === 'playable-swipe' && event.data?.type === 'prepareInteractive') {
+    send('interactive_ready');
+  }
+});
+addEventListener('load', () => send('static_ready'));
+</script></body></html>`;
+
+// Part B fixture: the module's own ES graph, plus a listener ledger installed
+// BEFORE the mount so a leaked document handler is provable, not assumed.
+const moduleFixture = `<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/styles.css"></head>
+<body><script type="module">
+window.documentListeners = new Map();
+const add = document.addEventListener.bind(document);
+const remove = document.removeEventListener.bind(document);
+document.addEventListener = (type, handler, options) => {
+  window.documentListeners.set(type, (window.documentListeners.get(type) || 0) + 1);
+  return add(type, handler, options);
+};
+document.removeEventListener = (type, handler, options) => {
+  window.documentListeners.set(type, (window.documentListeners.get(type) || 0) - 1);
+  return remove(type, handler, options);
+};
+const { mountDeveloperFeedDiffSurface, developerFeedDiffModel } =
+  await import('/developer-feed-diff.mjs');
+window.developerFeedDiffModel = developerFeedDiffModel;
+window.shown = [];
+window.surface = mountDeveloperFeedDiffSurface(document.body, {
+  input: {
+    operatorSurfacesActive: true,
+    platform: { sourceSha: '${BUILD_SHA}', stamp: '${PLATFORM_VERSION}' },
+    reworks: [],
+    platformIntake: null,
+    adoption: null,
+    catalog: null,
+  },
+  onShowMechanic: (playableId) => window.shown.push(playableId),
+});
+window.ready = true;
+</script></body></html>`;
+
+const server = createServer((request, response) => {
+  try {
+    const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
+    if (request.method === 'POST' && url.pathname === '/api/session') {
+      request.resume();
+      return json(response, sessionResponse());
+    }
+    if (request.method === 'GET' && url.pathname === '/api/operator-playable-reworks') {
+      reworkListRequests.push(Date.now());
+      return json(response, {
+        schema: 'feed.playable-rework-list.v1',
+        items: structuredClone(reworkItems),
+      });
+    }
+    if (request.method === 'GET' && url.pathname === '/api/development-intake') {
+      if (url.search !== '?limit=1') {
+        return json(response, { detail: 'exact limit=1 required' }, 400);
+      }
+      return json(response, {
+        schema: 'platform.development-intake.list.v1',
+        items: structuredClone(intakeItems),
+      });
+    }
+    if (request.method === 'GET' && url.pathname === '/api/challenges') {
+      return json(response, { box: 'in', items: [] });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/events') {
+      request.resume();
+      return json(response, { ok: true }, 202);
+    }
+    if (url.pathname === '/module.html') {
+      response.setHeader('content-type', 'text/html; charset=utf-8');
+      response.end(moduleFixture);
+      return;
+    }
+    if (url.pathname === '/styles.css') {
+      response.setHeader('content-type', 'text/css; charset=utf-8');
+      response.end(readFileSync(path.join(root, 'src', 'styles.css')));
+      return;
+    }
+    if (MODULE_PATH.test(url.pathname)) {
+      try {
+        const source = readFileSync(path.join(root, 'src', url.pathname.slice(1)));
+        response.setHeader('content-type', 'application/javascript; charset=utf-8');
+        response.end(source);
+      } catch {
+        response.statusCode = 404;
+        response.end();
+      }
+      return;
+    }
+    if (url.pathname === '/versions.json') return json(response, {});
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      response.setHeader('content-type', 'text/html; charset=utf-8');
+      response.end(readFileSync(path.join(buildRoot, 'index.html')));
+      return;
+    }
+    if (url.pathname.endsWith('.html')) {
+      response.setHeader('content-type', 'text/html; charset=utf-8');
+      response.end(fakePlayable);
+      return;
+    }
+    if (url.pathname.endsWith('.payload.js')) {
+      response.setHeader('content-type', 'application/javascript; charset=utf-8');
+      response.end('');
+      return;
+    }
+    if (url.pathname.startsWith('/api/')) {
+      request.resume();
+      return json(response, {}, 404);
+    }
+    response.statusCode = 404;
+    response.end();
+  } catch (error) {
+    response.statusCode = 500;
+    response.end(String(error));
+  }
+});
+
+await new Promise((resolve, reject) => {
+  server.once('error', reject);
+  server.listen(0, '127.0.0.1', resolve);
+});
+origin = `http://127.0.0.1:${server.address().port}`;
+
+const build = spawnSync('npx', [
+  '--no-install', 'vite', 'build', '--outDir', buildRoot, '--emptyOutDir',
+], {
+  cwd: root,
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    VITE_API_BASE: origin,
+    PLATFORM_SOURCE_SHA: BUILD_SHA,
+    PLATFORM_VERSION,
+  },
+  timeout: 180_000,
+});
+if (build.status !== 0) {
+  await new Promise((resolve) => server.close(resolve));
+  rmSync(buildRoot, { recursive: true, force: true });
+  assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+}
+
+const telegramSdkFixture = `
+window.Telegram = {
+  WebApp: {
+    initData: 'query_id=fixture&user=%7B%22id%22%3A42%7D&hash=fixture',
+    initDataUnsafe: { user: { id: 42 }, start_param: null },
+    platform: 'web',
+    ready() {}, expand() {}, disableVerticalSwipes() {}, setHeaderColor() {},
+    setBackgroundColor() {}, lockOrientation() {}, onEvent() {}, close() {},
+  },
+};`;
+
+let browser = null;
+try {
+  browser = await chromium.launch();
+  const newPage = async (viewport) => {
+    const page = await browser.newPage({ viewport });
+    await page.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/javascript',
+      body: telegramSdkFixture,
+    }));
+    return page;
+  };
+  const bootFeed = async (page, label) => {
+    const session = page.waitForResponse((response) =>
+      response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session');
+    await page.goto(`${origin}/?browserCase=${label}`, { waitUntil: 'domcontentloaded' });
+    await session;
+    await page.locator('iframe').first().waitFor({ state: 'attached' });
+    await page.waitForFunction(() => !document.querySelector('.preloader'));
+  };
+
+  // ── A1. No operator capability → the surface does not exist at all. ──────
+  operatorLevelFlaggingAvailable = false;
+  developmentIntakeAvailable = false;
+  reworkItems = [];
+  intakeItems = [];
+  const guest = await newPage({ width: 375, height: 812 });
+  await bootFeed(guest, 'no-capability');
+  assert.equal(await guest.locator(badgeSelector).count(), 0,
+    'an account without the operator capability received the dev-feed badge');
+  assert.equal(await guest.locator(sheetSelector).count(), 0,
+    'an account without the operator capability received the dev-diff sheet');
+  await guest.close();
+
+  // ── A2. Operator capability + in-flight work → badge, sheet, rows. ───────
+  operatorLevelFlaggingAvailable = true;
+  developmentIntakeAvailable = true;
+  reworkItems = [
+    reworkItem({
+      requestId: '66666666-6666-5666-8666-666666666666',
+      playableId: 'solitaire-v1-swipe',
+      instruction: 'Исправить центрирование.',
+      releaseExecution: {
+        releaseId: 'pr_118',
+        state: 'ready_for_approval',
+        bindingDigest: 'd'.repeat(64),
+        code: null,
+        summary: null,
+        updatedAt: '2026-08-18T09:10:00.000Z',
+        notificationStatus: null,
+      },
+    }),
+    reworkItem({
+      requestId: '77777777-7777-5777-8777-777777777777',
+      playableId: 'minesweeper-v1-swipe',
+      instruction: 'Перезапечь обложку.',
+      createdAt: '2026-08-18T08:30:00.000Z',
+      queueCounts: { active: 1, queued: 2 },
+      releaseExecution: {
+        releaseId: 'pr_119',
+        state: 'needs_help',
+        bindingDigest: 'f'.repeat(64),
+        code: 'build_failed',
+        summary: 'Сборка кандидата не проходит.',
+        updatedAt: '2026-08-18T08:40:00.000Z',
+        notificationStatus: null,
+      },
+    }),
+  ];
+  intakeItems = [intakeReceipt()];
+
+  const page = await newPage({ width: 375, height: 812 });
+  await bootFeed(page, 'operator');
+  const badge = page.locator(badgeSelector);
+  await badge.waitFor({ state: 'visible' });
+  assert.match(await badge.innerText(), /Dev-лента · Только мне/,
+    'the dev-feed badge lost its exact label');
+  assert.equal(await badge.evaluate((node) => node.tagName), 'BUTTON',
+    'the dev-feed badge must be a real control, not a decorative label');
+  // Two mechanics with unresolved rework + one platform intake in flight.
+  await page.locator('[data-testid="dev-diff-badge-count"]')
+    .filter({ hasText: /^3$/ }).waitFor();
+  assert.equal(await page.locator(sheetSelector).isVisible(), false,
+    'the inventory sheet was open before the operator asked for it');
+
+  const requestsBeforeOpen = reworkListRequests.length;
+  await badge.click();
+  const sheet = page.locator(sheetSelector);
+  await sheet.waitFor({ state: 'visible' });
+  await page.waitForTimeout(300);
+  assert.equal(reworkListRequests.length, requestsBeforeOpen,
+    'opening the read-only inventory issued its own projection request');
+
+  // Row 1 — platform: the baked identity, labelled as what is live now.
+  const platformRow = sheet.locator('[data-row="platform"]');
+  await platformRow.waitFor({ state: 'visible' });
+  const platformText = await platformRow.innerText();
+  assert.match(platformText, /что живёт сейчас/, 'the platform row lost its status line');
+  assert.match(platformText, new RegExp(BUILD_SHA.slice(0, 12)),
+    'the platform row does not carry the baked source sha');
+  assert.ok(!platformText.includes(BUILD_SHA),
+    'the platform row printed the full sha instead of the short form');
+  assert.match(platformText, /2026-08-18 13:59/,
+    'the platform row does not carry the build stamp baked into the bar');
+  assert.match(platformText, /Инженерный тикет создан; изменения ещё не опубликованы\./,
+    'the platform intake status is not the vocabulary the ⚙ control already uses');
+
+  // Row 2 — mechanics with active reworks, in the existing status vocabulary.
+  const mechanics = sheet.locator('[data-row="mechanic"]');
+  assert.equal(await mechanics.count(), 2, 'the mechanic inventory lost a row');
+  const needsHelp = sheet.locator('[data-playable-id="minesweeper-v1-swipe"]');
+  const ready = sheet.locator('[data-playable-id="solitaire-v1-swipe"]');
+  assert.equal(await needsHelp.getAttribute('data-tone'), 'error');
+  assert.match(await needsHelp.innerText(), /Нужна помощь/,
+    'a blocked rework is not shown with the existing status word');
+  assert.match(await needsHelp.innerText(), /Сборка кандидата не проходит\./,
+    'the blocker summary from the projection is not surfaced');
+  assert.match(await needsHelp.innerText(), /активно 1 · в очереди 2/,
+    'the counts strip is not the wording the rework details already use');
+  assert.equal(await ready.getAttribute('data-tone'), 'ok');
+  assert.match(await ready.innerText(), /Готово к проверке/,
+    'a ready candidate is not shown with the existing status word');
+  assert.equal(
+    await sheet.locator('[data-action="show-mechanic"]').count(), 2,
+    'each mechanic row must link to the card where Доработать механику lives');
+
+  assert.equal(await sheet.locator(rowSelector).count(), 4,
+    'the inventory must carry exactly the platform, mechanic and catalog rows');
+
+  // Row 3 — catalog stays honest: no client-readable release identity exists.
+  const catalogRow = sheet.locator('[data-row="catalog"]');
+  assert.match(await catalogRow.innerText(), /данных пока нет/,
+    'the catalog row invented identity the client cannot read');
+
+  // The read-only contract: no promotion control anywhere on this surface.
+  assert.equal(await sheet.locator('text=Продвинуть').count(), 0,
+    'slice 1 must not carry a promotion control');
+  assert.equal(await sheet.locator('input, textarea, select').count(), 0,
+    'the read-only inventory must contain no focusable form field');
+
+  // The card fades in over 0.2s; a proof screenshot must show the settled sheet.
+  await page.waitForTimeout(400);
+  assert.equal(await page.evaluate(() =>
+    document.querySelector('.dev-diff__card').scrollTop), 0,
+  'the inventory opened already scrolled past the platform row');
+  if (screenshotDir) {
+    await page.screenshot({ path: path.join(screenshotDir, 'dev-diff-mobile-375x812.png') });
+  }
+
+  // Escape closes; the badge regains focus (the operator never loses their place).
+  await page.keyboard.press('Escape');
+  await sheet.waitFor({ state: 'hidden' });
+  assert.equal(await badge.evaluate((node) => document.activeElement === node), true,
+    'closing the inventory did not restore focus to its own control');
+
+  // The row action jumps to the mechanic's card — where `Доработать механику`
+  // already lives — and closes the sheet behind it rather than covering it.
+  await badge.click();
+  await sheet.waitFor({ state: 'visible' });
+  const indexBeforeJump = await page.evaluate(() => window.__feedWarm().current);
+  assert.equal(indexBeforeJump, 0, 'the feed did not start on the first card');
+  await ready.locator('[data-action="show-mechanic"]').click();
+  await sheet.waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => window.__feedWarm().current !== 0);
+  await page.waitForFunction(() => [...document.querySelectorAll('iframe')]
+    .some((frame) => (frame.getAttribute('src') || '').includes('solitaire-v1-swipe')),
+  null, { timeout: 20_000 });
+  await page.close();
+
+  // ── A3. Desktop proof of the same open sheet. ───────────────────────────
+  const desktop = await newPage({ width: 1280, height: 800 });
+  await bootFeed(desktop, 'operator-desktop');
+  await desktop.locator(badgeSelector).click();
+  await desktop.locator(sheetSelector).waitFor({ state: 'visible' });
+  await desktop.waitForTimeout(400);
+  if (screenshotDir) {
+    await desktop.screenshot({ path: path.join(screenshotDir, 'dev-diff-desktop-1280x800.png') });
+  }
+  await desktop.close();
+
+  // ── A4. Nothing in flight → the honest empty state. ─────────────────────
+  reworkItems = [];
+  intakeItems = [];
+  const quiet = await newPage({ width: 375, height: 812 });
+  await bootFeed(quiet, 'operator-quiet');
+  const quietBadge = quiet.locator(badgeSelector);
+  await quietBadge.waitFor({ state: 'visible' });
+  assert.equal(await quiet.locator('[data-testid="dev-diff-badge-count"]').isVisible(), false,
+    'the badge advertised a change count with nothing in flight');
+  await quietBadge.click();
+  await quiet.locator('[data-testid="dev-diff-empty"]')
+    .filter({ hasText: 'Dev не отличается от публичного' }).waitFor();
+  await quiet.waitForTimeout(400);
+  if (screenshotDir) {
+    await quiet.screenshot({ path: path.join(screenshotDir, 'dev-diff-empty-375x812.png') });
+  }
+  await quiet.close();
+
+  // ── B. destroy() drops every listener it added. ─────────────────────────
+  const modulePage = await newPage({ width: 390, height: 760 });
+  await modulePage.goto(`${origin}/module.html`, { waitUntil: 'domcontentloaded' });
+  await modulePage.waitForFunction(() => window.ready === true);
+
+  // The pure projection is the contract the DOM renders; assert it directly.
+  const projection = await modulePage.evaluate(() => window.developerFeedDiffModel({
+    operatorSurfacesActive: true,
+    platform: { sourceSha: 'a'.repeat(40), stamp: 'stamp' },
+    reworks: [],
+    platformIntake: null,
+    adoption: {
+      playableId: 'marble-sort-swipe',
+      releaseId: 'pr_777',
+      candidateArtifactDigest: `sha256:${'9'.repeat(64)}`,
+      sourceCommit: '8'.repeat(40),
+    },
+    catalog: null,
+  }));
+  assert.equal(projection.mechanics.length, 1);
+  assert.equal(projection.mechanics[0].adopted, true);
+  assert.equal(projection.mechanics[0].status, 'Аудитория: Только мне',
+    'an adopted exact candidate is not shown with the audience wording already in use');
+  assert.equal(projection.changed, 1);
+  assert.equal(projection.empty, false);
+
+  const listenerBalance = () => modulePage.evaluate(() =>
+    Object.fromEntries(window.documentListeners));
+  assert.equal((await listenerBalance()).keydown, 1,
+    'the surface did not register its document-level Escape handler');
+
+  await modulePage.locator(badgeSelector).click();
+  await modulePage.locator(sheetSelector).waitFor({ state: 'visible' });
+  await modulePage.evaluate(() => window.surface.destroy());
+  assert.equal(await modulePage.locator('[data-testid="dev-diff-surface"]').count(), 0,
+    'destroy left the surface root attached');
+  assert.equal((await listenerBalance()).keydown, 0,
+    'destroy left a leaked document keydown listener behind');
+
+  // A late Escape must reach nothing: no resurrection, no throw.
+  await modulePage.keyboard.press('Escape');
+  await modulePage.waitForTimeout(100);
+  assert.equal(await modulePage.locator(sheetSelector).count(), 0,
+    'an Escape after destroy still reached the detached surface');
+  await modulePage.evaluate(() => window.surface.destroy());
+  assert.equal((await listenerBalance()).keydown, 0,
+    'a second destroy double-removed a listener it no longer owns');
+  await modulePage.close();
+
+  console.log('developer feed diff browser contract OK');
+} finally {
+  if (browser) await browser.close();
+  await new Promise((resolve) => server.close(resolve));
+  rmSync(buildRoot, { recursive: true, force: true });
+}
