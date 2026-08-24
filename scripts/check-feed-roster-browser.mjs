@@ -478,8 +478,9 @@ try {
       && new URL(response.url()).pathname === '/api/operator-playable-reworks'),
     page.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))),
   ]);
-  const readyButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="В работе · добавить замечание"]');
+  const readyButton = page.locator('.feed-bar .game__operator-playable-rework .game__operator-flag-open[aria-label="Готово к проверке"]');
   await readyButton.waitFor({ timeout: 5000 });
+  assert.equal(await readyButton.getAttribute('data-rework-state'), 'ready_for_approval');
   await readyButton.click();
   assert.match(await page.locator('.game__operator-playable-rework-details').innerText(), /Готово к проверке/);
   await readyButton.click();

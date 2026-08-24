@@ -30,7 +30,7 @@ const CATALOG_DETAIL = 'Клиенту не отдаётся активный re
 const TONE_ORDER = { error: 0, ok: 1, warn: 2, neutral: 3 };
 
 const toneForReworkState = (state) => {
-  if (state === 'needs_help' || state === 'blocked') return 'error';
+  if (state === 'needs_help' || state === 'blocked' || state === 'capability_gap_root') return 'error';
   if (state === 'ready_for_approval') return 'ok';
   if (state === 'preparing') return 'warn';
   return 'neutral';
@@ -69,12 +69,18 @@ const reworkCounts = (presentation) => [
  */
 function platformIntakeRow(receipt) {
   if (!receipt || typeof receipt !== 'object') return null;
+  if (receipt.cancellation?.status === 'confirmed') return null;
   const deliveryStatus = receipt.delivery?.status;
   const terminalReady = receipt.terminal?.status === 'READY_TO_PLAY';
   const terminalNeedsHelp = receipt.terminal?.status === 'NEEDS_HELP';
   const failed = deliveryStatus === 'failed_terminal' || terminalNeedsHelp;
   const confirmed = deliveryStatus === 'confirmed';
-  const status = terminalNeedsHelp
+  const cancelling = Boolean(receipt.cancellation);
+  const status = receipt.cancellation?.status === 'failed_terminal'
+    ? 'Не удалось завершить отмену; нужна помощь.'
+    : cancelling
+      ? 'Отмена сохранена и синхронизируется.'
+      : terminalNeedsHelp
     ? `NEEDS_HELP: ${text(receipt.terminal?.summary)}`
     : terminalReady
       ? `READY_TO_PLAY: ${text(receipt.terminal?.summary)}`
@@ -88,7 +94,8 @@ function platformIntakeRow(receipt) {
     : failed ? 'Нужна помощь с конфигурацией инженерного контура.' : '';
   return Object.freeze({
     status,
-    tone: failed ? 'error' : terminalReady ? 'ok' : confirmed ? 'neutral' : 'warn',
+    tone: failed || receipt.cancellation?.status === 'failed_terminal'
+      ? 'error' : terminalReady ? 'ok' : confirmed ? 'neutral' : 'warn',
     blocker: blocker || null,
   });
 }
@@ -162,7 +169,9 @@ export function developerFeedDiffModel(input = {}) {
   const catalogIdentity = Array.isArray(input.catalog?.activeRelease)
     ? input.catalog.activeRelease.filter(Boolean)
     : [];
-  const changed = mechanics.length + (intake ? 1 : 0);
+  const changed = mechanics.filter((row) => ![
+    'superseded', 'capability_gap_root_covered',
+  ].includes(row.state)).length + (intake ? 1 : 0);
   return Object.freeze({
     visible: input.operatorSurfacesActive === true || Boolean(input.adoption),
     changed,
@@ -300,7 +309,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     platform.append(platformRow);
     body.append(platform);
 
-    const mechanics = groupSection('Механики с активными правками');
+    const mechanics = groupSection('Механики и очередь правок');
     if (model.mechanics.length === 0) {
       // Scoped wording: the sheet-wide `Dev не отличается от публичного` is
       // already above, and repeating it per group reads as two verdicts.

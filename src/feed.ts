@@ -36,8 +36,10 @@ import {
   apiSessionRequired, apiMe, variantIdForMechanic,
   apiCreateOperatorLevelFlagRequired,
   apiCreateOperatorPlayableReworkRequired,
+  apiCancelOperatorPlayableReworkRequired,
   apiListOperatorPlayableReworksRequired,
   apiCreatePlatformDevelopmentIntakeRequired,
+  apiCancelPlatformDevelopmentIntakeRequired,
   apiListPlatformDevelopmentIntakesRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
@@ -2923,6 +2925,8 @@ export class Feed {
       existing: this.platformDevelopmentIntakeLatest,
       createMutationId: ticketUid,
       submit: (request) => this.submitPlatformDevelopmentIntake(request),
+      cancel: (requestId, request) => this.cancelPlatformDevelopmentIntake(requestId, request),
+      refresh: () => this.refreshPlatformDevelopmentIntakes(),
     });
     this.platformDevelopmentIntakeActorUserId = Number(actorUserId);
   }
@@ -2951,6 +2955,36 @@ export class Feed {
       throw new ApiRequestError(503, 'Development intake receipt differs', 'development_intake_receipt_invalid');
     }
     this.platformDevelopmentIntakeLatest = response;
+    return response;
+  }
+
+  private async cancelPlatformDevelopmentIntake(
+    requestId: string,
+    request: import('./operator-development-intakes.mjs').PlatformDevelopmentIntakeCancelV1,
+  ): Promise<PlatformDevelopmentIntakeResponseV1> {
+    if (!this.developmentIntakeAvailable
+      || this.platformDevelopmentIntakeActorUserId !== this.authenticatedUserId) {
+      throw new ApiRequestError(409, 'The platform intake identity changed', 'development_intake_stale');
+    }
+    this.platformDevelopmentIntakeSyncEpoch += 1;
+    let raw: PlatformDevelopmentIntakeResponseV1;
+    try {
+      raw = await apiCancelPlatformDevelopmentIntakeRequired(requestId, request);
+    } finally {
+      // Fence a projection begun after cancellation started but before its
+      // terminal receipt, exactly like the create mutation above.
+      this.platformDevelopmentIntakeSyncEpoch += 1;
+    }
+    const response = validatePlatformDevelopmentIntakeReceipt(raw);
+    if (response.requestId !== requestId
+      || response.requestHash !== request.requestHash
+      || response.cancellation?.mutationId !== request.mutationId
+      || !this.developmentIntakeAvailable
+      || this.platformDevelopmentIntakeActorUserId !== this.authenticatedUserId) {
+      throw new ApiRequestError(503, 'Cancellation receipt differs', 'development_intake_receipt_invalid');
+    }
+    this.platformDevelopmentIntakeLatest = response;
+    this.refreshDeveloperFeedDiff();
     return response;
   }
 
@@ -3120,6 +3154,7 @@ export class Feed {
         return current;
       },
       submit: (request) => this.submitOperatorPlayableRework(request),
+      cancel: (task) => this.cancelOperatorPlayableRework(task),
     });
   }
 
@@ -3144,6 +3179,29 @@ export class Feed {
       window.setTimeout(() => void this.refreshOperatorPlayableReworks(), 2_400);
     });
     return response;
+  }
+
+  private async cancelOperatorPlayableRework(
+    task: Pick<OperatorPlayableReworkQueueItemV1, 'requestId' | 'requestHash'>,
+  ): Promise<void> {
+    this.operatorPlayableReworkControlHoldUntil = Date.now() + 2_500;
+    try {
+      const response = await apiCancelOperatorPlayableReworkRequired(
+        task.requestId,
+        task.requestHash,
+      );
+      if (response.requestId !== task.requestId || response.requestHash !== task.requestHash
+        || response.state !== 'closed'
+        || response.administrativeClosure?.reason !== 'obsolete') {
+        throw new ApiRequestError(503, 'Playable cancellation receipt differs', 'playable_rework_receipt_invalid');
+      }
+    } catch (error) {
+      this.operatorPlayableReworkControlHoldUntil = 0;
+      throw error;
+    }
+    void this.refreshOperatorPlayableReworks(false).finally(() => {
+      window.setTimeout(() => void this.refreshOperatorPlayableReworks(), 2_400);
+    });
   }
 
   private requireProjectedOperatorFlagEvent(eventId: string | null): void {

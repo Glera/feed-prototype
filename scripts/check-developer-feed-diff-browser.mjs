@@ -74,6 +74,7 @@ const reworkItem = ({
   instruction,
   releaseExecution = undefined,
   execution = undefined,
+  operatorPresentation = undefined,
   queueDisposition = 'active_batch',
   queueCounts = { active: 1, queued: 0 },
   createdAt = '2026-08-18T09:00:00.000Z',
@@ -92,6 +93,7 @@ const reworkItem = ({
   closedAt: null,
   closeReceiptDigest: null,
   ...(execution ? { execution } : {}),
+  ...(operatorPresentation ? { operatorPresentation } : {}),
   ...(releaseExecution ? { releaseExecution } : {}),
   createdAt,
   request: {
@@ -346,15 +348,7 @@ try {
       requestId: '66666666-6666-5666-8666-666666666666',
       playableId: 'solitaire-v1-swipe',
       instruction: 'Исправить центрирование.',
-      releaseExecution: {
-        releaseId: 'pr_118',
-        state: 'ready_for_approval',
-        bindingDigest: 'd'.repeat(64),
-        code: null,
-        summary: null,
-        updatedAt: '2026-08-18T09:10:00.000Z',
-        notificationStatus: null,
-      },
+      operatorPresentation: { kind: 'current', effectDelivered: true },
     }),
     reworkItem({
       requestId: '77777777-7777-5777-8777-777777777777',
@@ -372,6 +366,22 @@ try {
         notificationStatus: null,
       },
     }),
+    reworkItem({
+      requestId: '88888888-8888-5888-8888-888888888888',
+      playableId: 'merge-locked-swipe',
+      instruction: 'Сделать legacy source исполняемым.',
+      operatorPresentation: {
+        kind: 'capability_gap_root_covered', effectDelivered: false,
+      },
+      createdAt: '2026-08-18T08:10:00.000Z',
+    }),
+    reworkItem({
+      requestId: '99999999-9999-5999-8999-999999999999',
+      playableId: 'arrows-v1-swipe',
+      instruction: 'Исправить старую геометрию.',
+      operatorPresentation: { kind: 'superseded', effectDelivered: false },
+      createdAt: '2026-08-18T08:00:00.000Z',
+    }),
   ];
   intakeItems = [intakeReceipt()];
 
@@ -383,7 +393,9 @@ try {
     'the dev-feed badge lost its exact label');
   assert.equal(await badge.evaluate((node) => node.tagName), 'BUTTON',
     'the dev-feed badge must be a real control, not a decorative label');
-  // Two mechanics with unresolved rework + one platform intake in flight.
+  // Two actionable mechanic lineages + one platform intake in flight;
+  // historical superseded/covered roots remain inspectable but do not inflate
+  // the badge that answers "what still differs now?".
   await page.locator('[data-testid="dev-diff-badge-count"]')
     .filter({ hasText: /^3$/ }).waitFor();
   assert.equal(await page.locator(sheetSelector).isVisible(), false,
@@ -413,7 +425,7 @@ try {
 
   // Row 2 — mechanics with active reworks, in the existing status vocabulary.
   const mechanics = sheet.locator('[data-row="mechanic"]');
-  assert.equal(await mechanics.count(), 2, 'the mechanic inventory lost a row');
+  assert.equal(await mechanics.count(), 4, 'the mechanic inventory lost a row');
   const needsHelp = sheet.locator('[data-playable-id="minesweeper-v1-swipe"]');
   const ready = sheet.locator('[data-playable-id="solitaire-v1-swipe"]');
   assert.equal(await needsHelp.getAttribute('data-tone'), 'error');
@@ -421,16 +433,30 @@ try {
     'a blocked rework is not shown with the existing status word');
   assert.match(await needsHelp.innerText(), /Сборка кандидата не проходит\./,
     'the blocker summary from the projection is not surfaced');
-  assert.match(await needsHelp.innerText(), /активно 1 · в очереди 2/,
-    'the counts strip is not the wording the rework details already use');
+  assert.match(await needsHelp.innerText(), /активно 1/,
+    'the counts strip is not derived from the exact visible queue rows');
+  assert.doesNotMatch(await needsHelp.innerText(), /в очереди 2/,
+    'a stale aggregate count invented queue rows absent from the projection');
   assert.equal(await ready.getAttribute('data-tone'), 'ok');
   assert.match(await ready.innerText(), /Готово к проверке/,
-    'a ready candidate is not shown with the existing status word');
+    'a delivered effect remained presented as in progress');
+  assert.doesNotMatch(await ready.innerText(), /В работе/,
+    'a delivered effect remained presented as in progress');
+  assert.match(
+    await sheet.locator('[data-playable-id="merge-locked-swipe"]').innerText(),
+    /Историческая заявка · выполнена successor/,
+    'a covered capability-gap root is still presented as active work',
+  );
+  assert.match(
+    await sheet.locator('[data-playable-id="arrows-v1-swipe"]').innerText(),
+    /Заменена следующей правкой/,
+    'a superseded request is still presented as active work',
+  );
   assert.equal(
-    await sheet.locator('[data-action="show-mechanic"]').count(), 2,
+    await sheet.locator('[data-action="show-mechanic"]').count(), 4,
     'each mechanic row must link to the card where Доработать механику lives');
 
-  assert.equal(await sheet.locator(rowSelector).count(), 4,
+  assert.equal(await sheet.locator(rowSelector).count(), 6,
     'the inventory must carry exactly the platform, mechanic and catalog rows');
 
   // Row 3 — catalog stays honest: no client-readable release identity exists.

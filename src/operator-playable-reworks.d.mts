@@ -42,10 +42,15 @@ export interface OperatorPlayableReworkControl {
 
 export interface OperatorPlayableReworkQueueItem {
   requestId: string;
+  requestHash: string;
   state: 'open' | 'claimed' | 'closed';
   sourceAdapter: 'telegram' | 'codex';
   queueDisposition: 'active_batch' | 'queued' | 'duplicate_of' | 'closed';
   batchPresent: boolean;
+  operatorPresentation?: {
+    kind: 'current' | 'superseded' | 'capability_gap_root' | 'capability_gap_root_covered';
+    effectDelivered: boolean;
+  };
   queueCounts: { active: number; queued: number };
   execution?: {
     state: 'accepted' | 'blocked';
@@ -94,8 +99,8 @@ export function groupOperatorPlayableReworkQueue(
 export function operatorPlayableReworkQueuePresentation(
   queue: readonly OperatorPlayableReworkQueueItem[],
 ): Readonly<{
-  state: 'idle' | 'active' | 'queued' | 'needs_help';
-  label: '✎ Доработать механику' | 'В работе · добавить замечание' | `В работе · ещё ${number}` | 'Нужна помощь · добавить замечание';
+  state: 'idle' | 'active' | 'queued' | 'needs_help' | 'ready_for_approval';
+  label: '✎ Доработать механику' | 'В работе · добавить замечание' | `В работе · ещё ${number}` | 'Нужна помощь · добавить замечание' | 'Готово к проверке';
   active: number;
   queued: number;
   duplicates: number;
@@ -109,10 +114,11 @@ export function operatorPlayableReworkPresentation(task: {
     state?: 'preparing' | 'ready_for_approval' | 'needs_help';
     summary?: string | null;
   };
+  operatorPresentation?: OperatorPlayableReworkQueueItem['operatorPresentation'];
 }): Readonly<{
   state: string;
   icon: string;
-  label: 'Готовится' | 'Готово к проверке' | 'Нужна помощь' | 'Задача принята';
+  label: 'Готовится' | 'Готово к проверке' | 'Нужна помощь' | 'Задача принята' | 'Заменена следующей правкой' | 'Историческая заявка · выполнена successor' | 'Ждёт capability successor';
   blocker: string | null;
 }>;
 
@@ -124,6 +130,7 @@ export function mountOperatorPlayableReworkControl(
     createMutationId(): string;
     resolveOccurrence?(): OperatorPlayableReworkOccurrence;
     submit(request: OperatorPlayableReworkRequestV1): Promise<{ replayed?: boolean } | void>;
+    cancel?(task: Pick<OperatorPlayableReworkQueueItem, 'requestId' | 'requestHash'>): Promise<void>;
     refresh?(): void | Promise<void>;
   },
 ): OperatorPlayableReworkControl;

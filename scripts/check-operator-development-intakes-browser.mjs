@@ -46,8 +46,24 @@ let holdNextPost = false;
 let heldPost = null;
 let holdNextProjection = false;
 let heldProjection = null;
+let holdNextCancellation = false;
+let heldCancellation = null;
 let projectionItems = [];
 const postedRequests = [];
+const cancelledRequests = [];
+
+const buildFixtureRequest = ({ mutationId, instruction, route }) => ({
+  schema: 'platform.development-intake.request.v1',
+  mutationId,
+  instruction,
+  surface: 'feed',
+  route,
+  buildSha: BUILD_SHA,
+  capturedAt: '2026-08-24T09:59:00.000Z',
+  screenshot: {
+    kind: 'unavailable', reason: 'not_attached', mimeType: null, dataUrl: null,
+  },
+});
 
 const json = (response, value, status = 200) => {
   response.statusCode = status;
@@ -172,6 +188,34 @@ const server = createServer(async (request, response) => {
       projectionItems = [receipt];
       return json(response, receipt);
     }
+    const cancelMatch = url.pathname.match(/^\/api\/development-intake\/([^/]+)\/cancel$/);
+    if (request.method === 'POST' && cancelMatch) {
+      const body = await readJsonBody(request);
+      cancelledRequests.push({ requestId: cancelMatch[1], body });
+      const prior = projectionItems.find((item) => item.requestId === cancelMatch[1]);
+      if (!prior || prior.requestHash !== body.requestHash) {
+        return json(response, { code: 'development_intake_conflict' }, 409);
+      }
+      const receipt = {
+        ...prior,
+        cancellation: {
+          mutationId: body.mutationId,
+          status: 'confirmed',
+          reason: 'obsolete',
+          requestedAt: '2026-08-24T10:00:00.000Z',
+          cancelledAt: '2026-08-24T10:00:00.000Z',
+          issueClosed: prior.delivery.issueUrl !== null,
+          lastErrorCode: null,
+        },
+      };
+      projectionItems = [receipt];
+      if (holdNextCancellation) {
+        holdNextCancellation = false;
+        heldCancellation = { response, receipt };
+        return;
+      }
+      return json(response, receipt);
+    }
     if (request.method === 'GET' && url.pathname === '/api/challenges') {
       return json(response, { box: 'in', items: [] });
     }
@@ -267,6 +311,12 @@ const releaseHeldPost = () => {
   const current = heldPost;
   heldPost = null;
   projectionItems = [current.receipt];
+  json(current.response, current.receipt);
+};
+const releaseHeldCancellation = () => {
+  assert.ok(heldCancellation, 'no controlled cancellation response is waiting');
+  const current = heldCancellation;
+  heldCancellation = null;
   json(current.response, current.receipt);
 };
 const waitForFixture = async (predicate, label) => {
@@ -956,7 +1006,136 @@ try {
   await undecodable.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
   await undecodable.close();
 
-  // 12. The on-screen keyboard shrinks the visible viewport from the bottom.
+  // 12. An accepted intake can be made «Неактуально» from the same phone.
+  // This fixture exercises the pre-delivery branch: it becomes terminal with
+  // no Issue URL and therefore cannot imply a GitHub side effect.
+  const obsoleteRequest = buildFixtureRequest({
+    mutationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    instruction: 'Эта задача больше не нужна.',
+    route: '/?browserCase=obsolete',
+  });
+  projectionItems = [receiptFor(obsoleteRequest)];
+  cancelledRequests.length = 0;
+  const obsoletePage = await newPage();
+  const obsoleteSession = awaitSession(obsoletePage);
+  await obsoletePage.goto(`${origin}/?browserCase=obsolete`, { waitUntil: 'domcontentloaded' });
+  await obsoleteSession;
+  await obsoletePage.locator(openSelector).waitFor({ state: 'visible' });
+  await obsoletePage.locator(openSelector).click();
+  const cancelledResponse = obsoletePage.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && /\/api\/development-intake\/[^/]+\/cancel$/.test(new URL(response.url()).pathname));
+  await obsoletePage.locator(`${detailsSelector} [data-action="obsolete"]`).click();
+  await cancelledResponse;
+  await obsoletePage.locator(`${openSelector}[data-intake-state="cancelled"]`).waitFor();
+  assert.deepEqual(cancelledRequests, [{
+    requestId: projectionItems[0].requestId,
+    body: {
+      schema: 'platform.development-intake.cancel.v1',
+      mutationId: cancelledRequests[0].body.mutationId,
+      requestHash: projectionItems[0].requestHash,
+      reason: 'obsolete',
+    },
+  }]);
+  assert.equal(
+    await obsoletePage.locator(`${detailsSelector} [data-intake-status]`).textContent(),
+    'Неактуально: задача отменена до создания инженерного тикета.',
+  );
+  await obsoletePage.close();
+
+  // 13. A delivered intake closes the exact Issue, and a projection that began
+  // before cancellation cannot resurrect the old open state afterward.
+  const deliveredRequest = buildFixtureRequest({
+    mutationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    instruction: 'Закрыть уже доставленный инженерный тикет.',
+    route: '/?browserCase=delivered-obsolete',
+  });
+  projectionItems = [receiptFor(deliveredRequest, { status: 'confirmed' })];
+  cancelledRequests.length = 0;
+  const deliveredObsolete = await newPage();
+  const deliveredSession = awaitSession(deliveredObsolete);
+  await deliveredObsolete.goto(`${origin}/?browserCase=delivered-obsolete`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await deliveredSession;
+  await deliveredObsolete.locator(openSelector).waitFor({ state: 'visible' });
+  await deliveredObsolete.waitForTimeout(1_050);
+  holdNextProjection = true;
+  const foregroundSession = awaitSession(deliveredObsolete);
+  const staleCancelProjection = deliveredObsolete.waitForRequest((request) =>
+    request.method() === 'GET'
+      && new URL(request.url()).pathname === '/api/development-intake');
+  await deliveredObsolete.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await foregroundSession;
+  await staleCancelProjection;
+  await waitForFixture(() => heldProjection !== null, 'projection begun before cancellation');
+  await deliveredObsolete.locator(openSelector).click();
+  const deliveredCancelResponse = deliveredObsolete.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && /\/api\/development-intake\/[^/]+\/cancel$/.test(new URL(response.url()).pathname));
+  await deliveredObsolete.locator(`${detailsSelector} [data-action="obsolete"]`).click();
+  await deliveredCancelResponse;
+  await deliveredObsolete.locator(`${openSelector}[data-intake-state="cancelled"]`).waitFor();
+  assert.equal(cancelledRequests[0]?.body.requestHash, 'c'.repeat(64));
+  assert.equal(projectionItems[0]?.cancellation?.issueClosed, true,
+    'the post-delivery branch did not close the exact engineering Issue');
+  await deliveredObsolete.locator(openSelector).click();
+  assert.equal(
+    await deliveredObsolete.locator(`${detailsSelector} [data-intake-status]`).textContent(),
+    'Неактуально: инженерный тикет помечен и закрыт.',
+  );
+  const staleCancelResponse = deliveredObsolete.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  releaseHeldProjection();
+  await staleCancelResponse;
+  await deliveredObsolete.waitForTimeout(100);
+  assert.equal(
+    await deliveredObsolete.locator(openSelector).getAttribute('data-intake-state'),
+    'cancelled',
+    'a stale pre-cancel projection resurrected the delivered intake',
+  );
+  await deliveredObsolete.close();
+
+  // 14. Capability/actor revocation while cancellation is in flight wins over
+  // the late receipt: the old operator surface must not be resurrected.
+  const revokedRequest = buildFixtureRequest({
+    mutationId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    instruction: 'Проверить отзыв capability во время отмены.',
+    route: '/?browserCase=cancel-revoked',
+  });
+  projectionItems = [receiptFor(revokedRequest)];
+  const cancelRevoked = await newPage();
+  const cancelRevokedSession = awaitSession(cancelRevoked);
+  await cancelRevoked.goto(`${origin}/?browserCase=cancel-revoked`, { waitUntil: 'domcontentloaded' });
+  await cancelRevokedSession;
+  await cancelRevoked.locator(openSelector).waitFor({ state: 'visible' });
+  await cancelRevoked.locator(openSelector).click();
+  holdNextCancellation = true;
+  const heldCancelRequest = cancelRevoked.waitForRequest((request) =>
+    request.method() === 'POST'
+      && /\/api\/development-intake\/[^/]+\/cancel$/.test(new URL(request.url()).pathname));
+  await cancelRevoked.locator(`${detailsSelector} [data-action="obsolete"]`).click();
+  await heldCancelRequest;
+  await waitForFixture(() => heldCancellation !== null, 'held cancellation response');
+  developmentIntakeAvailable = false;
+  await cancelRevoked.waitForTimeout(1_050);
+  const cancelCapabilitySession = awaitSession(cancelRevoked);
+  await cancelRevoked.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await cancelCapabilitySession;
+  await cancelRevoked.locator(intakeSelector).waitFor({ state: 'detached' });
+  const lateCancelResponse = cancelRevoked.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && /\/api\/development-intake\/[^/]+\/cancel$/.test(new URL(response.url()).pathname));
+  releaseHeldCancellation();
+  await lateCancelResponse;
+  await cancelRevoked.waitForTimeout(100);
+  assert.equal(await cancelRevoked.locator(intakeSelector).count(), 0,
+    'a late cancellation receipt resurrected a revoked operator surface');
+  await cancelRevoked.close();
+  developmentIntakeAvailable = true;
+
+  // 15. The on-screen keyboard shrinks the visible viewport from the bottom.
   // This form is anchored above the feed bar and grows UPWARD, so on a real iOS
   // Telegram device the instruction textarea was pushed clean off the top of
   // the screen and the operator typed blind (dogfood finding,
@@ -1037,6 +1216,7 @@ try {
 } finally {
   if (heldProjection) releaseHeldProjection();
   if (heldPost) releaseHeldPost();
+  if (heldCancellation) releaseHeldCancellation();
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));
   rmSync(buildRoot, { recursive: true, force: true });

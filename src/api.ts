@@ -27,7 +27,10 @@ import type {
   OperatorLevelFlagResponseV1,
 } from './operator-level-flags.mjs';
 import type { OperatorPlayableReworkRequestV1 } from './operator-playable-reworks.mjs';
-import type { PlatformDevelopmentIntakeRequestV1 } from './operator-development-intakes.mjs';
+import type {
+  PlatformDevelopmentIntakeCancelV1,
+  PlatformDevelopmentIntakeRequestV1,
+} from './operator-development-intakes.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -372,6 +375,15 @@ export interface PlatformDevelopmentIntakeResponseV1 {
     recordedAt: string;
     nothingPublished: true;
   } | null;
+  cancellation?: {
+    mutationId: string;
+    status: 'requested' | 'started' | 'outcome_unknown' | 'confirmed' | 'failed_terminal';
+    reason: 'obsolete';
+    requestedAt: string;
+    cancelledAt: string | null;
+    issueClosed: boolean;
+    lastErrorCode: string | null;
+  } | null;
   request: PlatformDevelopmentIntakeRequestV1;
   replayed: boolean;
   createdAt: string;
@@ -392,6 +404,17 @@ export function apiCreatePlatformDevelopmentIntakeRequired(
 
 export function apiListPlatformDevelopmentIntakesRequired(): Promise<PlatformDevelopmentIntakeListV1> {
   return getRequired<PlatformDevelopmentIntakeListV1>('/api/development-intake?limit=1');
+}
+
+export function apiCancelPlatformDevelopmentIntakeRequired(
+  requestId: string,
+  payload: PlatformDevelopmentIntakeCancelV1,
+): Promise<PlatformDevelopmentIntakeResponseV1> {
+  return postRequired<PlatformDevelopmentIntakeResponseV1>(
+    `/api/development-intake/${encodeURIComponent(requestId)}/cancel`,
+    payload,
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
 }
 
 /** Pilot-only exact field annotation. The server rechecks the Telegram user. */
@@ -431,6 +454,11 @@ export interface OperatorPlayableReworkResponseV1 {
     updatedAt: string;
     notificationStatus: 'confirmed' | 'retry_wait' | 'outcome_unknown' | 'failed_terminal' | null;
   };
+  administrativeClosure?: {
+    kind: 'administrative';
+    reason: 'done_outside_fast_lane' | 'obsolete';
+    note: string;
+  };
   createdAt: string;
   replayed?: boolean;
 }
@@ -442,6 +470,10 @@ export interface OperatorPlayableReworkQueueItemV1 extends OperatorPlayableRewor
   queueCounts: {
     active: number;
     queued: number;
+  };
+  operatorPresentation?: {
+    kind: 'current' | 'superseded' | 'capability_gap_root' | 'capability_gap_root_covered';
+    effectDelivered: boolean;
   };
 }
 
@@ -464,6 +496,21 @@ export function apiCreateOperatorPlayableReworkRequired(
 /** Rehydrate durable mobile task state after a Mini App restart. */
 export function apiListOperatorPlayableReworksRequired(): Promise<OperatorPlayableReworkListV1> {
   return getRequired<OperatorPlayableReworkListV1>('/api/operator-playable-reworks');
+}
+
+export function apiCancelOperatorPlayableReworkRequired(
+  requestId: string,
+  requestHash: string,
+): Promise<OperatorPlayableReworkResponseV1> {
+  return postRequired<OperatorPlayableReworkResponseV1>(
+    `/api/operator-playable-reworks/${encodeURIComponent(requestId)}/cancel`,
+    {
+      schema: 'feed.playable-rework.cancel.v1',
+      requestHash,
+      reason: 'obsolete',
+    },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
 }
 
 export interface BuiltinFeedBindingV1 {
