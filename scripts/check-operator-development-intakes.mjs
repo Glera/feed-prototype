@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   buildPlatformDevelopmentIntakeRequest,
+  buildPlatformDevelopmentIntakeCancelRequest,
   persistPlatformDevelopmentIntakePendingRequest,
   platformDevelopmentIntakeAvailable,
   platformDevelopmentIntakeFailureDisposition,
@@ -161,6 +162,56 @@ assert.deepEqual(validatePlatformDevelopmentIntakeReceipt(receipt, request), rec
 assert.deepEqual(validatePlatformDevelopmentIntakeList({
   schema: 'platform.development-intake.list.v1', items: [receipt],
 }).items, [receipt]);
+const cancellation = buildPlatformDevelopmentIntakeCancelRequest({
+  mutationId: randomUUID(), requestHash: receipt.requestHash,
+});
+assert.deepEqual(cancellation, {
+  schema: 'platform.development-intake.cancel.v1',
+  mutationId: cancellation.mutationId,
+  requestHash: receipt.requestHash,
+  reason: 'obsolete',
+});
+const cancelledReceipt = {
+  ...receipt,
+  cancellation: {
+    mutationId: cancellation.mutationId,
+    status: 'confirmed',
+    reason: 'obsolete',
+    requestedAt: '2026-08-09T12:35:00.000Z',
+    cancelledAt: '2026-08-09T12:35:00.000Z',
+    issueClosed: false,
+    lastErrorCode: null,
+  },
+};
+assert.equal(
+  validatePlatformDevelopmentIntakeReceipt(cancelledReceipt).cancellation.status,
+  'confirmed',
+);
+assert.throws(
+  () => validatePlatformDevelopmentIntakeReceipt({
+    ...cancelledReceipt,
+    cancellation: { ...cancelledReceipt.cancellation, cancelledAt: null },
+  }),
+  (error) => error?.code === 'development_intake_receipt_invalid',
+);
+assert.throws(
+  () => validatePlatformDevelopmentIntakeReceipt({
+    ...cancelledReceipt,
+    cancellation: { ...cancelledReceipt.cancellation, issueClosed: true },
+  }),
+  (error) => error?.code === 'development_intake_receipt_invalid',
+  'a closed Issue requires an exact confirmed delivery URL',
+);
+assert.throws(
+  () => validatePlatformDevelopmentIntakeReceipt({
+    ...cancelledReceipt,
+    cancellation: {
+      ...cancelledReceipt.cancellation, status: 'queued', cancelledAt: '2026-08-09T12:35:00.000Z',
+    },
+  }),
+  (error) => error?.code === 'development_intake_receipt_invalid',
+  'a non-confirmed cancellation cannot carry a terminal timestamp',
+);
 const readyReceipt = {
   ...receipt,
   delivery: {

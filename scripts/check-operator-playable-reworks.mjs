@@ -5,6 +5,7 @@ import {
   buildOperatorPlayableReworkRequest,
   groupOperatorPlayableReworkQueue,
   isOperatorPlayableReworkQueueItem,
+  operatorPlayableReworkControlKey,
   operatorPlayableReworkQueuePresentation,
   operatorPlayableReworkPresentation,
   operatorPlayableReworkErrorMessage,
@@ -96,6 +97,7 @@ assert.deepEqual(operatorPlayableReworkPresentation({
 }), { state: 'claimed', icon: '✓', label: 'Задача принята', blocker: null });
 const queueItem = ({ disposition, active, queued, sourceAdapter = 'telegram', blocked = false }) => ({
   requestId: randomUUID(),
+  requestHash: '1'.repeat(64),
   state: 'open',
   sourceAdapter,
   queueDisposition: disposition,
@@ -149,6 +151,58 @@ assert.deepEqual(operatorPlayableReworkQueuePresentation([staleActiveCount]), {
   state: 'idle', label: '✎ Доработать механику',
   active: 0, queued: 1, duplicates: 0, unresolved: 1,
 }, 'server count drift cannot invent an active batch without row-level evidence');
+const delivered = {
+  ...active,
+  operatorPresentation: { kind: 'current', effectDelivered: true },
+};
+assert.deepEqual(operatorPlayableReworkPresentation(delivered), {
+  state: 'ready_for_approval', icon: '!', label: 'Готово к проверке', blocker: null,
+});
+assert.deepEqual(operatorPlayableReworkPresentation({
+  ...delivered,
+  releaseExecution: {
+    releaseId: randomUUID(), state: 'needs_help', code: 'stale_failure',
+    summary: 'Устаревший failure.', updatedAt: '2026-08-10T12:30:00.000Z',
+  },
+}), {
+  state: 'ready_for_approval', icon: '!', label: 'Готово к проверке', blocker: null,
+}, 'a delivered effect outranks stale preparing/needs-help execution reporting');
+assert.deepEqual(operatorPlayableReworkQueuePresentation([delivered]), {
+  state: 'ready_for_approval', label: 'Готово к проверке',
+  active: 0, queued: 0, duplicates: 0, unresolved: 0,
+}, 'a delivered effect cannot remain presented as in progress');
+assert.notEqual(
+  operatorPlayableReworkControlKey(occurrence, [active]),
+  operatorPlayableReworkControlKey(occurrence, [delivered]),
+  'a repaired reporting projection must remount the visible control',
+);
+const superseded = {
+  ...active,
+  operatorPresentation: { kind: 'superseded', effectDelivered: false },
+};
+assert.deepEqual(operatorPlayableReworkPresentation(superseded), {
+  state: 'superseded', icon: '↪', label: 'Заменена следующей правкой', blocker: null,
+});
+assert.deepEqual(operatorPlayableReworkQueuePresentation([superseded]), {
+  state: 'history', label: 'История правок',
+  active: 0, queued: 0, duplicates: 0, unresolved: 0,
+});
+const coveredGap = {
+  ...active,
+  operatorPresentation: { kind: 'capability_gap_root_covered', effectDelivered: false },
+};
+assert.deepEqual(operatorPlayableReworkPresentation(coveredGap), {
+  state: 'capability_gap_root_covered', icon: '↪',
+  label: 'Историческая заявка · выполнена successor', blocker: null,
+});
+const openGap = {
+  ...active,
+  operatorPresentation: { kind: 'capability_gap_root', effectDelivered: false },
+};
+assert.deepEqual(operatorPlayableReworkQueuePresentation([openGap]), {
+  state: 'needs_help', label: 'Нужна помощь · добавить замечание',
+  active: 1, queued: 0, duplicates: 0, unresolved: 1,
+});
 const multiline = {
   ...waiting,
   requestId: randomUUID(),
@@ -161,6 +215,16 @@ const successor = {
   request: { ...request, schema: 'feed.playable-rework.successor.v1' },
 };
 const malformed = { ...active, requestId: randomUUID(), sourceAdapter: 'caller' };
+assert.equal(isOperatorPlayableReworkQueueItem({
+  ...active, requestHash: 'short',
+}, occurrence.playableId), false);
+assert.equal(isOperatorPlayableReworkQueueItem({
+  ...active, operatorPresentation: { kind: 'future_state', effectDelivered: false },
+}, occurrence.playableId), false);
+assert.equal(isOperatorPlayableReworkQueueItem({
+  ...active,
+  operatorPresentation: { kind: 'current', effectDelivered: false, callerAuthored: true },
+}, occurrence.playableId), false);
 const groups = groupOperatorPlayableReworkQueue([successor, malformed, waiting, multiline]);
 assert.deepEqual([...groups.keys()], [occurrence.playableId]);
 assert.deepEqual(

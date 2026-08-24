@@ -15,6 +15,9 @@ const PENDING_STORAGE_MAX_CHARS = 600_000;
 const DELIVERY_STATUSES = new Set([
   'queued', 'send_started', 'outcome_unknown', 'retry_wait', 'confirmed', 'failed_terminal',
 ]);
+const CANCELLATION_STATUSES = new Set([
+  'requested', 'started', 'outcome_unknown', 'confirmed', 'failed_terminal',
+]);
 const TERMINAL_STATUSES = new Set(['READY_TO_PLAY', 'NEEDS_HELP']);
 const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429]);
 const SCREENSHOT_INVALID = 'development_intake_screenshot_invalid';
@@ -147,7 +150,13 @@ export function validatePlatformDevelopmentIntakeReceipt(value, expectedRequest 
   const legacyKeys = [
     'schema', 'requestId', 'mutationId', 'requestHash', 'delivery', 'request', 'replayed', 'createdAt',
   ];
-  if (!(exactKeys(value, legacyKeys) || exactKeys(value, [...legacyKeys, 'terminal']))
+  const allowedKeys = [
+    legacyKeys,
+    [...legacyKeys, 'terminal'],
+    [...legacyKeys, 'cancellation'],
+    [...legacyKeys, 'terminal', 'cancellation'],
+  ];
+  if (!allowedKeys.some((keys) => exactKeys(value, keys))
     || value.schema !== 'platform.development-intake.response.v1'
     || !UUID.test(String(value.requestId)) || !UUID.test(String(value.mutationId))
     || !HASH.test(String(value.requestHash)) || typeof value.replayed !== 'boolean'
@@ -168,7 +177,25 @@ export function validatePlatformDevelopmentIntakeReceipt(value, expectedRequest 
     || (expectedRequest && !sameRequest(request, expectedRequest))) {
     fail('development_intake_receipt_invalid', 'development intake receipt identity is invalid');
   }
-  return Object.freeze({
+  let cancellation = null;
+  if (value.cancellation !== undefined) {
+    const item = value.cancellation;
+    if (!exactKeys(item, [
+      'mutationId', 'status', 'reason', 'requestedAt', 'cancelledAt',
+      'issueClosed', 'lastErrorCode',
+    ]) || !UUID.test(String(item.mutationId))
+      || !CANCELLATION_STATUSES.has(item.status) || item.reason !== 'obsolete'
+      || !exactTimestamp(item.requestedAt)
+      || !(item.cancelledAt === null || exactTimestamp(item.cancelledAt))
+      || typeof item.issueClosed !== 'boolean'
+      || !(item.lastErrorCode === null || /^[a-z0-9_]{3,64}$/.test(item.lastErrorCode))
+      || (item.status === 'confirmed') !== (item.cancelledAt !== null)
+      || (item.issueClosed && value.delivery.issueUrl === null)) {
+      fail('development_intake_receipt_invalid', 'development intake cancellation is invalid');
+    }
+    cancellation = Object.freeze({ ...item });
+  }
+  const receipt = {
     schema: value.schema,
     requestId: value.requestId,
     mutationId: value.mutationId,
@@ -178,6 +205,20 @@ export function validatePlatformDevelopmentIntakeReceipt(value, expectedRequest 
     request,
     replayed: value.replayed,
     createdAt: value.createdAt,
+  };
+  if (cancellation) receipt.cancellation = cancellation;
+  return Object.freeze(receipt);
+}
+
+export function buildPlatformDevelopmentIntakeCancelRequest({ mutationId, requestHash }) {
+  if (!UUID.test(String(mutationId)) || !HASH.test(String(requestHash))) {
+    fail('development_intake_invalid', 'development intake cancellation identity is invalid');
+  }
+  return Object.freeze({
+    schema: 'platform.development-intake.cancel.v1',
+    mutationId,
+    requestHash,
+    reason: 'obsolete',
   });
 }
 
@@ -346,6 +387,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
       </dl>
       <p class="platform-development-intake__blocker" data-intake-blocker hidden></p>
       <a class="platform-development-intake__result" data-intake-result target="_blank" rel="noreferrer" hidden>Открыть результат</a>
+      <button type="button" data-action="obsolete" hidden>Неактуально</button>
       <button type="button" data-action="new">Новая задача</button>
     </section>`;
   host.appendChild(root);
@@ -367,6 +409,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const detailDeliveryState = details.querySelector('[data-intake-delivery-state]');
   const blocker = details.querySelector('[data-intake-blocker]');
   const resultLink = details.querySelector('[data-intake-result]');
+  const obsolete = details.querySelector('[data-action="obsolete"]');
   const screenshotSelection = form.querySelector('[data-intake-screenshot]');
   const screenshotName = form.querySelector('[data-intake-screenshot-name]');
   const removeScreenshot = form.querySelector('[data-action="remove-screenshot"]');
@@ -379,6 +422,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   let accepted = null;
   let destroyed = false;
   let submitting = false;
+  let cancelling = false;
 
   // The attached file is only a local preview: it is prepared and inlined into
   // the immutable request at submit, and «Удалить» detaches it before then.
@@ -432,20 +476,33 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
       pendingRequest = null;
     }
     const deliveryStatus = validated.delivery.status;
+    const cancellation = validated.cancellation;
+    const cancelled = cancellation?.status === 'confirmed';
+    const cancellationFailed = cancellation?.status === 'failed_terminal';
     const terminalReady = validated.terminal?.status === 'READY_TO_PLAY';
     const terminalNeedsHelp = validated.terminal?.status === 'NEEDS_HELP';
     const failed = deliveryStatus === 'failed_terminal' || terminalNeedsHelp;
     const confirmed = deliveryStatus === 'confirmed';
-    open.textContent = failed ? '!' : terminalReady ? '▶' : '✓';
-    open.dataset.intakeState = failed ? 'needs_help' : terminalReady ? 'ready' : confirmed ? 'confirmed' : 'pending';
-    open.setAttribute('aria-label', failed ? '! Нужна помощь' : terminalReady ? '▶ Можно проверить' : confirmed ? '✓ Тикет создан' : '✓ Задача принята');
+    open.textContent = cancelled ? '×' : failed || cancellationFailed ? '!' : terminalReady ? '▶' : '✓';
+    open.dataset.intakeState = cancelled ? 'cancelled' : failed || cancellationFailed
+      ? 'needs_help' : terminalReady ? 'ready' : confirmed ? 'confirmed' : 'pending';
+    open.setAttribute('aria-label', cancelled ? '× Неактуально' : failed || cancellationFailed
+      ? '! Нужна помощь' : terminalReady ? '▶ Можно проверить' : confirmed ? '✓ Тикет создан' : '✓ Задача принята');
     detailInstruction.textContent = validated.request.instruction;
     detailRequestId.textContent = validated.requestId;
     detailMutationId.textContent = validated.mutationId;
     detailRequestHash.textContent = validated.requestHash;
     detailReplayed.textContent = String(validated.replayed);
     detailDeliveryState.textContent = deliveryStatus;
-    detailStatus.textContent = terminalNeedsHelp
+    detailStatus.textContent = cancelled
+      ? cancellation.issueClosed
+        ? 'Неактуально: инженерный тикет помечен и закрыт.'
+        : 'Неактуально: задача отменена до создания инженерного тикета.'
+      : cancellationFailed
+        ? 'Не удалось закрыть инженерный тикет; нужна помощь.'
+        : cancellation
+          ? 'Отмена сохранена и синхронизируется.'
+      : terminalNeedsHelp
       ? `NEEDS_HELP: ${validated.terminal.summary}`
       : terminalReady
         ? `READY_TO_PLAY: ${validated.terminal.summary}`
@@ -453,16 +510,21 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
           ? 'Синхронизация остановлена; изменения не опубликованы.'
       : confirmed ? 'Инженерный тикет создан; изменения ещё не опубликованы.'
         : 'Задача сохранена и ждёт синхронизации; изменения не опубликованы.';
-    blocker.textContent = terminalNeedsHelp
+    blocker.textContent = cancellationFailed
+      ? `Не удалось завершить отмену: ${cancellation.lastErrorCode || 'unknown'}`
+      : terminalNeedsHelp
       ? validated.terminal.blocker.operatorAction
       : failed ? 'Нужна помощь с конфигурацией инженерного контура.' : '';
-    blocker.hidden = !failed;
+    blocker.hidden = !(failed || cancellationFailed);
     const resultUrl = terminalReady
       ? validated.terminal.candidate.url
       : confirmed ? validated.delivery.issueUrl : null;
     resultLink.hidden = !resultUrl;
     if (resultUrl) resultLink.href = resultUrl;
     else resultLink.removeAttribute('href');
+    obsolete.hidden = typeof options.cancel !== 'function'
+      || Boolean(validated.terminal) || Boolean(cancellation);
+    obsolete.disabled = false;
     form.hidden = true;
     open.hidden = false;
     open.setAttribute('aria-controls', details.id);
@@ -527,6 +589,30 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     open.setAttribute('aria-expanded', 'true');
     instruction.value = safeDraft(options.storage, key);
     instruction.focus();
+  });
+  obsolete.addEventListener('click', async () => {
+    if (destroyed || cancelling || !accepted || typeof options.cancel !== 'function') return;
+    cancelling = true;
+    obsolete.disabled = true;
+    detailStatus.textContent = 'Сохраняю отмену…';
+    try {
+      const receipt = await options.cancel(
+        accepted.requestId,
+        buildPlatformDevelopmentIntakeCancelRequest({
+          mutationId: options.createMutationId(),
+          requestHash: accepted.requestHash,
+        }),
+      );
+      if (!renderAccepted(receipt)) {
+        fail('development_intake_receipt_mismatch', 'cancellation receipt is invalid');
+      }
+      void options.refresh?.();
+    } catch {
+      detailStatus.textContent = 'Не удалось отменить задачу.';
+      obsolete.disabled = false;
+    } finally {
+      cancelling = false;
+    }
   });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();

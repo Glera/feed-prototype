@@ -8,6 +8,7 @@ import {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SHA = /^[0-9a-f]{40}$/;
+const HASH = /^[0-9a-f]{64}$/;
 const SCREENSHOT_INVALID = 'playable_rework_screenshot_invalid';
 let controlSequence = 0;
 
@@ -93,10 +94,16 @@ const preservedInstruction = (value) => typeof value === 'string'
 export function isOperatorPlayableReworkQueueItem(value, playableId = undefined) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
     && UUID.test(value.requestId)
+    && HASH.test(value.requestHash)
     && ['open', 'claimed', 'closed'].includes(value.state)
     && SOURCE_ADAPTERS.has(value.sourceAdapter)
     && QUEUE_DISPOSITIONS.has(value.queueDisposition)
     && typeof value.batchPresent === 'boolean'
+    && (value.operatorPresentation === undefined
+      || (exactKeys(value.operatorPresentation, ['kind', 'effectDelivered'])
+        && ['current', 'superseded', 'capability_gap_root', 'capability_gap_root_covered']
+          .includes(value.operatorPresentation.kind)
+        && typeof value.operatorPresentation.effectDelivered === 'boolean'))
     && Boolean(value.queueCounts) && typeof value.queueCounts === 'object'
     && Number.isInteger(value.queueCounts.active) && value.queueCounts.active >= 0 && value.queueCounts.active <= 200
     && Number.isInteger(value.queueCounts.queued) && value.queueCounts.queued >= 0 && value.queueCounts.queued <= 200
@@ -131,35 +138,45 @@ export function groupOperatorPlayableReworkQueue(items) {
 
 export function operatorPlayableReworkQueuePresentation(queue) {
   const items = Array.isArray(queue) ? queue : [];
-  const locallyActive = items.filter((item) => item?.queueDisposition === 'active_batch').length;
-  const hasBatch = locallyActive > 0 || items.some((item) => item?.batchPresent === true);
-  const active = hasBatch ? Math.max(
-    locallyActive,
-    items.reduce((count, item) => Math.max(count, item?.queueCounts?.active || 0), 0),
-  ) : 0;
-  const queued = Math.max(
-    items.filter((item) => item?.queueDisposition === 'queued').length,
-    items.reduce((count, item) => Math.max(count, item?.queueCounts?.queued || 0), 0),
-  );
-  const duplicates = items.filter((item) => item?.queueDisposition === 'duplicate_of').length;
-  const needsHelp = items.some((item) => ['needs_help', 'blocked'].includes(
-    operatorPlayableReworkPresentation(item).state,
-  ));
+  const presentations = items.map((item) => operatorPlayableReworkPresentation(item));
+  const actionable = items.filter((_item, index) => ![
+    'superseded', 'capability_gap_root_covered', 'ready_for_approval',
+  ].includes(presentations[index].state));
+  const locallyActive = actionable.filter((item) => item?.queueDisposition === 'active_batch').length;
+  const hasBatch = locallyActive > 0 || actionable.some((item) => item?.batchPresent === true);
+  // The list items are the projection rendered below. Server aggregate counts
+  // can lag one mutation behind; using them here would leave the badge saying
+  // “В работе · ещё 1” after that exact queued row was made obsolete.
+  const active = hasBatch ? locallyActive : 0;
+  const queued = actionable.filter((item) => item?.queueDisposition === 'queued').length;
+  const duplicates = actionable.filter((item) => item?.queueDisposition === 'duplicate_of').length;
+  const ready = presentations.some((item) => item.state === 'ready_for_approval');
+  if (ready && actionable.length === 0) return Object.freeze({
+    state: 'ready_for_approval', label: 'Готово к проверке',
+    active: 0, queued, duplicates, unresolved: actionable.length,
+  });
+  const needsHelp = actionable.some((item) => [
+    'needs_help', 'blocked', 'capability_gap_root',
+  ].includes(operatorPlayableReworkPresentation(item).state));
   if (needsHelp) return Object.freeze({
     state: 'needs_help', label: 'Нужна помощь · добавить замечание',
-    active, queued, duplicates, unresolved: items.length,
+    active, queued, duplicates, unresolved: actionable.length,
   });
   if (hasBatch && queued > 0) return Object.freeze({
     state: 'queued', label: `В работе · ещё ${queued}`,
-    active, queued, duplicates, unresolved: items.length,
+    active, queued, duplicates, unresolved: actionable.length,
   });
   if (hasBatch) return Object.freeze({
     state: 'active', label: 'В работе · добавить замечание',
-    active, queued, duplicates, unresolved: items.length,
+    active, queued, duplicates, unresolved: actionable.length,
+  });
+  if (items.length > 0 && actionable.length === 0) return Object.freeze({
+    state: 'history', label: 'История правок',
+    active: 0, queued: 0, duplicates: 0, unresolved: 0,
   });
   return Object.freeze({
     state: 'idle', label: '✎ Доработать механику',
-    active, queued, duplicates, unresolved: items.length,
+    active, queued, duplicates, unresolved: actionable.length,
   });
 }
 
@@ -169,11 +186,35 @@ export function operatorPlayableReworkControlKey(occurrence, queue = []) {
     item.queueCounts?.active, item.queueCounts?.queued,
     item.execution?.state, item.execution?.updatedAt,
     item.releaseExecution?.state, item.releaseExecution?.updatedAt,
+    item.operatorPresentation?.kind, item.operatorPresentation?.effectDelivered,
   ].join(':')).join('|');
   return `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${queueKey}`;
 }
 
 export function operatorPlayableReworkPresentation(task) {
+  const presentation = task?.operatorPresentation;
+  if (presentation?.kind === 'superseded') {
+    return Object.freeze({
+      state: 'superseded', icon: '↪', label: 'Заменена следующей правкой', blocker: null,
+    });
+  }
+  if (presentation?.kind === 'capability_gap_root_covered') {
+    return Object.freeze({
+      state: 'capability_gap_root_covered', icon: '↪',
+      label: 'Историческая заявка · выполнена successor', blocker: null,
+    });
+  }
+  if (presentation?.kind === 'capability_gap_root') {
+    return Object.freeze({
+      state: 'capability_gap_root', icon: '!', label: 'Ждёт capability successor',
+      blocker: task?.execution?.summary || 'Эта историческая заявка не исполняется напрямую.',
+    });
+  }
+  if (presentation?.effectDelivered === true) {
+    return Object.freeze({
+      state: 'ready_for_approval', icon: '!', label: 'Готово к проверке', blocker: null,
+    });
+  }
   const projected = task?.releaseExecution;
   if (projected?.state === 'preparing') {
     return Object.freeze({ state: 'preparing', icon: '…', label: 'Готовится', blocker: null });
@@ -265,17 +306,22 @@ export function mountOperatorPlayableReworkControl(host, options) {
   // Same bar-anchored composition as the platform intake: the keyboard must
   // never push the field being typed into off the screen.
   const formViewport = observeOperatorFormViewport(form);
-  open.dataset.reworkState = queuePresentation.state;
-  open.setAttribute('aria-label', queuePresentation.label);
-  open.title = queuePresentation.label;
-  countBadge.textContent = String(queuePresentation.unresolved);
-  countBadge.hidden = queuePresentation.unresolved === 0;
-  summary.textContent = queuePresentation.label;
-  counts.textContent = [
-    queuePresentation.active ? `активно ${queuePresentation.active}` : '',
-    queuePresentation.queued ? `в очереди ${queuePresentation.queued}` : '',
-    queuePresentation.duplicates ? `возможных дублей ${queuePresentation.duplicates}` : '',
-  ].filter(Boolean).join(' · ') || 'Новых замечаний пока нет';
+  const renderQueueSummary = () => {
+    const presentation = operatorPlayableReworkQueuePresentation(queue);
+    root.dataset.reworkState = presentation.state;
+    open.dataset.reworkState = presentation.state;
+    open.setAttribute('aria-label', presentation.label);
+    open.title = presentation.label;
+    countBadge.textContent = String(presentation.unresolved);
+    countBadge.hidden = presentation.unresolved === 0;
+    summary.textContent = presentation.label;
+    counts.textContent = [
+      presentation.active ? `активно ${presentation.active}` : '',
+      presentation.queued ? `в очереди ${presentation.queued}` : '',
+      presentation.duplicates ? `возможных дублей ${presentation.duplicates}` : '',
+    ].filter(Boolean).join(' · ') || 'Новых замечаний пока нет';
+  };
+  renderQueueSummary();
   const dispositionLabels = {
     active_batch: 'В работе', queued: 'В очереди',
     duplicate_of: 'Возможный дубль', closed: 'Завершено',
@@ -287,8 +333,14 @@ export function mountOperatorPlayableReworkControl(host, options) {
     article.dataset.queueDisposition = task.queueDisposition;
     const itemHeading = document.createElement('div');
     itemHeading.className = 'game__operator-playable-rework-item-heading';
+    const lifecycle = operatorPlayableReworkPresentation(task);
     const itemState = document.createElement('b');
-    itemState.textContent = dispositionLabels[task.queueDisposition];
+    itemState.textContent = [
+      'superseded', 'capability_gap_root', 'capability_gap_root_covered',
+      'ready_for_approval',
+    ].includes(lifecycle.state)
+      ? lifecycle.label
+      : dispositionLabels[task.queueDisposition];
     const itemMeta = document.createElement('small');
     const createdAt = task.createdAt || task.request.context?.capturedAt || '';
     const created = createdAt ? new Date(createdAt) : null;
@@ -300,7 +352,6 @@ export function mountOperatorPlayableReworkControl(host, options) {
     const itemInstruction = document.createElement('p');
     itemInstruction.textContent = task.request.instruction;
     article.append(itemHeading, itemInstruction);
-    const lifecycle = operatorPlayableReworkPresentation(task);
     if (lifecycle.blocker) {
       const blocker = document.createElement('div');
       blocker.className = 'game__operator-playable-rework-blocker';
@@ -315,6 +366,34 @@ export function mountOperatorPlayableReworkControl(host, options) {
       const lifecycleLabel = document.createElement('small');
       lifecycleLabel.textContent = lifecycle.label;
       article.append(lifecycleLabel);
+    }
+    if (task.state === 'open' && task.releaseId == null
+      && !['superseded', 'capability_gap_root', 'capability_gap_root_covered', 'ready_for_approval']
+        .includes(lifecycle.state)
+      && typeof options.cancel === 'function') {
+      const obsolete = document.createElement('button');
+      obsolete.type = 'button';
+      obsolete.className = 'game__operator-playable-rework-obsolete';
+      obsolete.dataset.action = 'obsolete-rework';
+      obsolete.textContent = 'Неактуально';
+      obsolete.addEventListener('click', async () => {
+        if (obsolete.disabled) return;
+        obsolete.disabled = true;
+        itemState.textContent = 'Отменяю…';
+        try {
+          await options.cancel(task);
+          itemState.textContent = 'Неактуально';
+          article.dataset.queueDisposition = 'closed';
+          obsolete.remove();
+          const queueIndex = queue.indexOf(task);
+          if (queueIndex >= 0) queue.splice(queueIndex, 1);
+          renderQueueSummary();
+        } catch {
+          itemState.textContent = dispositionLabels[task.queueDisposition];
+          obsolete.disabled = false;
+        }
+      });
+      article.append(obsolete);
     }
     list.append(article);
   }

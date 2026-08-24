@@ -16,6 +16,13 @@ export interface PlatformDevelopmentIntakeRequestV1 {
   screenshot: PlatformDevelopmentIntakeScreenshotV1;
 }
 
+export interface PlatformDevelopmentIntakeCancelV1 {
+  schema: 'platform.development-intake.cancel.v1';
+  mutationId: string;
+  requestHash: string;
+  reason: 'obsolete';
+}
+
 export interface PlatformDevelopmentIntakeReceiptV1 {
   schema: 'platform.development-intake.response.v1';
   requestId: string;
@@ -45,6 +52,15 @@ export interface PlatformDevelopmentIntakeReceiptV1 {
     } | null;
     recordedAt: string;
     nothingPublished: true;
+  } | null;
+  cancellation?: {
+    mutationId: string;
+    status: 'requested' | 'started' | 'outcome_unknown' | 'confirmed' | 'failed_terminal';
+    reason: 'obsolete';
+    requestedAt: string;
+    cancelledAt: string | null;
+    issueClosed: boolean;
+    lastErrorCode: string | null;
   } | null;
   request: PlatformDevelopmentIntakeRequestV1;
   replayed: boolean;
@@ -93,6 +109,10 @@ export function validatePlatformDevelopmentIntakeList(value: unknown): Readonly<
   schema: 'platform.development-intake.list.v1';
   items: ReadonlyArray<Readonly<PlatformDevelopmentIntakeReceiptV1>>;
 }>;
+export function buildPlatformDevelopmentIntakeCancelRequest(input: {
+  mutationId: string;
+  requestHash: string;
+}): Readonly<PlatformDevelopmentIntakeCancelV1>;
 export function platformDevelopmentIntakeFailureDisposition(error: unknown): 'rejected' | 'retry';
 export function mountPlatformDevelopmentIntakeControl(
   host: HTMLElement,
@@ -105,5 +125,10 @@ export function mountPlatformDevelopmentIntakeControl(
     existing?: PlatformDevelopmentIntakeReceiptV1 | null;
     createMutationId(): string;
     submit(request: PlatformDevelopmentIntakeRequestV1): Promise<PlatformDevelopmentIntakeReceiptV1>;
+    cancel?(
+      requestId: string,
+      request: PlatformDevelopmentIntakeCancelV1,
+    ): Promise<PlatformDevelopmentIntakeReceiptV1>;
+    refresh?(): void | Promise<void>;
   },
 ): PlatformDevelopmentIntakeControl;

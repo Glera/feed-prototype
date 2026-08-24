@@ -101,9 +101,30 @@ const request = (id, instruction) => ({
   },
   instruction,
 });
-const queue = new URL(location.href).searchParams.has('queue') ? [
+const fixtureParams = new URL(location.href).searchParams;
+const queue = fixtureParams.has('honesty') ? [
+  {
+    requestId: '88888888-8888-5888-8888-888888888888', state: 'open',
+    requestHash: '${'8'.repeat(64)}',
+    sourceAdapter: 'telegram', queueDisposition: 'active_batch', batchPresent: true,
+    queueCounts: { active: 2, queued: 0 },
+    operatorPresentation: { kind: 'current', effectDelivered: true },
+    request: request('88888888-8888-5888-8888-888888888888', 'Уже доставленная правка.'),
+    createdAt: '2026-08-14T12:10:00.000Z',
+  },
+  {
+    requestId: '99999999-9999-5999-8999-999999999999', state: 'open',
+    requestHash: '${'9'.repeat(64)}',
+    sourceAdapter: 'telegram', queueDisposition: 'active_batch', batchPresent: true,
+    queueCounts: { active: 2, queued: 0 },
+    operatorPresentation: { kind: 'superseded', effectDelivered: false },
+    request: request('99999999-9999-5999-8999-999999999999', 'Уже заменённая правка.'),
+    createdAt: '2026-08-14T12:00:00.000Z',
+  },
+] : fixtureParams.has('queue') ? [
   {
     requestId: '66666666-6666-5666-8666-666666666666', state: 'open',
+    requestHash: '${'6'.repeat(64)}',
     sourceAdapter: 'telegram', queueDisposition: 'active_batch', batchPresent: true,
     queueCounts: { active: 1, queued: 1 },
     request: request('66666666-6666-5666-8666-666666666666', 'Исправить центрирование.'),
@@ -111,6 +132,7 @@ const queue = new URL(location.href).searchParams.has('queue') ? [
   },
   {
     requestId: '77777777-7777-5777-8777-777777777777', state: 'open',
+    requestHash: '${'7'.repeat(64)}',
     sourceAdapter: 'codex', queueDisposition: 'queued', batchPresent: false,
     queueCounts: { active: 1, queued: 1 },
     request: request('77777777-7777-5777-8777-777777777777', 'Перезапечь обложку.'),
@@ -122,6 +144,7 @@ window.submitGate = Promise.resolve();
 window.submitError = false;
 window.submitReplay = false;
 window.refreshes = 0;
+window.cancelledTasks = [];
 window.normalizeScreenshot = screenshotFromFile;
 window.control = mountOperatorPlayableReworkControl(document.querySelector('#host'), {
   occurrence,
@@ -133,6 +156,7 @@ window.control = mountOperatorPlayableReworkControl(document.querySelector('#hos
     if (window.submitError) throw Object.assign(new Error('offline'), { status: 0 });
     return { replayed: window.submitReplay };
   },
+  cancel: async (task) => { window.cancelledTasks.push(task); },
   refresh: () => { window.refreshes += 1; },
 });
 </script></body></html>`;
@@ -284,6 +308,24 @@ try {
   assert.match(await details.innerText(), /Перезапечь обложку\./);
   assert.match(await details.innerText(), /Telegram/);
   assert.match(await details.innerText(), /Codex/);
+  assert.equal(await details.locator('[data-action="obsolete-rework"]').count(), 2);
+  await details.locator('[data-action="obsolete-rework"]').nth(1).click();
+  await queuePage.waitForFunction(() => window.cancelledTasks.length === 1);
+  assert.deepEqual(await queuePage.evaluate(() => ({
+    requestId: window.cancelledTasks[0].requestId,
+    requestHash: window.cancelledTasks[0].requestHash,
+  })), {
+    requestId: '77777777-7777-5777-8777-777777777777',
+    requestHash: '7'.repeat(64),
+  });
+  const cancelledRow = details.locator('.game__operator-playable-rework-item').nth(1);
+  assert.equal(await cancelledRow.locator('b').innerText(), 'Неактуально');
+  assert.equal(await queueOpen.getAttribute('aria-label'), 'В работе · добавить замечание');
+  assert.equal(await queuePage.locator('[data-rework-count]').innerText(), '1');
+  assert.equal(await details.isVisible(), true,
+    'cancelling a row remounted and destroyed the open queue details');
+  assert.equal(await queuePage.evaluate(() => window.refreshes), 0,
+    'cancelling a row issued a redundant projection refresh from the mounted control');
   await details.locator('[data-action="add-feedback"]').click();
   await queuePage.locator('[data-action="cancel"]').click();
   assert.equal(
@@ -308,6 +350,22 @@ try {
   await queuePage.locator('.game__operator-flag-status')
     .filter({ hasText: 'Такое замечание уже сохранено' }).waitFor();
   await queuePage.close();
+
+  const honestyPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await honestyPage.goto(`${origin}/?honesty=1`, { waitUntil: 'domcontentloaded' });
+  const honestyOpen = honestyPage.locator('.game__operator-flag-open');
+  assert.equal(await honestyOpen.getAttribute('aria-label'), 'Готово к проверке');
+  await honestyOpen.click();
+  const honestyDetails = honestyPage.locator('.game__operator-playable-rework-details');
+  await honestyDetails.waitFor({ state: 'visible' });
+  const honestyText = await honestyDetails.innerText();
+  assert.doesNotMatch(honestyText, /В работе/,
+    'delivered and superseded rows remained presented as in progress');
+  assert.match(honestyText, /Готово к проверке/);
+  assert.match(honestyText, /Заменена следующей правкой/);
+  assert.equal(await honestyDetails.locator('[data-action="obsolete-rework"]').count(), 0,
+    'historical rows exposed an operator cancellation action');
+  await honestyPage.close();
 
   // The on-screen keyboard shrinks the visible viewport from the bottom. This
   // popover is anchored above the feed bar and grows UPWARD, so the instruction
