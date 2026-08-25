@@ -15,7 +15,6 @@ import {
   missionBarPercent,
   missionCaseSubtitle,
   missionCaseTitle,
-  missionOpenedByPlayCents,
   missionSourceLabel,
   type MissionCaseContract,
   type MissionCaseEvent,
@@ -61,23 +60,41 @@ function progressTrack(className: string, percent: number): HTMLElement {
 
 // ── HUD ─────────────────────────────────────────────────────────────────────
 export interface MissionHudState {
-  title: string;
   progress: number;
   tokenGoal: number;
-  myTokens: number;
+  nextStepThreshold: number | null;
 }
 
 /** The case bar: name, `N / goal`, and a thin track. Centre of the single HUD row. */
-export function buildMissionHudBar(onOpen: () => void): HTMLButtonElement {
-  const bar = document.createElement('button');
-  bar.type = 'button';
+export function buildMissionHudBar(
+  onOpen: () => void,
+  onOpenContract: () => void,
+): HTMLElement {
+  const bar = document.createElement('div');
   bar.className = 'hud__mission';
+  bar.tabIndex = 0;
+  bar.setAttribute('role', 'button');
   bar.setAttribute('aria-label', 'Кейс миссии');
-  bar.append(
-    el('span', 'hud__mission-title', '—'),
-    el('span', 'hud__mission-count', '0 / 0'),
-    progressTrack('hud__mission-track', 0),
-  );
+  const gift = el('span', 'hud__mission-gift', '🎁');
+  const info = el('span', 'hud__mission-info', 'ⓘ');
+  info.tabIndex = 0;
+  info.setAttribute('role', 'button');
+  info.setAttribute('aria-label', 'Полный контракт и материалы');
+  for (const type of ['pointerdown', 'pointerup', 'click'] as const) {
+    info.addEventListener(type, (event) => event.stopPropagation());
+  }
+  info.addEventListener('click', onOpenContract);
+  info.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    onOpenContract();
+  });
+  gift.appendChild(info);
+  const coin = el('span', 'hud__mission-coin');
+  coin.innerHTML = MISSION_PAW_SVG;
+  bar.append(gift, el('span', 'hud__mission-count', '0 / 0'), coin);
+  bar.appendChild(progressTrack('hud__mission-track', 0));
   // The bar lives inside the stories scroller, whose drag handler listens on the
   // rail: a tap on the bar must open the case, not fling the rail.
   bar.addEventListener('pointerdown', (event) => event.stopPropagation());
@@ -86,91 +103,54 @@ export function buildMissionHudBar(onOpen: () => void): HTMLButtonElement {
     event.stopPropagation();
     onOpen();
   });
+  bar.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    onOpen();
+  });
   return bar;
 }
 
 export function updateMissionHudBar(bar: HTMLElement, state: MissionHudState): void {
-  const title = bar.querySelector<HTMLElement>('.hud__mission-title');
   const count = bar.querySelector<HTMLElement>('.hud__mission-count');
   const fill = bar.querySelector<HTMLElement>('.hud__mission-track i');
-  if (title) title.textContent = state.title;
-  if (count) count.textContent = `${state.progress} / ${state.tokenGoal}`;
-  if (fill) fill.style.width = `${missionBarPercent(state.progress, state.tokenGoal)}%`;
-}
-
-/** The only badge attribute the mission mutates, remembered per element. */
-const BADGE_LABELS = new WeakMap<HTMLElement, string | null>();
-
-/**
- * Retheme the puzzle badge into the paw badge — ADDITIVELY.
- *
- * The pre-mission children are never removed or rebuilt: `data-mission` makes
- * CSS hide them, and the paw is a sibling. That matters twice. The capability
- * can be revoked by the very next `/session`, and a teardown that had to
- * reconstruct markup could only ever restore a copy; here the original nodes
- * were never detached, so the restore is exact by construction. And `feed.ts`
- * holds a live reference to `.hud__puzzles-value` — replacing it would leave
- * that reference pointing at a detached node, freezing the puzzle counter after
- * a revoke. The puzzle balance keeps being counted and painted; it only leaves
- * the SURFACE, which is what the operator decision asked for.
- */
-export function applyMissionPawBadge(badge: HTMLElement, myTokens: number): void {
-  if (badge.querySelector('.hud__mission-paw')) {
-    updateMissionPawBadge(badge, myTokens);
-    return;
-  }
-  if (!BADGE_LABELS.has(badge)) BADGE_LABELS.set(badge, badge.getAttribute('aria-label'));
-  const paw = el('span', 'hud__mission-paw');
-  paw.innerHTML = MISSION_PAW_SVG;
-  paw.appendChild(el('span', 'hud__mission-paw-value', String(myTokens)));
-  badge.appendChild(paw);
-  badge.setAttribute('aria-label', 'Мои лапки');
-  badge.dataset.mission = '1';
-}
-
-export function updateMissionPawBadge(badge: HTMLElement, myTokens: number): void {
-  const value = badge.querySelector<HTMLElement>('.hud__mission-paw-value');
-  if (value) value.textContent = String(myTokens);
-}
-
-/** Undo the retheme exactly: drop the added node and put the label back. */
-export function restoreMissionBadge(badge: HTMLElement): void {
-  badge.querySelector('.hud__mission-paw')?.remove();
-  delete badge.dataset.mission;
-  if (!BADGE_LABELS.has(badge)) return;
-  const label = BADGE_LABELS.get(badge) ?? null;
-  BADGE_LABELS.delete(badge);
-  if (label === null) badge.removeAttribute('aria-label');
-  else badge.setAttribute('aria-label', label);
+  const target = state.nextStepThreshold ?? state.tokenGoal;
+  if (count) count.textContent = `${state.progress} / ${target}`;
+  if (fill) fill.style.width = `${missionBarPercent(state.progress, target)}%`;
 }
 
 // ── contribution ceremony ───────────────────────────────────────────────────
-/**
- * «Ты принёс N лапок» — mounted above the challenge pill in the CTA stack, and
- * rendered strictly from the committed receipt: no optimistic amount, no local
- * bar estimate. The bar underneath is the receipt's own `bar` block.
- */
-export function buildMissionContributionCard(
+/** Own reward: one paw coin flies from the committed reward to the season bar.
+ * No own-contribution toast or card is created. */
+export function launchMissionPawFlight(
   receipt: MissionContributionReceipt,
+  origin: HTMLElement,
+  target: HTMLElement,
+  viewport: HTMLElement,
 ): HTMLElement {
-  const card = el('section', 'mission-card');
-  const head = el('div', 'mission-card__head');
-  const icon = el('span', 'mission-card__icon');
-  icon.innerHTML = MISSION_PAW_SVG;
-  const copy = el('div', 'mission-card__copy');
-  copy.append(
-    el('strong', 'mission-card__title', `Ты принёс ${receipt.amount} лапок`),
-    el('span', 'mission-card__sub', 'Вклад внесён — общий бар сдвинулся'),
+  const viewportRect = viewport.getBoundingClientRect();
+  const from = origin.getBoundingClientRect();
+  const to = target.getBoundingClientRect();
+  const coin = el('span', 'mission-paw-flight');
+  coin.innerHTML = MISSION_PAW_SVG;
+  coin.setAttribute('aria-label', `+${receipt.amount} лапок в общий сезон`);
+  coin.style.left = `${from.left - viewportRect.left + from.width / 2}px`;
+  coin.style.top = `${from.top - viewportRect.top + from.height / 2}px`;
+  viewport.appendChild(coin);
+  const dx = to.left - from.left + (to.width - from.width) / 2;
+  const dy = to.top - from.top + (to.height - from.height) / 2;
+  const animation = coin.animate?.(
+    [
+      { transform: 'translate(-50%, -50%) scale(.72)', opacity: 0 },
+      { transform: 'translate(-50%, -70%) scale(1.08)', opacity: 1, offset: .18 },
+      { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(.58)`, opacity: 1 },
+    ],
+    { duration: 720, easing: 'cubic-bezier(.22,.8,.28,1)', fill: 'forwards' },
   );
-  head.append(icon, copy);
-  const meter = el('div', 'mission-card__meter');
-  meter.append(
-    progressTrack('mission-card__track', missionBarPercent(receipt.bar.progress, receipt.bar.tokenGoal)),
-    el('span', 'mission-card__count', `${receipt.bar.progress} / ${receipt.bar.tokenGoal}`),
-  );
-  card.append(head, meter);
-  stopFeedGestures(card);
-  return card;
+  if (animation) animation.addEventListener('finish', () => coin.remove(), { once: true });
+  else window.setTimeout(() => coin.remove(), 720);
+  return coin;
 }
 
 // ── UNLOCKED / FULFILLED ceremonies ─────────────────────────────────────────
@@ -208,7 +188,6 @@ function receiptText(receipt: Record<string, unknown>, key: string): string {
   return typeof value === 'string' ? value : '';
 }
 
-/** «Мы сделали это» — the three sums plus the successor that is already open. */
 export function buildMissionUnlockedCeremony(options: {
   event: MissionCaseEvent;
   currency: string;
@@ -218,17 +197,16 @@ export function buildMissionUnlockedCeremony(options: {
   const { root, body, actions } = ceremonyShell(options.onClose);
   root.classList.add('mission-ceremony--unlocked');
   const payload = options.event.receipt;
-  body.append(el('div', 'mission-ceremony__emoji', '🎉'));
-  body.append(el('div', 'mission-ceremony__title', 'Мы сделали это'));
+  body.append(el('div', 'mission-ceremony__emoji', '🐾'));
+  body.append(el(
+    'div',
+    'mission-ceremony__title',
+    `Приют получает ${formatMissionMoney(receiptInt(payload, 'giftTotalCents'), options.currency)}`,
+  ));
   const sums = el('div', 'mission-ceremony__sums');
   sums.append(
-    sumRow('Гарантировано', formatMissionMoney(receiptInt(payload, 'guaranteedCents'), options.currency)),
-    sumRow('Открыто игрой', `+${formatMissionMoney(receiptInt(payload, 'giftAdditionalCents'), options.currency)}`),
-    sumRow(
-      'Подарок ждёт передачи',
-      formatMissionMoney(receiptInt(payload, 'giftTotalCents'), options.currency),
-      'accent',
-    ),
+    sumRow('Платформа', 'заранее резервирует помощь'),
+    sumRow('Сообщество', 'открывает ступени лапками', 'accent'),
   );
   body.append(sums);
   if (options.nextCaseTitle) {
@@ -263,9 +241,6 @@ export function buildMissionFulfilledCeremony(options: {
     receiptText(transfer, 'recipient'),
   ].filter(Boolean).join(' · ');
   if (details) body.append(el('div', 'mission-ceremony__sub', details));
-  body.append(el('div', 'mission-ceremony__next', 'записано в историю приюта'));
-  const reference = receiptText(transfer, 'transferReference');
-  if (reference) body.append(el('div', 'mission-ceremony__ref', `Перевод ${reference}`));
   const button = el('button', 'mission-ceremony__btn', 'Спасибо');
   (button as HTMLButtonElement).type = 'button';
   button.addEventListener('click', options.onClose);
@@ -306,15 +281,17 @@ const POLICY_LABELS: Record<string, string> = {
   currency: 'Валюта',
   rounding: 'Округление',
   giftFormula: 'Формула подарка',
+  stepRule: 'Правило ступеней',
   snapshotRule: 'Правило снимка пула',
   poolConsumption: 'Расходование пула',
   eligiblePool: 'Источники пула',
 };
 
 const POLICY_ENUM_MEANINGS: Record<string, string> = {
-  'floor-cents': 'вниз до целых центов',
-  'guaranteed-plus-floor-proportional-share-v1':
-    'гарантия плюс доля пула пропорционально прогрессу, вниз до цента',
+  'declared-cents': 'все суммы заранее объявлены целыми центами',
+  'guaranteed-plus-opened-steps-v1': 'гарантия плюс только открытые ступени',
+  'prefunded-reserved-at-ready-open-once-v1':
+    'вся лестница обеспечена до старта; каждая ступень открывается один раз',
   'ledger-seq-alloc-cutoff-v1': 'снимок пула по паре (ledger seq, alloc cutoff) под runtime-локом',
   'eligible-ledger-fifo-by-seq-v1': 'FIFO по seq и только из разрешённых источников',
 };
@@ -329,7 +306,8 @@ const POOL_SOURCE_LABELS: Record<string, string> = {
 /** Curated order for the fields v1 defines; anything the wire adds later follows,
  *  sorted — visible rather than silently dropped. */
 const POLICY_FIELD_ORDER = [
-  'currency', 'rounding', 'giftFormula', 'snapshotRule', 'poolConsumption', 'eligiblePool',
+  'currency', 'rounding', 'giftFormula', 'stepRule',
+  'snapshotRule', 'poolConsumption', 'eligiblePool',
 ];
 
 function poolSourceText(source: unknown): string {
@@ -391,14 +369,24 @@ function policySection(policy: MissionCaseContract['fundingPolicy']): HTMLElemen
  *  funding policy — every money-bearing field of the executable policy, with the
  *  raw pinned documents underneath for anyone who wants the bytes. */
 function contractSection(view: MissionCaseView): HTMLElement {
-  const wrap = el('details', 'mission-contract');
-  const summary = document.createElement('summary');
+  const wrap = el('section', 'mission-contract');
+  const summary = document.createElement('button');
+  summary.type = 'button';
   summary.className = 'mission-contract__summary';
-  summary.textContent = 'Контракт кейса';
+  summary.textContent = 'ⓘ Полный контракт и материалы';
   wrap.appendChild(summary);
+  const sheet = el('div', 'mission-contract-sheet');
+  sheet.hidden = true;
+  const close = el('button', 'mission-contract-sheet__close', '×');
+  (close as HTMLButtonElement).type = 'button';
+  close.setAttribute('aria-label', 'Закрыть контракт');
+  summary.addEventListener('click', () => { sheet.hidden = false; });
+  close.addEventListener('click', () => { sheet.hidden = true; });
+  sheet.appendChild(close);
+  wrap.appendChild(sheet);
   const contract = view.activeCase?.contract;
   if (!contract) {
-    wrap.appendChild(el('div', 'mission-contract__empty', 'Контракт недоступен'));
+    sheet.appendChild(el('div', 'mission-contract__empty', 'Контракт недоступен'));
     return wrap;
   }
   const doc = contract.document;
@@ -413,9 +401,9 @@ function contractSection(view: MissionCaseView): HTMLElement {
   definition(list, 'Раньше не разблокируется', doc.unlockCutoffAt);
   definition(list, 'Передать до', doc.latestFulfillmentAt);
   definition(list, 'Версия', `${contract.contractVersion} · ${contract.contractDigest.slice(0, 12)}`);
-  wrap.appendChild(list);
+  sheet.appendChild(list);
 
-  wrap.appendChild(policySection(contract.fundingPolicy));
+  sheet.appendChild(policySection(contract.fundingPolicy));
 
   const raw = el('details', 'mission-contract__raw');
   const rawSummary = document.createElement('summary');
@@ -428,7 +416,7 @@ function contractSection(view: MissionCaseView): HTMLElement {
     2,
   );
   raw.appendChild(pre);
-  wrap.appendChild(raw);
+  sheet.appendChild(raw);
   return wrap;
 }
 
@@ -473,47 +461,61 @@ export function buildMissionCaseScreen(options: {
   const doc = active.contract?.document ?? {};
   const currency = active.money.currency;
 
-  const photo = el('div', 'mission-photo');
-  photo.innerHTML = MISSION_PAW_SVG;
-  photo.append(el('span', 'mission-photo__hint', 'Фото кейса появится с отчётом'));
-  screen.appendChild(photo);
-
   const heading = el('header', 'mission-screen__head');
   heading.append(el('h2', 'mission-screen__title', missionCaseTitle(doc)));
   const subtitle = missionCaseSubtitle(doc);
   if (subtitle) heading.append(el('div', 'mission-screen__sub', subtitle));
   screen.appendChild(heading);
 
+  const meterTarget = active.bar.nextStepThreshold ?? active.bar.tokenGoal;
   const meter = el('section', 'mission-meter');
   meter.append(
-    progressTrack('mission-meter__track', missionBarPercent(active.bar.progress, active.bar.tokenGoal)),
-    el('div', 'mission-meter__count', `${active.bar.progress} / ${active.bar.tokenGoal} лапок сообщества`),
+    progressTrack('mission-meter__track', missionBarPercent(active.bar.progress, meterTarget)),
+    el('div', 'mission-meter__count', `${active.bar.progress} / ${meterTarget} лапок сообщества`),
   );
   screen.appendChild(meter);
 
-  // The four obligatory numbers: community tokens (the bar above), the promised
-  // guarantee, the money the pool ACTUALLY holds against it (reserved + whatever
-  // a crossing opened), and money that has really left — from fulfillment
-  // receipts alone. The play-opened part is a detail INSIDE the reserved tile so
-  // the promise is never visually confused with the held amount. «Мои лапки» is
-  // the extra personal number the operator asked to keep in the 2×2.
+  const photo = el('div', 'mission-photo');
+  photo.innerHTML = MISSION_PAW_SVG;
+  photo.append(el('span', 'mission-photo__hint', 'Материалы кейса'));
+  screen.appendChild(photo);
+
   const tiles = el('section', 'mission-tiles');
   tiles.append(
-    tile('Гарантировано', formatMissionMoney(active.money.guaranteedCents, currency)),
-    tile(
-      'Зарезервировано и открыто',
-      formatMissionMoney(active.money.reservedAndOpenedCents, currency),
-      `+${formatMissionMoney(missionOpenedByPlayCents(active.money), currency)} открыто игрой`,
-    ),
-    tile('Мои лапки', String(view.myContribution.caseTokens)),
-    tile(
-      'Передано',
-      active.money.deliveredCents > 0
-        ? formatMissionMoney(active.money.deliveredCents, currency)
-        : 'ждём',
-    ),
+    tile('уже собрано', formatMissionMoney(active.money.collectedCents, currency)),
+    tile('Мой вклад', `${view.myContribution.caseTokens} лапок`),
   );
   screen.appendChild(tiles);
+
+  const description = el('details', 'mission-description');
+  const descriptionSummary = el('summary', 'mission-description__summary');
+  descriptionSummary.append(
+    el('strong', 'mission-description__title', 'Что получит приют'),
+    el('span', 'mission-description__more', 'Читать дальше'),
+  );
+  description.append(
+    descriptionSummary,
+    el(
+      'span',
+      'mission-description__copy',
+      String((doc as Record<string, unknown>).guaranteedDeliverable ?? missionCaseTitle(doc)),
+    ),
+  );
+  screen.appendChild(description);
+
+  const ladder = el('section', 'mission-ladder');
+  ladder.appendChild(el('div', 'mission-ladder__head', 'Лестница подарка'));
+  for (const step of active.giftLadder) {
+    const row = el('div', `mission-ladder__step mission-ladder__step--${step.state}`);
+    row.append(
+      el('span', 'mission-ladder__threshold', step.stepIndex === 0
+        ? 'Гарантия'
+        : `${step.thresholdTokens} лапок`),
+      el('strong', 'mission-ladder__amount', formatMissionMoney(step.amountCents, currency)),
+    );
+    ladder.appendChild(row);
+  }
+  screen.appendChild(ladder);
 
   screen.appendChild(contractSection(view));
   screen.appendChild(historySection(history));

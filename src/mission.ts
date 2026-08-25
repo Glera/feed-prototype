@@ -38,15 +38,12 @@ import {
   type MissionWatermark,
 } from './mission-core.mjs';
 import {
-  applyMissionPawBadge,
   buildMissionCaseScreen,
-  buildMissionContributionCard,
   buildMissionFulfilledCeremony,
   buildMissionHudBar,
   buildMissionUnlockedCeremony,
-  restoreMissionBadge,
+  launchMissionPawFlight,
   updateMissionHudBar,
-  updateMissionPawBadge,
 } from './mission-ui';
 import { onResultConfirmed } from './outbox';
 import { userScopedStorageKey } from './user-scope';
@@ -66,7 +63,9 @@ let view: MissionCaseView | null = null;
 let viewFingerprint = '';
 let hudEl: HTMLElement | null = null;
 let barEl: HTMLElement | null = null;
-let badgeEl: HTMLElement | null = null;
+let navigationEl: HTMLElement | null = null;
+let navigationOrder: HTMLElement[] = [];
+let missionMapEl: HTMLButtonElement | null = null;
 let viewportEl: HTMLElement | null = null;
 let screenEl: HTMLElement | null = null;
 let ceremonyEl: HTMLElement | null = null;
@@ -93,7 +92,7 @@ export function missionActive(): boolean {
 
 /**
  * Adopt (or revoke) the `/session` capability. Revocation tears the surface
- * down: a build whose account lost enrolment must not keep a stale paw badge.
+ * down: a build whose account lost enrolment must not keep a stale mission HUD.
  */
 export function applyMissionCapability(available: unknown): void {
   if (!MISSION_FLAG_ENABLED) return;
@@ -134,7 +133,7 @@ function loadHistory(): MissionHistoryEntry[] {
 
 // ── HUD ─────────────────────────────────────────────────────────────────────
 /**
- * Register the HUD. Nothing is inserted here: the bar and the paw badge appear
+ * Register the HUD. Nothing is inserted here: the compact gift bar appears
  * only once the capability has actually arrived, so a build with the flag on but
  * an unenrolled account still renders the untouched HUD.
  */
@@ -143,8 +142,47 @@ export function mountMissionHud(hud: HTMLElement, viewport: HTMLElement): void {
   hudEl = hud;
   viewportEl = viewport;
   barEl = null;   // a remount brought a brand-new HUD subtree
-  badgeEl = hud.querySelector<HTMLElement>('.hud__puzzles');
   syncMissionSurface();
+}
+
+/** Register existing bottom navigation; mission mode reorders additively. */
+export function mountMissionNavigation(navigation: HTMLElement): void {
+  if (!MISSION_FLAG_ENABLED) return;
+  navigationEl = navigation;
+  const switcher = navigation.querySelector<HTMLElement>('.feed-bar__switch');
+  navigationOrder = switcher ? Array.from(switcher.children) as HTMLElement[] : [];
+  syncMissionSurface();
+}
+
+function syncMissionNavigation(): void {
+  const switcher = navigationEl?.querySelector<HTMLElement>('.feed-bar__switch');
+  if (!switcher || !navigationEl) return;
+  navigationEl.classList.add('feed-bar--mission');
+  const labels: Record<string, string> = {
+    daily: 'Daily', collections: 'Collections', feed: 'Feed',
+  };
+  for (const [name, label] of Object.entries(labels)) {
+    const button = switcher.querySelector<HTMLElement>(`[data-bar-tab="${name}"]`);
+    if (button) button.dataset.missionLabel = label;
+  }
+  for (const name of ['daily', 'collections', 'feed']) {
+    const button = switcher.querySelector<HTMLElement>(`[data-bar-tab="${name}"]`);
+    if (button) switcher.appendChild(button);
+  }
+  if (!missionMapEl) {
+    missionMapEl = document.createElement('button');
+    missionMapEl.type = 'button';
+    missionMapEl.className = 'feed-bar__icon feed-bar__icon--mission-map';
+    missionMapEl.dataset.missionLabel = 'Map';
+    missionMapEl.disabled = true;
+    missionMapEl.setAttribute('aria-label', 'Карта — скоро');
+    missionMapEl.setAttribute('aria-disabled', 'true');
+    missionMapEl.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true">'
+      + '<path d="M4 5.5 9 3l6 2.5L20 3v15.5L15 21l-6-2.5L4 21z"/>'
+      + '<path d="M9 3v15.5M15 5.5V21"/></svg>';
+    switcher.appendChild(missionMapEl);
+  }
 }
 
 function syncMissionSurface(): void {
@@ -152,10 +190,14 @@ function syncMissionSurface(): void {
   const stories = hudEl.querySelector<HTMLElement>('.stories');
   if (stories && !barEl) {
     hudEl.classList.add('hud--mission');
-    barEl = buildMissionHudBar(openMissionCaseScreen);
+    barEl = buildMissionHudBar(openMissionCaseScreen, openMissionContractSheet);
     stories.appendChild(barEl);
   }
-  if (badgeEl) applyMissionPawBadge(badgeEl, view?.myContribution.caseTokens ?? 0);
+  const plus = hudEl.querySelector<HTMLElement>('.hud__level-plus');
+  plus?.setAttribute('aria-hidden', 'false');
+  plus?.setAttribute('role', 'button');
+  plus?.setAttribute('aria-label', 'Добавить друга — скоро');
+  syncMissionNavigation();
   renderMissionHud();
 }
 
@@ -163,27 +205,35 @@ function renderMissionHud(): void {
   const active = view?.activeCase ?? null;
   if (barEl) {
     updateMissionHudBar(barEl, {
-      title: active ? missionCaseTitle(active.contract?.document ?? {}) : 'Кейс готовится',
       progress: active?.bar.progress ?? 0,
       tokenGoal: active?.bar.tokenGoal ?? 0,
-      myTokens: view?.myContribution.caseTokens ?? 0,
+      nextStepThreshold: active?.bar.nextStepThreshold ?? null,
     });
-  }
-  if (badgeEl?.dataset.mission === '1') {
-    updateMissionPawBadge(badgeEl, view?.myContribution.caseTokens ?? 0);
   }
 }
 
 /**
- * A revoked capability must leave the HUD exactly as the pre-mission build
- * renders it — the second half of the double gate. The badge restore is exact
- * because the retheme was additive: the original nodes never left the DOM.
+ * A revoked capability leaves the original HUD nodes untouched and removes only
+ * additive mission nodes/classes — the second half of the double gate.
  */
 function teardownMissionSurface(): void {
   hudEl?.classList.remove('hud--mission');
   barEl?.remove();
   barEl = null;
-  if (badgeEl) restoreMissionBadge(badgeEl);
+  const plus = hudEl?.querySelector<HTMLElement>('.hud__level-plus');
+  plus?.setAttribute('aria-hidden', 'true');
+  plus?.removeAttribute('role');
+  plus?.removeAttribute('aria-label');
+  if (navigationEl) navigationEl.classList.remove('feed-bar--mission');
+  const switcher = navigationEl?.querySelector<HTMLElement>('.feed-bar__switch');
+  if (switcher) {
+    missionMapEl?.remove();
+    missionMapEl = null;
+    for (const item of navigationOrder) {
+      delete item.dataset.missionLabel;
+      switcher.appendChild(item);
+    }
+  }
   screenEl?.remove();
   screenEl = null;
   ceremonyEl?.remove();
@@ -196,8 +246,8 @@ function teardownMissionSurface(): void {
 /**
  * Re-project the case from the server and settle any ceremony the player is
  * owed. Called on entry and on every foreground (both run through
- * `applySessionBootstrap`), and once after a contribution so the paw badge and
- * the community money catch up from receipts rather than from a local guess.
+ * `applySessionBootstrap`), and once after a contribution so the shared bar and
+ * community money catch up from receipts rather than from a local guess.
  */
 export function refreshMissionCase(): Promise<void> {
   if (!missionActive()) return Promise.resolve();
@@ -267,6 +317,20 @@ function openMissionCaseScreen(): void {
   if (!missionActive() || !viewportEl || screenEl) return;
   renderMissionCaseScreen();
   void refreshMissionCase();
+}
+
+function openMissionContractSheet(): void {
+  if (!missionActive() || !viewportEl) return;
+  const reveal = (): void => {
+    if (!screenEl) renderMissionCaseScreen();
+    screenEl?.querySelector<HTMLButtonElement>('.mission-contract__summary')?.click();
+  };
+  if (view) {
+    reveal();
+    void refreshMissionCase();
+  } else {
+    void refreshMissionCase().then(reveal);
+  }
 }
 
 function renderMissionCaseScreen(): void {
@@ -348,12 +412,10 @@ function awaitContribution(runId: string): Promise<MissionContributionReceipt | 
  * retried claim, a replayed outbox result and the first answer all describe one
  * contribution and owe the player exactly one ceremony.
  */
-function showContributionCard(receipt: MissionContributionReceipt, parent: HTMLElement | null): void {
-  if (!parent || isContributionPresented(presented, receipt.seq)) return;
+function showContributionFlight(receipt: MissionContributionReceipt, origin: HTMLElement | null): void {
+  if (!origin || !barEl || !viewportEl || isContributionPresented(presented, receipt.seq)) return;
   presented = rememberPresentedContribution(presented, receipt.seq);
-  // A card left over from an earlier contribution is replaced, not stacked.
-  parent.querySelector('.mission-card')?.remove();
-  parent.prepend(buildMissionContributionCard(receipt));
+  launchMissionPawFlight(receipt, origin, barEl, viewportEl);
 }
 
 /**
@@ -363,13 +425,13 @@ function showContributionCard(receipt: MissionContributionReceipt, parent: HTMLE
  */
 export function presentMissionContribution(options: {
   runId: string;
-  parent: () => HTMLElement | null;
+  origin: () => HTMLElement | null;
   alive: () => boolean;
 }): Promise<void> {
   if (!missionActive()) return Promise.resolve();
   return awaitContribution(options.runId).then((receipt) => {
     if (!receipt || !options.alive()) return;
-    showContributionCard(receipt, options.parent());
+    showContributionFlight(receipt, options.origin());
   });
 }
 
@@ -390,5 +452,5 @@ export function presentMissionDailyContribution(response: unknown, parent: HTMLE
   const receipt = parseMissionContributionReceipt(block);
   if (!receipt) return;
   recordContribution(receipt);
-  showContributionCard(receipt, parent);
+  showContributionFlight(receipt, parent);
 }

@@ -4485,9 +4485,8 @@ body {
    language is the existing one — the HUD badge shell, the daily-panel screen
    shell, and the .isln-award card shell. */
 
-/* The HUD becomes one row: level ring · case bar · paw badge. The stories rail
-   stops scrolling (with islands off it holds only the ring) and reserves the
-   badge on the right. */
+/* Legacy mission shell; iteration-5 overrides below replace its personal wallet
+   with the compact shared gift bar while preserving pre-mission nodes. */
 .hud--mission .stories {
   overflow-x: hidden;
   padding-right: 104px;
@@ -4537,9 +4536,7 @@ body {
   transition: width 0.5s cubic-bezier(0.3, 0.9, 0.35, 1);
 }
 
-/* Paw badge: the rethemed puzzle counter (same shell, inline glyph, no asset).
-   The retheme is ADDITIVE — the puzzle children are hidden, never removed — so a
-   revoked capability restores the original badge exactly by dropping one node. */
+/* Shared paw glyph for the gift coin, flights, and report placeholders. */
 .mission-paw {
   width: 30px;
   height: 30px;
@@ -4547,40 +4544,6 @@ body {
   fill: #ffd07a;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
 }
-.hud__puzzles[data-mission="1"] > :not(.hud__mission-paw) { display: none; }
-.hud__puzzles[data-mission="1"] { padding: 0 13px 0 9px; }
-.hud__mission-paw { display: flex; align-items: center; gap: 6px; }
-.hud__mission-paw-value {
-  font: 900 19px/1 system-ui, sans-serif;
-  font-variant-numeric: tabular-nums;
-  color: #fff;
-  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
-}
-
-/* Contribution ceremony — inside the win overlay, above the challenge pill. */
-.mission-card {
-  width: min(360px, calc(100vw - 36px));
-  margin: 0 auto 12px;
-  padding: 13px;
-  border: 1px solid rgba(255, 208, 122, 0.42);
-  border-radius: 18px;
-  background: linear-gradient(145deg, rgba(69, 55, 32, 0.95), rgba(21, 24, 34, 0.97));
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
-  color: #fff;
-  text-align: left;
-  pointer-events: auto;
-}
-.mission-card__head { display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: center; }
-.mission-card__icon { display: grid; place-items: center; }
-.mission-card__icon .mission-paw { width: 38px; height: 38px; }
-.mission-card__copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.mission-card__title { font: 900 16px/1.2 system-ui, -apple-system, sans-serif; }
-.mission-card__sub { color: rgba(255, 255, 255, 0.74); font: 600 12px/1.35 system-ui, sans-serif; }
-.mission-card__meter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: center; margin-top: 11px; }
-.mission-card__track { height: 6px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.14); }
-.mission-card__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #58d58f, #ffd86a); transition: width 0.6s cubic-bezier(0.3, 0.9, 0.35, 1); }
-.mission-card__count { color: #d9e2f0; font: 800 12px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
-.daily-panel .mission-card { margin-bottom: 14px; }
 
 /* UNLOCKED / FULFILLED ceremonies — one at a time, watermark-gated. */
 .mission-ceremony {
@@ -4748,6 +4711,176 @@ body {
 }
 .mission-history__source { color: #c9d3e4; font: 700 12px/1.2 system-ui, sans-serif; }
 .mission-history__amount { color: #ffd07a; font: 900 13px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+
+/* Iteration 5 taste delta: compact gift + nearest-step bar, no season name or
+   personal paw wallet. All overrides are mission-scoped and disappear on revoke. */
+.hud--mission .stories {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px 9px;
+  padding-right: 0;
+  overflow: hidden;
+}
+.hud--mission .story--me { order: 1; flex: 0 0 var(--story-size); }
+.hud--mission .hud__mission { order: 2; flex: 1 1 calc(100% - var(--story-size) - 12px); }
+.hud--mission .isln-friends { order: 3; flex: 0 0 100%; }
+.hud--mission .story[data-challenge] { display: none; }
+.hud--mission .hud__puzzles { display: none; }
+.hud--mission .hud__level-plus {
+  background: #55d887;
+  color: #0b2d1c;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.hud__mission {
+  height: 50px;
+  margin-top: 4px;
+  grid-template-columns: 34px minmax(0, 1fr) 28px;
+  gap: 4px 7px;
+  padding: 5px 8px 6px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(48, 39, 67, .97), rgba(25, 20, 38, .98));
+}
+.hud__mission-gift {
+  position: relative;
+  grid-row: 1 / 3;
+  font-size: 25px;
+  line-height: 1;
+}
+.hud__mission-info {
+  position: absolute;
+  right: -5px;
+  bottom: -7px;
+  color: #f6df9a;
+  font: 900 11px/1 system-ui, sans-serif;
+}
+.hud__mission-count { color: #fff2ba; font-size: 12px; }
+.hud__mission-track { grid-column: 2; }
+.hud__mission-coin {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  border-radius: 50%;
+  background: #241c38;
+  box-shadow: inset 0 0 0 1px rgba(255, 221, 126, .22);
+}
+.hud__mission-coin .mission-paw { width: 18px; height: 18px; fill: #f7d981; filter: none; }
+
+.mission-paw-flight {
+  position: absolute;
+  z-index: 3600;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #241c38;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .42), inset 0 0 0 1px rgba(255, 221, 126, .3);
+  pointer-events: none;
+}
+.mission-paw-flight .mission-paw { width: 26px; height: 26px; fill: #f7d981; filter: none; }
+
+/* Combination C chips with contour-A icons; original nodes/order are restored
+   exactly when the capability is revoked. */
+.feed-bar--mission .feed-bar__switch { gap: 6px; }
+.feed-bar--mission .feed-bar__icon:not([data-mission-label]) { display: none; }
+.feed-bar--mission .feed-bar__icon {
+  width: auto;
+  min-width: 58px;
+  height: 46px;
+  padding: 5px 8px 4px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 22px;
+  background: rgba(34, 28, 48, .92);
+}
+.feed-bar--mission .feed-bar__icon::after {
+  content: attr(data-mission-label);
+  display: block;
+  margin-top: 1px;
+  color: rgba(255, 255, 255, .72);
+  font: 750 9px/1 system-ui, sans-serif;
+}
+.feed-bar--mission .feed-bar__icon svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+.feed-bar--mission .feed-bar__icon--mission-map { opacity: .55; }
+
+.mission-description {
+  display: grid;
+  gap: 5px;
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .05);
+}
+.mission-description__summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+.mission-description__summary::-webkit-details-marker { display: none; }
+.mission-description__title { font: 850 13px/1.2 system-ui, sans-serif; }
+.mission-description__more { color: #f6df9a; font: 750 11px/1.2 system-ui, sans-serif; }
+.mission-description__copy { display: block; margin-top: 7px; color: #b8c1d1; font: 650 12px/1.4 system-ui, sans-serif; }
+.mission-ladder { display: grid; gap: 7px; margin-top: 14px; }
+.mission-ladder__head { color: #f6df9a; font: 850 13px/1.2 system-ui, sans-serif; }
+.mission-ladder__step {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .045);
+  color: #8f99aa;
+}
+.mission-ladder__step--opened,
+.mission-ladder__step--guaranteed {
+  background: rgba(84, 211, 139, .11);
+  color: #fff;
+}
+.mission-ladder__threshold { font: 700 12px/1.2 system-ui, sans-serif; }
+.mission-ladder__amount { font: 900 13px/1.2 system-ui, sans-serif; }
+.mission-contract { padding: 0; border: 0; background: transparent; }
+.mission-contract__summary {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .055);
+  color: #f6df9a;
+  text-align: left;
+}
+.mission-contract-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 3800;
+  overflow-y: auto;
+  padding: calc(env(safe-area-inset-top, 0px) + 54px) 16px 28px;
+  background: #0b0d16;
+}
+.mission-contract-sheet__close {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  right: 16px;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+  font-size: 22px;
+}
 
 /* Exact immutable candidate inside the ordinary Feed shell. This label stays
    above all game/HUD layers and carries no product decision control. */

@@ -10,6 +10,7 @@ export interface MissionBar {
   contractVersion: string;
   progress: number;
   tokenGoal: number;
+  nextStepThreshold: number | null;
 }
 
 export interface MissionUnlockedSnapshot {
@@ -19,8 +20,8 @@ export interface MissionUnlockedSnapshot {
   progress: number;
   tokenGoal: number;
   guaranteedCents: number;
-  giftAdditionalCents: number;
   giftTotalCents: number;
+  releasedUnopenedCents: number;
   nextCaseId: string | null;
   nextContractVersion: string | null;
 }
@@ -39,8 +40,18 @@ export interface MissionContributionReceipt {
   idempotencyKey: string;
   amount: number;
   allocations: MissionContributionAllocation[];
+  openedGiftSteps: MissionGiftStepOpening[];
   unlocked: MissionUnlockedSnapshot | null;
   bar: MissionBar;
+}
+
+export interface MissionGiftStepOpening {
+  caseId: string;
+  contractVersion: string;
+  stepIndex: number;
+  thresholdTokens: number;
+  amountCents: number;
+  progressAtOpen: number;
 }
 
 export interface MissionCaseEvent {
@@ -57,8 +68,8 @@ export interface MissionCaseMoney {
   currency: string;
   communityTokens: number;
   guaranteedCents: number;
-  reservedCents: number;
-  reservedAndOpenedCents: number;
+  ladderTotalCents: number;
+  collectedCents: number;
   deliveredCents: number;
 }
 
@@ -73,8 +84,15 @@ export interface MissionCaseContract {
 export interface MissionActiveCase {
   caseId: string;
   contractVersion: string;
-  bar: { progress: number; tokenGoal: number };
+  bar: { progress: number; tokenGoal: number; nextStepThreshold: number | null };
   money: MissionCaseMoney;
+  giftLadder: Array<{
+    stepIndex: number;
+    thresholdTokens: number;
+    amountCents: number;
+    state: string;
+    openingReceipt: Record<string, unknown> | null;
+  }>;
   contract: MissionCaseContract | null;
 }
 
@@ -117,7 +135,6 @@ export function advanceMissionWatermark(
 ): MissionWatermark;
 export function missionSurfaceEnabled(flagEnabled: unknown, capability: unknown): boolean;
 export function missionBarPercent(progress: unknown, tokenGoal: unknown): number;
-export function missionOpenedByPlayCents(money: unknown): number;
 export function formatMissionMoney(cents: unknown, currency?: string): string;
 export function missionCaseTitle(document: unknown): string;
 export function missionCaseSubtitle(document: unknown): string;
