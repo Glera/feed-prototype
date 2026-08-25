@@ -24,7 +24,6 @@ import {
   advanceMissionWatermark,
   appendMissionHistory,
   isContributionPresented,
-  missionCaseTitle,
   missionSurfaceEnabled,
   normaliseMissionWatermark,
   parseMissionCaseView,
@@ -38,15 +37,12 @@ import {
   type MissionWatermark,
 } from './mission-core.mjs';
 import {
-  applyMissionPawBadge,
   buildMissionCaseScreen,
-  buildMissionContributionCard,
   buildMissionFulfilledCeremony,
   buildMissionHudBar,
   buildMissionUnlockedCeremony,
-  restoreMissionBadge,
+  launchMissionPawFlight,
   updateMissionHudBar,
-  updateMissionPawBadge,
 } from './mission-ui';
 import { onResultConfirmed } from './outbox';
 import { userScopedStorageKey } from './user-scope';
@@ -66,7 +62,11 @@ let view: MissionCaseView | null = null;
 let viewFingerprint = '';
 let hudEl: HTMLElement | null = null;
 let barEl: HTMLElement | null = null;
-let badgeEl: HTMLElement | null = null;
+let navigationEl: HTMLElement | null = null;
+let navigationOrder: HTMLElement[] = [];
+let missionMapEl: HTMLButtonElement | null = null;
+let missionMapOpen: (() => void) | null = null;
+let addFriendOpen: (() => void) | null = null;
 let viewportEl: HTMLElement | null = null;
 let screenEl: HTMLElement | null = null;
 let ceremonyEl: HTMLElement | null = null;
@@ -76,6 +76,7 @@ let outboxBound = false;
 
 const receipts = new Map<string, MissionContributionReceipt>();
 const waiters = new Map<string, Set<(receipt: MissionContributionReceipt | null) => void>>();
+const boundAddFriendButtons = new WeakSet<HTMLElement>();
 /** Contribution seqs already celebrated — one ceremony per contribution, no
  *  matter which door the receipt came through (first answer, retry, replay). */
 let presented: number[] = [];
@@ -93,7 +94,7 @@ export function missionActive(): boolean {
 
 /**
  * Adopt (or revoke) the `/session` capability. Revocation tears the surface
- * down: a build whose account lost enrolment must not keep a stale paw badge.
+ * down: a build whose account lost enrolment must not keep a stale mission HUD.
  */
 export function applyMissionCapability(available: unknown): void {
   if (!MISSION_FLAG_ENABLED) return;
@@ -134,28 +135,112 @@ function loadHistory(): MissionHistoryEntry[] {
 
 // ── HUD ─────────────────────────────────────────────────────────────────────
 /**
- * Register the HUD. Nothing is inserted here: the bar and the paw badge appear
+ * Register the HUD. Nothing is inserted here: the compact gift bar appears
  * only once the capability has actually arrived, so a build with the flag on but
  * an unenrolled account still renders the untouched HUD.
  */
-export function mountMissionHud(hud: HTMLElement, viewport: HTMLElement): void {
+export function mountMissionHud(
+  hud: HTMLElement,
+  viewport: HTMLElement,
+  onAddFriend: () => void,
+): void {
   if (!MISSION_FLAG_ENABLED) return;
   hudEl = hud;
   viewportEl = viewport;
+  addFriendOpen = onAddFriend;
   barEl = null;   // a remount brought a brand-new HUD subtree
-  badgeEl = hud.querySelector<HTMLElement>('.hud__puzzles');
   syncMissionSurface();
+}
+
+/** Register existing bottom navigation; mission mode reorders additively. */
+export function mountMissionNavigation(navigation: HTMLElement, onOpenMap: () => void): void {
+  if (!MISSION_FLAG_ENABLED) return;
+  navigationEl = navigation;
+  missionMapOpen = onOpenMap;
+  const switcher = navigation.querySelector<HTMLElement>('.feed-bar__switch');
+  navigationOrder = switcher ? Array.from(switcher.children) as HTMLElement[] : [];
+  syncMissionSurface();
+}
+
+function syncMissionNavigation(): void {
+  const switcher = navigationEl?.querySelector<HTMLElement>('.feed-bar__switch');
+  if (!switcher || !navigationEl) return;
+  navigationEl.classList.add('feed-bar--mission');
+  const labels: Record<string, string> = {
+    daily: 'Дейлики', collections: 'Коллекции', feed: 'Лента',
+  };
+  for (const [name, label] of Object.entries(labels)) {
+    const button = switcher.querySelector<HTMLElement>(`[data-bar-tab="${name}"]`);
+    if (button) button.dataset.missionLabel = label;
+  }
+  for (const name of ['daily', 'collections', 'feed']) {
+    const button = switcher.querySelector<HTMLElement>(`[data-bar-tab="${name}"]`);
+    if (button) switcher.appendChild(button);
+  }
+  if (!missionMapEl) {
+    missionMapEl = document.createElement('button');
+    missionMapEl.type = 'button';
+    missionMapEl.className = 'feed-bar__icon feed-bar__icon--mission-map';
+    missionMapEl.dataset.missionLabel = 'Карта';
+    missionMapEl.setAttribute('aria-label', 'Карта помощи');
+    missionMapEl.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true">'
+      + '<path d="M4 5.5 9 3l6 2.5L20 3v15.5L15 21l-6-2.5L4 21z"/>'
+      + '<path d="M9 3v15.5M15 5.5V21"/></svg>';
+    missionMapEl.addEventListener('click', () => {
+      if (missionActive()) missionMapOpen?.();
+    });
+    switcher.appendChild(missionMapEl);
+  }
 }
 
 function syncMissionSurface(): void {
   if (!missionActive() || !hudEl) return;
   const stories = hudEl.querySelector<HTMLElement>('.stories');
-  if (stories && !barEl) {
-    hudEl.classList.add('hud--mission');
-    barEl = buildMissionHudBar(openMissionCaseScreen);
-    stories.appendChild(barEl);
+  hudEl.classList.add('hud--mission');
+  viewportEl?.classList.add('viewport--mission');
+  if (stories && stories.dataset.missionOriginalAriaLabel === undefined) {
+    stories.dataset.missionOriginalAriaLabel = stories.getAttribute('aria-label') ?? '';
+    stories.setAttribute('aria-label', 'Миссия и друзья');
   }
-  if (badgeEl) applyMissionPawBadge(badgeEl, view?.myContribution.caseTokens ?? 0);
+  if (stories && !barEl) {
+    barEl = buildMissionHudBar(openMissionCaseScreen, openMissionContractSheet);
+    stories.appendChild(barEl);
+    const friends = document.createElement('div');
+    friends.className = 'hud__mission-friends';
+    friends.setAttribute('aria-label', 'Друзья');
+    for (let index = 0; index < 4; index += 1) {
+      const slot = document.createElement('span');
+      slot.className = 'hud__mission-friend-slot';
+      slot.setAttribute('aria-hidden', 'true');
+      friends.appendChild(slot);
+    }
+    friends.appendChild(Object.assign(document.createElement('span'), {
+      className: 'hud__mission-friends-label',
+      textContent: 'друзья',
+    }));
+    stories.appendChild(friends);
+  }
+  const plus = hudEl.querySelector<HTMLElement>('.hud__level-plus');
+  plus?.setAttribute('aria-hidden', 'false');
+  plus?.setAttribute('role', 'button');
+  plus?.setAttribute('aria-label', 'Добавить друга — скоро');
+  if (plus) plus.tabIndex = 0;
+  if (plus && !boundAddFriendButtons.has(plus)) {
+    boundAddFriendButtons.add(plus);
+    plus.addEventListener('click', (event) => {
+      if (!missionActive()) return;
+      event.stopPropagation();
+      addFriendOpen?.();
+    });
+    plus.addEventListener('keydown', (event) => {
+      if (!missionActive() || (event.key !== 'Enter' && event.key !== ' ')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      addFriendOpen?.();
+    });
+  }
+  syncMissionNavigation();
   renderMissionHud();
 }
 
@@ -163,27 +248,45 @@ function renderMissionHud(): void {
   const active = view?.activeCase ?? null;
   if (barEl) {
     updateMissionHudBar(barEl, {
-      title: active ? missionCaseTitle(active.contract?.document ?? {}) : 'Кейс готовится',
       progress: active?.bar.progress ?? 0,
       tokenGoal: active?.bar.tokenGoal ?? 0,
-      myTokens: view?.myContribution.caseTokens ?? 0,
+      nextStepThreshold: active?.bar.nextStepThreshold ?? null,
     });
-  }
-  if (badgeEl?.dataset.mission === '1') {
-    updateMissionPawBadge(badgeEl, view?.myContribution.caseTokens ?? 0);
   }
 }
 
 /**
- * A revoked capability must leave the HUD exactly as the pre-mission build
- * renders it — the second half of the double gate. The badge restore is exact
- * because the retheme was additive: the original nodes never left the DOM.
+ * A revoked capability leaves the original HUD nodes untouched and removes only
+ * additive mission nodes/classes — the second half of the double gate.
  */
 function teardownMissionSurface(): void {
   hudEl?.classList.remove('hud--mission');
+  viewportEl?.classList.remove('viewport--mission');
   barEl?.remove();
   barEl = null;
-  if (badgeEl) restoreMissionBadge(badgeEl);
+  hudEl?.querySelector('.hud__mission-friends')?.remove();
+  const stories = hudEl?.querySelector<HTMLElement>('.stories');
+  if (stories?.dataset.missionOriginalAriaLabel !== undefined) {
+    const original = stories.dataset.missionOriginalAriaLabel;
+    if (original) stories.setAttribute('aria-label', original);
+    else stories.removeAttribute('aria-label');
+    delete stories.dataset.missionOriginalAriaLabel;
+  }
+  const plus = hudEl?.querySelector<HTMLElement>('.hud__level-plus');
+  plus?.setAttribute('aria-hidden', 'true');
+  plus?.removeAttribute('role');
+  plus?.removeAttribute('aria-label');
+  plus?.removeAttribute('tabindex');
+  if (navigationEl) navigationEl.classList.remove('feed-bar--mission');
+  const switcher = navigationEl?.querySelector<HTMLElement>('.feed-bar__switch');
+  if (switcher) {
+    missionMapEl?.remove();
+    missionMapEl = null;
+    for (const item of navigationOrder) {
+      delete item.dataset.missionLabel;
+      switcher.appendChild(item);
+    }
+  }
   screenEl?.remove();
   screenEl = null;
   ceremonyEl?.remove();
@@ -196,8 +299,8 @@ function teardownMissionSurface(): void {
 /**
  * Re-project the case from the server and settle any ceremony the player is
  * owed. Called on entry and on every foreground (both run through
- * `applySessionBootstrap`), and once after a contribution so the paw badge and
- * the community money catch up from receipts rather than from a local guess.
+ * `applySessionBootstrap`), and once after a contribution so the shared bar and
+ * community money catch up from receipts rather than from a local guess.
  */
 export function refreshMissionCase(): Promise<void> {
   if (!missionActive()) return Promise.resolve();
@@ -250,12 +353,7 @@ function presentNextCeremony(): void {
     presentNextCeremony();
   };
   if (next.kind === 'unlocked') {
-    const active = view.activeCase;
-    // The successor the crossing activated — never the case that just closed.
-    const nextCaseTitle = active && active.caseId !== next.event.caseId
-      ? missionCaseTitle(active.contract?.document ?? {})
-      : null;
-    ceremonyEl = buildMissionUnlockedCeremony({ event: next.event, currency, nextCaseTitle, onClose: close });
+    ceremonyEl = buildMissionUnlockedCeremony({ event: next.event, currency, onClose: close });
   } else {
     ceremonyEl = buildMissionFulfilledCeremony({ event: next.event, currency, onClose: close });
   }
@@ -269,8 +367,23 @@ function openMissionCaseScreen(): void {
   void refreshMissionCase();
 }
 
+function openMissionContractSheet(): void {
+  if (!missionActive() || !viewportEl) return;
+  const reveal = (): void => {
+    if (!screenEl) renderMissionCaseScreen();
+    screenEl?.querySelector<HTMLButtonElement>('.mission-contract__summary')?.click();
+  };
+  if (view) {
+    reveal();
+    void refreshMissionCase();
+  } else {
+    void refreshMissionCase().then(reveal);
+  }
+}
+
 function renderMissionCaseScreen(): void {
   if (!viewportEl || !view) return;
+  const keepContractOpen = screenEl?.querySelector<HTMLElement>('.mission-contract-sheet')?.hidden === false;
   const fresh = buildMissionCaseScreen({
     view,
     history: loadHistory(),
@@ -279,6 +392,9 @@ function renderMissionCaseScreen(): void {
   if (screenEl) screenEl.replaceWith(fresh);
   else viewportEl.appendChild(fresh);
   screenEl = fresh;
+  if (keepContractOpen) {
+    fresh.querySelector<HTMLButtonElement>('.mission-contract__summary')?.click();
+  }
 }
 
 function closeMissionCaseScreen(): void {
@@ -348,12 +464,10 @@ function awaitContribution(runId: string): Promise<MissionContributionReceipt | 
  * retried claim, a replayed outbox result and the first answer all describe one
  * contribution and owe the player exactly one ceremony.
  */
-function showContributionCard(receipt: MissionContributionReceipt, parent: HTMLElement | null): void {
-  if (!parent || isContributionPresented(presented, receipt.seq)) return;
+function showContributionFlight(receipt: MissionContributionReceipt, origin: HTMLElement | null): void {
+  if (!origin || !barEl || !viewportEl || isContributionPresented(presented, receipt.seq)) return;
   presented = rememberPresentedContribution(presented, receipt.seq);
-  // A card left over from an earlier contribution is replaced, not stacked.
-  parent.querySelector('.mission-card')?.remove();
-  parent.prepend(buildMissionContributionCard(receipt));
+  launchMissionPawFlight(receipt, origin, barEl, viewportEl);
 }
 
 /**
@@ -363,13 +477,13 @@ function showContributionCard(receipt: MissionContributionReceipt, parent: HTMLE
  */
 export function presentMissionContribution(options: {
   runId: string;
-  parent: () => HTMLElement | null;
+  origin: () => HTMLElement | null;
   alive: () => boolean;
 }): Promise<void> {
   if (!missionActive()) return Promise.resolve();
   return awaitContribution(options.runId).then((receipt) => {
     if (!receipt || !options.alive()) return;
-    showContributionCard(receipt, options.parent());
+    showContributionFlight(receipt, options.origin());
   });
 }
 
@@ -390,5 +504,5 @@ export function presentMissionDailyContribution(response: unknown, parent: HTMLE
   const receipt = parseMissionContributionReceipt(block);
   if (!receipt) return;
   recordContribution(receipt);
-  showContributionCard(receipt, parent);
+  showContributionFlight(receipt, parent);
 }

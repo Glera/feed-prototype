@@ -24,7 +24,6 @@ import {
   missionBarPercent,
   missionCaseSubtitle,
   missionCaseTitle,
-  missionOpenedByPlayCents,
   missionSurfaceEnabled,
   normaliseMissionWatermark,
   parseMissionCaseView,
@@ -50,16 +49,32 @@ const RECEIPT = {
   weightsVersion: 'mission-weights.v1',
   weightsDigest: 'a'.repeat(64),
   allocations: [{ caseId: 'case-1', contractVersion: 'v1', amount: 2 }],
+  openedGiftSteps: [],
   unlocked: null,
-  bar: { caseId: 'case-1', contractVersion: 'v1', progress: 2, tokenGoal: 50 },
+  bar: {
+    caseId: 'case-1', contractVersion: 'v1', progress: 2,
+    tokenGoal: 50, nextStepThreshold: 25,
+  },
 };
 
 const receipt = parseMissionContributionReceipt(RECEIPT);
 eq(receipt?.amount, 2, 'the ceremony amount comes from the receipt, never from rewards.mjs');
 eq(receipt?.bar.progress, 2, 'the bar is the receipt bar');
 eq(receipt?.bar.tokenGoal, 50, 'the goal is the receipt goal');
+eq(receipt?.bar.nextStepThreshold, 25, 'the bar denominator is the nearest step');
 deep(receipt?.allocations, [{ caseId: 'case-1', contractVersion: 'v1', amount: 2 }], 'allocations survive');
 eq(receipt?.unlocked, null, 'a non-crossing contribution carries no UNLOCKED snapshot');
+const legacyBarReceipt = parseMissionContributionReceipt({
+  ...RECEIPT,
+  bar: {
+    caseId: 'case-1', contractVersion: 'v1', progress: 2, tokenGoal: 50,
+  },
+});
+eq(
+  legacyBarReceipt?.bar.nextStepThreshold,
+  null,
+  'an additive rollout keeps pre-ladder contribution receipts readable',
+);
 
 // Absent block = the feature is off for this caller. Never an error.
 for (const missing of [undefined, null, {}, '', 0, [], 'mission.contribution-receipt.v1']) {
@@ -82,6 +97,17 @@ deep(
   [],
   'structurally broken allocations are dropped, not rendered',
 );
+deep(
+  parseMissionContributionReceipt({
+    ...RECEIPT,
+    openedGiftSteps: [{
+      caseId: 'case-1', contractVersion: 'v1', stepIndex: 0,
+      thresholdTokens: 0, amountCents: 10_000, progressAtOpen: 0,
+    }],
+  })?.openedGiftSteps.map((step) => [step.stepIndex, step.thresholdTokens]),
+  [[0, 0]],
+  'the guaranteed zero-threshold step stays structurally readable',
+);
 
 const CROSSED = {
   ...RECEIPT,
@@ -93,12 +119,15 @@ const CROSSED = {
     progress: 2,
     tokenGoal: 2,
     guaranteedCents: 10_000,
-    giftAdditionalCents: 12_000,
-    giftTotalCents: 22_000,
+    giftTotalCents: 12_000,
+    releasedUnopenedCents: 0,
     nextCaseId: 'case-successor',
     nextContractVersion: 'v1',
   },
-  bar: { caseId: 'case-successor', contractVersion: 'v1', progress: 0, tokenGoal: 50 },
+  bar: {
+    caseId: 'case-successor', contractVersion: 'v1', progress: 0,
+    tokenGoal: 50, nextStepThreshold: 25,
+  },
 };
 eq(parseMissionContributionReceipt(CROSSED)?.unlocked?.nextCaseId, 'case-successor', 'the successor travels');
 eq(parseMissionContributionReceipt(CROSSED)?.bar.caseId, 'case-successor', 'the bar follows the new ACTIVE case');
@@ -109,13 +138,13 @@ const VIEW = {
   activeCase: {
     caseId: 'case-2',
     contractVersion: 'v1',
-    bar: { progress: 4, tokenGoal: 50 },
+    bar: { progress: 4, tokenGoal: 50, nextStepThreshold: 25 },
     money: {
       currency: 'EUR',
       communityTokens: 4,
       guaranteedCents: 10_000,
-      reservedCents: 10_000,
-      reservedAndOpenedCents: 10_000,
+      ladderTotalCents: 22_000,
+      collectedCents: 10_000,
       deliveredCents: 0,
     },
     contract: {
@@ -123,7 +152,7 @@ const VIEW = {
       contractVersion: 'v1',
       contractDigest: 'b'.repeat(64),
       document: {
-        schema: 'mission.case-contract.v1',
+        schema: 'mission.case-contract.v2',
         caseId: 'case-2',
         recipient: 'Local shelter',
         guaranteedDeliverable: '10 kg of food',
@@ -131,19 +160,30 @@ const VIEW = {
       },
       // EXACT wire of the closed, executable schema (swipe-backend `b63b26e`).
       fundingPolicy: {
-        version: 'mission-funding.v1',
+        version: 'mission-funding.v2',
         digest: 'c'.repeat(64),
         document: {
-          schema: 'mission.funding-policy.v1',
+          schema: 'mission.funding-policy.v2',
           currency: 'EUR',
-          rounding: 'floor-cents',
-          giftFormula: 'guaranteed-plus-floor-proportional-share-v1',
+          rounding: 'declared-cents',
+          giftFormula: 'guaranteed-plus-opened-steps-v1',
+          stepRule: 'prefunded-reserved-at-ready-open-once-v1',
           snapshotRule: 'ledger-seq-alloc-cutoff-v1',
           poolConsumption: 'eligible-ledger-fifo-by-seq-v1',
           eligiblePool: { sources: ['seed', 'revenue_share'] },
         },
       },
     },
+    giftLadder: [
+      {
+        stepIndex: 0, thresholdTokens: 0, amountCents: 10_000,
+        state: 'guaranteed', openingReceipt: null,
+      },
+      {
+        stepIndex: 1, thresholdTokens: 25, amountCents: 12_000,
+        state: 'reserved', openingReceipt: null,
+      },
+    ],
   },
   myContribution: { caseTokens: 2, totalTokens: 6 },
   lastUnlocked: {
@@ -152,7 +192,7 @@ const VIEW = {
     contractVersion: 'v1',
     occurredAt: '2026-08-01T10:00:00+00:00',
     receiptDigest: 'd'.repeat(64),
-    receipt: { guaranteedCents: 10_000, giftAdditionalCents: 12_000, giftTotalCents: 22_000 },
+    receipt: { guaranteedCents: 10_000, giftTotalCents: 22_000 },
   },
   lastFulfilled: {
     eventSeq: 9,
@@ -174,7 +214,9 @@ const VIEW = {
 
 const view = parseMissionCaseView(VIEW);
 eq(view?.activeCase?.caseId, 'case-2', 'the ACTIVE case is projected');
-eq(view?.myContribution.caseTokens, 2, 'the paw badge value is my case tokens, not a puzzle balance');
+eq(view?.activeCase?.bar.nextStepThreshold, 25, 'the nearest step survives parsing');
+eq(view?.activeCase?.money.collectedCents, 10_000, 'already collected is server-owned');
+eq(view?.myContribution.caseTokens, 2, 'my contribution remains server-owned case tokens');
 eq(view?.lastFulfilled?.transferReceipt?.transferReference, 'SEPA-77', 'the transfer receipt travels');
 eq(parseMissionCaseView(null), null, 'a 404 (not enrolled) is simply no mission');
 eq(parseMissionCaseView({ schema: 'mission.case-view.v2' }), null, 'an unknown view schema is refused');
@@ -247,14 +289,6 @@ eq(formatMissionMoney(5, 'EUR'), '€0,05', 'a five-cent gift is still five cent
 eq(formatMissionMoney(0, 'EUR'), '€0', 'nothing delivered yet reads as zero, not blank');
 eq(formatMissionMoney(1_000, 'XYZ'), '10 XYZ', 'an unknown currency keeps its code');
 eq(formatMissionMoney('10000', 'EUR'), '€0', 'a stringly amount is never coerced into money');
-eq(missionOpenedByPlayCents(view.activeCase.money), 0, 'nothing is opened before a crossing');
-eq(
-  missionOpenedByPlayCents({ reservedCents: 10_000, reservedAndOpenedCents: 22_000 }),
-  12_000,
-  'opened-by-play is exactly what the crossing added over the reserve',
-);
-eq(missionOpenedByPlayCents(null), 0, 'no money block → nothing opened');
-
 eq(missionCaseTitle(VIEW.activeCase.contract.document), '10 kg of food', 'the deliverable names the case');
 eq(missionCaseTitle({ title: 'Корм для приюта', guaranteedDeliverable: 'x' }), 'Корм для приюта', 'an explicit title wins');
 eq(missionCaseTitle({ caseId: 'case-9' }), 'case-9', 'the case id is the last resort');
@@ -348,6 +382,7 @@ function firstStatements(source, name, count = 2) {
 for (const name of [
   'applyMissionCapability',
   'mountMissionHud',
+  'mountMissionNavigation',
   'refreshMissionCase',
   'presentMissionContribution',
   'presentMissionDailyContribution',
@@ -372,33 +407,29 @@ assert.ok(
 // not only the first answer (R1 finding 4).
 assertions += 1;
 assert.ok(
-  /function showContributionCard[\s\S]*?isContributionPresented\(presented, receipt\.seq\)/.test(missionSource),
+  /function showContributionFlight[\s\S]*?isContributionPresented\(presented, receipt\.seq\)/.test(missionSource),
   'both contribution paths must share one presenter, deduplicated by the immutable seq',
 );
-// The revoked capability must restore the badge (R1 finding 6).
+// Revoke restores original navigation order and drops the additive map chip.
 assertions += 1;
 assert.ok(
-  /function teardownMissionSurface[\s\S]*?restoreMissionBadge\(badgeEl\)/.test(missionSource),
-  'teardown must restore the HUD badge, not only remove the bar/screen/ceremony',
+  /function teardownMissionSurface[\s\S]*?missionMapEl\?\.remove\(\)[\s\S]*?navigationOrder/.test(missionSource),
+  'teardown must restore the original navigation order',
 );
 
 const uiSource = readFileSync(path.join(root, 'src/mission-ui.ts'), 'utf8');
-// The retheme must be additive, so the restore is exact by construction and the
-// puzzle-value node feed.ts holds is never detached.
 assertions += 1;
 assert.ok(
-  /export function applyMissionPawBadge[\s\S]*?badge\.appendChild\(paw\)/.test(uiSource)
-    && !/export function applyMissionPawBadge[\s\S]*?badge\.replaceChildren\(\)/.test(uiSource),
-  'the paw retheme must append, never replace, the badge children',
+  /export function launchMissionPawFlight[\s\S]*?viewport\.appendChild\(coin\)/.test(uiSource)
+    && !uiSource.includes('Ты принёс'),
+  'own contribution must be one paw flight with no own toast/card',
 );
-// The four obligatory money numbers (R1 finding 5): the community bar, the
-// guarantee, what the pool actually holds, and what really left.
 assertions += 1;
 assert.ok(
-  /tile\(\s*'Зарезервировано и открыто',\s*formatMissionMoney\(active\.money\.reservedAndOpenedCents/.test(uiSource),
-  'the case screen must show the full reservedAndOpened amount, not only the delta',
+  /tile\('уже собрано', formatMissionMoney\(active\.money\.collectedCents/.test(uiSource),
+  'the case screen must show server-owned collectedCents',
 );
-for (const label of ['Гарантировано', 'Передано', 'Мои лапки', 'лапок сообщества', 'открыто игрой']) {
+for (const label of ['уже собрано', 'Мой вклад', 'лапок сообщества', 'Подарки сезона']) {
   assertions += 1;
   assert.ok(uiSource.includes(label), `the case screen must keep the «${label}» number`);
 }
@@ -419,7 +450,10 @@ assert.ok(
     && !/pool\.definition/.test(uiSource),
   'no field of the closed policy schema may be cast back to the old prose objects',
 );
-for (const field of ['currency', 'rounding', 'giftFormula', 'snapshotRule', 'poolConsumption', 'eligiblePool']) {
+for (const field of [
+  'currency', 'rounding', 'giftFormula', 'stepRule',
+  'snapshotRule', 'poolConsumption', 'eligiblePool',
+]) {
   assertions += 1;
   assert.ok(
     new RegExp(`^\\s{2}${field}:`, 'm').test(uiSource),
@@ -449,7 +483,7 @@ assert.equal(
 assertions += 1;
 assert.ok(
   !/missionOwnsHudBadge/.test(feedSource),
-  'the puzzle counter no longer needs a mission gate: the retheme hides, never replaces',
+  'the puzzle counter stays untouched and is hidden only by mission-scoped CSS',
 );
 
 const islandDiff = readFileSync(path.join(root, 'src/island.ts'), 'utf8');

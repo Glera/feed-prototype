@@ -1,23 +1,9 @@
-/**
- * Mission slice v0 in the real production Feed build (stubbed backend).
+/** Mission Stage 1 in the real production Feed build (stubbed backend).
  *
- * Covers the three client findings of the Stage 1 cross-review R1, each on the
- * path where a unit test cannot be honest — the browser:
- *
- *   F4  a daily claim whose FIRST answer is the mandatory retryable 503 of an
- *       empty case queue: the contribution is committed only by the background
- *       retry, and the player must still get exactly one ceremony and exactly
- *       one history row from that later answer;
- *   F5  the case screen shows the full `reservedAndOpenedCents` the pool really
- *       holds — not only the delta a crossing opened;
- *   R2/2 «the contract in one tap» renders every money-bearing field of the CLOSED
- *       funding-policy schema, against the exact document the backend sends;
- *   F6  a `/session` that no longer carries `mission_dogfood` restores the HUD
- *       badge exactly, so the double gate really closes.
- *
- * Plus the two properties everything else rests on: the additive retheme (the
- * puzzle counter node stays live and correct underneath) and the ceremony
- * watermark (shown once, and not again after a reload).
+ * Covers the approved iteration-5 surface against the exact v2 ladder wire:
+ * nearest-step HUD, full public contract in a separate sheet, no own toast,
+ * one receipt-driven paw flight, UNLOCKED/FULFILLED copy, mission navigation,
+ * hidden challenge rail, and exact capability-revoke restoration.
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -42,7 +28,12 @@ const build = spawnSync(
     cwd: root,
     encoding: 'utf8',
     // The build flag is the FIRST gate; the capability below is the second.
-    env: { ...process.env, VITE_API_BASE: origin, VITE_MISSION_ENABLED: 'true' },
+    env: {
+      ...process.env,
+      VITE_API_BASE: origin,
+      VITE_MISSION_ENABLED: 'true',
+      VITE_ISLAND_ENABLED: 'false',
+    },
     timeout: 240_000,
   },
 );
@@ -63,6 +54,7 @@ const backend = {
   caseTokens: 2,
   barProgress: 4,
   unlockedSeq: null,
+  fulfilledSeq: null,
   dailyReceipt: null,
 };
 
@@ -77,8 +69,15 @@ const CONTRIBUTION = {
   weightsVersion: 'mission-weights.v1',
   weightsDigest: 'a'.repeat(64),
   allocations: [{ caseId: 'case-2', contractVersion: 'v1', amount: 1 }],
+  openedGiftSteps: [{
+    caseId: 'case-2', contractVersion: 'v1', stepIndex: 1,
+    thresholdTokens: 5, amountCents: 1_000, progressAtOpen: 5,
+  }],
   unlocked: null,
-  bar: { caseId: 'case-2', contractVersion: 'v1', progress: 5, tokenGoal: 50 },
+  bar: {
+    caseId: 'case-2', contractVersion: 'v1', progress: 5,
+    tokenGoal: 50, nextStepThreshold: 50,
+  },
 };
 
 /**
@@ -95,10 +94,11 @@ const CONTRIBUTION = {
  * one of its keys is rendered, are the anti-drift pair.
  */
 const FUNDING_POLICY_DOCUMENT = {
-  schema: 'mission.funding-policy.v1',
+  schema: 'mission.funding-policy.v2',
   currency: 'EUR',
-  rounding: 'floor-cents',
-  giftFormula: 'guaranteed-plus-floor-proportional-share-v1',
+  rounding: 'declared-cents',
+  giftFormula: 'guaranteed-plus-opened-steps-v1',
+  stepRule: 'prefunded-reserved-at-ready-open-once-v1',
   snapshotRule: 'ledger-seq-alloc-cutoff-v1',
   poolConsumption: 'eligible-ledger-fifo-by-seq-v1',
   eligiblePool: { sources: ['seed', 'revenue_share'] },
@@ -109,23 +109,38 @@ const caseView = () => ({
   activeCase: {
     caseId: 'case-2',
     contractVersion: 'v1',
-    bar: { progress: backend.barProgress, tokenGoal: 50 },
+    bar: {
+      progress: backend.barProgress,
+      tokenGoal: 50,
+      nextStepThreshold: backend.barProgress < 5 ? 5 : backend.barProgress < 50 ? 50 : null,
+    },
     money: {
       currency: 'EUR',
       communityTokens: backend.barProgress,
       guaranteedCents: 10_000,
-      // Deliberately different from reservedAndOpened: before the fix the screen
-      // could show only the €120 delta and never the €220 actually held.
-      reservedCents: 10_000,
-      reservedAndOpenedCents: 22_000,
+      ladderTotalCents: 12_000,
+      collectedCents: backend.barProgress < 5 ? 10_000 : backend.barProgress < 50 ? 11_000 : 12_000,
       deliveredCents: 0,
     },
+    giftLadder: [
+      { stepIndex: 0, thresholdTokens: 0, amountCents: 10_000, state: 'guaranteed', openingReceipt: null },
+      {
+        stepIndex: 1, thresholdTokens: 5, amountCents: 1_000,
+        state: backend.barProgress < 5 ? 'reserved' : 'opened',
+        openingReceipt: backend.barProgress < 5 ? null : { contributionSeq: 7 },
+      },
+      {
+        stepIndex: 2, thresholdTokens: 50, amountCents: 1_000,
+        state: backend.barProgress < 50 ? 'reserved' : 'opened',
+        openingReceipt: null,
+      },
+    ],
     contract: {
       caseId: 'case-2',
       contractVersion: 'v1',
       contractDigest: 'b'.repeat(64),
       document: {
-        schema: 'mission.case-contract.v1',
+        schema: 'mission.case-contract.v2',
         caseId: 'case-2',
         contractVersion: 'v1',
         recipient: 'Приют «Лапа»',
@@ -139,15 +154,20 @@ const caseView = () => ({
         confirmedNeedCents: 50_000,
         stretchCapCents: 20_000,
         tokenGoal: 50,
-        unlockShare: 'proportional',
+        giftLadder: [
+          { stepIndex: 0, thresholdTokens: 0, amountCents: 10_000 },
+          { stepIndex: 1, thresholdTokens: 5, amountCents: 1_000 },
+          { stepIndex: 2, thresholdTokens: 50, amountCents: 1_000 },
+        ],
+        ladderTotalCents: 12_000,
         // Executable since backend R1/F2: UNLOCK is refused before this instant.
         unlockCutoffAt: '2026-09-01T00:00:00+00:00',
         latestFulfillmentAt: '2026-09-15T00:00:00+00:00',
         queuePosition: 1,
-        fundingPolicy: { version: 'mission-funding.v1', digest: 'c'.repeat(64) },
+        fundingPolicy: { version: 'mission-funding.v2', digest: 'c'.repeat(64) },
       },
       fundingPolicy: {
-        version: 'mission-funding.v1',
+        version: 'mission-funding.v2',
         digest: 'c'.repeat(64),
         document: FUNDING_POLICY_DOCUMENT,
       },
@@ -162,13 +182,27 @@ const caseView = () => ({
     receiptDigest: 'd'.repeat(64),
     receipt: {
       guaranteedCents: 10_000,
-      giftAdditionalCents: 12_000,
-      giftTotalCents: 22_000,
+      giftTotalCents: 12_000,
+      releasedUnopenedCents: 0,
       progress: 50,
       tokenGoal: 50,
     },
   },
-  lastFulfilled: null,
+  lastFulfilled: backend.fulfilledSeq === null ? null : {
+    eventSeq: backend.fulfilledSeq,
+    caseId: 'case-1',
+    contractVersion: 'v1',
+    occurredAt: '2026-08-02T10:00:00+00:00',
+    receiptDigest: 'e'.repeat(64),
+    receipt: { giftTotalCents: 12_000 },
+    transferReceipt: {
+      amountCents: 12_000,
+      currency: 'EUR',
+      transferDate: '2026-08-02',
+      recipient: 'Приют «Лапа»',
+      transferReference: 'internal-do-not-render',
+    },
+  },
 });
 
 const dailyState = (withReceipt) => ({
@@ -273,7 +307,14 @@ try {
       return json(dailyState(true));
     }
     if (url.pathname === '/api/me') return json({ user: null, balance: 0, puzzles: backend.puzzleBalance });
-    if (url.pathname === '/api/challenges' && method === 'GET') return json([]);
+    if (url.pathname === '/api/challenges' && method === 'GET') return json({
+      box: 'in',
+      items: [{
+        id: 'challenge-1', mechanic_id: 'sort', metric_key: 'time_ms',
+        challenger_value: 42, played: false,
+        challenger: { first_name: 'Друг', username: null },
+      }],
+    });
     if (url.pathname === '/api/events') return json({ accepted: 0 });
     return route.fulfill({ status: 404, contentType: 'application/json', body: '{"detail":"fixture unavailable"}' });
   });
@@ -281,38 +322,69 @@ try {
   const page = await context.newPage();
   const bar = page.locator('.hud__mission');
   const badge = page.locator('.hud__puzzles');
+  const challenge = page.locator('.story[data-challenge="challenge-1"]');
   const foreground = async () => {
     // The foreground edge is dedupd for 1s and is what re-reads /session.
     await sleep(1200);
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   };
 
-  // ── 1. both gates open: the case bar and the paw badge appear ──────────────
-  await page.goto(`${origin}/?initData=mission-browser`, { waitUntil: 'domcontentloaded' });
+  // ── 1. both gates open: iteration-5 HUD and navigation appear ──────────────
+  await page.goto(`${origin}/?initData=mission-browser&metaworld=1`, { waitUntil: 'domcontentloaded' });
   await bar.waitFor({ state: 'visible', timeout: 15_000 });
-  // The bar mounts empty and is filled by the read API — never by a local guess.
+  // The denominator is the nearest unopened step, never the final goal guess.
   await page.waitForFunction(
-    () => document.querySelector('.hud__mission-count')?.textContent === '4 / 50',
+    () => document.querySelector('.hud__mission-count')?.textContent === '4 / 5',
     null,
     { timeout: 15_000 },
   );
-  assert.equal(await bar.locator('.hud__mission-title').textContent(), '10 кг корма');
-  assert.equal(await badge.getAttribute('data-mission'), '1', 'the badge must be rethemed');
-  assert.equal(await badge.locator('.hud__mission-paw-value').textContent(), '2', 'the badge shows MY case tokens');
-  assert.equal(await badge.getAttribute('aria-label'), 'Мои лапки');
-  // The retheme is additive: the puzzle node is still there, still correct, and
-  // merely hidden — which is what makes the revoke in step 5 exact.
-  assert.equal(await badge.locator('.hud__puzzles-value').count(), 1, 'the puzzle node must survive the retheme');
+  assert.equal(await bar.locator('.hud__mission-title').count(), 0, 'the compact HUD has no season title');
+  assert.equal(await bar.locator('.hud__mission-track i').getAttribute('style'), 'width: 80%;');
+  assert.equal(await bar.locator('.hud__mission-gift').textContent(), '🎁');
+  assert.equal(await bar.locator('.hud__mission-open .hud__mission-info').count(), 0, 'interactive roles never nest');
+  assert.equal(await bar.locator('.hud__mission-info').evaluate((node) => node.tagName), 'BUTTON');
+  const infoBounds = await bar.locator('.hud__mission-info').evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  });
+  assert.ok(infoBounds.width >= 24 && infoBounds.height >= 24, 'contract info has a real touch target');
+  assert.equal(await badge.isVisible(), false, 'there is no personal paw wallet in mission HUD');
+  assert.equal(await badge.locator('.hud__puzzles-value').count(), 1, 'the puzzle node must remain untouched');
   assert.equal(await badge.locator('.hud__puzzles-value').isVisible(), false, 'the puzzle balance leaves the surface');
   assert.equal(await badge.locator('.hud__puzzles-value').textContent(), '10', 'and keeps being painted underneath');
+  assert.equal(await page.locator('.hud__level-plus').getAttribute('aria-label'), 'Добавить друга — скоро');
+  assert.equal(await page.locator('.hud__level-plus').getAttribute('tabindex'), '0');
+  const levelBounds = await page.locator('.hud__level').evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return { width: rect.width, height: rect.height, radius: getComputedStyle(node).borderRadius };
+  });
+  assert.deepEqual(levelBounds, { width: 72, height: 84, radius: '15px' });
+  assert.equal(await page.locator('.hud__mission-friend-slot').count(), 4, 'the static friends row is honest and empty');
+  await page.locator('.hud__level-plus').press('Enter');
+  await page.getByText('Добавление друзей — скоро', { exact: true }).waitFor({ state: 'visible' });
+  await challenge.waitFor({ state: 'attached' });
+  assert.equal(await challenge.isVisible(), false, 'incoming challenges are hidden from mission HUD');
+  const missionNav = page.locator('.feed-bar--mission [data-mission-label]');
+  await missionNav.first().waitFor({ state: 'visible' });
+  assert.deepEqual(await missionNav.evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-mission-label'))), [
+    'Дейлики', 'Коллекции', 'Лента', 'Карта',
+  ]);
+  assert.equal(await page.locator('.feed-bar__icon--mission-map').isDisabled(), false);
+  await page.locator('.feed-bar__icon--mission-map').click();
+  await page.locator('.helpmap-preview').waitFor({ state: 'visible', timeout: 10_000 });
+  await page.getByLabel('Закрыть карту').click();
+  await page.locator('.helpmap-preview').waitFor({ state: 'detached', timeout: 10_000 });
 
-  // ── 2. the case screen shows the four obligatory numbers (F5) ──────────────
-  await bar.click();
+  // ── 2. case canvas: bar, collected/mine, ladder, separate contract sheet ───
+  await bar.locator('.hud__mission-info').click();
   const screen = page.locator('.mission-screen');
   await screen.waitFor({ state: 'visible' });
-  assert.match(await screen.locator('.mission-meter__count').textContent(), /^4 \/ 50 лапок сообщества$/);
+  const contractSheet = screen.locator('.mission-contract-sheet');
+  await contractSheet.waitFor({ state: 'visible' });
+  assert.match(await screen.locator('.mission-meter__count').textContent(), /^4 \/ 5 лапок сообщества$/);
+  assert.equal(await screen.locator('.mission-meter__track i').getAttribute('style'), 'width: 80%;');
   const tiles = screen.locator('.mission-tile');
-  assert.equal(await tiles.count(), 4);
+  assert.equal(await tiles.count(), 2);
   const tileByLabel = async (label) => {
     const tile = screen.locator('.mission-tile', { has: page.locator(`.mission-tile__label:text-is("${label}")`) });
     return {
@@ -322,27 +394,36 @@ try {
         : null,
     };
   };
-  assert.deepEqual(await tileByLabel('Гарантировано'), { value: '€100', detail: null });
-  assert.deepEqual(
-    await tileByLabel('Зарезервировано и открыто'),
-    { value: '€220', detail: '+€120 открыто игрой' },
-    'the pool must show what it HOLDS, with the play-opened part as its detail',
-  );
-  assert.deepEqual(await tileByLabel('Мои лапки'), { value: '2', detail: null });
-  assert.deepEqual(await tileByLabel('Передано'), { value: 'ждём', detail: null });
-  // «Контракт кейса» resolves the pinned money policy in ONE tap.
-  await screen.locator('.mission-contract__summary').click();
-  assert.match(await screen.locator('.mission-defs').first().textContent(), /Приют «Лапа»/);
+  assert.deepEqual(await tileByLabel('уже собрано'), { value: '€100', detail: null });
+  assert.deepEqual(await tileByLabel('Мой вклад'), { value: '2 лапки', detail: null });
+  assert.equal(await screen.getByText('Передано', { exact: true }).count(), 0, 'no transfer claim before fulfillment');
+  assert.deepEqual(await screen.locator('.mission-ladder__step').allTextContents(), [
+    '✓€100гарантированный подарокоткрыт',
+    '🔒€10за 5 лапок сообществавпереди',
+    '🔒€10за 50 лапок сообществавпереди',
+  ]);
+  assert.equal(await screen.locator('.mission-description').count(), 0, 'media-blocked copy creates no false read-more affordance');
+  // ⓘ opens the complete public contract/materials in its own sheet.
+  assert.match(await contractSheet.locator('.mission-defs').first().textContent(), /Приют «Лапа»/);
   assert.match(
     await screen.locator('.mission-defs').first().textContent(),
     /2026-09-01/,
     'the published unlock cutoff is now an executable promise and belongs in the contract',
   );
+  assert.equal(await contractSheet.getAttribute('role'), 'dialog');
+  assert.equal(await contractSheet.getAttribute('aria-modal'), 'true');
+  assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true);
+  backend.caseTokens = 3;
+  await foreground();
+  await contractSheet.waitFor({ state: 'visible' });
+  assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true, 'refresh preserves the open contract');
+  backend.caseTokens = 2;
+  await foreground();
   // Anti-drift: one tap must render EVERY key of the policy wire document, by
   // the document's own keys — not by a hand-written list that can silently fall
   // behind the next closed-schema change.
   const policyKeys = Object.keys(FUNDING_POLICY_DOCUMENT).filter((key) => key !== 'schema');
-  const renderedKeys = await screen.locator('.mission-policy .mission-def').evaluateAll(
+  const renderedKeys = await contractSheet.locator('.mission-policy .mission-def').evaluateAll(
     (nodes) => nodes.map((node) => node.dataset.policyKey),
   );
   assert.deepEqual(
@@ -352,7 +433,7 @@ try {
   );
   // …and each one by its EXACT wire value, so a renamed enum cannot hide behind
   // a friendly label.
-  const policyText = await screen.locator('.mission-policy').textContent();
+  const policyText = await contractSheet.locator('.mission-policy').textContent();
   for (const key of policyKeys) {
     const value = FUNDING_POLICY_DOCUMENT[key];
     const wireValues = typeof value === 'string' ? [value] : value.sources;
@@ -364,34 +445,52 @@ try {
     }
   }
   // The executable meaning travels with the enum, not instead of it.
-  assert.match(policyText, /вниз до целых центов/);
+  assert.match(policyText, /целыми центами/);
   assert.match(policyText, /FIFO/);
+  assert.match(policyText, /каждая ступень открывается один раз/);
   assert.match(policyText, /посев/);
+  await contractSheet.locator('.mission-contract-sheet__close').click();
+  await contractSheet.waitFor({ state: 'hidden' });
   assert.equal(await screen.locator('.mission-history__empty').count(), 1, 'no contribution yet, no history');
   await screen.locator('.mission-screen__close').click();
   await screen.waitFor({ state: 'detached' });
 
   // ── 3. daily claim: 503 first, ceremony only from the retry answer (F4) ────
+  await page.evaluate(() => {
+    window.__missionFlightCount = 0;
+    window.__missionGiftBounceCount = 0;
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node instanceof Element && node.matches('.mission-paw-flight')) window.__missionFlightCount += 1;
+        }
+        if (
+          record.target instanceof Element
+          && record.target.matches('.hud__mission-gift')
+          && record.target.classList.contains('hud__mission-gift--bounce')
+        ) window.__missionGiftBounceCount += 1;
+      }
+    });
+    observer.observe(document.body, { attributes: true, attributeFilter: ['class'], childList: true, subtree: true });
+    window.__missionFlightObserver = observer;
+  });
   await page.locator('[data-bar-tab="daily"]').click();
   await page.locator('.daily-panel__claim').waitFor({ state: 'visible' });
   await page.locator('.daily-panel__claim').click();
   await page.waitForFunction(() => Number(document.querySelector('.hud__puzzles-value')?.textContent) === 14);
   await sleep(300);
   assert.equal(backend.claimCalls, 1, 'the first claim was refused retryably');
-  assert.equal(await page.locator('.mission-card').count(), 0, 'a refused claim commits nothing to celebrate');
+  assert.equal(await page.locator('.mission-card, .mission-toast').count(), 0, 'a refused claim creates no own toast');
   // The operator refills the queue; the background retry now commits the
   // contribution and the receipt arrives ONLY on that answer.
   backend.claimStatus = 200;
-  const card = page.locator('.mission-card');
-  await card.waitFor({ state: 'visible', timeout: 20_000 });
+  await page.waitForFunction(() => window.__missionFlightCount === 1, null, { timeout: 20_000 });
   assert.ok(backend.claimCalls >= 2, `the ceremony must come from the retry (calls=${backend.claimCalls})`);
-  assert.equal(await card.locator('.mission-card__title').textContent(), 'Ты принёс 1 лапок');
-  assert.equal(await card.locator('.mission-card__sub').textContent(), 'Вклад внесён — общий бар сдвинулся');
-  assert.equal(await card.locator('.mission-card__count').textContent(), '5 / 50', 'the bar is the receipt bar');
   await sleep(2500);
-  assert.equal(await page.locator('.mission-card').count(), 1, 'exactly one ceremony per contribution');
-  // The read API refresh — not an optimistic guess — moves the badge and bar.
-  await page.waitForFunction(() => document.querySelector('.hud__mission-paw-value')?.textContent === '3');
+  assert.equal(await page.evaluate(() => window.__missionFlightCount), 1, 'exactly one receipt-driven paw flight');
+  assert.equal(await page.evaluate(() => window.__missionGiftBounceCount), 1, 'one crossed ladder step bounces the gift once');
+  assert.equal(await page.locator('.mission-card, .mission-toast').count(), 0, 'own contribution never creates a toast');
+  // The read API refresh — not an optimistic guess — moves the shared bar.
   assert.equal(await bar.locator('.hud__mission-count').textContent(), '5 / 50');
   await page.locator('[data-bar-tab="feed"]').click();
   await bar.click();
@@ -407,35 +506,42 @@ try {
   await foreground();
   const ceremony = page.locator('.mission-ceremony--unlocked');
   await ceremony.waitFor({ state: 'visible', timeout: 15_000 });
-  assert.equal(await ceremony.locator('.mission-ceremony__title').textContent(), 'Мы сделали это');
-  const sums = await ceremony.locator('.mission-sum').allTextContents();
-  assert.deepEqual(sums, [
-    'Гарантировано€100',
-    'Открыто игрой+€120',
-    'Подарок ждёт передачи€220',
-  ], 'the three sums come from the UNLOCKED receipt');
-  assert.equal(
-    await ceremony.locator('.mission-ceremony__next').textContent(),
-    'Следующая цель уже открыта — 10 кг корма',
-  );
+  assert.equal(await ceremony.locator('.mission-ceremony__title').textContent(), 'Приют получает €120');
+  assert.equal(await ceremony.locator('.mission-ceremony__moment').textContent(), 'сразу · подарок открыт');
+  assert.equal(await ceremony.locator('.mission-ceremony__paws').textContent(), '50 лапок');
+  assert.deepEqual(await ceremony.locator('.mission-ceremony__breakdown').allTextContents(), [
+    '€100 — гарантия платформы',
+    '€20 — собрало сообщество',
+  ], 'the ceremony shows the exact platform/community money split');
+  assert.equal(await ceremony.locator('.mission-ceremony__next').count(), 0, 'the successor announcement is absent');
+  assert.equal(await ceremony.locator('.mission-ceremony__btn').textContent(), 'Ура!');
   await ceremony.locator('.mission-ceremony__btn').click();
   await ceremony.waitFor({ state: 'detached' });
   await foreground();
   await sleep(1500);
   assert.equal(await page.locator('.mission-ceremony').count(), 0, 'a shown ceremony must not return on focus');
+
+  // ── 5. FULFILLED report has public facts, never the technical transfer ref ─
+  backend.fulfilledSeq = 12;
+  await foreground();
+  const fulfilled = page.locator('.mission-ceremony--fulfilled');
+  await fulfilled.waitFor({ state: 'visible', timeout: 15_000 });
+  assert.equal(await fulfilled.locator('.mission-ceremony__title').textContent(), 'Корм передан');
+  assert.match(await fulfilled.locator('.mission-ceremony__sub').textContent(), /€120/);
+  assert.equal((await fulfilled.textContent()).includes('internal-do-not-render'), false);
+  await fulfilled.locator('.mission-ceremony__btn').click();
+  await fulfilled.waitFor({ state: 'detached' });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await bar.waitFor({ state: 'visible', timeout: 15_000 });
   await sleep(1500);
   assert.equal(await page.locator('.mission-ceremony').count(), 0, 'the watermark must survive a reload');
 
-  // ── 5. revoked capability: the HUD returns to the pre-mission build (F6) ───
+  // ── 6. revoked capability: exact pre-mission HUD/nav/challenge restoration ─
   backend.capability = false;
   const requestsBeforeRevoke = backend.caseRequests;
   await foreground();
   await bar.waitFor({ state: 'detached', timeout: 15_000 });
   assert.equal(await badge.count(), 1, 'the badge itself must stay');
-  assert.equal(await badge.getAttribute('data-mission'), null, 'the mission marker must be gone');
-  assert.equal(await badge.locator('.hud__mission-paw').count(), 0, 'the paw node must be removed');
   assert.equal(await badge.getAttribute('aria-label'), 'Puzzles', 'the original ARIA label must be restored');
   assert.equal(await badge.locator('.hud__puzzles-value').isVisible(), true, 'the puzzle counter returns');
   assert.equal(
@@ -444,7 +550,18 @@ try {
     'and shows the CURRENT balance — the node was never detached, so it never went stale',
   );
   assert.equal(await badge.locator('img').isVisible(), true, 'the puzzle icon returns too');
-  assert.equal(await page.locator('.mission-screen, .mission-ceremony, .hud__mission').count(), 0);
+  assert.equal(await page.locator('.hud__level-plus').getAttribute('aria-hidden'), 'true');
+  assert.equal(await page.locator('.hud__level-plus').getAttribute('aria-label'), null);
+  assert.equal(await page.locator('.hud__level-plus').getAttribute('tabindex'), null);
+  assert.equal(await challenge.isVisible(), true, 'challenge inbox returns outside mission HUD');
+  assert.equal(await page.locator('.stories').getAttribute('aria-label'), 'Challenges');
+  assert.deepEqual(await page.locator('.feed-bar__switch > [data-bar-tab]').evaluateAll(
+    (nodes) => nodes.map((node) => node.getAttribute('data-bar-tab')),
+  ), ['daily', 'meta', 'feed', 'collections']);
+  assert.equal(await page.locator('.feed-bar--mission, .feed-bar__icon--mission-map').count(), 0);
+  assert.equal(await page.locator('[data-mission-label]').count(), 0);
+  assert.equal(await page.locator('.mission-screen, .mission-ceremony, .hud__mission, .hud__mission-friends').count(), 0);
+  assert.equal(await page.locator('.viewport--mission').count(), 0);
   await sleep(1500);
   assert.equal(
     backend.caseRequests,
@@ -453,9 +570,9 @@ try {
   );
 
   console.log(
-    'mission browser: both gates + additive paw retheme + reserved-and-opened tile'
-    + ' + one-tap contract over every key of the exact closed funding-policy wire'
-    + ' + 503→retry ceremony exactly once + watermark across reload + exact revoke restore verified',
+    'mission browser: iteration-5 HUD/nav + hidden challenge rail + nearest ladder step'
+    + ' + separate full-contract sheet + own 503→retry paw flight exactly once'
+    + ' + UNLOCKED/FULFILLED copy + watermark + exact revoke restore verified',
   );
 } finally {
   await browser?.close();

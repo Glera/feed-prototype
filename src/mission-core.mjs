@@ -60,8 +60,12 @@ export function parseMissionBar(value) {
   const contractVersion = textOf(value.contractVersion);
   const progress = intOf(value.progress);
   const tokenGoal = intOf(value.tokenGoal, 1);
+  const nextStepThreshold = value.nextStepThreshold == null
+    ? null
+    : intOf(value.nextStepThreshold, 1);
   if (!caseId || !contractVersion || progress === null || tokenGoal === null) return null;
-  return { caseId, contractVersion, progress, tokenGoal };
+  if (value.nextStepThreshold != null && nextStepThreshold === null) return null;
+  return { caseId, contractVersion, progress, tokenGoal, nextStepThreshold };
 }
 
 /** The UNLOCKED snapshot a crossing contribution carries, or `null`. */
@@ -77,8 +81,8 @@ export function parseMissionUnlockedSnapshot(value) {
     progress: intOf(value.progress) ?? 0,
     tokenGoal: intOf(value.tokenGoal, 1) ?? 0,
     guaranteedCents: intOf(value.guaranteedCents) ?? 0,
-    giftAdditionalCents: intOf(value.giftAdditionalCents) ?? 0,
     giftTotalCents: intOf(value.giftTotalCents) ?? 0,
+    releasedUnopenedCents: intOf(value.releasedUnopenedCents) ?? 0,
     nextCaseId: textOf(value.nextCaseId),
     nextContractVersion: textOf(value.nextContractVersion),
   };
@@ -95,6 +99,25 @@ function parseAllocations(value) {
     out.push({ caseId, contractVersion: textOf(item.contractVersion) ?? '', amount });
   }
   return out;
+}
+
+function parseGiftSteps(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isObject(item)) return [];
+    const stepIndex = intOf(item.stepIndex);
+    const thresholdTokens = intOf(item.thresholdTokens);
+    const amountCents = intOf(item.amountCents, 1);
+    if (stepIndex === null || thresholdTokens === null || amountCents === null) return [];
+    return [{
+      caseId: textOf(item.caseId) ?? '',
+      contractVersion: textOf(item.contractVersion) ?? '',
+      stepIndex,
+      thresholdTokens,
+      amountCents,
+      progressAtOpen: intOf(item.progressAtOpen) ?? 0,
+    }];
+  });
 }
 
 /**
@@ -117,6 +140,7 @@ export function parseMissionContributionReceipt(value) {
     idempotencyKey: textOf(value.idempotencyKey) ?? '',
     amount,
     allocations: parseAllocations(value.allocations),
+    openedGiftSteps: parseGiftSteps(value.openedGiftSteps),
     unlocked: parseMissionUnlockedSnapshot(value.unlocked),
     bar,
   };
@@ -146,10 +170,31 @@ function parseMoney(value) {
     currency: textOf(value.currency) ?? 'EUR',
     communityTokens: intOf(value.communityTokens) ?? 0,
     guaranteedCents: intOf(value.guaranteedCents) ?? 0,
-    reservedCents: intOf(value.reservedCents) ?? 0,
-    reservedAndOpenedCents: intOf(value.reservedAndOpenedCents) ?? 0,
+    ladderTotalCents: intOf(value.ladderTotalCents) ?? 0,
+    collectedCents: intOf(value.collectedCents) ?? 0,
     deliveredCents: intOf(value.deliveredCents) ?? 0,
   };
+}
+
+function parseGiftLadder(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isObject(item)) return [];
+    const stepIndex = intOf(item.stepIndex);
+    const thresholdTokens = intOf(item.thresholdTokens);
+    const amountCents = intOf(item.amountCents, 1);
+    const state = textOf(item.state);
+    if (stepIndex === null || thresholdTokens === null || amountCents === null || !state) {
+      return [];
+    }
+    return [{
+      stepIndex,
+      thresholdTokens,
+      amountCents,
+      state,
+      openingReceipt: isObject(item.openingReceipt) ? item.openingReceipt : null,
+    }];
+  });
 }
 
 function parseContract(value) {
@@ -174,13 +219,17 @@ function parseActiveCase(value) {
   const bar = isObject(value.bar) ? value.bar : null;
   const progress = bar ? intOf(bar.progress) : null;
   const tokenGoal = bar ? intOf(bar.tokenGoal, 1) : null;
+  const nextStepThreshold = bar?.nextStepThreshold === null
+    ? null
+    : intOf(bar?.nextStepThreshold, 1);
   const money = parseMoney(value.money);
   if (!caseId || progress === null || tokenGoal === null || !money) return null;
   return {
     caseId,
     contractVersion: textOf(value.contractVersion) ?? '',
-    bar: { progress, tokenGoal },
+    bar: { progress, tokenGoal, nextStepThreshold },
     money,
+    giftLadder: parseGiftLadder(value.giftLadder),
     contract: parseContract(value.contract),
   };
 }
@@ -260,14 +309,6 @@ export function missionBarPercent(progress, tokenGoal) {
   if (goal === null) return 0;
   const value = intOf(progress) ?? 0;
   return Math.max(0, Math.min(100, Math.round((value / goal) * 100)));
-}
-
-/** Money a crossing has opened on top of the reserved guarantee. */
-export function missionOpenedByPlayCents(money) {
-  if (!isObject(money)) return 0;
-  const all = intOf(money.reservedAndOpenedCents) ?? 0;
-  const reserved = intOf(money.reservedCents) ?? 0;
-  return Math.max(0, all - reserved);
 }
 
 /** Integer cents → «€100» / «€99,50». Never a float, never a rounding of one. */

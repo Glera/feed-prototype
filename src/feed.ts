@@ -138,7 +138,9 @@ import { hasPendingStageUpgrade } from './island-celebrations';
 // stay inert (and mount nothing) in the production build.
 import {
   applyMissionCapability,
+  missionActive,
   mountMissionHud,
+  mountMissionNavigation,
   presentMissionContribution,
   presentMissionDailyContribution,
   refreshMissionCase,
@@ -3579,7 +3581,11 @@ export class Feed {
    *  deduplicates by the immutable contribution seq, so this is still exactly
    *  one ceremony (and one history row) per contribution. */
   private presentMissionDaily(state: DailyStateResp): void {
-    presentMissionDailyContribution(state, this.dailyPanelEl?.querySelector('.daily-panel__list') ?? null);
+    const panel = this.dailyPanelEl;
+    const origin = panel?.querySelector<HTMLElement>(
+      '.daily-panel__quest--done .daily-panel__reward',
+    ) ?? panel?.querySelector<HTMLElement>('.daily-panel__list') ?? null;
+    presentMissionDailyContribution(state, origin);
   }
 
   private dailyClaimRefusalText(error: unknown): string {
@@ -5500,7 +5506,9 @@ export class Feed {
     if (payoutRunId) {
       void presentMissionContribution({
         runId: payoutRunId,
-        parent: () => this.stateEls[i]?.querySelector<HTMLElement>('.reward') ?? null,
+        origin: () => this.stateEls[i]?.querySelector<HTMLElement>('.reward__stars')
+          ?? this.stateEls[i]?.querySelector<HTMLElement>('.reward')
+          ?? null,
         alive: () => this.seriesWinShown.has(i) && this.series?.payoutRunId === payoutRunId,
       });
     }
@@ -6228,6 +6236,10 @@ export class Feed {
     this.attachSwipeSurface(bar);
     this.feedEl.appendChild(bar);
     this.feedBarEl = bar;
+    mountMissionNavigation(bar, () => {
+      this.openHelpMapPreview();
+      this.hideDailyPanel();
+    });
     // Explicit QA routes (?diag, startapp=diag, local Vite dev) open the debug
     // entry immediately, exactly as before. An operator gets the same button
     // permanently once /session answers the capability — no query parameter.
@@ -6500,10 +6512,11 @@ export class Feed {
       this.friendsHudEl = cluster;
       this.renderFriendsHud();   // empty cells now; the network refresh runs post-/session
     }
-    // Mission: the case bar joins the same single row (centre), and the puzzle
-    // badge is rethemed into the paw badge — but only after /session proves the
+    // Mission: the compact gift bar joins the HUD only after /session proves the
     // capability, so nothing is inserted here for anybody else.
-    mountMissionHud(hud, this.viewport);
+    mountMissionHud(hud, this.viewport, () => {
+      this.showActivityNotifier('Добавление друзей — скоро');
+    });
   }
 
 
@@ -6562,7 +6575,10 @@ export class Feed {
       if (shouldFling) startMomentum(scrollVelocity);
       if (!wasTap) return;
       const t = e.target as HTMLElement | null;
-      if (t?.closest?.('.hud__level-plus')) { this.openEditor(); return; }
+      if (t?.closest?.('.hud__level-plus')) {
+        if (!missionActive()) this.openEditor();
+        return;
+      }
       const chEl = t?.closest?.('.story[data-challenge]') as HTMLElement | null;
       if (chEl) { this.playChallengeFromRail(chEl.dataset.challenge); return; }
       const storyEl = t?.closest?.('.story[data-friend]') as HTMLElement | null;

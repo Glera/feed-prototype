@@ -4485,9 +4485,8 @@ body {
    language is the existing one — the HUD badge shell, the daily-panel screen
    shell, and the .isln-award card shell. */
 
-/* The HUD becomes one row: level ring · case bar · paw badge. The stories rail
-   stops scrolling (with islands off it holds only the ring) and reserves the
-   badge on the right. */
+/* Legacy mission shell; iteration-5 overrides below replace its personal wallet
+   with the compact shared gift bar while preserving pre-mission nodes. */
 .hud--mission .stories {
   overflow-x: hidden;
   padding-right: 104px;
@@ -4537,9 +4536,7 @@ body {
   transition: width 0.5s cubic-bezier(0.3, 0.9, 0.35, 1);
 }
 
-/* Paw badge: the rethemed puzzle counter (same shell, inline glyph, no asset).
-   The retheme is ADDITIVE — the puzzle children are hidden, never removed — so a
-   revoked capability restores the original badge exactly by dropping one node. */
+/* Shared paw glyph for the gift coin, flights, and report placeholders. */
 .mission-paw {
   width: 30px;
   height: 30px;
@@ -4547,40 +4544,6 @@ body {
   fill: #ffd07a;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
 }
-.hud__puzzles[data-mission="1"] > :not(.hud__mission-paw) { display: none; }
-.hud__puzzles[data-mission="1"] { padding: 0 13px 0 9px; }
-.hud__mission-paw { display: flex; align-items: center; gap: 6px; }
-.hud__mission-paw-value {
-  font: 900 19px/1 system-ui, sans-serif;
-  font-variant-numeric: tabular-nums;
-  color: #fff;
-  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
-}
-
-/* Contribution ceremony — inside the win overlay, above the challenge pill. */
-.mission-card {
-  width: min(360px, calc(100vw - 36px));
-  margin: 0 auto 12px;
-  padding: 13px;
-  border: 1px solid rgba(255, 208, 122, 0.42);
-  border-radius: 18px;
-  background: linear-gradient(145deg, rgba(69, 55, 32, 0.95), rgba(21, 24, 34, 0.97));
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.3);
-  color: #fff;
-  text-align: left;
-  pointer-events: auto;
-}
-.mission-card__head { display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: center; }
-.mission-card__icon { display: grid; place-items: center; }
-.mission-card__icon .mission-paw { width: 38px; height: 38px; }
-.mission-card__copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.mission-card__title { font: 900 16px/1.2 system-ui, -apple-system, sans-serif; }
-.mission-card__sub { color: rgba(255, 255, 255, 0.74); font: 600 12px/1.35 system-ui, sans-serif; }
-.mission-card__meter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: center; margin-top: 11px; }
-.mission-card__track { height: 6px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.14); }
-.mission-card__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #58d58f, #ffd86a); transition: width 0.6s cubic-bezier(0.3, 0.9, 0.35, 1); }
-.mission-card__count { color: #d9e2f0; font: 800 12px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
-.daily-panel .mission-card { margin-bottom: 14px; }
 
 /* UNLOCKED / FULFILLED ceremonies — one at a time, watermark-gated. */
 .mission-ceremony {
@@ -4608,9 +4571,44 @@ body {
 .mission-ceremony--unlocked .mission-ceremony__card { border-color: rgba(255, 216, 106, 0.4); }
 .mission-ceremony--fulfilled .mission-ceremony__card { border-color: rgba(143, 216, 194, 0.42); }
 .mission-ceremony__emoji { font-size: 40px; line-height: 1; }
+.mission-ceremony__moment {
+  display: inline-flex;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .07);
+  color: rgba(255, 255, 255, .62);
+  font: 750 10.5px/1 system-ui, sans-serif;
+}
 .mission-ceremony__title { margin-top: 10px; font: 900 22px/1.15 system-ui, -apple-system, sans-serif; }
 .mission-ceremony__sub { margin-top: 6px; color: #c9d3e4; font: 750 13px/1.4 system-ui, sans-serif; }
-.mission-ceremony__sums { display: grid; gap: 7px; margin-top: 16px; text-align: left; }
+.mission-ceremony__paws {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  margin-top: 14px;
+  color: #e8c96a;
+  font: 850 16px/1.2 system-ui, sans-serif;
+}
+.mission-ceremony__paws .mission-paw {
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+  border: 1px solid rgba(255, 224, 138, .45);
+  border-radius: 50%;
+  background: #241c38;
+  fill: #ffe08a;
+  box-sizing: border-box;
+  filter: none;
+}
+.mission-ceremony__sums {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  text-align: center;
+}
+.mission-ceremony__breakdown { color: rgba(255, 255, 255, .7); font: 700 12.5px/1.3 system-ui, sans-serif; }
+.mission-ceremony__released { color: #aeb8c9; font: 650 11.5px/1.35 system-ui, sans-serif; }
 .mission-sum {
   display: flex;
   align-items: baseline;
@@ -4748,6 +4746,337 @@ body {
 }
 .mission-history__source { color: #c9d3e4; font: 700 12px/1.2 system-ui, sans-serif; }
 .mission-history__amount { color: #ffd07a; font: 900 13px/1 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+
+/* Iteration 5 taste delta: a static 72px level frame beside the season bar and
+   an honest empty friends row. The original challenge rail stays attached but
+   is inert/hidden until capability revoke restores it byte-for-byte. */
+.viewport--mission {
+  --chrome-zone-h: 112px;
+  --top-zone-h: calc(112px + var(--safe-top));
+}
+.hud--mission .stories {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-rows: 50px 28px;
+  align-items: stretch;
+  gap: 7px 10px;
+  padding: 8px 10px 5px;
+  box-sizing: border-box;
+  overflow: hidden;
+  cursor: default;
+  touch-action: none;
+}
+.hud--mission .story--me {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  width: 72px;
+  height: 84px;
+  display: block;
+}
+.hud--mission .story--me .story__name { display: none; }
+.hud--mission .isln-friends { display: none; }
+.hud--mission .story[data-challenge] { display: none; }
+.hud--mission .hud__puzzles { display: none; }
+.hud--mission .hud__level {
+  width: 72px;
+  height: 84px;
+  border-radius: 15px;
+}
+.hud--mission .hud__level-ring,
+.hud--mission .hud__level-ring::before,
+.hud--mission .hud__level-ring::after { border-radius: 15px; }
+.hud--mission .hud__level-ring {
+  background: conic-gradient(
+    from 0deg,
+    #b9a0f5 0deg,
+    #8d6fe0 var(--level-progress),
+    rgba(255, 255, 255, .14) var(--level-progress),
+    rgba(255, 255, 255, .14) 360deg
+  );
+}
+.hud--mission .hud__level-ring::before { display: none; }
+.hud--mission .hud__level-ring::after {
+  inset: 3px;
+  background: linear-gradient(180deg, #21192f, #15111f);
+  border: 1px solid rgba(255, 255, 255, .12);
+}
+.hud--mission .hud__level-core {
+  position: absolute;
+  top: 14px;
+  left: 18px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 34%, #e8ddff 0 4px, transparent 4.5px),
+    radial-gradient(ellipse at 50% 103%, #e8ddff 0 10px, transparent 10.5px),
+    #2a2140;
+}
+.hud--mission .hud__level-value {
+  position: absolute;
+  top: 47px;
+  left: -9px;
+  font-size: 15px;
+  color: #e8ddff;
+}
+.hud--mission .hud__level-plus {
+  right: -7px;
+  bottom: -7px;
+  width: 24px;
+  height: 24px;
+  background: #55d887;
+  color: #0b2d1c;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.hud__mission {
+  position: relative;
+  display: block;
+  grid-column: 2;
+  grid-row: 1;
+  height: 50px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.hud__mission-open {
+  width: 100%;
+  height: 50px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 0 5px;
+  padding: 7px 7px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(48, 39, 67, .97), rgba(25, 20, 38, .98));
+  box-shadow: 0 6px 14px rgba(0, 0, 0, .34), inset 0 1px 0 rgba(255, 255, 255, .12);
+  color: #fff;
+  pointer-events: auto;
+}
+.hud__mission-gift {
+  grid-column: 3;
+  grid-row: 1;
+  font-size: 25px;
+  line-height: 1;
+}
+.hud__mission-gift--bounce { animation: mission-gift-bounce .5s cubic-bezier(.22, .8, .28, 1); }
+@keyframes mission-gift-bounce {
+  0%, 100% { transform: translateY(0) scale(1); }
+  42% { transform: translateY(-7px) scale(1.12); }
+}
+.hud__mission-info {
+  position: absolute;
+  right: -2px;
+  bottom: -4px;
+  z-index: 3;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, .38);
+  border-radius: 50%;
+  background: rgba(10, 16, 24, .95);
+  color: #f6df9a;
+  font: 900 11px/1 system-ui, sans-serif;
+  pointer-events: auto;
+}
+.hud__mission-count {
+  grid-column: 2;
+  grid-row: 1;
+  z-index: 2;
+  color: #fff2ba;
+  font-size: 11px;
+  text-align: center;
+  text-shadow: 0 1px 2px #000, 1px 0 1px #000, -1px 0 1px #000;
+  pointer-events: none;
+}
+.hud__mission-track {
+  grid-column: 2;
+  grid-row: 1;
+  height: 16px;
+}
+.hud__mission-coin {
+  grid-column: 1;
+  grid-row: 1;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #241c38;
+  box-shadow: inset 0 0 0 1px rgba(255, 221, 126, .22);
+}
+.hud__mission-coin .mission-paw { width: 18px; height: 18px; fill: #f7d981; filter: none; }
+.hud__mission-friends {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hud__mission-friend-slot {
+  width: 28px;
+  height: 28px;
+  box-sizing: border-box;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 9px;
+  background: #141d28;
+}
+.hud__mission-friends-label {
+  color: rgba(255, 255, 255, .48);
+  font: 700 10px/1 system-ui, sans-serif;
+}
+
+.mission-paw-flight {
+  position: absolute;
+  z-index: 3600;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #241c38;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .42), inset 0 0 0 1px rgba(255, 221, 126, .3);
+  pointer-events: none;
+}
+.mission-paw-flight .mission-paw { width: 26px; height: 26px; fill: #f7d981; filter: none; }
+
+/* Combination C chips with contour-A icons; original nodes/order are restored
+   exactly when the capability is revoked. */
+.feed-bar--mission .feed-bar__switch { gap: 6px; }
+.feed-bar--mission .feed-bar__icon:not([data-mission-label]) { display: none; }
+.feed-bar--mission .feed-bar__icon {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 0;
+  height: 46px;
+  padding: 5px 8px 4px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 22px;
+  background: rgba(34, 28, 48, .92);
+}
+.feed-bar--mission .feed-bar__icon::after {
+  content: attr(data-mission-label);
+  display: block;
+  margin-top: 1px;
+  color: rgba(255, 255, 255, .72);
+  font: 750 9px/1 system-ui, sans-serif;
+}
+.feed-bar--mission .feed-bar__icon svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+.feed-bar--mission .feed-bar__icon--mission-map { opacity: 1; }
+
+.mission-description {
+  display: grid;
+  gap: 5px;
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .05);
+}
+.mission-description__summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+.mission-description__summary::-webkit-details-marker { display: none; }
+.mission-description__title { font: 850 13px/1.2 system-ui, sans-serif; }
+.mission-description__more { color: #f6df9a; font: 750 11px/1.2 system-ui, sans-serif; }
+.mission-description__copy { display: block; margin-top: 7px; color: #b8c1d1; font: 650 12px/1.4 system-ui, sans-serif; }
+.mission-ladder {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 16px;
+  background: #141d28;
+}
+.mission-ladder__head {
+  color: #f6df9a;
+  font: 850 12px/1.2 system-ui, sans-serif;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.mission-ladder__step {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .045);
+  color: #8f99aa;
+}
+.mission-ladder__step--opened,
+.mission-ladder__step--guaranteed {
+  border-color: rgba(157, 255, 193, .3);
+  background: rgba(84, 211, 139, .11);
+  color: #fff;
+}
+.mission-ladder__icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .07);
+  font-size: 13px;
+}
+.mission-ladder__copy { display: grid; gap: 3px; min-width: 0; }
+.mission-ladder__threshold { color: rgba(255, 255, 255, .58); font: 650 11px/1.2 system-ui, sans-serif; }
+.mission-ladder__amount { color: #fff; font: 900 14px/1.2 system-ui, sans-serif; }
+.mission-ladder__state { color: rgba(255, 255, 255, .48); font: 750 11px/1.2 system-ui, sans-serif; }
+.mission-ladder__step--opened .mission-ladder__state,
+.mission-ladder__step--guaranteed .mission-ladder__state { color: #9dffc1; }
+.mission-ladder__track { height: 5px; overflow: hidden; border-radius: 3px; background: rgba(255, 255, 255, .12); }
+.mission-ladder__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8d6fe0, #b9a0f5); }
+.mission-contract { padding: 0; border: 0; background: transparent; }
+.mission-contract__summary {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .055);
+  color: #f6df9a;
+  text-align: left;
+}
+.mission-contract-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 3800;
+  overflow-y: auto;
+  padding: calc(env(safe-area-inset-top, 0px) + 54px) 16px 28px;
+  background: #0b0d16;
+}
+.mission-contract-sheet__title {
+  margin: 0 48px 16px 0;
+  color: #fff;
+  font: 900 20px/1.2 system-ui, sans-serif;
+}
+.mission-contract-sheet__close {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  right: 16px;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+  font-size: 22px;
+}
 
 /* Exact immutable candidate inside the ordinary Feed shell. This label stays
    above all game/HUD layers and carries no product decision control. */
