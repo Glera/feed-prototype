@@ -64,6 +64,17 @@ eq(receipt?.bar.tokenGoal, 50, 'the goal is the receipt goal');
 eq(receipt?.bar.nextStepThreshold, 25, 'the bar denominator is the nearest step');
 deep(receipt?.allocations, [{ caseId: 'case-1', contractVersion: 'v1', amount: 2 }], 'allocations survive');
 eq(receipt?.unlocked, null, 'a non-crossing contribution carries no UNLOCKED snapshot');
+const legacyBarReceipt = parseMissionContributionReceipt({
+  ...RECEIPT,
+  bar: {
+    caseId: 'case-1', contractVersion: 'v1', progress: 2, tokenGoal: 50,
+  },
+});
+eq(
+  legacyBarReceipt?.bar.nextStepThreshold,
+  null,
+  'an additive rollout keeps pre-ladder contribution receipts readable',
+);
 
 // Absent block = the feature is off for this caller. Never an error.
 for (const missing of [undefined, null, {}, '', 0, [], 'mission.contribution-receipt.v1']) {
@@ -85,6 +96,17 @@ deep(
   parseMissionContributionReceipt({ ...RECEIPT, allocations: [{ caseId: 'case-1' }, 7, null] })?.allocations,
   [],
   'structurally broken allocations are dropped, not rendered',
+);
+deep(
+  parseMissionContributionReceipt({
+    ...RECEIPT,
+    openedGiftSteps: [{
+      caseId: 'case-1', contractVersion: 'v1', stepIndex: 0,
+      thresholdTokens: 0, amountCents: 10_000, progressAtOpen: 0,
+    }],
+  })?.openedGiftSteps.map((step) => [step.stepIndex, step.thresholdTokens]),
+  [[0, 0]],
+  'the guaranteed zero-threshold step stays structurally readable',
 );
 
 const CROSSED = {
@@ -407,7 +429,7 @@ assert.ok(
   /tile\('уже собрано', formatMissionMoney\(active\.money\.collectedCents/.test(uiSource),
   'the case screen must show server-owned collectedCents',
 );
-for (const label of ['уже собрано', 'Мой вклад', 'лапок сообщества', 'Лестница подарка']) {
+for (const label of ['уже собрано', 'Мой вклад', 'лапок сообщества', 'Подарки сезона']) {
   assertions += 1;
   assert.ok(uiSource.includes(label), `the case screen must keep the «${label}» number`);
 }

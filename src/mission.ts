@@ -24,7 +24,6 @@ import {
   advanceMissionWatermark,
   appendMissionHistory,
   isContributionPresented,
-  missionCaseTitle,
   missionSurfaceEnabled,
   normaliseMissionWatermark,
   parseMissionCaseView,
@@ -66,6 +65,8 @@ let barEl: HTMLElement | null = null;
 let navigationEl: HTMLElement | null = null;
 let navigationOrder: HTMLElement[] = [];
 let missionMapEl: HTMLButtonElement | null = null;
+let missionMapOpen: (() => void) | null = null;
+let addFriendOpen: (() => void) | null = null;
 let viewportEl: HTMLElement | null = null;
 let screenEl: HTMLElement | null = null;
 let ceremonyEl: HTMLElement | null = null;
@@ -75,6 +76,7 @@ let outboxBound = false;
 
 const receipts = new Map<string, MissionContributionReceipt>();
 const waiters = new Map<string, Set<(receipt: MissionContributionReceipt | null) => void>>();
+const boundAddFriendButtons = new WeakSet<HTMLElement>();
 /** Contribution seqs already celebrated — one ceremony per contribution, no
  *  matter which door the receipt came through (first answer, retry, replay). */
 let presented: number[] = [];
@@ -137,18 +139,24 @@ function loadHistory(): MissionHistoryEntry[] {
  * only once the capability has actually arrived, so a build with the flag on but
  * an unenrolled account still renders the untouched HUD.
  */
-export function mountMissionHud(hud: HTMLElement, viewport: HTMLElement): void {
+export function mountMissionHud(
+  hud: HTMLElement,
+  viewport: HTMLElement,
+  onAddFriend: () => void,
+): void {
   if (!MISSION_FLAG_ENABLED) return;
   hudEl = hud;
   viewportEl = viewport;
+  addFriendOpen = onAddFriend;
   barEl = null;   // a remount brought a brand-new HUD subtree
   syncMissionSurface();
 }
 
 /** Register existing bottom navigation; mission mode reorders additively. */
-export function mountMissionNavigation(navigation: HTMLElement): void {
+export function mountMissionNavigation(navigation: HTMLElement, onOpenMap: () => void): void {
   if (!MISSION_FLAG_ENABLED) return;
   navigationEl = navigation;
+  missionMapOpen = onOpenMap;
   const switcher = navigation.querySelector<HTMLElement>('.feed-bar__switch');
   navigationOrder = switcher ? Array.from(switcher.children) as HTMLElement[] : [];
   syncMissionSurface();
@@ -159,7 +167,7 @@ function syncMissionNavigation(): void {
   if (!switcher || !navigationEl) return;
   navigationEl.classList.add('feed-bar--mission');
   const labels: Record<string, string> = {
-    daily: 'Daily', collections: 'Collections', feed: 'Feed',
+    daily: 'Дейлики', collections: 'Коллекции', feed: 'Лента',
   };
   for (const [name, label] of Object.entries(labels)) {
     const button = switcher.querySelector<HTMLElement>(`[data-bar-tab="${name}"]`);
@@ -173,14 +181,15 @@ function syncMissionNavigation(): void {
     missionMapEl = document.createElement('button');
     missionMapEl.type = 'button';
     missionMapEl.className = 'feed-bar__icon feed-bar__icon--mission-map';
-    missionMapEl.dataset.missionLabel = 'Map';
-    missionMapEl.disabled = true;
-    missionMapEl.setAttribute('aria-label', 'Карта — скоро');
-    missionMapEl.setAttribute('aria-disabled', 'true');
+    missionMapEl.dataset.missionLabel = 'Карта';
+    missionMapEl.setAttribute('aria-label', 'Карта помощи');
     missionMapEl.innerHTML =
       '<svg viewBox="0 0 24 24" aria-hidden="true">'
       + '<path d="M4 5.5 9 3l6 2.5L20 3v15.5L15 21l-6-2.5L4 21z"/>'
       + '<path d="M9 3v15.5M15 5.5V21"/></svg>';
+    missionMapEl.addEventListener('click', () => {
+      if (missionActive()) missionMapOpen?.();
+    });
     switcher.appendChild(missionMapEl);
   }
 }
@@ -188,15 +197,49 @@ function syncMissionNavigation(): void {
 function syncMissionSurface(): void {
   if (!missionActive() || !hudEl) return;
   const stories = hudEl.querySelector<HTMLElement>('.stories');
+  hudEl.classList.add('hud--mission');
+  viewportEl?.classList.add('viewport--mission');
+  if (stories && stories.dataset.missionOriginalAriaLabel === undefined) {
+    stories.dataset.missionOriginalAriaLabel = stories.getAttribute('aria-label') ?? '';
+    stories.setAttribute('aria-label', 'Миссия и друзья');
+  }
   if (stories && !barEl) {
-    hudEl.classList.add('hud--mission');
     barEl = buildMissionHudBar(openMissionCaseScreen, openMissionContractSheet);
     stories.appendChild(barEl);
+    const friends = document.createElement('div');
+    friends.className = 'hud__mission-friends';
+    friends.setAttribute('aria-label', 'Друзья');
+    for (let index = 0; index < 4; index += 1) {
+      const slot = document.createElement('span');
+      slot.className = 'hud__mission-friend-slot';
+      slot.setAttribute('aria-hidden', 'true');
+      friends.appendChild(slot);
+    }
+    friends.appendChild(Object.assign(document.createElement('span'), {
+      className: 'hud__mission-friends-label',
+      textContent: 'друзья',
+    }));
+    stories.appendChild(friends);
   }
   const plus = hudEl.querySelector<HTMLElement>('.hud__level-plus');
   plus?.setAttribute('aria-hidden', 'false');
   plus?.setAttribute('role', 'button');
   plus?.setAttribute('aria-label', 'Добавить друга — скоро');
+  if (plus) plus.tabIndex = 0;
+  if (plus && !boundAddFriendButtons.has(plus)) {
+    boundAddFriendButtons.add(plus);
+    plus.addEventListener('click', (event) => {
+      if (!missionActive()) return;
+      event.stopPropagation();
+      addFriendOpen?.();
+    });
+    plus.addEventListener('keydown', (event) => {
+      if (!missionActive() || (event.key !== 'Enter' && event.key !== ' ')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      addFriendOpen?.();
+    });
+  }
   syncMissionNavigation();
   renderMissionHud();
 }
@@ -218,12 +261,22 @@ function renderMissionHud(): void {
  */
 function teardownMissionSurface(): void {
   hudEl?.classList.remove('hud--mission');
+  viewportEl?.classList.remove('viewport--mission');
   barEl?.remove();
   barEl = null;
+  hudEl?.querySelector('.hud__mission-friends')?.remove();
+  const stories = hudEl?.querySelector<HTMLElement>('.stories');
+  if (stories?.dataset.missionOriginalAriaLabel !== undefined) {
+    const original = stories.dataset.missionOriginalAriaLabel;
+    if (original) stories.setAttribute('aria-label', original);
+    else stories.removeAttribute('aria-label');
+    delete stories.dataset.missionOriginalAriaLabel;
+  }
   const plus = hudEl?.querySelector<HTMLElement>('.hud__level-plus');
   plus?.setAttribute('aria-hidden', 'true');
   plus?.removeAttribute('role');
   plus?.removeAttribute('aria-label');
+  plus?.removeAttribute('tabindex');
   if (navigationEl) navigationEl.classList.remove('feed-bar--mission');
   const switcher = navigationEl?.querySelector<HTMLElement>('.feed-bar__switch');
   if (switcher) {
@@ -300,12 +353,7 @@ function presentNextCeremony(): void {
     presentNextCeremony();
   };
   if (next.kind === 'unlocked') {
-    const active = view.activeCase;
-    // The successor the crossing activated — never the case that just closed.
-    const nextCaseTitle = active && active.caseId !== next.event.caseId
-      ? missionCaseTitle(active.contract?.document ?? {})
-      : null;
-    ceremonyEl = buildMissionUnlockedCeremony({ event: next.event, currency, nextCaseTitle, onClose: close });
+    ceremonyEl = buildMissionUnlockedCeremony({ event: next.event, currency, onClose: close });
   } else {
     ceremonyEl = buildMissionFulfilledCeremony({ event: next.event, currency, onClose: close });
   }
@@ -335,6 +383,7 @@ function openMissionContractSheet(): void {
 
 function renderMissionCaseScreen(): void {
   if (!viewportEl || !view) return;
+  const keepContractOpen = screenEl?.querySelector<HTMLElement>('.mission-contract-sheet')?.hidden === false;
   const fresh = buildMissionCaseScreen({
     view,
     history: loadHistory(),
@@ -343,6 +392,9 @@ function renderMissionCaseScreen(): void {
   if (screenEl) screenEl.replaceWith(fresh);
   else viewportEl.appendChild(fresh);
   screenEl = fresh;
+  if (keepContractOpen) {
+    fresh.querySelector<HTMLButtonElement>('.mission-contract__summary')?.click();
+  }
 }
 
 function closeMissionCaseScreen(): void {

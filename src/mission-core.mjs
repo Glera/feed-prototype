@@ -60,11 +60,11 @@ export function parseMissionBar(value) {
   const contractVersion = textOf(value.contractVersion);
   const progress = intOf(value.progress);
   const tokenGoal = intOf(value.tokenGoal, 1);
-  const nextStepThreshold = value.nextStepThreshold === null
+  const nextStepThreshold = value.nextStepThreshold == null
     ? null
     : intOf(value.nextStepThreshold, 1);
   if (!caseId || !contractVersion || progress === null || tokenGoal === null) return null;
-  if (value.nextStepThreshold !== null && nextStepThreshold === null) return null;
+  if (value.nextStepThreshold != null && nextStepThreshold === null) return null;
   return { caseId, contractVersion, progress, tokenGoal, nextStepThreshold };
 }
 
@@ -105,8 +105,8 @@ function parseGiftSteps(value) {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
     if (!isObject(item)) return [];
-    const stepIndex = intOf(item.stepIndex, 1);
-    const thresholdTokens = intOf(item.thresholdTokens, 1);
+    const stepIndex = intOf(item.stepIndex);
+    const thresholdTokens = intOf(item.thresholdTokens);
     const amountCents = intOf(item.amountCents, 1);
     if (stepIndex === null || thresholdTokens === null || amountCents === null) return [];
     return [{

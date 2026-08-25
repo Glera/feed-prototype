@@ -6236,7 +6236,10 @@ export class Feed {
     this.attachSwipeSurface(bar);
     this.feedEl.appendChild(bar);
     this.feedBarEl = bar;
-    mountMissionNavigation(bar);
+    mountMissionNavigation(bar, () => {
+      this.openHelpMapPreview();
+      this.hideDailyPanel();
+    });
     // Explicit QA routes (?diag, startapp=diag, local Vite dev) open the debug
     // entry immediately, exactly as before. An operator gets the same button
     // permanently once /session answers the capability — no query parameter.
@@ -6511,7 +6514,9 @@ export class Feed {
     }
     // Mission: the compact gift bar joins the HUD only after /session proves the
     // capability, so nothing is inserted here for anybody else.
-    mountMissionHud(hud, this.viewport);
+    mountMissionHud(hud, this.viewport, () => {
+      this.showActivityNotifier('Добавление друзей — скоро');
+    });
   }
 
 
@@ -6571,8 +6576,7 @@ export class Feed {
       if (!wasTap) return;
       const t = e.target as HTMLElement | null;
       if (t?.closest?.('.hud__level-plus')) {
-        if (missionActive()) this.showActivityNotifier('Добавление друзей — скоро');
-        else this.openEditor();
+        if (!missionActive()) this.openEditor();
         return;
       }
       const chEl = t?.closest?.('.story[data-challenge]') as HTMLElement | null;

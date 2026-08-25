@@ -330,7 +330,7 @@ try {
   };
 
   // ── 1. both gates open: iteration-5 HUD and navigation appear ──────────────
-  await page.goto(`${origin}/?initData=mission-browser`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`${origin}/?initData=mission-browser&metaworld=1`, { waitUntil: 'domcontentloaded' });
   await bar.waitFor({ state: 'visible', timeout: 15_000 });
   // The denominator is the nearest unopened step, never the final goal guess.
   await page.waitForFunction(
@@ -340,20 +340,40 @@ try {
   );
   assert.equal(await bar.locator('.hud__mission-title').count(), 0, 'the compact HUD has no season title');
   assert.equal(await bar.locator('.hud__mission-track i').getAttribute('style'), 'width: 80%;');
-  assert.equal(await bar.locator('.hud__mission-gift').textContent(), '🎁ⓘ');
+  assert.equal(await bar.locator('.hud__mission-gift').textContent(), '🎁');
+  assert.equal(await bar.locator('.hud__mission-open .hud__mission-info').count(), 0, 'interactive roles never nest');
+  assert.equal(await bar.locator('.hud__mission-info').evaluate((node) => node.tagName), 'BUTTON');
+  const infoBounds = await bar.locator('.hud__mission-info').evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  });
+  assert.ok(infoBounds.width >= 24 && infoBounds.height >= 24, 'contract info has a real touch target');
   assert.equal(await badge.isVisible(), false, 'there is no personal paw wallet in mission HUD');
   assert.equal(await badge.locator('.hud__puzzles-value').count(), 1, 'the puzzle node must remain untouched');
   assert.equal(await badge.locator('.hud__puzzles-value').isVisible(), false, 'the puzzle balance leaves the surface');
   assert.equal(await badge.locator('.hud__puzzles-value').textContent(), '10', 'and keeps being painted underneath');
   assert.equal(await page.locator('.hud__level-plus').getAttribute('aria-label'), 'Добавить друга — скоро');
+  assert.equal(await page.locator('.hud__level-plus').getAttribute('tabindex'), '0');
+  const levelBounds = await page.locator('.hud__level').evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return { width: rect.width, height: rect.height, radius: getComputedStyle(node).borderRadius };
+  });
+  assert.deepEqual(levelBounds, { width: 72, height: 84, radius: '15px' });
+  assert.equal(await page.locator('.hud__mission-friend-slot').count(), 4, 'the static friends row is honest and empty');
+  await page.locator('.hud__level-plus').press('Enter');
+  await page.getByText('Добавление друзей — скоро', { exact: true }).waitFor({ state: 'visible' });
   await challenge.waitFor({ state: 'attached' });
   assert.equal(await challenge.isVisible(), false, 'incoming challenges are hidden from mission HUD');
   const missionNav = page.locator('.feed-bar--mission [data-mission-label]');
   await missionNav.first().waitFor({ state: 'visible' });
   assert.deepEqual(await missionNav.evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-mission-label'))), [
-    'Daily', 'Collections', 'Feed', 'Map',
+    'Дейлики', 'Коллекции', 'Лента', 'Карта',
   ]);
-  assert.equal(await page.locator('.feed-bar__icon--mission-map').isDisabled(), true);
+  assert.equal(await page.locator('.feed-bar__icon--mission-map').isDisabled(), false);
+  await page.locator('.feed-bar__icon--mission-map').click();
+  await page.locator('.helpmap-preview').waitFor({ state: 'visible', timeout: 10_000 });
+  await page.getByLabel('Закрыть карту').click();
+  await page.locator('.helpmap-preview').waitFor({ state: 'detached', timeout: 10_000 });
 
   // ── 2. case canvas: bar, collected/mine, ladder, separate contract sheet ───
   await bar.locator('.hud__mission-info').click();
@@ -375,14 +395,14 @@ try {
     };
   };
   assert.deepEqual(await tileByLabel('уже собрано'), { value: '€100', detail: null });
-  assert.deepEqual(await tileByLabel('Мой вклад'), { value: '2 лапок', detail: null });
+  assert.deepEqual(await tileByLabel('Мой вклад'), { value: '2 лапки', detail: null });
   assert.equal(await screen.getByText('Передано', { exact: true }).count(), 0, 'no transfer claim before fulfillment');
   assert.deepEqual(await screen.locator('.mission-ladder__step').allTextContents(), [
-    'Гарантия€100', '5 лапок€10', '50 лапок€10',
+    '✓€100гарантированный подарокоткрыт',
+    '🔒€10за 5 лапок сообществавпереди',
+    '🔒€10за 50 лапок сообществавпереди',
   ]);
-  const description = screen.locator('.mission-description');
-  assert.equal(await description.getAttribute('open'), null);
-  assert.equal(await description.locator('.mission-description__more').textContent(), 'Читать дальше');
+  assert.equal(await screen.locator('.mission-description').count(), 0, 'media-blocked copy creates no false read-more affordance');
   // ⓘ opens the complete public contract/materials in its own sheet.
   assert.match(await contractSheet.locator('.mission-defs').first().textContent(), /Приют «Лапа»/);
   assert.match(
@@ -390,6 +410,15 @@ try {
     /2026-09-01/,
     'the published unlock cutoff is now an executable promise and belongs in the contract',
   );
+  assert.equal(await contractSheet.getAttribute('role'), 'dialog');
+  assert.equal(await contractSheet.getAttribute('aria-modal'), 'true');
+  assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true);
+  backend.caseTokens = 3;
+  await foreground();
+  await contractSheet.waitFor({ state: 'visible' });
+  assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true, 'refresh preserves the open contract');
+  backend.caseTokens = 2;
+  await foreground();
   // Anti-drift: one tap must render EVERY key of the policy wire document, by
   // the document's own keys — not by a hand-written list that can silently fall
   // behind the next closed-schema change.
@@ -422,8 +451,6 @@ try {
   assert.match(policyText, /посев/);
   await contractSheet.locator('.mission-contract-sheet__close').click();
   await contractSheet.waitFor({ state: 'hidden' });
-  await description.locator('.mission-description__summary').click();
-  assert.equal(await description.locator('.mission-description__copy').isVisible(), true);
   assert.equal(await screen.locator('.mission-history__empty').count(), 1, 'no contribution yet, no history');
   await screen.locator('.mission-screen__close').click();
   await screen.waitFor({ state: 'detached' });
@@ -431,14 +458,20 @@ try {
   // ── 3. daily claim: 503 first, ceremony only from the retry answer (F4) ────
   await page.evaluate(() => {
     window.__missionFlightCount = 0;
+    window.__missionGiftBounceCount = 0;
     const observer = new MutationObserver((records) => {
       for (const record of records) {
         for (const node of record.addedNodes) {
           if (node instanceof Element && node.matches('.mission-paw-flight')) window.__missionFlightCount += 1;
         }
+        if (
+          record.target instanceof Element
+          && record.target.matches('.hud__mission-gift')
+          && record.target.classList.contains('hud__mission-gift--bounce')
+        ) window.__missionGiftBounceCount += 1;
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { attributes: true, attributeFilter: ['class'], childList: true, subtree: true });
     window.__missionFlightObserver = observer;
   });
   await page.locator('[data-bar-tab="daily"]').click();
@@ -455,6 +488,7 @@ try {
   assert.ok(backend.claimCalls >= 2, `the ceremony must come from the retry (calls=${backend.claimCalls})`);
   await sleep(2500);
   assert.equal(await page.evaluate(() => window.__missionFlightCount), 1, 'exactly one receipt-driven paw flight');
+  assert.equal(await page.evaluate(() => window.__missionGiftBounceCount), 1, 'one crossed ladder step bounces the gift once');
   assert.equal(await page.locator('.mission-card, .mission-toast').count(), 0, 'own contribution never creates a toast');
   // The read API refresh — not an optimistic guess — moves the shared bar.
   assert.equal(await bar.locator('.hud__mission-count').textContent(), '5 / 50');
@@ -473,15 +507,14 @@ try {
   const ceremony = page.locator('.mission-ceremony--unlocked');
   await ceremony.waitFor({ state: 'visible', timeout: 15_000 });
   assert.equal(await ceremony.locator('.mission-ceremony__title').textContent(), 'Приют получает €120');
-  const sums = await ceremony.locator('.mission-sum').allTextContents();
-  assert.deepEqual(sums, [
-    'Платформазаранее резервирует помощь',
-    'Сообществооткрывает ступени лапками',
-  ], 'the ceremony explains the platform/community ladder roles');
-  assert.equal(
-    await ceremony.locator('.mission-ceremony__next').textContent(),
-    'Следующая цель уже открыта — 10 кг корма',
-  );
+  assert.equal(await ceremony.locator('.mission-ceremony__moment').textContent(), 'сразу · подарок открыт');
+  assert.equal(await ceremony.locator('.mission-ceremony__paws').textContent(), '50 лапок');
+  assert.deepEqual(await ceremony.locator('.mission-ceremony__breakdown').allTextContents(), [
+    '€100 — гарантия платформы',
+    '€20 — собрало сообщество',
+  ], 'the ceremony shows the exact platform/community money split');
+  assert.equal(await ceremony.locator('.mission-ceremony__next').count(), 0, 'the successor announcement is absent');
+  assert.equal(await ceremony.locator('.mission-ceremony__btn').textContent(), 'Ура!');
   await ceremony.locator('.mission-ceremony__btn').click();
   await ceremony.waitFor({ state: 'detached' });
   await foreground();
@@ -519,13 +552,16 @@ try {
   assert.equal(await badge.locator('img').isVisible(), true, 'the puzzle icon returns too');
   assert.equal(await page.locator('.hud__level-plus').getAttribute('aria-hidden'), 'true');
   assert.equal(await page.locator('.hud__level-plus').getAttribute('aria-label'), null);
+  assert.equal(await page.locator('.hud__level-plus').getAttribute('tabindex'), null);
   assert.equal(await challenge.isVisible(), true, 'challenge inbox returns outside mission HUD');
+  assert.equal(await page.locator('.stories').getAttribute('aria-label'), 'Challenges');
   assert.deepEqual(await page.locator('.feed-bar__switch > [data-bar-tab]').evaluateAll(
     (nodes) => nodes.map((node) => node.getAttribute('data-bar-tab')),
   ), ['daily', 'meta', 'feed', 'collections']);
   assert.equal(await page.locator('.feed-bar--mission, .feed-bar__icon--mission-map').count(), 0);
   assert.equal(await page.locator('[data-mission-label]').count(), 0);
-  assert.equal(await page.locator('.mission-screen, .mission-ceremony, .hud__mission').count(), 0);
+  assert.equal(await page.locator('.mission-screen, .mission-ceremony, .hud__mission, .hud__mission-friends').count(), 0);
+  assert.equal(await page.locator('.viewport--mission').count(), 0);
   await sleep(1500);
   assert.equal(
     backend.caseRequests,

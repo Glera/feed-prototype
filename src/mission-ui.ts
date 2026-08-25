@@ -65,50 +65,42 @@ export interface MissionHudState {
   nextStepThreshold: number | null;
 }
 
-/** The case bar: name, `N / goal`, and a thin track. Centre of the single HUD row. */
+/** Static iteration-5 season bar. Its case and contract doors are sibling
+ * buttons: the small info target stays independently focusable and never nests
+ * one interactive role inside another. */
 export function buildMissionHudBar(
   onOpen: () => void,
   onOpenContract: () => void,
 ): HTMLElement {
   const bar = document.createElement('div');
   bar.className = 'hud__mission';
-  bar.tabIndex = 0;
-  bar.setAttribute('role', 'button');
-  bar.setAttribute('aria-label', 'Кейс миссии');
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'hud__mission-open';
+  open.setAttribute('aria-label', 'Кейс миссии');
   const gift = el('span', 'hud__mission-gift', '🎁');
-  const info = el('span', 'hud__mission-info', 'ⓘ');
-  info.tabIndex = 0;
-  info.setAttribute('role', 'button');
+  gift.setAttribute('aria-hidden', 'true');
+  const info = document.createElement('button');
+  info.type = 'button';
+  info.className = 'hud__mission-info';
+  info.textContent = 'ⓘ';
   info.setAttribute('aria-label', 'Полный контракт и материалы');
   for (const type of ['pointerdown', 'pointerup', 'click'] as const) {
     info.addEventListener(type, (event) => event.stopPropagation());
   }
   info.addEventListener('click', onOpenContract);
-  info.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    event.stopPropagation();
-    onOpenContract();
-  });
-  gift.appendChild(info);
   const coin = el('span', 'hud__mission-coin');
   coin.innerHTML = MISSION_PAW_SVG;
-  bar.append(gift, el('span', 'hud__mission-count', '0 / 0'), coin);
-  bar.appendChild(progressTrack('hud__mission-track', 0));
-  // The bar lives inside the stories scroller, whose drag handler listens on the
-  // rail: a tap on the bar must open the case, not fling the rail.
-  bar.addEventListener('pointerdown', (event) => event.stopPropagation());
-  bar.addEventListener('pointerup', (event) => event.stopPropagation());
-  bar.addEventListener('click', (event) => {
+  open.append(coin, progressTrack('hud__mission-track', 0), gift);
+  open.appendChild(el('span', 'hud__mission-count', '0 / 0'));
+  for (const type of ['pointerdown', 'pointerup'] as const) {
+    open.addEventListener(type, (event) => event.stopPropagation());
+  }
+  open.addEventListener('click', (event) => {
     event.stopPropagation();
     onOpen();
   });
-  bar.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    event.stopPropagation();
-    onOpen();
-  });
+  bar.append(open, info);
   return bar;
 }
 
@@ -134,22 +126,33 @@ export function launchMissionPawFlight(
   const to = target.getBoundingClientRect();
   const coin = el('span', 'mission-paw-flight');
   coin.innerHTML = MISSION_PAW_SVG;
+  coin.setAttribute('role', 'status');
+  coin.setAttribute('aria-live', 'polite');
   coin.setAttribute('aria-label', `+${receipt.amount} лапок в общий сезон`);
   coin.style.left = `${from.left - viewportRect.left + from.width / 2}px`;
   coin.style.top = `${from.top - viewportRect.top + from.height / 2}px`;
   viewport.appendChild(coin);
   const dx = to.left - from.left + (to.width - from.width) / 2;
   const dy = to.top - from.top + (to.height - from.height) / 2;
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const duration = reducedMotion ? 1 : 720;
   const animation = coin.animate?.(
     [
       { transform: 'translate(-50%, -50%) scale(.72)', opacity: 0 },
       { transform: 'translate(-50%, -70%) scale(1.08)', opacity: 1, offset: .18 },
       { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(.58)`, opacity: 1 },
     ],
-    { duration: 720, easing: 'cubic-bezier(.22,.8,.28,1)', fill: 'forwards' },
+    { duration, easing: 'cubic-bezier(.22,.8,.28,1)', fill: 'forwards' },
   );
-  if (animation) animation.addEventListener('finish', () => coin.remove(), { once: true });
-  else window.setTimeout(() => coin.remove(), 720);
+  const settle = (): void => {
+    coin.remove();
+    if (receipt.openedGiftSteps.length === 0) return;
+    const gift = target.querySelector<HTMLElement>('.hud__mission-gift');
+    gift?.classList.add('hud__mission-gift--bounce');
+    window.setTimeout(() => gift?.classList.remove('hud__mission-gift--bounce'), reducedMotion ? 1 : 520);
+  };
+  if (animation) animation.addEventListener('finish', settle, { once: true });
+  else window.setTimeout(settle, duration);
   return coin;
 }
 
@@ -172,12 +175,6 @@ function ceremonyShell(onClose: () => void): {
   return { root, body, actions };
 }
 
-function sumRow(label: string, value: string, tone = ''): HTMLElement {
-  const row = el('div', `mission-sum${tone ? ` mission-sum--${tone}` : ''}`);
-  row.append(el('span', 'mission-sum__label', label), el('span', 'mission-sum__value', value));
-  return row;
-}
-
 function receiptInt(receipt: Record<string, unknown>, key: string): number {
   const value = receipt[key];
   return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 0;
@@ -188,31 +185,64 @@ function receiptText(receipt: Record<string, unknown>, key: string): string {
   return typeof value === 'string' ? value : '';
 }
 
+function formatPawCount(value: number): string {
+  const count = Math.max(0, Math.trunc(value));
+  const mod100 = count % 100;
+  const mod10 = count % 10;
+  const noun = mod100 >= 11 && mod100 <= 14
+    ? 'лапок'
+    : mod10 === 1
+      ? 'лапка'
+      : mod10 >= 2 && mod10 <= 4
+        ? 'лапки'
+        : 'лапок';
+  return `${new Intl.NumberFormat('ru-RU').format(count)} ${noun}`;
+}
+
 export function buildMissionUnlockedCeremony(options: {
   event: MissionCaseEvent;
   currency: string;
-  nextCaseTitle: string | null;
   onClose: () => void;
 }): HTMLElement {
   const { root, body, actions } = ceremonyShell(options.onClose);
   root.classList.add('mission-ceremony--unlocked');
   const payload = options.event.receipt;
-  body.append(el('div', 'mission-ceremony__emoji', '🐾'));
+  body.append(el('div', 'mission-ceremony__moment', 'сразу · подарок открыт'));
   body.append(el(
     'div',
     'mission-ceremony__title',
     `Приют получает ${formatMissionMoney(receiptInt(payload, 'giftTotalCents'), options.currency)}`,
   ));
+  const paws = el('div', 'mission-ceremony__paws');
+  paws.innerHTML = MISSION_PAW_SVG;
+  paws.appendChild(el('strong', '', formatPawCount(receiptInt(payload, 'progress'))));
+  body.appendChild(paws);
+  const guaranteed = receiptInt(payload, 'guaranteedCents');
+  const giftTotal = receiptInt(payload, 'giftTotalCents');
+  const community = Math.max(0, giftTotal - guaranteed);
   const sums = el('div', 'mission-ceremony__sums');
   sums.append(
-    sumRow('Платформа', 'заранее резервирует помощь'),
-    sumRow('Сообщество', 'открывает ступени лапками', 'accent'),
+    el(
+      'span',
+      'mission-ceremony__breakdown',
+      `${formatMissionMoney(guaranteed, options.currency)} — гарантия платформы`,
+    ),
+    el(
+      'span',
+      'mission-ceremony__breakdown',
+      `${formatMissionMoney(community, options.currency)} — собрало сообщество`,
+    ),
   );
-  body.append(sums);
-  if (options.nextCaseTitle) {
-    body.append(el('div', 'mission-ceremony__next', `Следующая цель уже открыта — ${options.nextCaseTitle}`));
+  const released = receiptInt(payload, 'releasedUnopenedCents');
+  if (released > 0) {
+    sums.appendChild(el(
+      'span',
+      'mission-ceremony__released',
+      `${formatMissionMoney(released, options.currency)} нераскрытого резерва вернулось в общий пул`,
+    ));
   }
-  const button = el('button', 'mission-ceremony__btn', 'Дальше');
+  body.append(sums);
+  const button = el('button', 'mission-ceremony__btn', 'Ура!');
   (button as HTMLButtonElement).type = 'button';
   button.addEventListener('click', options.onClose);
   actions.appendChild(button);
@@ -377,12 +407,46 @@ function contractSection(view: MissionCaseView): HTMLElement {
   wrap.appendChild(summary);
   const sheet = el('div', 'mission-contract-sheet');
   sheet.hidden = true;
+  sheet.tabIndex = -1;
+  sheet.setAttribute('role', 'dialog');
+  sheet.setAttribute('aria-modal', 'true');
+  sheet.setAttribute('aria-labelledby', 'mission-contract-sheet-title');
   const close = el('button', 'mission-contract-sheet__close', '×');
   (close as HTMLButtonElement).type = 'button';
   close.setAttribute('aria-label', 'Закрыть контракт');
-  summary.addEventListener('click', () => { sheet.hidden = false; });
-  close.addEventListener('click', () => { sheet.hidden = true; });
-  sheet.appendChild(close);
+  const hideSheet = (): void => {
+    sheet.hidden = true;
+    summary.focus();
+  };
+  summary.addEventListener('click', () => {
+    sheet.hidden = false;
+    sheet.focus();
+  });
+  close.addEventListener('click', hideSheet);
+  sheet.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      hideSheet();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = Array.from(sheet.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+    ));
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  const title = el('h2', 'mission-contract-sheet__title', 'Полный контракт и материалы');
+  title.id = 'mission-contract-sheet-title';
+  sheet.append(close, title);
   wrap.appendChild(sheet);
   const contract = view.activeCase?.contract;
   if (!contract) {
@@ -477,41 +541,52 @@ export function buildMissionCaseScreen(options: {
 
   const photo = el('div', 'mission-photo');
   photo.innerHTML = MISSION_PAW_SVG;
-  photo.append(el('span', 'mission-photo__hint', 'Материалы кейса'));
+  photo.append(el('span', 'mission-photo__hint', 'Медиа кейса появятся здесь'));
   screen.appendChild(photo);
 
   const tiles = el('section', 'mission-tiles');
   tiles.append(
     tile('уже собрано', formatMissionMoney(active.money.collectedCents, currency)),
-    tile('Мой вклад', `${view.myContribution.caseTokens} лапок`),
+    tile('Мой вклад', formatPawCount(view.myContribution.caseTokens)),
   );
   screen.appendChild(tiles);
 
-  const description = el('details', 'mission-description');
-  const descriptionSummary = el('summary', 'mission-description__summary');
-  descriptionSummary.append(
-    el('strong', 'mission-description__title', 'Что получит приют'),
-    el('span', 'mission-description__more', 'Читать дальше'),
-  );
-  description.append(
-    descriptionSummary,
-    el(
-      'span',
-      'mission-description__copy',
-      String((doc as Record<string, unknown>).guaranteedDeliverable ?? missionCaseTitle(doc)),
-    ),
-  );
-  screen.appendChild(description);
-
   const ladder = el('section', 'mission-ladder');
-  ladder.appendChild(el('div', 'mission-ladder__head', 'Лестница подарка'));
-  for (const step of active.giftLadder) {
+  ladder.appendChild(el('div', 'mission-ladder__head', '🎁 Подарки сезона'));
+  for (const step of [...active.giftLadder].sort((left, right) => left.stepIndex - right.stepIndex)) {
     const row = el('div', `mission-ladder__step mission-ladder__step--${step.state}`);
-    row.append(
-      el('span', 'mission-ladder__threshold', step.stepIndex === 0
-        ? 'Гарантия'
-        : `${step.thresholdTokens} лапок`),
+    const icon = el(
+      'span',
+      'mission-ladder__icon',
+      step.state === 'guaranteed' ? '✓' : step.state === 'opened' ? '🎁' : '🔒',
+    );
+    icon.setAttribute('aria-hidden', 'true');
+    const copy = el('span', 'mission-ladder__copy');
+    copy.append(
       el('strong', 'mission-ladder__amount', formatMissionMoney(step.amountCents, currency)),
+      el(
+        'span',
+        'mission-ladder__threshold',
+        step.stepIndex === 0
+          ? 'гарантированный подарок'
+          : `за ${formatPawCount(step.thresholdTokens)} сообщества`,
+      ),
+    );
+    if (step.state === 'reserved' && step.thresholdTokens === meterTarget) {
+      copy.appendChild(progressTrack(
+        'mission-ladder__track',
+        missionBarPercent(active.bar.progress, step.thresholdTokens),
+      ));
+    }
+    const state = el(
+      'span',
+      'mission-ladder__state',
+      step.state === 'guaranteed' || step.state === 'opened' ? 'открыт' : 'впереди',
+    );
+    row.append(
+      icon,
+      copy,
+      state,
     );
     ladder.appendChild(row);
   }
