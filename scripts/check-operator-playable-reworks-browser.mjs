@@ -101,8 +101,67 @@ const request = (id, instruction) => ({
   },
   instruction,
 });
+const escalation = (requestId, requestHash) => ({
+  schema: 'feed.playable-escalation.v1', requestId, requestHash,
+  decision: 'pending', actionable: true, allowedDecisions: ['do', 'obsolete'],
+  issue: {
+    status: 'confirmed', url: 'https://github.com/Glera/p4g-workspace-meta/issues/140', number: 140,
+  },
+  routing: { status: 'not_requested', ticketDigest: null, boundAt: null },
+  root: { state: 'open', administrativeClosure: null },
+  replayed: false,
+});
 const fixtureParams = new URL(location.href).searchParams;
-const queue = fixtureParams.has('honesty') ? [
+const queue = fixtureParams.has('escalation') ? [
+  {
+    requestId: 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa', state: 'open',
+    requestHash: '${'a'.repeat(64)}',
+    sourceAdapter: 'telegram', queueDisposition: 'active_batch', batchPresent: true,
+    queueCounts: { active: 3, queued: 0 },
+    execution: {
+      state: 'blocked', code: 'playable_rework_agent_unsupported',
+      summary: 'Эта правка требует обычной разработки.', updatedAt: '2026-08-14T12:10:00.000Z',
+    },
+    operatorPresentation: {
+      kind: 'capability_gap_root', effectDelivered: false,
+      escalation: escalation('aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa', '${'a'.repeat(64)}'),
+    },
+    request: request('aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa', 'Добавить новый игровой режим.'),
+    createdAt: '2026-08-14T12:10:00.000Z',
+  },
+  {
+    requestId: 'bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb', state: 'open',
+    requestHash: '${'b'.repeat(64)}',
+    sourceAdapter: 'telegram', queueDisposition: 'active_batch', batchPresent: true,
+    queueCounts: { active: 3, queued: 0 },
+    execution: {
+      state: 'blocked', code: 'playable_rework_agent_unsupported',
+      summary: 'Эта правка требует обычной разработки.', updatedAt: '2026-08-14T12:00:00.000Z',
+    },
+    operatorPresentation: {
+      kind: 'capability_gap_root', effectDelivered: false,
+      escalation: escalation('bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb', '${'b'.repeat(64)}'),
+    },
+    request: request('bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb', 'Устаревшая идея.'),
+    createdAt: '2026-08-14T12:00:00.000Z',
+  },
+  {
+    requestId: 'cccccccc-cccc-5ccc-8ccc-cccccccccccc', state: 'open',
+    requestHash: '${'c'.repeat(64)}',
+    sourceAdapter: 'telegram', queueDisposition: 'active_batch', batchPresent: true,
+    queueCounts: { active: 3, queued: 0 },
+    execution: {
+      state: 'blocked', code: 'playable_rework_agent_unsupported',
+      summary: 'Эта правка требует обычной разработки.', updatedAt: '2026-08-14T11:50:00.000Z',
+    },
+    operatorPresentation: {
+      kind: 'capability_gap_root', effectDelivered: false,
+      escalation: escalation('cccccccc-cccc-5ccc-8ccc-cccccccccccc', '${'c'.repeat(64)}'),
+    },
+    request: request('cccccccc-cccc-5ccc-8ccc-cccccccccccc', 'Закрыть неактуальную идею.'),
+    createdAt: '2026-08-14T11:50:00.000Z',
+  },
+] : fixtureParams.has('honesty') ? [
   {
     requestId: '88888888-8888-5888-8888-888888888888', state: 'open',
     requestHash: '${'8'.repeat(64)}',
@@ -145,11 +204,19 @@ window.submitError = false;
 window.submitReplay = false;
 window.refreshes = 0;
 window.cancelledTasks = [];
+window.escalationDecisions = [];
+window.escalationGate = Promise.resolve();
+window.escalationError = false;
+window.mutationIds = [
+  '55555555-5555-5555-8555-555555555555',
+  '66666666-6666-5666-8666-666666666666',
+  '77777777-7777-5777-8777-777777777777',
+];
 window.normalizeScreenshot = screenshotFromFile;
 window.control = mountOperatorPlayableReworkControl(document.querySelector('#host'), {
   occurrence,
   queue,
-  createMutationId: () => '55555555-5555-5555-8555-555555555555',
+  createMutationId: () => window.mutationIds.shift(),
   submit: async (request) => {
     window.lastRequest = request;
     await window.submitGate;
@@ -157,6 +224,29 @@ window.control = mountOperatorPlayableReworkControl(document.querySelector('#hos
     return { replayed: window.submitReplay };
   },
   cancel: async (task) => { window.cancelledTasks.push(task); },
+  escalate: async (task, decision, mutationId) => {
+    window.escalationDecisions.push({ task, decision, mutationId });
+    await window.escalationGate;
+    if (window.escalationError) throw Object.assign(new Error('offline'), { status: 0 });
+    const current = task.operatorPresentation.escalation;
+    return {
+      ...current,
+      decision: decision === 'do' ? 'accepted' : 'obsolete',
+      actionable: false,
+      allowedDecisions: [],
+      routing: decision === 'do'
+        ? { status: 'pending', ticketDigest: null, boundAt: null }
+        : { status: 'not_requested', ticketDigest: null, boundAt: null },
+      root: decision === 'do'
+        ? { state: 'open', administrativeClosure: null }
+        : {
+          state: 'closed',
+          administrativeClosure: {
+            kind: 'administrative', reason: 'obsolete', note: 'Отменено оператором как неактуальное.',
+          },
+        },
+    };
+  },
   refresh: () => { window.refreshes += 1; },
 });
 </script></body></html>`;
@@ -350,6 +440,69 @@ try {
   await queuePage.locator('.game__operator-flag-status')
     .filter({ hasText: 'Такое замечание уже сохранено' }).waitFor();
   await queuePage.close();
+
+  const escalationPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
+  await escalationPage.goto(`${origin}/?escalation=1`, { waitUntil: 'domcontentloaded' });
+  const escalationOpen = escalationPage.locator('.game__operator-flag-open');
+  assert.equal(await escalationOpen.getAttribute('aria-label'), 'Нужна помощь · добавить замечание');
+  await escalationOpen.click();
+  const escalationDetails = escalationPage.locator('.game__operator-playable-rework-details');
+  await escalationDetails.waitFor({ state: 'visible' });
+  assert.equal(await escalationDetails.locator('[data-action="escalate-rework"]').count(), 3);
+  assert.equal(await escalationDetails.locator('[data-action="obsolete-escalation"]').count(), 3);
+  assert.equal(await escalationDetails.locator('.game__operator-playable-rework-escalation-issue').count(), 3);
+  assert.match(await escalationDetails.innerText(), /Делать \(~день Mac B\)/);
+  await escalationPage.evaluate(() => {
+    window.escalationGate = new Promise((resolve) => { window.releaseEscalation = resolve; });
+    window.escalationError = true;
+  });
+  await escalationDetails.locator('[data-action="escalate-rework"]').first().click();
+  assert.equal(await escalationDetails.locator('[data-action="escalate-rework"]').first().isDisabled(), true);
+  assert.match(
+    await escalationDetails.locator('[data-escalation-status]').first().innerText(),
+    /Передаю Mac B/,
+  );
+  await escalationPage.evaluate(() => window.releaseEscalation());
+  await escalationDetails.locator('[data-escalation-status]').first()
+    .filter({ hasText: 'Повторите то же действие' }).waitFor();
+  assert.equal(
+    await escalationDetails.locator('[data-action="obsolete-escalation"]').first().isDisabled(),
+    true,
+    'ambiguous do outcome must not allow the opposite decision',
+  );
+  await escalationPage.evaluate(() => { window.escalationError = false; });
+  await escalationDetails.locator('[data-action="escalate-rework"]').first().click();
+  await escalationDetails.locator('.game__operator-playable-rework-item').first().locator('b')
+    .filter({ hasText: 'Тикет создан · передаётся Mac B' }).waitFor();
+  assert.deepEqual(await escalationPage.evaluate(() => window.escalationDecisions.slice(0, 2)
+    .map(({ task, decision, mutationId }) => ({ requestId: task.requestId, decision, mutationId }))), [
+    {
+      requestId: 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa',
+      decision: 'do', mutationId: '55555555-5555-5555-8555-555555555555',
+    },
+    {
+      requestId: 'aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa',
+      decision: 'do', mutationId: '55555555-5555-5555-8555-555555555555',
+    },
+  ]);
+  await escalationDetails.locator('[data-action="escalate-rework"]').first().click();
+  await escalationDetails.locator('.game__operator-playable-rework-item').nth(1).locator('b')
+    .filter({ hasText: 'Тикет создан · передаётся Mac B' }).waitFor();
+  assert.deepEqual(await escalationPage.evaluate(() => {
+    const { task, decision, mutationId } = window.escalationDecisions[2];
+    return { requestId: task.requestId, decision, mutationId };
+  }), {
+    requestId: 'bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb',
+    decision: 'do', mutationId: '66666666-6666-5666-8666-666666666666',
+  }, 'two different roots reused one decision mutation identity');
+  await escalationDetails.locator('[data-action="obsolete-escalation"]').click();
+  await escalationDetails.locator('.game__operator-playable-rework-item').nth(2).locator('b')
+    .filter({ hasText: 'Неактуально' }).waitFor();
+  assert.equal(await escalationDetails.locator('[data-action="escalate-rework"]').count(), 0);
+  assert.equal(await escalationDetails.locator('[data-action="obsolete-escalation"]').count(), 0);
+  assert.equal(await escalationOpen.getAttribute('aria-label'), 'В работе · добавить замечание');
+  assert.equal(await escalationPage.locator('[data-rework-count]').innerText(), '2');
+  await escalationPage.close();
 
   const honestyPage = await browser.newPage({ viewport: { width: 390, height: 760 } });
   await honestyPage.goto(`${origin}/?honesty=1`, { waitUntil: 'domcontentloaded' });

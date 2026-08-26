@@ -86,10 +86,60 @@ export async function screenshotFromFile(file) {
 
 const QUEUE_DISPOSITIONS = new Set(['active_batch', 'queued', 'duplicate_of', 'closed']);
 const SOURCE_ADAPTERS = new Set(['telegram', 'codex']);
+const ESCALATION_ISSUE_STATUSES = new Set([
+  'queued', 'send_started', 'outcome_unknown', 'retry_wait', 'confirmed', 'failed_terminal',
+]);
+const ESCALATION_ROUTING_STATUSES = new Set(['not_requested', 'pending', 'routed']);
+const ESCALATION_DECISIONS = new Set(['pending', 'accepted', 'obsolete']);
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const ISSUE_URL = /^https:\/\/github\.com\/Glera\/p4g-workspace-meta\/issues\/([1-9][0-9]*)$/;
 const preservedInstruction = (value) => typeof value === 'string'
   && value.trim().length >= 1 && value.length <= 2_000
   && new TextEncoder().encode(value).length <= 8_000
   && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value);
+
+export function isOperatorPlayableEscalation(value, requestId = undefined, requestHash = undefined) {
+  if (!exactKeys(value, [
+    'schema', 'requestId', 'requestHash', 'decision', 'actionable', 'allowedDecisions',
+    'issue', 'routing', 'root', 'replayed',
+  ]) || value.schema !== 'feed.playable-escalation.v1'
+    || !UUID.test(value.requestId) || !HASH.test(value.requestHash)
+    || (requestId !== undefined && value.requestId !== requestId)
+    || (requestHash !== undefined && value.requestHash !== requestHash)
+    || !ESCALATION_DECISIONS.has(value.decision)
+    || typeof value.actionable !== 'boolean' || !Array.isArray(value.allowedDecisions)
+    || typeof value.replayed !== 'boolean'
+    || !exactKeys(value.issue, ['status', 'url', 'number'])
+    || !ESCALATION_ISSUE_STATUSES.has(value.issue.status)
+    || !exactKeys(value.routing, ['status', 'ticketDigest', 'boundAt'])
+    || !ESCALATION_ROUTING_STATUSES.has(value.routing.status)
+    || !exactKeys(value.root, ['administrativeClosure', 'state'])
+    || !['open', 'closed'].includes(value.root.state)) return false;
+  const issueConfirmed = value.issue.status === 'confirmed';
+  const issueMatch = typeof value.issue.url === 'string' ? value.issue.url.match(ISSUE_URL) : null;
+  if (issueConfirmed !== (issueMatch !== null
+    && Number.isInteger(value.issue.number) && value.issue.number > 0
+    && Number(issueMatch[1]) === value.issue.number)) return false;
+  if (!issueConfirmed && (value.issue.url !== null || value.issue.number !== null)) return false;
+  const allowed = value.allowedDecisions.join('\0');
+  const expectedAllowed = value.actionable
+    ? (issueConfirmed ? 'do\0obsolete' : 'obsolete')
+    : '';
+  if (allowed !== expectedAllowed
+      || (value.actionable && value.decision !== 'pending')) return false;
+  const routed = value.routing.status === 'routed';
+  if (routed !== (HASH.test(value.routing.ticketDigest) && ISO_INSTANT.test(value.routing.boundAt))) return false;
+  if (!routed && (value.routing.ticketDigest !== null || value.routing.boundAt !== null)) return false;
+  const obsolete = value.decision === 'obsolete';
+  if (obsolete) {
+    if (value.root.state !== 'closed'
+      || !exactKeys(value.root.administrativeClosure, ['kind', 'note', 'reason'])) return false;
+    if (value.root.administrativeClosure.kind !== 'administrative'
+      || value.root.administrativeClosure.reason !== 'obsolete'
+      || !preservedInstruction(value.root.administrativeClosure.note)) return false;
+  } else if (value.root.state !== 'open' || value.root.administrativeClosure !== null) return false;
+  return true;
+}
 
 export function isOperatorPlayableReworkQueueItem(value, playableId = undefined) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -100,10 +150,17 @@ export function isOperatorPlayableReworkQueueItem(value, playableId = undefined)
     && QUEUE_DISPOSITIONS.has(value.queueDisposition)
     && typeof value.batchPresent === 'boolean'
     && (value.operatorPresentation === undefined
-      || (exactKeys(value.operatorPresentation, ['kind', 'effectDelivered'])
+      || ((exactKeys(value.operatorPresentation, ['kind', 'effectDelivered'])
+        || exactKeys(value.operatorPresentation, ['kind', 'effectDelivered', 'escalation']))
         && ['current', 'superseded', 'capability_gap_root', 'capability_gap_root_covered']
           .includes(value.operatorPresentation.kind)
-        && typeof value.operatorPresentation.effectDelivered === 'boolean'))
+        && typeof value.operatorPresentation.effectDelivered === 'boolean'
+        && (value.operatorPresentation.escalation === undefined
+          || (['capability_gap_root', 'capability_gap_root_covered']
+            .includes(value.operatorPresentation.kind)
+            && isOperatorPlayableEscalation(
+              value.operatorPresentation.escalation, value.requestId, value.requestHash,
+            )))))
     && Boolean(value.queueCounts) && typeof value.queueCounts === 'object'
     && Number.isInteger(value.queueCounts.active) && value.queueCounts.active >= 0 && value.queueCounts.active <= 200
     && Number.isInteger(value.queueCounts.queued) && value.queueCounts.queued >= 0 && value.queueCounts.queued <= 200
@@ -140,7 +197,7 @@ export function operatorPlayableReworkQueuePresentation(queue) {
   const items = Array.isArray(queue) ? queue : [];
   const presentations = items.map((item) => operatorPlayableReworkPresentation(item));
   const actionable = items.filter((_item, index) => ![
-    'superseded', 'capability_gap_root_covered', 'ready_for_approval',
+    'superseded', 'capability_gap_root_covered', 'ready_for_approval', 'obsolete',
   ].includes(presentations[index].state));
   const locallyActive = actionable.filter((item) => item?.queueDisposition === 'active_batch').length;
   const hasBatch = locallyActive > 0 || actionable.some((item) => item?.batchPresent === true);
@@ -187,6 +244,11 @@ export function operatorPlayableReworkControlKey(occurrence, queue = []) {
     item.execution?.state, item.execution?.updatedAt,
     item.releaseExecution?.state, item.releaseExecution?.updatedAt,
     item.operatorPresentation?.kind, item.operatorPresentation?.effectDelivered,
+    item.operatorPresentation?.escalation?.decision,
+    item.operatorPresentation?.escalation?.actionable,
+    item.operatorPresentation?.escalation?.issue?.status,
+    item.operatorPresentation?.escalation?.issue?.number,
+    item.operatorPresentation?.escalation?.routing?.status,
   ].join(':')).join('|');
   return `${occurrence.playableId}:${occurrence.mappingId}:${occurrence.rosterActivationId}:${occurrence.runtime.artifactDigest}:${queueKey}`;
 }
@@ -205,8 +267,35 @@ export function operatorPlayableReworkPresentation(task) {
     });
   }
   if (presentation?.kind === 'capability_gap_root') {
+    if (presentation.escalation?.decision === 'accepted') {
+      if (['outcome_unknown', 'failed_terminal'].includes(presentation.escalation.issue.status)) {
+        return Object.freeze({
+          state: 'needs_help', icon: '!', label: 'Не удалось передать в разработку',
+          blocker: 'Инженерный тикет не подтверждён. Нужна помощь.',
+        });
+      }
+      if (presentation.escalation.issue.status !== 'confirmed') {
+        return Object.freeze({
+          state: 'preparing', icon: '…', label: 'Создаётся инженерный тикет', blocker: null,
+        });
+      }
+      if (presentation.escalation.routing.status !== 'routed') {
+        return Object.freeze({
+          state: 'preparing', icon: '…', label: 'Тикет создан · передаётся Mac B', blocker: null,
+        });
+      }
+      return Object.freeze({
+        state: 'escalated_to_mac_b', icon: '…', label: 'Передано Mac B', blocker: null,
+      });
+    }
+    if (presentation.escalation?.decision === 'obsolete') {
+      return Object.freeze({
+        state: 'obsolete', icon: '↪', label: 'Неактуально', blocker: null,
+      });
+    }
     return Object.freeze({
-      state: 'capability_gap_root', icon: '!', label: 'Ждёт capability successor',
+      state: 'capability_gap_root', icon: '!',
+      label: presentation.escalation ? 'Нужна обычная разработка' : 'Ждёт capability successor',
       blocker: task?.execution?.summary || 'Эта историческая заявка не исполняется напрямую.',
     });
   }
@@ -244,6 +333,7 @@ export function operatorPlayableReworkPresentation(task) {
 export function mountOperatorPlayableReworkControl(host, options) {
   if (!(host instanceof HTMLElement) || typeof options?.submit !== 'function'
     || typeof options?.createMutationId !== 'function'
+    || (options.escalate != null && typeof options.escalate !== 'function')
     || (options.resolveOccurrence != null && typeof options.resolveOccurrence !== 'function')) {
     fail('playable_rework_invalid', 'control options are invalid');
   }
@@ -327,7 +417,12 @@ export function mountOperatorPlayableReworkControl(host, options) {
     duplicate_of: 'Возможный дубль', closed: 'Завершено',
   };
   const sourceLabels = { telegram: 'Telegram', codex: 'Codex' };
+  let destroyed = false;
+  let submitting = false;
+  let escalationSubmitting = false;
+  let pendingRequest = null;
   for (const task of queue) {
+    const escalationMutationIds = new Map();
     const article = document.createElement('article');
     article.className = 'game__operator-playable-rework-item';
     article.dataset.queueDisposition = task.queueDisposition;
@@ -337,7 +432,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
     const itemState = document.createElement('b');
     itemState.textContent = [
       'superseded', 'capability_gap_root', 'capability_gap_root_covered',
-      'ready_for_approval',
+      'ready_for_approval', 'escalated_to_mac_b', 'obsolete',
     ].includes(lifecycle.state)
       ? lifecycle.label
       : dispositionLabels[task.queueDisposition];
@@ -366,6 +461,94 @@ export function mountOperatorPlayableReworkControl(host, options) {
       const lifecycleLabel = document.createElement('small');
       lifecycleLabel.textContent = lifecycle.label;
       article.append(lifecycleLabel);
+    }
+    const escalation = task.operatorPresentation?.escalation;
+    if (escalation?.issue?.url) {
+      const issueLink = document.createElement('a');
+      issueLink.className = 'game__operator-playable-rework-escalation-issue';
+      issueLink.href = escalation.issue.url;
+      issueLink.target = '_blank';
+      issueLink.rel = 'noreferrer noopener';
+      issueLink.textContent = `Тикет #${escalation.issue.number}`;
+      article.append(issueLink);
+    }
+    if (lifecycle.state === 'capability_gap_root' && escalation?.actionable === true
+      && typeof options.escalate === 'function') {
+      const escalationActions = document.createElement('div');
+      escalationActions.className = 'game__operator-playable-rework-escalation-actions';
+      const canDo = escalation.allowedDecisions.includes('do');
+      const canObsolete = escalation.allowedDecisions.includes('obsolete');
+      const doButton = canDo ? document.createElement('button') : null;
+      if (doButton) {
+        doButton.type = 'button';
+        doButton.dataset.action = 'escalate-rework';
+        doButton.textContent = 'Делать (~день Mac B)';
+      }
+      const obsoleteButton = canObsolete ? document.createElement('button') : null;
+      if (obsoleteButton) {
+        obsoleteButton.type = 'button';
+        obsoleteButton.dataset.action = 'obsolete-escalation';
+        obsoleteButton.textContent = 'Неактуально';
+      }
+      const escalationStatus = document.createElement('small');
+      escalationStatus.dataset.escalationStatus = '';
+      escalationStatus.setAttribute('aria-live', 'polite');
+      const act = async (decision) => {
+        const selectedButton = decision === 'do' ? doButton : obsoleteButton;
+        if (destroyed || escalationSubmitting
+          || selectedButton === null || selectedButton.disabled) return;
+        escalationSubmitting = true;
+        if (doButton) doButton.disabled = true;
+        if (obsoleteButton) obsoleteButton.disabled = true;
+        escalationStatus.textContent = decision === 'do' ? 'Передаю Mac B…' : 'Закрываю…';
+        try {
+          if (!escalationMutationIds.has(decision)) {
+            escalationMutationIds.set(decision, options.createMutationId());
+          }
+          const receipt = await options.escalate(
+            task, decision, escalationMutationIds.get(decision),
+          );
+          if (destroyed) return;
+          if (!isOperatorPlayableEscalation(receipt, task.requestId, task.requestHash)
+            || receipt.decision !== (decision === 'do' ? 'accepted' : 'obsolete')
+            || receipt.actionable
+            || (decision === 'obsolete' && (receipt.root.state !== 'closed'
+              || receipt.root.administrativeClosure?.reason !== 'obsolete'))) {
+            fail('playable_escalation_invalid', 'escalation receipt differs');
+          }
+          task.operatorPresentation.escalation = receipt;
+          escalationActions.remove();
+          article.querySelector('.game__operator-playable-rework-blocker')?.remove();
+          if (decision === 'obsolete') {
+            itemState.textContent = 'Неактуально';
+            article.dataset.queueDisposition = 'closed';
+            const queueIndex = queue.indexOf(task);
+            if (queueIndex >= 0) queue.splice(queueIndex, 1);
+          } else {
+            itemState.textContent = operatorPlayableReworkPresentation(task).label;
+          }
+          renderQueueSummary();
+          queueMicrotask(() => { if (!destroyed) void options.refresh?.(); });
+        } catch (error) {
+          if (destroyed) return;
+          escalationStatus.textContent = error?.code === 'request_timeout'
+            ? 'Сервер не ответил вовремя. Повторите то же действие.'
+            : error?.status === 0
+              ? 'Нет связи с сервером. Повторите то же действие.'
+              : 'Решение не сохранено. Обновите список и повторите.';
+          const ambiguous = error?.code === 'request_timeout' || error?.status === 0;
+          if (doButton) doButton.disabled = ambiguous ? decision !== 'do' : false;
+          if (obsoleteButton) {
+            obsoleteButton.disabled = ambiguous ? decision !== 'obsolete' : false;
+          }
+        } finally {
+          escalationSubmitting = false;
+        }
+      };
+      doButton?.addEventListener('click', () => void act('do'));
+      obsoleteButton?.addEventListener('click', () => void act('obsolete'));
+      escalationActions.append(...[doButton, obsoleteButton, escalationStatus].filter(Boolean));
+      article.append(escalationActions);
     }
     if (task.state === 'open' && task.releaseId == null
       && !['superseded', 'capability_gap_root', 'capability_gap_root_covered', 'ready_for_approval']
@@ -397,9 +580,6 @@ export function mountOperatorPlayableReworkControl(host, options) {
     }
     list.append(article);
   }
-  let destroyed = false;
-  let submitting = false;
-  let pendingRequest = null;
   const setSubmitting = (value) => {
     submitting = value;
     root.setAttribute('aria-busy', String(value));
@@ -523,6 +703,7 @@ export function mountOperatorPlayableReworkControl(host, options) {
   return Object.freeze({
     key: operatorPlayableReworkControlKey(occurrence, queue),
     playableId: occurrence.playableId,
+    busy() { return submitting || escalationSubmitting; },
     destroy() { destroyed = true; formViewport.release(); root.remove(); },
   });
 }

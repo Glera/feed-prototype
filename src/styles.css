@@ -1435,6 +1435,38 @@ body {
 .game__operator-playable-rework-item-heading b { margin: 0; }
 .game__operator-playable-rework-item-heading small { margin: 0; text-align: right; }
 .game__operator-playable-rework-item > small { margin-top: 5px; }
+.game__operator-playable-rework-escalation-issue {
+  display: inline-block;
+  margin-top: 8px;
+  color: #cdb7ff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.game__operator-playable-rework-escalation-actions {
+  display: grid;
+  grid-template-columns: 1fr 0.72fr;
+  gap: 7px;
+  margin-top: 9px;
+}
+.game__operator-playable-rework-escalation-actions button {
+  min-height: 38px;
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 9px;
+  background: #a879ff;
+  color: #160c26;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+}
+.game__operator-playable-rework-escalation-actions button[data-action="obsolete-escalation"] {
+  background: rgba(255,255,255,0.07);
+  color: #fff;
+}
+.game__operator-playable-rework-escalation-actions button:disabled { opacity: 0.55; }
+.game__operator-playable-rework-escalation-actions [data-escalation-status] {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
 .game__operator-playable-rework-detail-actions {
   position: sticky;
   bottom: -10px;

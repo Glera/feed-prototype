@@ -32,7 +32,7 @@ const TONE_ORDER = { error: 0, ok: 1, warn: 2, neutral: 3 };
 const toneForReworkState = (state) => {
   if (state === 'needs_help' || state === 'blocked' || state === 'capability_gap_root') return 'error';
   if (state === 'ready_for_approval') return 'ok';
-  if (state === 'preparing') return 'warn';
+  if (state === 'preparing' || state === 'escalated_to_mac_b') return 'warn';
   return 'neutral';
 };
 
@@ -170,7 +170,7 @@ export function developerFeedDiffModel(input = {}) {
     ? input.catalog.activeRelease.filter(Boolean)
     : [];
   const changed = mechanics.filter((row) => ![
-    'superseded', 'capability_gap_root_covered',
+    'superseded', 'capability_gap_root_covered', 'obsolete',
   ].includes(row.state)).length + (intake ? 1 : 0);
   return Object.freeze({
     visible: input.operatorSurfacesActive === true || Boolean(input.adoption),

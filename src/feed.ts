@@ -37,6 +37,7 @@ import {
   apiCreateOperatorLevelFlagRequired,
   apiCreateOperatorPlayableReworkRequired,
   apiCancelOperatorPlayableReworkRequired,
+  apiDecideOperatorPlayableEscalationRequired,
   apiListOperatorPlayableReworksRequired,
   apiCreatePlatformDevelopmentIntakeRequired,
   apiCancelPlatformDevelopmentIntakeRequired,
@@ -60,6 +61,8 @@ import {
   type SessionResp,
   type OperatorPlayableReworkQueueItemV1,
   type OperatorPlayableReworkResponseV1,
+  type OperatorPlayableEscalationDecisionV1,
+  type OperatorPlayableEscalationResponseV1,
   type PlatformDevelopmentIntakeResponseV1,
 } from './api';
 import {
@@ -3121,6 +3124,9 @@ export class Feed {
       ? operatorPlayableReworkControlKey(occurrence, queue)
       : null;
     if (this.operatorPlayableReworkControl?.key === key) return;
+    if (this.operatorPlayableReworkControl?.busy()
+      && occurrence
+      && this.operatorPlayableReworkControl.playableId === occurrence.playableId) return;
     const holdRemaining = this.operatorPlayableReworkControlHoldUntil - Date.now();
     if (holdRemaining > 0 && occurrence
       && this.operatorPlayableReworkControl?.playableId === occurrence.playableId) {
@@ -3157,6 +3163,10 @@ export class Feed {
       },
       submit: (request) => this.submitOperatorPlayableRework(request),
       cancel: (task) => this.cancelOperatorPlayableRework(task),
+      escalate: (task, decision, mutationId) => this.decideOperatorPlayableEscalation(
+        task, decision, mutationId,
+      ),
+      refresh: () => this.refreshOperatorPlayableReworks(),
     });
   }
 
@@ -3204,6 +3214,39 @@ export class Feed {
     void this.refreshOperatorPlayableReworks(false).finally(() => {
       window.setTimeout(() => void this.refreshOperatorPlayableReworks(), 2_400);
     });
+  }
+
+  private async decideOperatorPlayableEscalation(
+    task: Pick<OperatorPlayableReworkQueueItemV1, 'requestId' | 'requestHash'>,
+    decision: OperatorPlayableEscalationDecisionV1,
+    mutationId: string,
+  ): Promise<OperatorPlayableEscalationResponseV1> {
+    this.operatorPlayableReworkControlHoldUntil = Date.now() + 2_500;
+    try {
+      const response = await apiDecideOperatorPlayableEscalationRequired(
+        task.requestId,
+        task.requestHash,
+        mutationId,
+        decision,
+      );
+      const expectedDecision = decision === 'do' ? 'accepted' : 'obsolete';
+      if (response.schema !== 'feed.playable-escalation.v1'
+        || response.requestId !== task.requestId
+        || response.requestHash !== task.requestHash
+        || response.decision !== expectedDecision
+        || response.actionable !== false
+        || (decision === 'obsolete' && (response.root.state !== 'closed'
+          || response.root.administrativeClosure?.reason !== 'obsolete'))) {
+        throw new ApiRequestError(503, 'Playable escalation receipt differs', 'playable_escalation_receipt_invalid');
+      }
+      void this.refreshOperatorPlayableReworks(false).finally(() => {
+        window.setTimeout(() => void this.refreshOperatorPlayableReworks(), 2_400);
+      });
+      return response;
+    } catch (error) {
+      this.operatorPlayableReworkControlHoldUntil = 0;
+      throw error;
+    }
   }
 
   private requireProjectedOperatorFlagEvent(eventId: string | null): void {
