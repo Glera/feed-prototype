@@ -37,7 +37,39 @@ export interface OperatorPlayableReworkRequestV1 {
 export interface OperatorPlayableReworkControl {
   readonly key: string;
   readonly playableId: string;
+  busy(): boolean;
   destroy(): void;
+}
+
+export type OperatorPlayableEscalationDecision = 'do' | 'obsolete';
+
+export interface OperatorPlayableEscalation {
+  schema: 'feed.playable-escalation.v1';
+  requestId: string;
+  requestHash: string;
+  decision: 'pending' | 'accepted' | 'obsolete';
+  actionable: boolean;
+  allowedDecisions: OperatorPlayableEscalationDecision[];
+  issue: {
+    status: 'queued' | 'send_started' | 'outcome_unknown' | 'retry_wait'
+      | 'confirmed' | 'failed_terminal';
+    url: string | null;
+    number: number | null;
+  };
+  routing: {
+    status: 'not_requested' | 'pending' | 'routed';
+    ticketDigest: string | null;
+    boundAt: string | null;
+  };
+  root: {
+    state: 'open' | 'closed';
+    administrativeClosure: {
+      kind: 'administrative';
+      reason: 'obsolete';
+      note: string;
+    } | null;
+  };
+  replayed: boolean;
 }
 
 export interface OperatorPlayableReworkQueueItem {
@@ -50,6 +82,7 @@ export interface OperatorPlayableReworkQueueItem {
   operatorPresentation?: {
     kind: 'current' | 'superseded' | 'capability_gap_root' | 'capability_gap_root_covered';
     effectDelivered: boolean;
+    escalation?: OperatorPlayableEscalation;
   };
   queueCounts: { active: number; queued: number };
   execution?: {
@@ -92,6 +125,12 @@ export function isOperatorPlayableReworkQueueItem(
   playableId?: string,
 ): value is OperatorPlayableReworkQueueItem;
 
+export function isOperatorPlayableEscalation(
+  value: unknown,
+  requestId?: string,
+  requestHash?: string,
+): value is OperatorPlayableEscalation;
+
 export function groupOperatorPlayableReworkQueue(
   items: readonly unknown[],
 ): Map<string, OperatorPlayableReworkQueueItem[]>;
@@ -118,7 +157,9 @@ export function operatorPlayableReworkPresentation(task: {
 }): Readonly<{
   state: string;
   icon: string;
-  label: 'Готовится' | 'Готово к проверке' | 'Нужна помощь' | 'Задача принята' | 'Заменена следующей правкой' | 'Историческая заявка · выполнена successor' | 'Ждёт capability successor';
+  label: 'Готовится' | 'Готово к проверке' | 'Нужна помощь' | 'Задача принята'
+    | 'Заменена следующей правкой' | 'Историческая заявка · выполнена successor'
+    | 'Нужна обычная разработка' | 'Передано Mac B' | 'Неактуально';
   blocker: string | null;
 }>;
 
@@ -131,6 +172,11 @@ export function mountOperatorPlayableReworkControl(
     resolveOccurrence?(): OperatorPlayableReworkOccurrence;
     submit(request: OperatorPlayableReworkRequestV1): Promise<{ replayed?: boolean } | void>;
     cancel?(task: Pick<OperatorPlayableReworkQueueItem, 'requestId' | 'requestHash'>): Promise<void>;
+    escalate?(
+      task: Pick<OperatorPlayableReworkQueueItem, 'requestId' | 'requestHash'>,
+      decision: OperatorPlayableEscalationDecision,
+      mutationId: string,
+    ): Promise<OperatorPlayableEscalation>;
     refresh?(): void | Promise<void>;
   },
 ): OperatorPlayableReworkControl;

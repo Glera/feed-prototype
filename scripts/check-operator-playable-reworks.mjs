@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import {
   buildOperatorPlayableReworkRequest,
   groupOperatorPlayableReworkQueue,
+  isOperatorPlayableEscalation,
   isOperatorPlayableReworkQueueItem,
   operatorPlayableReworkControlKey,
   operatorPlayableReworkQueuePresentation,
@@ -197,12 +198,97 @@ assert.deepEqual(operatorPlayableReworkPresentation(coveredGap), {
 });
 const openGap = {
   ...active,
-  operatorPresentation: { kind: 'capability_gap_root', effectDelivered: false },
+  operatorPresentation: {
+    kind: 'capability_gap_root',
+    effectDelivered: false,
+    escalation: {
+      schema: 'feed.playable-escalation.v1',
+      requestId: active.requestId,
+      requestHash: active.requestHash,
+      decision: 'pending',
+      actionable: true,
+      allowedDecisions: ['do', 'obsolete'],
+      issue: {
+        status: 'confirmed',
+        url: 'https://github.com/Glera/p4g-workspace-meta/issues/140',
+        number: 140,
+      },
+      routing: { status: 'not_requested', ticketDigest: null, boundAt: null },
+      root: { state: 'open', administrativeClosure: null },
+      replayed: false,
+    },
+  },
 };
+assert.equal(isOperatorPlayableEscalation(
+  openGap.operatorPresentation.escalation, openGap.requestId, openGap.requestHash,
+), true);
+assert.equal(isOperatorPlayableReworkQueueItem(openGap, occurrence.playableId), true);
+assert.deepEqual(operatorPlayableReworkPresentation(openGap), {
+  state: 'capability_gap_root', icon: '!', label: 'Нужна обычная разработка',
+  blocker: 'Эта историческая заявка не исполняется напрямую.',
+});
 assert.deepEqual(operatorPlayableReworkQueuePresentation([openGap]), {
   state: 'needs_help', label: 'Нужна помощь · добавить замечание',
   active: 1, queued: 0, duplicates: 0, unresolved: 1,
 });
+const acceptedGap = {
+  ...openGap,
+  operatorPresentation: {
+    ...openGap.operatorPresentation,
+    escalation: {
+      ...openGap.operatorPresentation.escalation,
+      decision: 'accepted', actionable: false, allowedDecisions: [],
+      routing: { status: 'pending', ticketDigest: null, boundAt: null },
+    },
+  },
+};
+assert.deepEqual(operatorPlayableReworkPresentation(acceptedGap), {
+  state: 'preparing', icon: '…', label: 'Тикет создан · передаётся Mac B', blocker: null,
+});
+assert.deepEqual(operatorPlayableReworkQueuePresentation([acceptedGap]), {
+  state: 'active', label: 'В работе · добавить замечание',
+  active: 1, queued: 0, duplicates: 0, unresolved: 1,
+});
+assert.notEqual(
+  operatorPlayableReworkControlKey(occurrence, [openGap]),
+  operatorPlayableReworkControlKey(occurrence, [acceptedGap]),
+  'an accepted escalation must remount the visible control',
+);
+assert.equal(isOperatorPlayableEscalation({
+  ...openGap.operatorPresentation.escalation,
+  allowedDecisions: ['obsolete', 'do'],
+}), false, 'caller-authored decision order cannot widen the exact wire');
+const failedGapEscalation = {
+  ...openGap.operatorPresentation.escalation,
+  issue: { status: 'failed_terminal', url: null, number: null },
+  allowedDecisions: ['obsolete'],
+};
+assert.equal(isOperatorPlayableEscalation(failedGapEscalation), true,
+  'a failed Issue delivery must retain the local obsolete action');
+assert.equal(isOperatorPlayableEscalation({
+  ...failedGapEscalation,
+  allowedDecisions: ['do', 'obsolete'],
+}), false, 'a failed Issue delivery cannot authorize Mac B work');
+assert.equal(isOperatorPlayableEscalation({
+  ...openGap.operatorPresentation.escalation,
+  decision: 'obsolete', actionable: false, allowedDecisions: [],
+  root: { state: 'closed', administrativeClosure: null },
+}), false, 'an obsolete receipt without exact administrative closure must fail closed');
+assert.equal(isOperatorPlayableEscalation({
+  ...openGap.operatorPresentation.escalation,
+  issue: {
+    status: 'confirmed',
+    url: 'https://github.com/Glera/p4g-workspace-meta/issues/999',
+    number: 140,
+  },
+}), false, 'Issue URL must bind to the exact Issue number');
+assert.equal(isOperatorPlayableReworkQueueItem({
+  ...openGap,
+  operatorPresentation: {
+    ...openGap.operatorPresentation,
+    escalation: { ...openGap.operatorPresentation.escalation, requestHash: '2'.repeat(64) },
+  },
+}, occurrence.playableId), false, 'escalation identity must bind to the exact request');
 const multiline = {
   ...waiting,
   requestId: randomUUID(),

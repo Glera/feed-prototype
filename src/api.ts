@@ -463,6 +463,37 @@ export interface OperatorPlayableReworkResponseV1 {
   replayed?: boolean;
 }
 
+export type OperatorPlayableEscalationDecisionV1 = 'do' | 'obsolete';
+
+export interface OperatorPlayableEscalationResponseV1 {
+  schema: 'feed.playable-escalation.v1';
+  requestId: string;
+  requestHash: string;
+  decision: 'pending' | 'accepted' | 'obsolete';
+  actionable: boolean;
+  allowedDecisions: OperatorPlayableEscalationDecisionV1[];
+  issue: {
+    status: 'queued' | 'send_started' | 'outcome_unknown' | 'retry_wait'
+      | 'confirmed' | 'failed_terminal';
+    url: string | null;
+    number: number | null;
+  };
+  routing: {
+    status: 'not_requested' | 'pending' | 'routed';
+    ticketDigest: string | null;
+    boundAt: string | null;
+  };
+  root: {
+    state: 'open' | 'closed';
+    administrativeClosure: {
+      kind: 'administrative';
+      reason: 'obsolete';
+      note: string;
+    } | null;
+  };
+  replayed: boolean;
+}
+
 export interface OperatorPlayableReworkQueueItemV1 extends OperatorPlayableReworkResponseV1 {
   sourceAdapter: 'telegram' | 'codex';
   queueDisposition: 'active_batch' | 'queued' | 'duplicate_of' | 'closed';
@@ -474,6 +505,7 @@ export interface OperatorPlayableReworkQueueItemV1 extends OperatorPlayableRewor
   operatorPresentation?: {
     kind: 'current' | 'superseded' | 'capability_gap_root' | 'capability_gap_root_covered';
     effectDelivered: boolean;
+    escalation?: OperatorPlayableEscalationResponseV1;
   };
 }
 
@@ -508,6 +540,24 @@ export function apiCancelOperatorPlayableReworkRequired(
       schema: 'feed.playable-rework.cancel.v1',
       requestHash,
       reason: 'obsolete',
+    },
+    OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
+  );
+}
+
+export function apiDecideOperatorPlayableEscalationRequired(
+  requestId: string,
+  requestHash: string,
+  mutationId: string,
+  decision: OperatorPlayableEscalationDecisionV1,
+): Promise<OperatorPlayableEscalationResponseV1> {
+  return postRequired<OperatorPlayableEscalationResponseV1>(
+    `/api/operator-playable-reworks/${encodeURIComponent(requestId)}/escalation`,
+    {
+      schema: 'feed.playable-escalation.decision.v1',
+      mutationId,
+      requestHash,
+      decision,
     },
     OUTBOX_REQUIRED_REQUEST_TIMEOUT_MS,
   );
