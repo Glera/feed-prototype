@@ -25,6 +25,7 @@ export interface CandidateFeedPreviewIdentity {
 
 export interface DeveloperFeedAdoptionIdentity extends CandidateFeedPreviewIdentity {
   schema: 'feed.playable-source-preview-adoption.v1';
+  runtimeArtifactDigest: string;
   sourceCommit: string;
   receiptDigest: string;
   audience: 'exact-user';
@@ -216,12 +217,14 @@ export async function resolveDeveloperFeedAdoption(
 ): Promise<DeveloperFeedAdoptionIdentity> {
   if (!exactKeys(value, [
     'schema', 'releaseId', 'playableId', 'candidatePath', 'candidateArtifactDigest',
-    'reviewBindingDigest', 'sourceCommit', 'receiptDigest', 'audience', 'publicRollout',
+    'runtimeArtifactDigest', 'reviewBindingDigest', 'sourceCommit', 'receiptDigest',
+    'audience', 'publicRollout',
   ])) throw new Error('developer_feed_adoption_invalid');
   const identity = value as DeveloperFeedAdoptionIdentity;
   if (identity.schema !== 'feed.playable-source-preview-adoption.v1'
     || !UUID.test(identity.releaseId) || !PLAYABLE_ID.test(identity.playableId)
     || !DIGEST.test(identity.candidateArtifactDigest)
+    || !/^sha256:[0-9a-f]{64}$/.test(identity.runtimeArtifactDigest)
     || !DIGEST.test(identity.reviewBindingDigest)
     || !DIGEST.test(identity.receiptDigest)
     || !/^[0-9a-f]{40}$/.test(identity.sourceCommit)
