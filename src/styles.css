@@ -5157,6 +5157,14 @@ body {
   cursor: pointer;
   pointer-events: auto;
 }
+.dev-diff__badge-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
+  white-space: normal;
+}
+.dev-diff__badge-label-line { display: block; }
 .dev-diff__badge-count {
   min-width: 15px;
   padding: 0 4px;

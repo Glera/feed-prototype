@@ -169,7 +169,7 @@ async function boot(): Promise<void> {
     failCandidateFeedPreview();
     return;
   } else {
-    // The `Dev-лента · Только мне` badge is owned by the feed itself: it is the
+    // The two-line `Dev-лента` / `Только мне` badge is owned by the feed itself: it is the
     // entry point of the read-only «Изменения dev-ленты» inventory, which needs
     // the operator capabilities and rework queue the feed already holds.
     mountFeed();

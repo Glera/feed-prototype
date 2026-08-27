@@ -256,7 +256,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   badge.type = 'button';
   badge.dataset.testid = 'developer-feed-badge';
   badge.setAttribute('aria-haspopup', 'dialog');
-  badge.append(element('span', null, 'Dev-лента · Только мне'));
+  const badgeLabel = element('span', 'dev-diff__badge-label');
+  badgeLabel.append(
+    element('span', 'dev-diff__badge-label-line', 'Dev-лента'),
+    element('span', 'dev-diff__badge-label-line', 'Только мне'),
+  );
+  badge.append(badgeLabel);
   const badgeCount = element('span', 'dev-diff__badge-count');
   badgeCount.dataset.testid = 'dev-diff-badge-count';
   badge.append(badgeCount);
