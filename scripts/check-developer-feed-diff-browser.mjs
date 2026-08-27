@@ -37,6 +37,7 @@ const rowSelector = '[data-testid="dev-diff-row"]';
 let origin = '';
 let operatorLevelFlaggingAvailable = false;
 let developmentIntakeAvailable = false;
+let developerFeedCatalog = null;
 let reworkItems = [];
 let intakeItems = [];
 const reworkListRequests = [];
@@ -66,6 +67,33 @@ const sessionResponse = () => ({
     unavailable_reason: 'browser_fixture',
     by_playable_id: {},
   },
+  ...(developerFeedCatalog ? { developerFeedCatalog: structuredClone(developerFeedCatalog) } : {}),
+});
+
+const catalogEntry = ({ entryId, state, stateVersion, seriesId }) => ({
+  entryId,
+  kind: 'series',
+  state,
+  stateVersion,
+  seriesId,
+  levelSpecHash: null,
+  runtime: {
+    releaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    playableId: 'marble-sort-swipe',
+    runtimeArtifactDigest: `sha256:${'a'.repeat(64)}`,
+    sourceCommit: 'b'.repeat(40),
+  },
+  stateChangedAt: '2026-08-27T12:00:00Z',
+});
+
+const catalogDiff = ({ dev = null, publicEntry = null } = {}) => ({
+  schema: 'feed.developer-catalog-diff.v1',
+  mechanic: 'sort',
+  variant: 'base',
+  available: dev !== null || publicEntry !== null,
+  unavailableReason: dev !== null || publicEntry !== null ? null : 'catalog_entry_unavailable',
+  dev,
+  public: publicEntry,
 });
 
 const reworkItem = ({
@@ -172,9 +200,11 @@ document.removeEventListener = (type, handler, options) => {
   window.documentListeners.set(type, (window.documentListeners.get(type) || 0) - 1);
   return remove(type, handler, options);
 };
-const { mountDeveloperFeedDiffSurface, developerFeedDiffModel } =
+const { mountDeveloperFeedDiffSurface, developerFeedDiffModel,
+  validateDeveloperFeedCatalogDiff } =
   await import('/developer-feed-diff.mjs');
 window.developerFeedDiffModel = developerFeedDiffModel;
+window.validateDeveloperFeedCatalogDiff = validateDeveloperFeedCatalogDiff;
 window.shown = [];
 window.surface = mountDeveloperFeedDiffSurface(document.body, {
   input: {
@@ -330,6 +360,7 @@ try {
   // ── A1. No operator capability → the surface does not exist at all. ──────
   operatorLevelFlaggingAvailable = false;
   developmentIntakeAvailable = false;
+  developerFeedCatalog = null;
   reworkItems = [];
   intakeItems = [];
   const guest = await newPage({ width: 375, height: 812 });
@@ -343,6 +374,20 @@ try {
   // ── A2. Operator capability + in-flight work → badge, sheet, rows. ───────
   operatorLevelFlaggingAvailable = true;
   developmentIntakeAvailable = true;
+  developerFeedCatalog = catalogDiff({
+    dev: catalogEntry({
+      entryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      state: 'canary',
+      stateVersion: 2,
+      seriesId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    }),
+    publicEntry: catalogEntry({
+      entryId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      state: 'published',
+      stateVersion: 4,
+      seriesId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    }),
+  });
   reworkItems = [
     reworkItem({
       requestId: '66666666-6666-5666-8666-666666666666',
@@ -410,11 +455,11 @@ try {
     'the two-line dev-feed label lacks safe glyph leading');
   assert.equal(await badge.evaluate((node) => node.tagName), 'BUTTON',
     'the dev-feed badge must be a real control, not a decorative label');
-  // Two actionable mechanic lineages + one platform intake in flight;
+  // Two actionable mechanic lineages + one platform intake + one dev catalog row;
   // historical superseded/covered roots remain inspectable but do not inflate
   // the badge that answers "what still differs now?".
   await page.locator('[data-testid="dev-diff-badge-count"]')
-    .filter({ hasText: /^3$/ }).waitFor();
+    .filter({ hasText: /^4$/ }).waitFor();
   assert.equal(await page.locator(sheetSelector).isVisible(), false,
     'the inventory sheet was open before the operator asked for it');
 
@@ -479,10 +524,15 @@ try {
   assert.equal(await sheet.locator(rowSelector).count(), 6,
     'the inventory must carry exactly the platform, mechanic and catalog rows');
 
-  // Row 3 — catalog stays honest: no client-readable release identity exists.
+  // Row 3 — exact server-owned dev/public catalog identity.
   const catalogRow = sheet.locator('[data-row="catalog"]');
-  assert.match(await catalogRow.innerText(), /данных пока нет/,
-    'the catalog row invented identity the client cannot read');
+  const catalogText = await catalogRow.innerText();
+  assert.match(catalogText, /Только мне · canary/,
+    'the catalog row lost its server-owned dev state');
+  assert.match(catalogText, /bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/,
+    'the catalog row lost its exact dev entry identity');
+  assert.match(catalogText, /dddddddd-dddd-4ddd-8ddd-dddddddddddd/,
+    'the catalog row lost its exact public entry identity');
 
   // The read-only contract: no promotion control anywhere on this surface.
   assert.equal(await sheet.locator('text=Продвинуть').count(), 0,
@@ -533,6 +583,14 @@ try {
   // ── A4. Nothing in flight → the honest empty state. ─────────────────────
   reworkItems = [];
   intakeItems = [];
+  developerFeedCatalog = catalogDiff({
+    publicEntry: catalogEntry({
+      entryId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      state: 'published',
+      stateVersion: 4,
+      seriesId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    }),
+  });
   const quiet = await newPage({ width: 375, height: 812 });
   await bootFeed(quiet, 'operator-quiet');
   const quietBadge = quiet.locator(badgeSelector);
@@ -616,6 +674,24 @@ try {
   );
   assert.equal(projection.changed, 1);
   assert.equal(projection.empty, false);
+
+  const catalogValidation = await modulePage.evaluate(() => {
+    const valid = {
+      schema: 'feed.developer-catalog-diff.v1', mechanic: 'sort', variant: 'base',
+      available: false, unavailableReason: 'catalog_entry_unavailable',
+      dev: null, public: null,
+    };
+    return {
+      valid: window.validateDeveloperFeedCatalogDiff(valid),
+      extra: window.validateDeveloperFeedCatalogDiff({ ...valid, callerState: 'forbidden' }),
+      mixed: window.validateDeveloperFeedCatalogDiff({
+        ...valid, available: true, unavailableReason: null,
+      }),
+    };
+  });
+  assert.equal(catalogValidation.valid?.schema, 'feed.developer-catalog-diff.v1');
+  assert.equal(catalogValidation.extra, null, 'catalog projection accepted an unknown field');
+  assert.equal(catalogValidation.mixed, null, 'catalog projection accepted mixed availability');
 
   const listenerBalance = () => modulePage.evaluate(() =>
     Object.fromEntries(window.documentListeners));

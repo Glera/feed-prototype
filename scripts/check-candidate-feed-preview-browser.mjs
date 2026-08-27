@@ -120,6 +120,7 @@ let adoptionPosts = 0;
 const playableReworkPosts = [];
 let adopted = false;
 let adoptionAuthorizationState = 'approved';
+let adoptedArtifactIsPublic = false;
 let origin = '';
 
 const candidateOverlayPlayableIds = [
@@ -314,9 +315,9 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname === '/versions.json') return json(response, {
     'solitaire-v1-swipe': {
-      version: 'live-solitaire',
-      sourceCommit: '5'.repeat(40),
-      runtimeArtifactDigest: `sha256:${'5'.repeat(64)}`,
+      version: adoptedArtifactIsPublic ? sourceCandidateArtifactDigest.slice(0, 12) : 'live-solitaire',
+      sourceCommit: (adoptedArtifactIsPublic ? '7' : '5').repeat(40),
+      runtimeArtifactDigest: `sha256:${adoptedArtifactIsPublic ? sourceCandidateArtifactDigest : '5'.repeat(64)}`,
     },
     'merge-locked-v1-swipe': {
       version: 'live-merge',
@@ -833,6 +834,32 @@ try {
   assert.equal(adoptionPosts, 1, 'normal dev feed replayed the adoption mutation');
   assert.equal(await page.getByText('Кандидат — не опубликовано', { exact: true }).count(), 0,
     'one-shot handoff restored the physical Telegram candidate start_param');
+
+  // Once the immutable candidate digest is the public manifest digest, the
+  // authenticated adoption is historical. It must not keep mounting a dev-only
+  // path or suppressing ordinary public gameplay behavior.
+  adoptedArtifactIsPublic = true;
+  const publishedContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await publishedContext.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: telegramSdk,
+  }));
+  await publishedContext.addInitScript((snapshot) => {
+    if (window === window.top) {
+      localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
+    }
+  }, roster);
+  const publishedPage = await publishedContext.newPage();
+  await publishedPage.goto(origin, { waitUntil: 'domcontentloaded' });
+  await advanceToPlayable(publishedPage, playableId);
+  const publicFrame = publishedPage.locator('.page--in-viewport iframe').first();
+  await publicFrame.waitFor({ state: 'attached' });
+  assert.equal(new URL((await publicFrame.getAttribute('src')) || '', origin).pathname,
+    `/${playableId}.html`, 'published candidate stayed mounted from its preview path');
+  assert.equal(await publishedPage.locator('.game--candidate-overlay').count(), 0,
+    'published candidate remained presented as dev-only adoption');
+  await publishedContext.close();
 
   for (const malformed of [
     candidateStartParam.slice(0, -1),

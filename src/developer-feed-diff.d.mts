@@ -1,4 +1,5 @@
 import type {
+  DeveloperFeedCatalogDiffV1,
   OperatorPlayableReworkQueueItemV1,
   PlatformDevelopmentIntakeResponseV1,
 } from './api';
@@ -72,11 +73,8 @@ export interface DeveloperFeedDiffInput {
     candidateArtifactDigest: string;
     sourceCommit?: string;
   } | null;
-  /**
-   * Slice 1 always passes `null`: no operator-readable endpoint exposes catalog
-   * active-release/candidate identity to this client, so the row stays honest.
-   */
-  catalog?: { activeRelease: DeveloperFeedDiffIdentityLine[] } | null;
+  /** Exact optional server-owned catalog dev/public projection from `/session`. */
+  catalog?: DeveloperFeedCatalogDiffV1 | null;
 }
 
 export interface DeveloperFeedDiffModel {
@@ -102,6 +100,10 @@ export interface DeveloperFeedDiffSurface {
 export function developerFeedDiffModel(
   input: DeveloperFeedDiffInput,
 ): Readonly<DeveloperFeedDiffModel>;
+
+export function validateDeveloperFeedCatalogDiff(
+  value: unknown,
+): Readonly<DeveloperFeedCatalogDiffV1> | null;
 
 export function mountDeveloperFeedDiffSurface(
   host: HTMLElement,
