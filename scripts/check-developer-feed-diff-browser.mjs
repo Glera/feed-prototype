@@ -389,8 +389,25 @@ try {
   await bootFeed(page, 'operator');
   const badge = page.locator(badgeSelector);
   await badge.waitFor({ state: 'visible' });
-  assert.match(await badge.innerText(), /Dev-лента · Только мне/,
-    'the dev-feed badge lost its exact label');
+  const badgeLabelLines = badge.locator('.dev-diff__badge-label-line');
+  await badgeLabelLines.nth(0).waitFor({ state: 'visible' });
+  await badgeLabelLines.nth(1).waitFor({ state: 'visible' });
+  assert.deepEqual(await badgeLabelLines.allTextContents(), ['Dev-лента', 'Только мне'],
+    'the dev-feed badge lost its exact two-line label');
+  const { labelBoxes, lineHeight, fontSize } = await badge.evaluate((node) => ({
+    labelBoxes: [...node.querySelectorAll('.dev-diff__badge-label-line')].map((line) => {
+      const box = line.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom };
+    }),
+    lineHeight: Number.parseFloat(getComputedStyle(
+      node.querySelector('.dev-diff__badge-label'),
+    ).lineHeight),
+    fontSize: Number.parseFloat(getComputedStyle(node).fontSize),
+  }));
+  assert.ok(labelBoxes[0].bottom <= labelBoxes[1].top,
+    'the two dev-feed label lines overlap');
+  assert.ok(lineHeight >= fontSize * 1.15,
+    'the two-line dev-feed label lacks safe glyph leading');
   assert.equal(await badge.evaluate((node) => node.tagName), 'BUTTON',
     'the dev-feed badge must be a real control, not a decorative label');
   // Two actionable mechanic lineages + one platform intake in flight;

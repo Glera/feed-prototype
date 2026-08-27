@@ -725,7 +725,16 @@ try {
   );
   assert.equal(await page.getByText('Аудитория: Только мне', { exact: true }).count(), 1);
   await page.getByText('Открыть dev-ленту', { exact: true }).click();
-  await page.getByText('Dev-лента · Только мне', { exact: true }).waitFor({ state: 'visible' });
+  const developerBadge = page.locator('[data-testid="developer-feed-badge"]');
+  await developerBadge.waitFor({ state: 'visible' });
+  const developerBadgeLines = developerBadge.locator('.dev-diff__badge-label-line');
+  await developerBadgeLines.nth(0).waitFor({ state: 'visible' });
+  await developerBadgeLines.nth(1).waitFor({ state: 'visible' });
+  assert.deepEqual(
+    await developerBadgeLines.allTextContents(),
+    ['Dev-лента', 'Только мне'],
+    'adopted developer Feed lost the compact two-line badge label',
+  );
   const adoptedFrame = page.locator('.page').first().locator('iframe');
   await adoptedFrame.waitFor({ state: 'attached' });
   assert.equal(new URL((await adoptedFrame.getAttribute('src')) || '', origin).pathname, sourceCandidatePath);
