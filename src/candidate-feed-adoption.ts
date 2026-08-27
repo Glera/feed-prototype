@@ -35,6 +35,7 @@ function exactAdoption(
     && value.playableId === candidate.playableId
     && value.candidatePath === candidate.candidatePath
     && value.candidateArtifactDigest === candidate.candidateArtifactDigest
+    && /^sha256:[0-9a-f]{64}$/.test(value.runtimeArtifactDigest)
     && value.reviewBindingDigest === candidate.reviewBindingDigest
     && /^[0-9a-f]{40}$/.test(value.sourceCommit)
     && DIGEST.test(value.receiptDigest)

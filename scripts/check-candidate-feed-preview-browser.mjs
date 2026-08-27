@@ -37,6 +37,7 @@ const reviewBindingDigest = createHash('sha256').update(bindingBytes).digest('he
 const sourceReleaseId = '9c558cf1-239d-5aa5-9dc9-0cfdf6cd37fe';
 const sourceCandidatePath = `/playable-previews/${sourceReleaseId}/${playableId}.html`;
 const sourceCandidateArtifactDigest = '8'.repeat(64);
+const sourceRuntimeArtifactDigest = `sha256:${'7'.repeat(64)}`;
 const sourceBinding = {
   schema: 'feed.playable-release-review-binding.v1',
   releaseId: sourceReleaseId,
@@ -317,7 +318,9 @@ const server = createServer(async (request, response) => {
     'solitaire-v1-swipe': {
       version: adoptedArtifactIsPublic ? sourceCandidateArtifactDigest.slice(0, 12) : 'live-solitaire',
       sourceCommit: (adoptedArtifactIsPublic ? '7' : '5').repeat(40),
-      runtimeArtifactDigest: `sha256:${adoptedArtifactIsPublic ? sourceCandidateArtifactDigest : '5'.repeat(64)}`,
+      runtimeArtifactDigest: adoptedArtifactIsPublic
+        ? sourceRuntimeArtifactDigest
+        : `sha256:${'5'.repeat(64)}`,
     },
     'merge-locked-v1-swipe': {
       version: 'live-merge',
@@ -390,6 +393,7 @@ const server = createServer(async (request, response) => {
         playableId,
         candidatePath: sourceCandidatePath,
         candidateArtifactDigest: sourceCandidateArtifactDigest,
+        runtimeArtifactDigest: sourceRuntimeArtifactDigest,
         reviewBindingDigest: sourceReviewBindingDigest,
         sourceCommit: '7'.repeat(40),
         receiptDigest: '6'.repeat(64),
@@ -773,7 +777,7 @@ try {
   assert.equal(playableReworkPosts[0].mappingId, rosterEntries[1].builtinMappingId);
   assert.equal(playableReworkPosts[0].rosterActivationId, roster.activationId);
   assert.equal(playableReworkPosts[0].runtime.version, sourceCandidateArtifactDigest.slice(0, 12));
-  assert.equal(playableReworkPosts[0].runtime.artifactDigest, `sha256:${sourceCandidateArtifactDigest}`);
+  assert.equal(playableReworkPosts[0].runtime.artifactDigest, sourceRuntimeArtifactDigest);
   assert.equal(playableReworkPosts[0].runtime.sourceCommit, '7'.repeat(40));
   assert.notEqual(playableReworkPosts[0].runtime.artifactDigest, `sha256:${'5'.repeat(64)}`,
     'adopted mechanic rework fell back to the public manifest runtime');
@@ -835,7 +839,8 @@ try {
   assert.equal(await page.getByText('Кандидат — не опубликовано', { exact: true }).count(), 0,
     'one-shot handoff restored the physical Telegram candidate start_param');
 
-  // Once the immutable candidate digest is the public manifest digest, the
+  // Once the immutable candidate runtime identity is the public manifest
+  // runtime identity, the
   // authenticated adoption is historical. It must not keep mounting a dev-only
   // path or suppressing ordinary public gameplay behavior.
   adoptedArtifactIsPublic = true;

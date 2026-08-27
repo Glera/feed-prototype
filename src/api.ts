@@ -378,6 +378,7 @@ export interface DeveloperFeedAdoptionV1 {
   playableId: string;
   candidatePath: string;
   candidateArtifactDigest: string;
+  runtimeArtifactDigest: string;
   reviewBindingDigest: string;
   sourceCommit: string;
   receiptDigest: string;

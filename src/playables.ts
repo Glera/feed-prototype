@@ -41,6 +41,7 @@ export interface CandidatePlayableOverlay {
   candidateArtifactDigest: string;
   reviewBindingDigest: string;
   sourceCommit?: string;
+  runtimeArtifactDigest?: string;
 }
 let CANDIDATE_OVERLAY: CandidatePlayableOverlay | null = null;
 
@@ -94,9 +95,10 @@ export function publicMechanicReleaseIdentity(id: string): MechanicReleaseIdenti
 /** True only when the immutable operator candidate is already the public bytes. */
 export function candidateMatchesPublicManifest(candidate: CandidatePlayableOverlay): boolean {
   if (!candidate || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(candidate.playableId)
-    || !/^[0-9a-f]{64}$/.test(candidate.candidateArtifactDigest)) return false;
+    || !/^[0-9a-f]{64}$/.test(candidate.candidateArtifactDigest)
+    || !/^sha256:[0-9a-f]{64}$/.test(candidate.runtimeArtifactDigest || '')) return false;
   return publicMechanicReleaseIdentity(candidate.playableId)?.runtimeArtifactDigest
-    === `sha256:${candidate.candidateArtifactDigest}`;
+    === candidate.runtimeArtifactDigest;
 }
 
 /** Exact static identity shown in the operator-only mobile rework form. */
@@ -108,7 +110,9 @@ export function mechanicReleaseIdentity(id: string): MechanicReleaseIdentity | n
     return Object.freeze({
       version: candidate.candidateArtifactDigest.slice(0, 12),
       sourceCommit: candidate.sourceCommit!,
-      runtimeArtifactDigest: `sha256:${candidate.candidateArtifactDigest}`,
+      runtimeArtifactDigest: /^sha256:[0-9a-f]{64}$/.test(candidate.runtimeArtifactDigest || '')
+        ? candidate.runtimeArtifactDigest!
+        : `sha256:${candidate.candidateArtifactDigest}`,
     });
   }
   return publicMechanicReleaseIdentity(id);
