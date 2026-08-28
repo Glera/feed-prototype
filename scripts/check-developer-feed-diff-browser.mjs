@@ -559,6 +559,21 @@ try {
     platform: { sourceSha: 'a'.repeat(40), stamp: 'stamp' },
     reworks: [],
     platformIntake: null,
+    vocabulary: {
+      schema: 'platform.operator-presentation-vocabulary.v1',
+      audience: {
+        labs: { label: 'Labs fixture', icon: 'L', tone: 'gray' },
+        exactUser: { label: 'Лично', icon: '◉', tone: 'blue' },
+        team: { label: 'Team fixture', icon: 'T', tone: 'purple' },
+        public: { label: 'Public fixture', icon: 'P', tone: 'green' },
+      },
+      workState: {
+        working: { label: 'Working fixture', icon: 'W', tone: 'amber' },
+        ready: { label: 'Ready fixture', icon: 'R', tone: 'cyan' },
+        needsHelp: { label: 'Help fixture', icon: 'H', tone: 'red' },
+        previousStopped: { label: 'Stopped fixture', icon: 'S', tone: 'neutral' },
+      },
+    },
     adoption: {
       playableId: 'marble-sort-swipe',
       releaseId: 'pr_777',
@@ -569,8 +584,8 @@ try {
   }));
   assert.equal(projection.mechanics.length, 1);
   assert.equal(projection.mechanics[0].adopted, true);
-  assert.equal(projection.mechanics[0].status, 'Аудитория: ● Только мне',
-    'an adopted exact candidate is not shown with the audience wording already in use');
+  assert.equal(projection.mechanics[0].status, 'Аудитория: ◉ Лично',
+    'the Feed ignored the strict server-owned audience vocabulary');
   assert.equal(projection.changed, 1);
   assert.equal(projection.empty, false);
 
