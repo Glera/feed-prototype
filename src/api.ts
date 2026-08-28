@@ -323,6 +323,7 @@ export interface SessionResp {
   operator_level_flagging_available?: boolean;
   development_intake_available?: boolean;
   development_intake_context?: { buildSha: string };
+  operatorPresentationVocabulary?: OperatorPresentationVocabularyV1;
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
   developerFeedAdoption?: DeveloperFeedAdoptionV1;
@@ -330,6 +331,16 @@ export interface SessionResp {
    *  `ENABLE_MISSION_READ` is on. Absent is how every other payload stays
    *  byte-identical to the pre-mission build. */
   mission_dogfood?: boolean;
+}
+
+export interface OperatorPresentationVocabularyV1 {
+  schema: 'platform.operator-presentation-vocabulary.v1';
+  audience: Record<'labs' | 'exactUser' | 'team' | 'public', {
+    label: string; icon: string; tone: 'gray' | 'blue' | 'purple' | 'green';
+  }>;
+  workState: Record<'working' | 'ready' | 'needsHelp' | 'previousStopped', {
+    label: string; icon: string; tone: 'amber' | 'cyan' | 'red' | 'neutral';
+  }>;
 }
 
 export interface DeveloperFeedAdoptionV1 {

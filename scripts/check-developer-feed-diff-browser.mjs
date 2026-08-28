@@ -437,8 +437,11 @@ try {
     'the platform row printed the full sha instead of the short form');
   assert.match(platformText, /2026-08-18 13:59/,
     'the platform row does not carry the build stamp baked into the bar');
-  assert.match(platformText, /Инженерный тикет создан; изменения ещё не опубликованы\./,
+  assert.match(platformText,
+    /Дорабатывается: Инженерный тикет создан; изменения ещё не опубликованы\./,
     'the platform intake status is not the vocabulary the ⚙ control already uses');
+  assert.doesNotMatch(platformText, /READY_TO_PLAY|NEEDS_HELP/,
+    'machine lifecycle tokens leaked into the read-only inventory');
 
   // Row 2 — mechanics with active reworks, in the existing status vocabulary.
   const mechanics = sheet.locator('[data-row="mechanic"]');
@@ -566,7 +569,7 @@ try {
   }));
   assert.equal(projection.mechanics.length, 1);
   assert.equal(projection.mechanics[0].adopted, true);
-  assert.equal(projection.mechanics[0].status, 'Аудитория: Только мне',
+  assert.equal(projection.mechanics[0].status, 'Аудитория: ● Только мне',
     'an adopted exact candidate is not shown with the audience wording already in use');
   assert.equal(projection.changed, 1);
   assert.equal(projection.empty, false);
