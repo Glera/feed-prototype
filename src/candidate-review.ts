@@ -585,8 +585,8 @@ export async function mountPlayableCandidateReviewSurface(releaseId: string): Pr
       decisionPanel.dataset.state = receipt.decision;
       if (receipt.decision === 'accept') {
         decisionStatus.textContent = receipt.authorization.state === 'approved'
-          ? 'Кандидат принят в dev-ленту. Дополнительный код не требуется; public rollout не выполнялся.'
-          : 'Кандидат принят в dev-ленту. Старый authorization будет reconciled автоматически; новый код не требуется; public rollout не выполнялся.';
+          ? 'Кандидат принят в dev-ленту; дополнительный код не требуется. Public rollout не выполнялся.'
+          : 'Кандидат принят в dev-ленту; старый одноразовый код остаётся совместимым на время обновления. Public rollout не выполнялся.';
       } else {
         decisionStatus.textContent = `Отправлено на доработку. Successor cycle ${receipt.successor?.cycle} создан; production не изменён.`;
         instruction.value = receipt.instruction ?? '';

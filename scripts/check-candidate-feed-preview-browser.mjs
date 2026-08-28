@@ -421,7 +421,7 @@ const server = createServer(async (request, response) => {
       audience: 'exact-user', publicRollout: false,
       authorization: {
         schema: 'feed.playable-release-authorization-disposition.v1',
-        state: 'awaiting_exact_authorization', itemCount: 0,
+        state: 'approved', itemCount: 0,
         itemsDigest: '5'.repeat(64), items: [],
       },
       successor: null,

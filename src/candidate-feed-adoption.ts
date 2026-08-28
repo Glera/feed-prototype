@@ -56,7 +56,9 @@ function exactReceipt(
     && value.candidateArtifactDigest === candidate.candidateArtifactDigest
     && value.decision === 'accept' && value.instruction === null
     && value.audience === 'exact-user' && value.publicRollout === false
-    && value.authorization?.state === 'awaiting_exact_authorization'
+    && ['approved', 'awaiting_exact_authorization'].includes(
+      value.authorization?.state ?? '',
+    )
     && value.successor === null && DIGEST.test(value.receiptDigest);
 }
 
