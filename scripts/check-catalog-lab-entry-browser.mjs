@@ -660,7 +660,8 @@ try {
     return button instanceof HTMLButtonElement && !button.disabled;
   });
   await acceptSurface.getByRole('button', { name: 'Принять в тестовую ленту' }).click();
-  await acceptSurface.getByText(/Exact content-bound approval подтверждён/).waitFor({ state: 'visible' });
+  await acceptSurface.getByText(/Кандидат принят в dev-ленту\. Дополнительный код не требуется/)
+    .waitFor({ state: 'visible' });
   assert.equal(decisionRequests.length, 1, 'accept created more than one decision request');
   assert.deepEqual(Object.keys(decisionRequests[0]).sort(), ['decision', 'mutationId', 'schema']);
   assert.equal(decisionRequests[0].decision, 'accept');
