@@ -660,11 +660,12 @@ try {
     return button instanceof HTMLButtonElement && !button.disabled;
   });
   await acceptSurface.getByRole('button', { name: 'Принять в тестовую ленту' }).click();
-  await acceptSurface.getByText(/Exact content-bound approval подтверждён/).waitFor({ state: 'visible' });
+  await acceptSurface.getByText(/Кандидат принят в dev-ленту; дополнительный код не требуется/)
+    .waitFor({ state: 'visible' });
   assert.equal(decisionRequests.length, 1, 'accept created more than one decision request');
   assert.deepEqual(Object.keys(decisionRequests[0]).sort(), ['decision', 'mutationId', 'schema']);
   assert.equal(decisionRequests[0].decision, 'accept');
-  assert.match((await acceptSurface.textContent()) || '', /public rollout не выполнялся/);
+  assert.match((await acceptSurface.textContent()) || '', /Public rollout не выполнялся/);
   assert.equal(await acceptSurface.getByRole('button', { name: 'Принять в тестовую ленту' }).isDisabled(), true);
   assert.equal(await acceptSurface.getByRole('button', { name: 'Отправить на доработку' }).isDisabled(), true);
   await acceptPage.close();

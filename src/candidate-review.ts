@@ -585,8 +585,8 @@ export async function mountPlayableCandidateReviewSurface(releaseId: string): Pr
       decisionPanel.dataset.state = receipt.decision;
       if (receipt.decision === 'accept') {
         decisionStatus.textContent = receipt.authorization.state === 'approved'
-          ? 'Exact content-bound approval подтверждён. Candidate принят только в тестовую ленту; public rollout не выполнялся.'
-          : 'Exact content-bound approval запущен. Candidate принят только в тестовую ленту; public rollout не выполнялся.';
+          ? 'Кандидат принят в dev-ленту; дополнительный код не требуется. Public rollout не выполнялся.'
+          : 'Кандидат принят в dev-ленту; старый одноразовый код остаётся совместимым на время обновления. Public rollout не выполнялся.';
       } else {
         decisionStatus.textContent = `Отправлено на доработку. Successor cycle ${receipt.successor?.cycle} создан; production не изменён.`;
         instruction.value = receipt.instruction ?? '';
@@ -626,7 +626,7 @@ export async function mountPlayableCandidateReviewSurface(releaseId: string): Pr
       mutationIds[decision] ??= crypto.randomUUID();
       pending = true;
       decisionStatus.textContent = decision === 'accept'
-        ? 'Фиксируем exact-user approval…'
+        ? 'Фиксируем принятие в dev-ленту…'
         : 'Фиксируем server-owned successor request…';
       updateControls();
       try {
