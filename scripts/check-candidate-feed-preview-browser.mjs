@@ -119,6 +119,7 @@ const requests = [];
 let adoptionPosts = 0;
 const playableReworkPosts = [];
 let adopted = false;
+let adoptionAuthorizationState = 'approved';
 let origin = '';
 
 const candidateOverlayPlayableIds = [
@@ -421,7 +422,7 @@ const server = createServer(async (request, response) => {
       audience: 'exact-user', publicRollout: false,
       authorization: {
         schema: 'feed.playable-release-authorization-disposition.v1',
-        state: 'approved', itemCount: 0,
+        state: adoptionAuthorizationState, itemCount: 0,
         itemsDigest: '5'.repeat(64), items: [],
       },
       successor: null,
@@ -928,6 +929,30 @@ try {
     && Math.abs(desktopManual.slot.top - desktopManual.game.top) <= 2,
   `desktop takeover did not finish at the full manual rectangle: ${JSON.stringify(desktopManual)}`);
   await desktop.close();
+
+  adopted = false;
+  adoptionAuthorizationState = 'awaiting_exact_authorization';
+  requests.length = 0;
+  const historicalContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await historicalContext.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: telegramSdk,
+  }));
+  await historicalContext.addInitScript((snapshot) => {
+    if (window === window.top) localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
+  }, roster);
+  const historicalPage = await historicalContext.newPage();
+  await historicalPage.goto(startAppUrl.toString(), { waitUntil: 'domcontentloaded' });
+  await historicalPage.getByText('Добавить в dev-ленту', { exact: true }).waitFor({ state: 'visible' });
+  const historicalPostsBefore = adoptionPosts;
+  await historicalPage.getByText('Добавить в dev-ленту', { exact: true }).click();
+  await historicalPage.getByText('Добавлено в dev-ленту', { exact: true }).waitFor({ state: 'visible' });
+  assert.equal(adoptionPosts, historicalPostsBefore + 1,
+    'historical awaiting_exact_authorization receipt did not complete exact-user adoption');
+  assert.equal(requests.filter((entry) => entry === 'POST /api/session').length, 1,
+    `historical receipt fell back to reconciliation: ${requests.join(', ')}`);
+  await historicalContext.close();
 
   await context.close();
 } finally {
