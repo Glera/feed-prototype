@@ -558,6 +558,99 @@ html, body {
   overscroll-behavior: none;            /* kill the browser's own pull-to-refresh / bounce */
 }
 
+/* Focused operator-only Mission template preview. It uses production Mission
+   renderers with an in-bundle synthetic fixture and performs no Mission writes. */
+body.mission-demo-open {
+  background: #07090f;
+}
+.mission-demo {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #07090f;
+  color: #fff;
+}
+.mission-demo--loading,
+.mission-demo--error {
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 28px;
+  box-sizing: border-box;
+  color: #c9d3e4;
+  text-align: center;
+  font: 750 14px/1.4 system-ui, sans-serif;
+}
+.mission-demo--error strong { color: #fff; font-size: 20px; }
+.mission-demo__badge {
+  position: fixed;
+  top: calc(var(--safe-top) + 8px);
+  left: 50%;
+  z-index: 5000;
+  max-width: calc(100vw - 24px);
+  transform: translateX(-50%);
+  padding: 7px 12px;
+  border: 1px solid rgba(255, 214, 102, .58);
+  border-radius: 999px;
+  background: rgba(18, 20, 28, .94);
+  color: #ffe49a;
+  font: 850 12px/1.15 system-ui, sans-serif;
+  white-space: nowrap;
+}
+.mission-demo__chrome {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 2500;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 146px;
+  gap: 8px 12px;
+  padding: calc(var(--safe-top) + 46px) 12px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, .1);
+  background: linear-gradient(180deg, #181326, #0d1017);
+  box-sizing: border-box;
+}
+.mission-demo__heading { display: grid; align-content: center; gap: 3px; min-width: 0; }
+.mission-demo__heading strong { font: 900 15px/1.15 system-ui, sans-serif; }
+.mission-demo__heading span { color: #9aa5b7; font: 650 9.5px/1.25 system-ui, sans-serif; }
+.mission-demo__hud { grid-column: 2; width: 146px; margin: 0; }
+.mission-demo__tabs {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.mission-demo__tab {
+  min-height: 34px;
+  padding: 0 6px;
+  border: 1px solid rgba(255, 255, 255, .13);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, .06);
+  color: #c9d3e4;
+  font: 800 11px/1 system-ui, sans-serif;
+}
+.mission-demo__tab[data-active="true"] {
+  border-color: rgba(255, 216, 106, .5);
+  background: rgba(255, 216, 106, .14);
+  color: #ffe49a;
+}
+.mission-demo__scene {
+  position: absolute;
+  inset: calc(var(--safe-top) + 154px) 0 0;
+  overflow: hidden;
+}
+.mission-demo__case {
+  padding-top: 42px;
+  padding-bottom: calc(var(--safe-bottom) + 18px);
+}
+.mission-demo__case .mission-screen__close { display: none; }
+.mission-demo .mission-ceremony { position: absolute; }
+
+@media (max-width: 360px) {
+  .mission-demo__chrome { grid-template-columns: minmax(0, 1fr) 132px; }
+  .mission-demo__hud { width: 132px; }
+  .mission-demo__tab { font-size: 10px; }
+}
+
 body {
   display: flex;
   align-items: center;
