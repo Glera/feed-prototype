@@ -513,7 +513,7 @@ try {
   const pendingStatus = operator.locator(`${detailsSelector} [data-intake-status]`);
   await pendingStatus.waitFor({ state: 'visible' });
   assert.equal(await pendingStatus.textContent(),
-    'Задача сохранена и ждёт синхронизации; изменения не опубликованы.');
+    'Дорабатывается: Задача ждёт синхронизации.');
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-request-id]`).textContent(),
     '11111111-1111-5111-8111-111111111111');
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-mutation-id]`).textContent(),
@@ -545,7 +545,7 @@ try {
   const confirmedStatus = operator.locator(`${detailsSelector} [data-intake-status]`);
   await confirmedStatus.waitFor({ state: 'visible' });
   assert.equal(await confirmedStatus.textContent(),
-    'Инженерный тикет создан; изменения ещё не опубликованы.');
+    'Дорабатывается: Инженерный тикет создан; изменения ещё не опубликованы.');
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-delivery-state]`).textContent(),
     'confirmed');
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-result]`).getAttribute('href'),
@@ -589,7 +589,9 @@ try {
   await operator.locator(openSelector).click();
   await confirmedStatus.waitFor({ state: 'visible' });
   assert.equal(await confirmedStatus.textContent(),
-    'READY_TO_PLAY: Bounded candidate is ready for operator testing.');
+    'Можно проверить: Bounded candidate is ready for operator testing.');
+  assert.doesNotMatch(await confirmedStatus.textContent(), /READY_TO_PLAY|NEEDS_HELP/,
+    'machine terminal token leaked into operator-visible copy');
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-result]`).getAttribute('href'),
     'https://example.test/candidate/17');
 

@@ -11,7 +11,9 @@ import type {
  * no request of its own and never carries a promotion control.
  */
 
-export type DeveloperFeedDiffTone = 'ok' | 'warn' | 'error' | 'neutral';
+export type DeveloperFeedDiffTone =
+  | 'ok' | 'warn' | 'error' | 'neutral'
+  | 'amber' | 'cyan' | 'red';
 
 export interface DeveloperFeedDiffIdentityLine {
   label: string;
@@ -40,7 +42,13 @@ export interface DeveloperFeedDiffPlatformRow {
   status: string;
   identity: DeveloperFeedDiffIdentityLine[];
   /** Present only while a platform rework is in flight. */
-  intake: { status: string; tone: DeveloperFeedDiffTone; blocker: string | null } | null;
+  intake: {
+    status: string;
+    label: string;
+    icon: string;
+    tone: DeveloperFeedDiffTone;
+    blocker: string | null;
+  } | null;
 }
 
 export interface DeveloperFeedDiffCatalogRow {
@@ -56,6 +64,7 @@ export interface DeveloperFeedDiffInput {
   /** Entries of the feed's own `playableId → queue` map. No request is issued. */
   reworks?: Iterable<readonly [string, readonly OperatorPlayableReworkQueueItemV1[]]> | null;
   platformIntake?: PlatformDevelopmentIntakeResponseV1 | null;
+  vocabulary?: import('./operator-presentation-vocabulary.mjs').OperatorPresentationVocabularyV1;
   /** The exact candidate this operator adopted, if any. */
   adoption?: {
     playableId: string;

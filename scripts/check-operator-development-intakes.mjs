@@ -13,6 +13,7 @@ import {
   validatePlatformDevelopmentIntakeList,
   validatePlatformDevelopmentIntakeReceipt,
 } from '../src/operator-development-intakes.mjs';
+import { platformDevelopmentIntakePresentation } from '../src/operator-presentation-vocabulary.mjs';
 
 const screenshot = { kind: 'unavailable', reason: 'not_attached', mimeType: null, dataUrl: null };
 const input = {
@@ -243,6 +244,44 @@ assert.equal(
   validatePlatformDevelopmentIntakeReceipt(readyReceipt).terminal.status,
   'READY_TO_PLAY',
 );
+
+const pendingCancellation = {
+  mutationId: cancellation.mutationId,
+  status: 'queued',
+  reason: 'obsolete',
+  requestedAt: '2026-08-09T12:35:00.000Z',
+  cancelledAt: null,
+  issueClosed: false,
+  lastErrorCode: null,
+};
+const needsHelpDuringCancellation = platformDevelopmentIntakePresentation({
+  ...readyReceipt,
+  terminal: {
+    status: 'NEEDS_HELP',
+    summary: 'Нужна ручная проверка конфигурации.',
+    candidate: null,
+    blocker: {
+      code: 'operator_action_required',
+      operatorAction: 'Проверьте конфигурацию доступа.',
+    },
+    review: null,
+    recordedAt: '2026-08-09T12:35:01.000Z',
+    nothingPublished: true,
+  },
+  cancellation: pendingCancellation,
+});
+assert.equal(needsHelpDuringCancellation.state, 'needsHelp');
+assert.equal(needsHelpDuringCancellation.blocker, 'Проверьте конфигурацию доступа.');
+assert.match(needsHelpDuringCancellation.detail, /Нужна ручная проверка конфигурации/);
+
+const deliveryFailureDuringCancellation = platformDevelopmentIntakePresentation({
+  ...readyReceipt,
+  delivery: { ...readyReceipt.delivery, status: 'failed_terminal', issueUrl: null },
+  cancellation: pendingCancellation,
+});
+assert.equal(deliveryFailureDuringCancellation.state, 'needsHelp');
+assert.match(deliveryFailureDuringCancellation.detail, /изменения не опубликованы/);
+assert.match(deliveryFailureDuringCancellation.blocker, /Нужна помощь/);
 assert.throws(
   () => validatePlatformDevelopmentIntakeReceipt({
     ...readyReceipt,

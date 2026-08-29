@@ -18,9 +18,12 @@ import {
   operatorPlayableReworkPresentation,
   operatorPlayableReworkQueuePresentation,
 } from './operator-playable-reworks.mjs';
+import {
+  operatorAudiencePresentation,
+  platformDevelopmentIntakePresentation,
+  resolveOperatorPresentationVocabulary,
+} from './operator-presentation-vocabulary.mjs';
 
-/** The audience vocabulary the adoption card already shows (candidate-feed-adoption). */
-const ADOPTED_STATUS = 'Аудитория: Только мне';
 const PLATFORM_STATUS = 'что живёт сейчас';
 const EMPTY_STATUS = 'Dev не отличается от публичного';
 const CATALOG_STATUS = 'данных пока нет';
@@ -67,40 +70,21 @@ const reworkCounts = (presentation) => [
  * The platform intake status, worded exactly as the ⚙ intake details word it.
  * `null` when no platform rework is in flight.
  */
-function platformIntakeRow(receipt) {
-  if (!receipt || typeof receipt !== 'object') return null;
-  if (receipt.cancellation?.status === 'confirmed') return null;
-  const deliveryStatus = receipt.delivery?.status;
-  const terminalReady = receipt.terminal?.status === 'READY_TO_PLAY';
-  const terminalNeedsHelp = receipt.terminal?.status === 'NEEDS_HELP';
-  const failed = deliveryStatus === 'failed_terminal' || terminalNeedsHelp;
-  const confirmed = deliveryStatus === 'confirmed';
-  const cancelling = Boolean(receipt.cancellation);
-  const status = receipt.cancellation?.status === 'failed_terminal'
-    ? 'Не удалось завершить отмену; нужна помощь.'
-    : cancelling
-      ? 'Отмена сохранена и синхронизируется.'
-      : terminalNeedsHelp
-    ? `NEEDS_HELP: ${text(receipt.terminal?.summary)}`
-    : terminalReady
-      ? `READY_TO_PLAY: ${text(receipt.terminal?.summary)}`
-      : failed
-        ? 'Синхронизация остановлена; изменения не опубликованы.'
-        : confirmed
-          ? 'Инженерный тикет создан; изменения ещё не опубликованы.'
-          : 'Задача сохранена и ждёт синхронизации; изменения не опубликованы.';
-  const blocker = terminalNeedsHelp
-    ? text(receipt.terminal?.blocker?.operatorAction)
-    : failed ? 'Нужна помощь с конфигурацией инженерного контура.' : '';
+function platformIntakeRow(receipt, vocabulary) {
+  const presentation = platformDevelopmentIntakePresentation(receipt, vocabulary);
+  if (!presentation?.visible) return null;
   return Object.freeze({
-    status,
-    tone: failed || receipt.cancellation?.status === 'failed_terminal'
-      ? 'error' : terminalReady ? 'ok' : confirmed ? 'neutral' : 'warn',
-    blocker: blocker || null,
+    status: presentation.detail,
+    label: presentation.label,
+    icon: presentation.icon,
+    tone: presentation.tone,
+    blocker: presentation.blocker,
   });
 }
 
 function mechanicRows(input) {
+  const audience = operatorAudiencePresentation(input.vocabulary, 'exactUser');
+  const adoptedStatus = `Аудитория: ${audience.icon} ${audience.label}`;
   const rows = new Map();
   const entries = input.reworks ? Array.from(input.reworks) : [];
   for (const entry of entries) {
@@ -145,7 +129,7 @@ function mechanicRows(input) {
     } else {
       rows.set(adoption.playableId, {
         playableId: adoption.playableId,
-        status: ADOPTED_STATUS,
+        status: adoptedStatus,
         state: 'adopted',
         tone: 'ok',
         counts: 'Новых замечаний пока нет',
@@ -163,9 +147,11 @@ function mechanicRows(input) {
 }
 
 export function developerFeedDiffModel(input = {}) {
+  const vocabulary = resolveOperatorPresentationVocabulary(input.vocabulary);
+  const exactUserAudience = operatorAudiencePresentation(vocabulary, 'exactUser');
   const platformInput = input.platform || {};
-  const intake = platformIntakeRow(input.platformIntake);
-  const mechanics = mechanicRows(input);
+  const intake = platformIntakeRow(input.platformIntake, vocabulary);
+  const mechanics = mechanicRows({ ...input, vocabulary });
   const catalogIdentity = Array.isArray(input.catalog?.activeRelease)
     ? input.catalog.activeRelease.filter(Boolean)
     : [];
@@ -176,6 +162,7 @@ export function developerFeedDiffModel(input = {}) {
     visible: input.operatorSurfacesActive === true || Boolean(input.adoption),
     changed,
     empty: changed === 0,
+    audience: exactUserAudience,
     platform: Object.freeze({
       status: PLATFORM_STATUS,
       identity: Object.freeze([
@@ -288,6 +275,14 @@ export function mountDeveloperFeedDiffSurface(host, options) {
 
   const renderBadge = () => {
     root.hidden = !model.visible;
+    badgeLabel.replaceChildren(
+      element('span', 'dev-diff__badge-label-line', 'Dev-лента'),
+      element(
+        'span',
+        'dev-diff__badge-label-line',
+        `${model.audience.icon} ${model.audience.label}`,
+      ),
+    );
     badgeCount.textContent = String(model.changed);
     badgeCount.hidden = model.changed === 0;
     badge.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -325,7 +320,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       article.dataset.playableId = row.playableId;
       article.append(rowHead(row.playableId, row.status));
       if (row.adopted) {
-        article.append(element('small', 'dev-diff__adopted', ADOPTED_STATUS));
+        article.append(element('small', 'dev-diff__adopted', row.status));
       }
       article.append(element('small', 'dev-diff__counts', row.counts));
       if (row.blocker) article.append(element('p', 'dev-diff__blocker', row.blocker));

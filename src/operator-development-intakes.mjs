@@ -4,6 +4,10 @@ import {
   screenshotSelectionLabel,
   screenshotSelectionMarkup,
 } from './operator-screenshot.mjs';
+import {
+  platformDevelopmentIntakePresentation,
+  resolveOperatorPresentationVocabulary,
+} from './operator-presentation-vocabulary.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA = /^[0-9a-f]{40}$/;
@@ -423,6 +427,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   let destroyed = false;
   let submitting = false;
   let cancelling = false;
+  const vocabulary = resolveOperatorPresentationVocabulary(options.vocabulary);
 
   // The attached file is only a local preview: it is prepared and inlined into
   // the immutable request at submit, and «Удалить» detaches it before then.
@@ -478,16 +483,15 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     const deliveryStatus = validated.delivery.status;
     const cancellation = validated.cancellation;
     const cancelled = cancellation?.status === 'confirmed';
-    const cancellationFailed = cancellation?.status === 'failed_terminal';
-    const terminalReady = validated.terminal?.status === 'READY_TO_PLAY';
-    const terminalNeedsHelp = validated.terminal?.status === 'NEEDS_HELP';
-    const failed = deliveryStatus === 'failed_terminal' || terminalNeedsHelp;
+    const presentation = platformDevelopmentIntakePresentation(validated, vocabulary);
+    const terminalReady = presentation?.state === 'ready';
+    const failed = presentation?.state === 'needsHelp';
     const confirmed = deliveryStatus === 'confirmed';
-    open.textContent = cancelled ? '×' : failed || cancellationFailed ? '!' : terminalReady ? '▶' : '✓';
-    open.dataset.intakeState = cancelled ? 'cancelled' : failed || cancellationFailed
+    open.textContent = cancelled ? '×' : presentation?.icon || '…';
+    open.dataset.intakeState = cancelled ? 'cancelled' : failed
       ? 'needs_help' : terminalReady ? 'ready' : confirmed ? 'confirmed' : 'pending';
-    open.setAttribute('aria-label', cancelled ? '× Неактуально' : failed || cancellationFailed
-      ? '! Нужна помощь' : terminalReady ? '▶ Можно проверить' : confirmed ? '✓ Тикет создан' : '✓ Задача принята');
+    open.setAttribute('aria-label', cancelled ? '× Неактуально'
+      : `${presentation?.icon || '…'} ${presentation?.label || 'Дорабатывается'}`);
     detailInstruction.textContent = validated.request.instruction;
     detailRequestId.textContent = validated.requestId;
     detailMutationId.textContent = validated.mutationId;
@@ -498,24 +502,9 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
       ? cancellation.issueClosed
         ? 'Неактуально: инженерный тикет помечен и закрыт.'
         : 'Неактуально: задача отменена до создания инженерного тикета.'
-      : cancellationFailed
-        ? 'Не удалось закрыть инженерный тикет; нужна помощь.'
-        : cancellation
-          ? 'Отмена сохранена и синхронизируется.'
-      : terminalNeedsHelp
-      ? `NEEDS_HELP: ${validated.terminal.summary}`
-      : terminalReady
-        ? `READY_TO_PLAY: ${validated.terminal.summary}`
-        : failed
-          ? 'Синхронизация остановлена; изменения не опубликованы.'
-      : confirmed ? 'Инженерный тикет создан; изменения ещё не опубликованы.'
-        : 'Задача сохранена и ждёт синхронизации; изменения не опубликованы.';
-    blocker.textContent = cancellationFailed
-      ? `Не удалось завершить отмену: ${cancellation.lastErrorCode || 'unknown'}`
-      : terminalNeedsHelp
-      ? validated.terminal.blocker.operatorAction
-      : failed ? 'Нужна помощь с конфигурацией инженерного контура.' : '';
-    blocker.hidden = !(failed || cancellationFailed);
+      : presentation?.detail || 'Дорабатывается';
+    blocker.textContent = presentation?.blocker || '';
+    blocker.hidden = !presentation?.blocker;
     const resultUrl = terminalReady
       ? validated.terminal.candidate.url
       : confirmed ? validated.delivery.issueUrl : null;

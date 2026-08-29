@@ -130,5 +130,6 @@ export function mountPlatformDevelopmentIntakeControl(
       request: PlatformDevelopmentIntakeCancelV1,
     ): Promise<PlatformDevelopmentIntakeReceiptV1>;
     refresh?(): void | Promise<void>;
+    vocabulary?: import('./operator-presentation-vocabulary.mjs').OperatorPresentationVocabularyV1;
   },
 ): PlatformDevelopmentIntakeControl;

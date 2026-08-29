@@ -215,6 +215,7 @@ import {
   type DeveloperFeedDiffInput,
   type DeveloperFeedDiffSurface,
 } from './developer-feed-diff.mjs';
+import { resolveOperatorPresentationVocabulary } from './operator-presentation-vocabulary.mjs';
 
 // Injected at build time (vite define) — the platform build stamp, shown on the feed bar.
 declare const __PLATFORM_VERSION__: string;
@@ -782,6 +783,7 @@ export class Feed {
   private operatorPlayableReworkControlHoldUntil = 0;
   private operatorPlayableReworkControlRefreshTimer: number | null = null;
   private developmentIntakeAvailable = false;
+  private operatorPresentationVocabulary = resolveOperatorPresentationVocabulary(null);
   // Read-only «Изменения dev-ленты»: the dev badge + its inventory sheet. It is
   // a projection of state this class already holds (rework queue, platform
   // intake receipt, adopted candidate) — it never issues a request of its own.
@@ -1151,6 +1153,9 @@ export class Feed {
       track('roster_snapshot_rejected', { reason: rosterStage.reason });
     }
     this.applyBuiltinFeedBindings(session.builtin_feed_bindings);
+    this.operatorPresentationVocabulary = resolveOperatorPresentationVocabulary(
+      session.operatorPresentationVocabulary,
+    );
     this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
     this.applyOperatorDebugEntryCapability(session.catalog_lab_authorization_available);
     this.applyOperatorLevelFlaggingCapability(session.operator_level_flagging_available);
@@ -2824,6 +2829,7 @@ export class Feed {
         ? this.platformDevelopmentIntakeLatest
         : null,
       adoption: overlay,
+      vocabulary: this.operatorPresentationVocabulary,
       // No operator-readable endpoint exposes catalog active-release/candidate
       // identity to this client, so the row stays honestly empty here.
       catalog: null,
@@ -2932,6 +2938,7 @@ export class Feed {
       submit: (request) => this.submitPlatformDevelopmentIntake(request),
       cancel: (requestId, request) => this.cancelPlatformDevelopmentIntake(requestId, request),
       refresh: () => this.refreshPlatformDevelopmentIntakes(),
+      vocabulary: this.operatorPresentationVocabulary,
     });
     this.platformDevelopmentIntakeActorUserId = Number(actorUserId);
   }
