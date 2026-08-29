@@ -11,6 +11,7 @@ import { candidateReviewReleaseIdFromParam } from './candidate-review';
 import { candidateFeedPreviewRequested, resolveCandidateFeedPreview, resolveDeveloperFeedAdoption, type CandidateFeedPreviewIdentity } from './candidate-feed-preview';
 import { candidateFeedStartParamRequested } from './candidate-feed-start-param.mjs';
 import { consumeDeveloperFeedHandoff, mountCandidateFeedAdoption } from './candidate-feed-adoption';
+import { missionDemoRequested } from './mission-demo-route.mjs';
 
 const query = new URLSearchParams(location.search);
 const restoredStartParam = getStartParam();
@@ -18,15 +19,16 @@ const developerFeedHandoff = consumeDeveloperFeedHandoff(restoredStartParam);
 const startParam = developerFeedHandoff ? null : restoredStartParam;
 const candidateFeedStartRequested = candidateFeedStartParamRequested(startParam);
 const candidateFeedRequested = candidateFeedPreviewRequested(location.search, startParam);
+const missionDemoLaunch = missionDemoRequested({ search: location.search, startParam });
 setTelegramReadOnlyPreviewMode(candidateFeedRequested);
-setTelemetryReadOnlyPreviewMode(candidateFeedRequested);
+setTelemetryReadOnlyPreviewMode(candidateFeedRequested || missionDemoLaunch);
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
 initTelegram();
 // Telemetry (D3): flush the event queue on background/close. Events themselves
 // are emitted from the feed; no-op network outside Telegram.
-if (!candidateFeedRequested) initTelemetry();
+if (!candidateFeedRequested && !missionDemoLaunch) initTelemetry();
 
 const viewport = document.getElementById('viewport')!;
 const feedEl = document.getElementById('feed')!;
@@ -181,7 +183,9 @@ const candidateReviewQuery = query.get('candidateReview');
 const candidateReviewReleaseId = candidateReviewReleaseIdFromParam(routedStartParam)
   || candidateReviewReleaseIdFromParam(candidateReviewQuery ? `pr_${candidateReviewQuery}` : null);
 
-if (candidateFeedRequested) {
+if (missionDemoLaunch) {
+  void import('./mission-demo').then((module) => module.mountMissionDemo());
+} else if (candidateFeedRequested) {
   void boot();
 } else if (candidateReviewReleaseId) {
   // READY deep-link: resolve only this server-owned immutable release. This
@@ -202,7 +206,7 @@ if (candidateFeedRequested) {
 // right on screen (no desktop console in Telegram).
 // Debug panel lives on the feed bar (left of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
-if (!candidateFeedRequested && !candidateReviewReleaseId && !labAuthLaunch
+if (!missionDemoLaunch && !candidateFeedRequested && !candidateReviewReleaseId && !labAuthLaunch
   && (query.get('diag') === '1' || routedStartParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
 }

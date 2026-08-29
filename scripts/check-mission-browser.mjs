@@ -14,6 +14,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
+import {
+  MISSION_DEMO_CONTRIBUTION,
+  missionDemoCaseWire,
+} from '../src/mission-demo-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const buildRoot = mkdtempSync(path.join(tmpdir(), 'mission-browser-'));
@@ -58,152 +62,14 @@ const backend = {
   dailyReceipt: null,
 };
 
-const CONTRIBUTION = {
-  schema: 'mission.contribution-receipt.v1',
-  seq: 7,
-  userId: 79123,
-  source: 'daily',
-  sourceRef: QUEST_ID,
-  idempotencyKey: `mcd:79123:2026-08-01:${QUEST_ID}`,
-  amount: 1,
-  weightsVersion: 'mission-weights.v1',
-  weightsDigest: 'a'.repeat(64),
-  allocations: [{ caseId: 'case-2', contractVersion: 'v1', amount: 1 }],
-  openedGiftSteps: [{
-    caseId: 'case-2', contractVersion: 'v1', stepIndex: 1,
-    thresholdTokens: 5, amountCents: 1_000, progressAtOpen: 5,
-  }],
-  unlocked: null,
-  bar: {
-    caseId: 'case-2', contractVersion: 'v1', progress: 5,
-    tokenGoal: 50, nextStepThreshold: 50,
-  },
-};
-
-/**
- * EXACT wire, copied from swipe-backend `b63b26e`
- * (`tests/test_mission_migration_postgres.py:FUNDING_POLICY`, the constants in
- * `app/mission_contracts.py`). `mission_api._contract_view` returns
- * `dict(policy.document)` with no adaptation, so what the client receives is
- * these bytes.
- *
- * The schema is CLOSED and executable: every money-bearing field is an enum with
- * exactly one legal value naming the behaviour the runtime implements. Keeping a
- * hand-written prose copy here is what let the client's «contract in one tap»
- * drift out of the wire unnoticed — so this object, and the assertion that every
- * one of its keys is rendered, are the anti-drift pair.
- */
-const FUNDING_POLICY_DOCUMENT = {
-  schema: 'mission.funding-policy.v2',
-  currency: 'EUR',
-  rounding: 'declared-cents',
-  giftFormula: 'guaranteed-plus-opened-steps-v1',
-  stepRule: 'prefunded-reserved-at-ready-open-once-v1',
-  snapshotRule: 'ledger-seq-alloc-cutoff-v1',
-  poolConsumption: 'eligible-ledger-fifo-by-seq-v1',
-  eligiblePool: { sources: ['seed', 'revenue_share'] },
-};
-
-const caseView = () => ({
-  schema: 'mission.case-view.v1',
-  activeCase: {
-    caseId: 'case-2',
-    contractVersion: 'v1',
-    bar: {
-      progress: backend.barProgress,
-      tokenGoal: 50,
-      nextStepThreshold: backend.barProgress < 5 ? 5 : backend.barProgress < 50 ? 50 : null,
-    },
-    money: {
-      currency: 'EUR',
-      communityTokens: backend.barProgress,
-      guaranteedCents: 10_000,
-      ladderTotalCents: 12_000,
-      collectedCents: backend.barProgress < 5 ? 10_000 : backend.barProgress < 50 ? 11_000 : 12_000,
-      deliveredCents: 0,
-    },
-    giftLadder: [
-      { stepIndex: 0, thresholdTokens: 0, amountCents: 10_000, state: 'guaranteed', openingReceipt: null },
-      {
-        stepIndex: 1, thresholdTokens: 5, amountCents: 1_000,
-        state: backend.barProgress < 5 ? 'reserved' : 'opened',
-        openingReceipt: backend.barProgress < 5 ? null : { contributionSeq: 7 },
-      },
-      {
-        stepIndex: 2, thresholdTokens: 50, amountCents: 1_000,
-        state: backend.barProgress < 50 ? 'reserved' : 'opened',
-        openingReceipt: null,
-      },
-    ],
-    contract: {
-      caseId: 'case-2',
-      contractVersion: 'v1',
-      contractDigest: 'b'.repeat(64),
-      document: {
-        schema: 'mission.case-contract.v2',
-        caseId: 'case-2',
-        contractVersion: 'v1',
-        recipient: 'Приют «Лапа»',
-        needKind: 'scalable',
-        guaranteedDeliverable: '10 кг корма',
-        stretchDeliverables: [],
-        rolloverRule: 'остаток переходит в следующий кейс',
-        confirmationKind: 'photo_report',
-        currency: 'EUR',
-        guaranteedCents: 10_000,
-        confirmedNeedCents: 50_000,
-        stretchCapCents: 20_000,
-        tokenGoal: 50,
-        giftLadder: [
-          { stepIndex: 0, thresholdTokens: 0, amountCents: 10_000 },
-          { stepIndex: 1, thresholdTokens: 5, amountCents: 1_000 },
-          { stepIndex: 2, thresholdTokens: 50, amountCents: 1_000 },
-        ],
-        ladderTotalCents: 12_000,
-        // Executable since backend R1/F2: UNLOCK is refused before this instant.
-        unlockCutoffAt: '2026-09-01T00:00:00+00:00',
-        latestFulfillmentAt: '2026-09-15T00:00:00+00:00',
-        queuePosition: 1,
-        fundingPolicy: { version: 'mission-funding.v2', digest: 'c'.repeat(64) },
-      },
-      fundingPolicy: {
-        version: 'mission-funding.v2',
-        digest: 'c'.repeat(64),
-        document: FUNDING_POLICY_DOCUMENT,
-      },
-    },
-  },
-  myContribution: { caseTokens: backend.caseTokens, totalTokens: backend.caseTokens },
-  lastUnlocked: backend.unlockedSeq === null ? null : {
-    eventSeq: backend.unlockedSeq,
-    caseId: 'case-1',
-    contractVersion: 'v1',
-    occurredAt: '2026-08-01T10:00:00+00:00',
-    receiptDigest: 'd'.repeat(64),
-    receipt: {
-      guaranteedCents: 10_000,
-      giftTotalCents: 12_000,
-      releasedUnopenedCents: 0,
-      progress: 50,
-      tokenGoal: 50,
-    },
-  },
-  lastFulfilled: backend.fulfilledSeq === null ? null : {
-    eventSeq: backend.fulfilledSeq,
-    caseId: 'case-1',
-    contractVersion: 'v1',
-    occurredAt: '2026-08-02T10:00:00+00:00',
-    receiptDigest: 'e'.repeat(64),
-    receipt: { giftTotalCents: 12_000 },
-    transferReceipt: {
-      amountCents: 12_000,
-      currency: 'EUR',
-      transferDate: '2026-08-02',
-      recipient: 'Приют «Лапа»',
-      transferReference: 'internal-do-not-render',
-    },
-  },
+const CONTRIBUTION = MISSION_DEMO_CONTRIBUTION;
+const caseView = () => missionDemoCaseWire({
+  progress: backend.barProgress,
+  caseTokens: backend.caseTokens,
+  unlockedSeq: backend.unlockedSeq,
+  fulfilledSeq: backend.fulfilledSeq,
 });
+const FUNDING_POLICY_DOCUMENT = caseView().activeCase.contract.fundingPolicy.document;
 
 const dailyState = (withReceipt) => ({
   day: '2026-08-01',
