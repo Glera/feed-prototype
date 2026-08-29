@@ -733,7 +733,7 @@ try {
   await developerBadgeLines.nth(1).waitFor({ state: 'visible' });
   assert.deepEqual(
     await developerBadgeLines.allTextContents(),
-    ['Dev-лента', 'Только мне'],
+    ['Dev-лента', '● Только мне'],
     'adopted developer Feed lost the compact two-line badge label',
   );
   const adoptedFrame = page.locator('.page').first().locator('iframe');

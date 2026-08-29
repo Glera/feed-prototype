@@ -392,7 +392,7 @@ try {
   const badgeLabelLines = badge.locator('.dev-diff__badge-label-line');
   await badgeLabelLines.nth(0).waitFor({ state: 'visible' });
   await badgeLabelLines.nth(1).waitFor({ state: 'visible' });
-  assert.deepEqual(await badgeLabelLines.allTextContents(), ['Dev-лента', 'Только мне'],
+  assert.deepEqual(await badgeLabelLines.allTextContents(), ['Dev-лента', '● Только мне'],
     'the dev-feed badge lost its exact two-line label');
   const { labelBoxes, lineHeight, fontSize } = await badge.evaluate((node) => ({
     labelBoxes: [...node.querySelectorAll('.dev-diff__badge-label-line')].map((line) => {
@@ -586,6 +586,34 @@ try {
   assert.equal(projection.mechanics[0].adopted, true);
   assert.equal(projection.mechanics[0].status, 'Аудитория: ◉ Лично',
     'the Feed ignored the strict server-owned audience vocabulary');
+  await modulePage.evaluate(() => window.surface.update({
+    operatorSurfacesActive: true,
+    platform: { sourceSha: 'a'.repeat(40), stamp: 'stamp' },
+    reworks: [],
+    platformIntake: null,
+    vocabulary: {
+      schema: 'platform.operator-presentation-vocabulary.v1',
+      audience: {
+        labs: { label: 'Labs fixture', icon: 'L', tone: 'gray' },
+        exactUser: { label: 'Лично', icon: '◉', tone: 'blue' },
+        team: { label: 'Team fixture', icon: 'T', tone: 'purple' },
+        public: { label: 'Public fixture', icon: 'P', tone: 'green' },
+      },
+      workState: {
+        working: { label: 'Working fixture', icon: 'W', tone: 'amber' },
+        ready: { label: 'Ready fixture', icon: 'R', tone: 'cyan' },
+        needsHelp: { label: 'Help fixture', icon: 'H', tone: 'red' },
+        previousStopped: { label: 'Stopped fixture', icon: 'S', tone: 'neutral' },
+      },
+    },
+    adoption: null,
+    catalog: null,
+  }));
+  assert.deepEqual(
+    await modulePage.locator('.dev-diff__badge-label-line').allTextContents(),
+    ['Dev-лента', '◉ Лично'],
+    'the dev-feed badge did not refresh from the strict server audience vocabulary',
+  );
   assert.equal(projection.changed, 1);
   assert.equal(projection.empty, false);
 

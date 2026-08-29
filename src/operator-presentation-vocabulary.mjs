@@ -90,19 +90,19 @@ export function platformDevelopmentIntakePresentation(receipt, vocabulary) {
     key = 'needsHelp';
     summary = 'Не удалось завершить отмену.';
     blocker = `Код: ${receipt.cancellation.lastErrorCode || 'unknown'}`;
-  } else if (cancelling) {
-    summary = 'Отмена сохранена и синхронизируется.';
   } else if (terminalNeedsHelp) {
     key = 'needsHelp';
     summary = receipt.terminal.summary;
     blocker = receipt.terminal.blocker?.operatorAction || null;
-  } else if (terminalReady) {
-    key = 'ready';
-    summary = receipt.terminal.summary;
   } else if (deliveryFailed) {
     key = 'needsHelp';
     summary = 'Синхронизация остановлена; изменения не опубликованы.';
     blocker = 'Нужна помощь с конфигурацией инженерного контура.';
+  } else if (cancelling) {
+    summary = 'Отмена сохранена и синхронизируется.';
+  } else if (terminalReady) {
+    key = 'ready';
+    summary = receipt.terminal.summary;
   } else if (receipt.delivery?.status === 'confirmed') {
     summary = 'Инженерный тикет создан; изменения ещё не опубликованы.';
   }

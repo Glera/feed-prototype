@@ -148,6 +148,7 @@ function mechanicRows(input) {
 
 export function developerFeedDiffModel(input = {}) {
   const vocabulary = resolveOperatorPresentationVocabulary(input.vocabulary);
+  const exactUserAudience = operatorAudiencePresentation(vocabulary, 'exactUser');
   const platformInput = input.platform || {};
   const intake = platformIntakeRow(input.platformIntake, vocabulary);
   const mechanics = mechanicRows({ ...input, vocabulary });
@@ -161,6 +162,7 @@ export function developerFeedDiffModel(input = {}) {
     visible: input.operatorSurfacesActive === true || Boolean(input.adoption),
     changed,
     empty: changed === 0,
+    audience: exactUserAudience,
     platform: Object.freeze({
       status: PLATFORM_STATUS,
       identity: Object.freeze([
@@ -273,6 +275,14 @@ export function mountDeveloperFeedDiffSurface(host, options) {
 
   const renderBadge = () => {
     root.hidden = !model.visible;
+    badgeLabel.replaceChildren(
+      element('span', 'dev-diff__badge-label-line', 'Dev-лента'),
+      element(
+        'span',
+        'dev-diff__badge-label-line',
+        `${model.audience.icon} ${model.audience.label}`,
+      ),
+    );
     badgeCount.textContent = String(model.changed);
     badgeCount.hidden = model.changed === 0;
     badge.setAttribute('aria-expanded', open ? 'true' : 'false');
