@@ -399,6 +399,32 @@ const server = createServer(async (request, response) => {
         receiptDigest: '6'.repeat(64),
         audience: 'exact-user',
         publicRollout: false,
+      }, developerFeedCatalog: {
+        schema: 'feed.developer-catalog-diff.v1',
+        mechanic: 'sort',
+        variant: 'base',
+        available: true,
+        unavailableReason: null,
+        dev: {
+          entryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          kind: 'series',
+          state: 'canary',
+          stateVersion: 2,
+          seriesId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          levelSpecHash: null,
+          runtime: null,
+          stateChangedAt: '2026-08-27T12:00:00Z',
+        },
+        public: {
+          entryId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          kind: 'series',
+          state: 'published',
+          stateVersion: 4,
+          seriesId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          levelSpecHash: null,
+          runtime: null,
+          stateChangedAt: '2026-08-27T12:01:00Z',
+        },
       } } : {}),
     });
   }
@@ -741,6 +767,18 @@ try {
     ['Dev-лента', '● Только мне'],
     'adopted developer Feed lost the compact two-line badge label',
   );
+  await developerBadge.click();
+  const adoptedCatalogRow = page.locator('[data-testid="dev-diff-sheet"] [data-row="catalog"]');
+  await adoptedCatalogRow.waitFor({ state: 'visible' });
+  const adoptedCatalogText = await adoptedCatalogRow.innerText();
+  assert.match(adoptedCatalogText, /Только мне · canary/,
+    'adopted candidate boot dropped the read-only dev catalog state');
+  assert.match(adoptedCatalogText, /bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/,
+    'adopted candidate boot dropped the exact dev catalog identity');
+  assert.match(adoptedCatalogText, /dddddddd-dddd-4ddd-8ddd-dddddddddddd/,
+    'adopted candidate boot dropped the exact public catalog identity');
+  await page.keyboard.press('Escape');
+  await page.locator('[data-testid="dev-diff-sheet"]').waitFor({ state: 'hidden' });
   const adoptedFrame = page.locator('.page').first().locator('iframe');
   await adoptedFrame.waitFor({ state: 'attached' });
   assert.equal(new URL((await adoptedFrame.getAttribute('src')) || '', origin).pathname, sourceCandidatePath);

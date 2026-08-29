@@ -238,6 +238,8 @@ export function developerFeedDiffModel(input = {}) {
       catalogIdentity.push(identityLine(`${prefix} runtime`, shortDigest(
         entry.runtime.runtimeArtifactDigest,
       ), true));
+    } else {
+      catalogIdentity.push(identityLine(`${prefix} runtime`, 'не сопоставлен'));
     }
   };
   appendCatalogIdentity('dev', catalog?.dev);

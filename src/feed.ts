@@ -1170,6 +1170,13 @@ export class Feed {
       this.backendVersion = session.backend_version;
       this.renderVersionLabel();
     }
+    // The catalog diff is a server-owned, read-only operator projection.  It
+    // must survive adopted-candidate boot even though gameplay side effects
+    // below are intentionally suppressed for those immutable bytes.
+    this.developerFeedCatalog = validateDeveloperFeedCatalogDiff(
+      session.developerFeedCatalog,
+    );
+    this.refreshDeveloperFeedDiff();
     // An adopted immutable candidate is an authenticated operator surface, not
     // a public gameplay occurrence. Keep its server-owned controls available,
     // but never flush/credit results, missions, daily state, social state,
@@ -1181,10 +1188,6 @@ export class Feed {
     // watermark).
     applyMissionCapability(session.mission_dogfood);
     void refreshMissionCase();
-    this.developerFeedCatalog = validateDeveloperFeedCatalogDiff(
-      session.developerFeedCatalog,
-    );
-    this.refreshDeveloperFeedDiff();
     this.applyServerBalance(session.balance);
     if (typeof session.puzzles === 'number') this.applyServerPuzzles(session.puzzles);
     await this.syncDaily(false);

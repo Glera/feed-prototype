@@ -70,19 +70,19 @@ const sessionResponse = () => ({
   ...(developerFeedCatalog ? { developerFeedCatalog: structuredClone(developerFeedCatalog) } : {}),
 });
 
-const catalogEntry = ({ entryId, state, stateVersion, seriesId }) => ({
+const catalogEntry = ({ entryId, state, stateVersion, seriesId, runtime = undefined }) => ({
   entryId,
   kind: 'series',
   state,
   stateVersion,
   seriesId,
   levelSpecHash: null,
-  runtime: {
+  runtime: runtime === undefined ? {
     releaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     playableId: 'marble-sort-swipe',
     runtimeArtifactDigest: `sha256:${'a'.repeat(64)}`,
     sourceCommit: 'b'.repeat(40),
-  },
+  } : runtime,
   stateChangedAt: '2026-08-27T12:00:00Z',
 });
 
@@ -380,6 +380,7 @@ try {
       state: 'canary',
       stateVersion: 2,
       seriesId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      runtime: null,
     }),
     publicEntry: catalogEntry({
       entryId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
@@ -533,6 +534,8 @@ try {
     'the catalog row lost its exact dev entry identity');
   assert.match(catalogText, /dddddddd-dddd-4ddd-8ddd-dddddddddddd/,
     'the catalog row lost its exact public entry identity');
+  assert.match(catalogText, /dev runtime\s+не сопоставлен/,
+    'a catalog entry without a compatible runtime was hidden instead of shown honestly');
 
   // The read-only contract: no promotion control anywhere on this surface.
   assert.equal(await sheet.locator('text=Продвинуть').count(), 0,
