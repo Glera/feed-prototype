@@ -2,6 +2,24 @@
  * Synthetic Mission fixture shared by the browser acceptance and the focused
  * operator preview. These bytes use the same closed production wire parsed by
  * mission-core; there is deliberately no separate "demo" schema.
+ *
+ * WIRE PROVENANCE / ANTI-DRIFT CONTRACT
+ *
+ * The funding-policy and case shapes below were moved byte-for-byte from
+ * `scripts/check-mission-browser.mjs`, where they were copied from
+ * swipe-backend `b63b26e`:
+ *
+ * - `tests/test_mission_migration_postgres.py:FUNDING_POLICY`
+ * - the closed constants in `app/mission_contracts.py`
+ * - `mission_api._contract_view`, which returns `dict(policy.document)` with
+ *   no client adaptation.
+ *
+ * These are production-wire fixtures, not presentation copy. Do not rename,
+ * remove or rewrite their fields/enums to make the demo friendlier. The
+ * production Mission browser acceptance intentionally derives its key/value
+ * assertions from this object so every money-bearing closed-wire value is
+ * rendered. Presentation changes belong in `mission-ui.ts`; wire changes must
+ * originate in Backend authority and update both sides deliberately.
  */
 
 export const MISSION_DEMO_CONTRIBUTION = Object.freeze({
