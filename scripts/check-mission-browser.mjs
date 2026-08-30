@@ -282,6 +282,11 @@ try {
   backend.caseTokens = 3;
   await foreground();
   await contractSheet.waitFor({ state: 'visible' });
+  await page.waitForFunction(
+    () => document.activeElement?.classList.contains('mission-contract-sheet') === true,
+    null,
+    { timeout: 15_000 },
+  );
   assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true, 'refresh preserves the open contract');
   backend.caseTokens = 2;
   await foreground();
@@ -373,7 +378,7 @@ try {
   const ceremony = page.locator('.mission-ceremony--unlocked');
   await ceremony.waitFor({ state: 'visible', timeout: 15_000 });
   assert.equal(await ceremony.locator('.mission-ceremony__title').textContent(), 'Приют получает €120');
-  assert.equal(await ceremony.locator('.mission-ceremony__moment').textContent(), 'сразу · подарок открыт');
+  assert.equal(await ceremony.locator('.mission-ceremony__moment').count(), 0, 'the removed eyebrow must not return');
   assert.equal(await ceremony.locator('.mission-ceremony__paws').textContent(), '50 лапок');
   assert.deepEqual(await ceremony.locator('.mission-ceremony__breakdown').allTextContents(), [
     '€100 — гарантия платформы',
