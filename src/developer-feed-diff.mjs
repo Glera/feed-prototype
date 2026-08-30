@@ -27,8 +27,9 @@ import {
 const PLATFORM_STATUS = 'что живёт сейчас';
 const EMPTY_STATUS = 'Dev не отличается от публичного';
 const CATALOG_STATUS = 'данных пока нет';
-const CATALOG_DETAIL = 'Клиенту не отдаётся активный release/candidate каталога — '
-  + 'показывать нечего, пока это не станет server-owned проекцией.';
+const CATALOG_DETAIL = 'Для sort/base пока нет dev или public записи каталога.';
+const CATALOG_INVALID_STATUS = 'Проекция недоступна';
+const CATALOG_INVALID_DETAIL = 'Server-owned состояние каталога не прошло проверку.';
 
 const TONE_ORDER = { error: 0, ok: 1, warn: 2, neutral: 3 };
 
@@ -40,6 +41,78 @@ const toneForReworkState = (state) => {
 };
 
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SHA = /^[0-9a-f]{40}$/;
+const HASH = /^[0-9a-f]{64}$/;
+const DIGEST = /^sha256:[0-9a-f]{64}$/;
+const PLAYABLE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+const exactObject = (value, keys) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+};
+
+const validDateTime = (value) => typeof value === 'string'
+  && DATE_TIME.test(value) && Number.isFinite(Date.parse(value));
+
+const validateCatalogRuntime = (value) => {
+  if (!exactObject(value, [
+    'releaseId', 'playableId', 'runtimeArtifactDigest', 'sourceCommit',
+  ])) return null;
+  if (!UUID.test(value.releaseId) || !PLAYABLE_ID.test(value.playableId)
+    || !DIGEST.test(value.runtimeArtifactDigest) || !SHA.test(value.sourceCommit)) return null;
+  return Object.freeze({ ...value });
+};
+
+const validateCatalogEntry = (value) => {
+  if (!exactObject(value, [
+    'entryId', 'kind', 'state', 'stateVersion', 'seriesId', 'levelSpecHash',
+    'runtime', 'stateChangedAt',
+  ])) return null;
+  if (!UUID.test(value.entryId)
+    || !['level', 'series', 'theme'].includes(value.kind)
+    || !['candidate', 'canary', 'paused', 'published'].includes(value.state)
+    || !Number.isSafeInteger(value.stateVersion) || value.stateVersion < 0
+    || !validDateTime(value.stateChangedAt)) return null;
+  const seriesId = value.seriesId === null ? null
+    : typeof value.seriesId === 'string' && UUID.test(value.seriesId) ? value.seriesId : undefined;
+  const levelSpecHash = value.levelSpecHash === null ? null
+    : typeof value.levelSpecHash === 'string' && HASH.test(value.levelSpecHash)
+      ? value.levelSpecHash : undefined;
+  if (seriesId === undefined || levelSpecHash === undefined) return null;
+  if ((value.kind === 'series' && (seriesId === null || levelSpecHash !== null))
+    || (value.kind === 'level' && (levelSpecHash === null || seriesId !== null))
+    || (value.kind === 'theme' && (seriesId !== null || levelSpecHash !== null))) return null;
+  const runtime = value.runtime === null ? null : validateCatalogRuntime(value.runtime);
+  if (value.runtime !== null && runtime === null) return null;
+  return Object.freeze({ ...value, runtime });
+};
+
+/** Strict fail-closed validator for the optional server-owned `/session` projection. */
+export function validateDeveloperFeedCatalogDiff(value) {
+  if (!exactObject(value, [
+    'schema', 'mechanic', 'variant', 'available', 'unavailableReason', 'dev', 'public',
+  ])) return null;
+  if (value.schema !== 'feed.developer-catalog-diff.v1'
+    || value.mechanic !== 'sort' || value.variant !== 'base'
+    || typeof value.available !== 'boolean'
+    || ![null, 'catalog_entry_unavailable', 'catalog_projection_invalid']
+      .includes(value.unavailableReason)) return null;
+  const dev = value.dev === null ? null : validateCatalogEntry(value.dev);
+  const publicEntry = value.public === null ? null : validateCatalogEntry(value.public);
+  if ((value.dev !== null && dev === null) || (value.public !== null && publicEntry === null)) return null;
+  const hasRow = dev !== null || publicEntry !== null;
+  if (value.available !== hasRow
+    || value.available !== (value.unavailableReason === null)
+    || dev?.state === 'published'
+    || (publicEntry !== null && publicEntry.state !== 'published')) return null;
+  return Object.freeze({ ...value, dev, public: publicEntry });
+}
 
 /** `abcdef…` → `abcdef012345`; `sha256:abc…` keeps its algorithm prefix. */
 const shortDigest = (value) => {
@@ -152,12 +225,31 @@ export function developerFeedDiffModel(input = {}) {
   const platformInput = input.platform || {};
   const intake = platformIntakeRow(input.platformIntake, vocabulary);
   const mechanics = mechanicRows({ ...input, vocabulary });
-  const catalogIdentity = Array.isArray(input.catalog?.activeRelease)
-    ? input.catalog.activeRelease.filter(Boolean)
-    : [];
+  const catalog = validateDeveloperFeedCatalogDiff(input.catalog);
+  const catalogIdentity = [];
+  const appendCatalogIdentity = (prefix, entry) => {
+    if (!entry) return;
+    catalogIdentity.push(identityLine(`${prefix} entry`, entry.entryId, true));
+    catalogIdentity.push(identityLine(`${prefix} state`, `${entry.state} · v${entry.stateVersion}`));
+    catalogIdentity.push(identityLine(
+      `${prefix} content`, entry.seriesId || entry.levelSpecHash || entry.kind, true,
+    ));
+    if (entry.runtime) {
+      catalogIdentity.push(identityLine(`${prefix} runtime`, shortDigest(
+        entry.runtime.runtimeArtifactDigest,
+      ), true));
+    } else {
+      catalogIdentity.push(identityLine(`${prefix} runtime`, 'не сопоставлен'));
+    }
+  };
+  appendCatalogIdentity('dev', catalog?.dev);
+  appendCatalogIdentity('public', catalog?.public);
+  const catalogChanged = catalog?.dev ? 1 : 0;
   const changed = mechanics.filter((row) => ![
     'superseded', 'capability_gap_root_covered', 'obsolete',
-  ].includes(row.state)).length + (intake ? 1 : 0);
+  ].includes(row.state)).length + (intake ? 1 : 0) + catalogChanged;
+  const catalogInvalid = input.catalog != null && catalog === null;
+  const catalogUnavailable = catalog?.unavailableReason === 'catalog_projection_invalid';
   return Object.freeze({
     visible: input.operatorSurfacesActive === true || Boolean(input.adoption),
     changed,
@@ -173,9 +265,14 @@ export function developerFeedDiffModel(input = {}) {
     }),
     mechanics: Object.freeze(mechanics),
     catalog: Object.freeze({
-      status: catalogIdentity.length ? '' : CATALOG_STATUS,
-      detail: catalogIdentity.length ? '' : CATALOG_DETAIL,
-      identity: Object.freeze(catalogIdentity),
+      status: catalogInvalid || catalogUnavailable
+        ? CATALOG_INVALID_STATUS
+        : catalog?.dev ? `Только мне · ${catalog.dev.state}`
+          : catalog?.public ? 'Доступно всем' : CATALOG_STATUS,
+      detail: catalogInvalid || catalogUnavailable
+        ? CATALOG_INVALID_DETAIL
+        : catalogIdentity.length ? '' : CATALOG_DETAIL,
+      identity: Object.freeze(catalogIdentity.filter(Boolean)),
     }),
   });
 }

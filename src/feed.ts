@@ -59,6 +59,7 @@ import {
   type CatalogRunTicketViewV2, type CatalogRunTicketViewV3,
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
   type SessionResp,
+  type DeveloperFeedCatalogDiffV1,
   type OperatorPlayableReworkQueueItemV1,
   type OperatorPlayableReworkResponseV1,
   type OperatorPlayableEscalationDecisionV1,
@@ -212,6 +213,7 @@ import {
 } from './operator-development-intakes.mjs';
 import {
   mountDeveloperFeedDiffSurface,
+  validateDeveloperFeedCatalogDiff,
   type DeveloperFeedDiffInput,
   type DeveloperFeedDiffSurface,
 } from './developer-feed-diff.mjs';
@@ -788,6 +790,7 @@ export class Feed {
   // a projection of state this class already holds (rework queue, platform
   // intake receipt, adopted candidate) — it never issues a request of its own.
   private developerFeedDiffSurface: DeveloperFeedDiffSurface | null = null;
+  private developerFeedCatalog: Readonly<DeveloperFeedCatalogDiffV1> | null = null;
   private platformDevelopmentIntakeControl: PlatformDevelopmentIntakeControl | null = null;
   private platformDevelopmentIntakeLatest: PlatformDevelopmentIntakeResponseV1 | null = null;
   private platformDevelopmentIntakeSyncEpoch = 0;
@@ -1167,6 +1170,13 @@ export class Feed {
       this.backendVersion = session.backend_version;
       this.renderVersionLabel();
     }
+    // The catalog diff is a server-owned, read-only operator projection.  It
+    // must survive adopted-candidate boot even though gameplay side effects
+    // below are intentionally suppressed for those immutable bytes.
+    this.developerFeedCatalog = validateDeveloperFeedCatalogDiff(
+      session.developerFeedCatalog,
+    );
+    this.refreshDeveloperFeedDiff();
     // An adopted immutable candidate is an authenticated operator surface, not
     // a public gameplay occurrence. Keep its server-owned controls available,
     // but never flush/credit results, missions, daily state, social state,
@@ -2830,9 +2840,7 @@ export class Feed {
         : null,
       adoption: overlay,
       vocabulary: this.operatorPresentationVocabulary,
-      // No operator-readable endpoint exposes catalog active-release/candidate
-      // identity to this client, so the row stays honestly empty here.
-      catalog: null,
+      catalog: this.developerFeedCatalog,
     };
   }
 

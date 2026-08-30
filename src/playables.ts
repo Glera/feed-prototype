@@ -41,6 +41,7 @@ export interface CandidatePlayableOverlay {
   candidateArtifactDigest: string;
   reviewBindingDigest: string;
   sourceCommit?: string;
+  runtimeArtifactDigest?: string;
 }
 let CANDIDATE_OVERLAY: CandidatePlayableOverlay | null = null;
 
@@ -81,6 +82,26 @@ export interface MechanicReleaseIdentity {
 }
 
 /** Exact static identity shown in the operator-only mobile rework form. */
+export function publicMechanicReleaseIdentity(id: string): MechanicReleaseIdentity | null {
+  const entry = manifestEntry(id);
+  if (!entry || !/^sha256:[0-9a-f]{64}$/.test(entry.runtimeArtifactDigest || '')) return null;
+  return Object.freeze({
+    version: entry.version,
+    sourceCommit: /^[0-9a-f]{40}$/.test(entry.sourceCommit || '') ? entry.sourceCommit! : null,
+    runtimeArtifactDigest: entry.runtimeArtifactDigest!,
+  });
+}
+
+/** True only when the immutable operator candidate is already the public bytes. */
+export function candidateMatchesPublicManifest(candidate: CandidatePlayableOverlay): boolean {
+  if (!candidate || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(candidate.playableId)
+    || !/^[0-9a-f]{64}$/.test(candidate.candidateArtifactDigest)
+    || !/^sha256:[0-9a-f]{64}$/.test(candidate.runtimeArtifactDigest || '')) return false;
+  return publicMechanicReleaseIdentity(candidate.playableId)?.runtimeArtifactDigest
+    === candidate.runtimeArtifactDigest;
+}
+
+/** Exact static identity shown in the operator-only mobile rework form. */
 export function mechanicReleaseIdentity(id: string): MechanicReleaseIdentity | null {
   const candidate = candidateOverlayFor(id);
   if (candidate) {
@@ -89,16 +110,12 @@ export function mechanicReleaseIdentity(id: string): MechanicReleaseIdentity | n
     return Object.freeze({
       version: candidate.candidateArtifactDigest.slice(0, 12),
       sourceCommit: candidate.sourceCommit!,
-      runtimeArtifactDigest: `sha256:${candidate.candidateArtifactDigest}`,
+      runtimeArtifactDigest: /^sha256:[0-9a-f]{64}$/.test(candidate.runtimeArtifactDigest || '')
+        ? candidate.runtimeArtifactDigest!
+        : `sha256:${candidate.candidateArtifactDigest}`,
     });
   }
-  const entry = manifestEntry(id);
-  if (!entry || !/^sha256:[0-9a-f]{64}$/.test(entry.runtimeArtifactDigest || '')) return null;
-  return Object.freeze({
-    version: entry.version,
-    sourceCommit: /^[0-9a-f]{40}$/.test(entry.sourceCommit || '') ? entry.sourceCommit! : null,
-    runtimeArtifactDigest: entry.runtimeArtifactDigest!,
-  });
+  return publicMechanicReleaseIdentity(id);
 }
 
 /** True only when this exact deployment manifest can mount the playable. */

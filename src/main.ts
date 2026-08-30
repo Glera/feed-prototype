@@ -1,6 +1,10 @@
 import './styles.css';
 import { createFeed } from './feed';
-import { setCandidatePlayableOverlay, setMechanicVersions } from './playables';
+import {
+  candidateMatchesPublicManifest,
+  setCandidatePlayableOverlay,
+  setMechanicVersions,
+} from './playables';
 import { initTelegram, getInitData, getStartParam, hasTelegramHostContext, hasTelegramLaunchUserIdentity, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam, setTelegramReadOnlyPreviewMode } from './telegram';
 import { initTelemetry, setTelemetryReadOnlyPreviewMode } from './telemetry';
 import { apiGetChallenge, apiPublicIsland, apiSessionRequired, apiSourcePreviewSessionRequired, type ChallengeView, type PublicIslandView, type SessionResp } from './api';
@@ -143,8 +147,15 @@ async function boot(): Promise<void> {
     if (initial !== timeout && initial?.developerFeedAdoption) {
       try {
         const adopted = await resolveDeveloperFeedAdoption(initial.developerFeedAdoption);
-        setCandidatePlayableOverlay(adopted);
-        setTelemetryReadOnlyPreviewMode(true);
+        if (candidateMatchesPublicManifest(adopted)) {
+          // The exact adopted bytes are public now.  Keeping the operator
+          // overlay would falsely present a dev-only audience and suppress
+          // ordinary telemetry after publication.
+          setCandidatePlayableOverlay(null);
+        } else {
+          setCandidatePlayableOverlay(adopted);
+          setTelemetryReadOnlyPreviewMode(true);
+        }
       } catch { /* invalid/tampered dev adoption fails closed to the public manifest */ }
     }
   }

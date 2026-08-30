@@ -37,6 +37,7 @@ const reviewBindingDigest = createHash('sha256').update(bindingBytes).digest('he
 const sourceReleaseId = '9c558cf1-239d-5aa5-9dc9-0cfdf6cd37fe';
 const sourceCandidatePath = `/playable-previews/${sourceReleaseId}/${playableId}.html`;
 const sourceCandidateArtifactDigest = '8'.repeat(64);
+const sourceRuntimeArtifactDigest = `sha256:${'7'.repeat(64)}`;
 const sourceBinding = {
   schema: 'feed.playable-release-review-binding.v1',
   releaseId: sourceReleaseId,
@@ -120,6 +121,7 @@ let adoptionPosts = 0;
 const playableReworkPosts = [];
 let adopted = false;
 let adoptionAuthorizationState = 'approved';
+let adoptedArtifactIsPublic = false;
 let origin = '';
 
 const candidateOverlayPlayableIds = [
@@ -314,9 +316,11 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname === '/versions.json') return json(response, {
     'solitaire-v1-swipe': {
-      version: 'live-solitaire',
-      sourceCommit: '5'.repeat(40),
-      runtimeArtifactDigest: `sha256:${'5'.repeat(64)}`,
+      version: adoptedArtifactIsPublic ? sourceCandidateArtifactDigest.slice(0, 12) : 'live-solitaire',
+      sourceCommit: (adoptedArtifactIsPublic ? '7' : '5').repeat(40),
+      runtimeArtifactDigest: adoptedArtifactIsPublic
+        ? sourceRuntimeArtifactDigest
+        : `sha256:${'5'.repeat(64)}`,
     },
     'merge-locked-v1-swipe': {
       version: 'live-merge',
@@ -389,11 +393,38 @@ const server = createServer(async (request, response) => {
         playableId,
         candidatePath: sourceCandidatePath,
         candidateArtifactDigest: sourceCandidateArtifactDigest,
+        runtimeArtifactDigest: sourceRuntimeArtifactDigest,
         reviewBindingDigest: sourceReviewBindingDigest,
         sourceCommit: '7'.repeat(40),
         receiptDigest: '6'.repeat(64),
         audience: 'exact-user',
         publicRollout: false,
+      }, developerFeedCatalog: {
+        schema: 'feed.developer-catalog-diff.v1',
+        mechanic: 'sort',
+        variant: 'base',
+        available: true,
+        unavailableReason: null,
+        dev: {
+          entryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          kind: 'series',
+          state: 'canary',
+          stateVersion: 2,
+          seriesId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          levelSpecHash: null,
+          runtime: null,
+          stateChangedAt: '2026-08-27T12:00:00Z',
+        },
+        public: {
+          entryId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          kind: 'series',
+          state: 'published',
+          stateVersion: 4,
+          seriesId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          levelSpecHash: null,
+          runtime: null,
+          stateChangedAt: '2026-08-27T12:01:00Z',
+        },
       } } : {}),
     });
   }
@@ -736,6 +767,18 @@ try {
     ['Dev-лента', '● Только мне'],
     'adopted developer Feed lost the compact two-line badge label',
   );
+  await developerBadge.click();
+  const adoptedCatalogRow = page.locator('[data-testid="dev-diff-sheet"] [data-row="catalog"]');
+  await adoptedCatalogRow.waitFor({ state: 'visible' });
+  const adoptedCatalogText = await adoptedCatalogRow.innerText();
+  assert.match(adoptedCatalogText, /Только мне · canary/,
+    'adopted candidate boot dropped the read-only dev catalog state');
+  assert.match(adoptedCatalogText, /bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/,
+    'adopted candidate boot dropped the exact dev catalog identity');
+  assert.match(adoptedCatalogText, /dddddddd-dddd-4ddd-8ddd-dddddddddddd/,
+    'adopted candidate boot dropped the exact public catalog identity');
+  await page.keyboard.press('Escape');
+  await page.locator('[data-testid="dev-diff-sheet"]').waitFor({ state: 'hidden' });
   const adoptedFrame = page.locator('.page').first().locator('iframe');
   await adoptedFrame.waitFor({ state: 'attached' });
   assert.equal(new URL((await adoptedFrame.getAttribute('src')) || '', origin).pathname, sourceCandidatePath);
@@ -772,7 +815,7 @@ try {
   assert.equal(playableReworkPosts[0].mappingId, rosterEntries[1].builtinMappingId);
   assert.equal(playableReworkPosts[0].rosterActivationId, roster.activationId);
   assert.equal(playableReworkPosts[0].runtime.version, sourceCandidateArtifactDigest.slice(0, 12));
-  assert.equal(playableReworkPosts[0].runtime.artifactDigest, `sha256:${sourceCandidateArtifactDigest}`);
+  assert.equal(playableReworkPosts[0].runtime.artifactDigest, sourceRuntimeArtifactDigest);
   assert.equal(playableReworkPosts[0].runtime.sourceCommit, '7'.repeat(40));
   assert.notEqual(playableReworkPosts[0].runtime.artifactDigest, `sha256:${'5'.repeat(64)}`,
     'adopted mechanic rework fell back to the public manifest runtime');
@@ -833,6 +876,33 @@ try {
   assert.equal(adoptionPosts, 1, 'normal dev feed replayed the adoption mutation');
   assert.equal(await page.getByText('Кандидат — не опубликовано', { exact: true }).count(), 0,
     'one-shot handoff restored the physical Telegram candidate start_param');
+
+  // Once the immutable candidate runtime identity is the public manifest
+  // runtime identity, the
+  // authenticated adoption is historical. It must not keep mounting a dev-only
+  // path or suppressing ordinary public gameplay behavior.
+  adoptedArtifactIsPublic = true;
+  const publishedContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await publishedContext.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: telegramSdk,
+  }));
+  await publishedContext.addInitScript((snapshot) => {
+    if (window === window.top) {
+      localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
+    }
+  }, roster);
+  const publishedPage = await publishedContext.newPage();
+  await publishedPage.goto(origin, { waitUntil: 'domcontentloaded' });
+  await advanceToPlayable(publishedPage, playableId);
+  const publicFrame = publishedPage.locator('.page--in-viewport iframe').first();
+  await publicFrame.waitFor({ state: 'attached' });
+  assert.equal(new URL((await publicFrame.getAttribute('src')) || '', origin).pathname,
+    `/${playableId}.html`, 'published candidate stayed mounted from its preview path');
+  assert.equal(await publishedPage.locator('.game--candidate-overlay').count(), 0,
+    'published candidate remained presented as dev-only adoption');
+  await publishedContext.close();
 
   for (const malformed of [
     candidateStartParam.slice(0, -1),

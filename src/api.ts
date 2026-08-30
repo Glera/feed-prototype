@@ -327,6 +327,7 @@ export interface SessionResp {
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
   developerFeedAdoption?: DeveloperFeedAdoptionV1;
+  developerFeedCatalog?: DeveloperFeedCatalogDiffV1;
   /** Mission slice v0: present (true) only for an enrolled dogfood account while
    *  `ENABLE_MISSION_READ` is on. Absent is how every other payload stays
    *  byte-identical to the pre-mission build. */
@@ -343,12 +344,41 @@ export interface OperatorPresentationVocabularyV1 {
   }>;
 }
 
+export interface DeveloperFeedCatalogRuntimeV1 {
+  releaseId: string;
+  playableId: string;
+  runtimeArtifactDigest: string;
+  sourceCommit: string;
+}
+
+export interface DeveloperFeedCatalogEntryV1 {
+  entryId: string;
+  kind: 'level' | 'series' | 'theme';
+  state: 'candidate' | 'canary' | 'paused' | 'published';
+  stateVersion: number;
+  seriesId: string | null;
+  levelSpecHash: string | null;
+  runtime: DeveloperFeedCatalogRuntimeV1 | null;
+  stateChangedAt: string;
+}
+
+export interface DeveloperFeedCatalogDiffV1 {
+  schema: 'feed.developer-catalog-diff.v1';
+  mechanic: 'sort';
+  variant: 'base';
+  available: boolean;
+  unavailableReason: 'catalog_entry_unavailable' | 'catalog_projection_invalid' | null;
+  dev: DeveloperFeedCatalogEntryV1 | null;
+  public: DeveloperFeedCatalogEntryV1 | null;
+}
+
 export interface DeveloperFeedAdoptionV1 {
   schema: 'feed.playable-source-preview-adoption.v1';
   releaseId: string;
   playableId: string;
   candidatePath: string;
   candidateArtifactDigest: string;
+  runtimeArtifactDigest: string;
   reviewBindingDigest: string;
   sourceCommit: string;
   receiptDigest: string;
