@@ -1,12 +1,12 @@
 /**
- * Browser contract for the read-only «Изменения dev-ленты» inventory
- * (selective promotion v1, slice 1).
+ * Browser contract for «Изменения dev-ленты» and its exact direct-public
+ * confirmation (selective promotion v1).
  *
  * Two passes:
  *  A. The real production build against a fake backend — the badge exists only
  *     for an operator-capable session, tapping it opens the sheet, and every
- *     row is a projection of data the client already fetched. No request is
- *     issued by the sheet itself, and it carries no promotion control.
+ *     row is a server-owned projection.  Ineligible rows have no mutation;
+ *     one exact prepared candidate exposes the content-bound publication flow.
  *  B. The module served as its own ES graph — destroy() must drop every
  *     listener it added, including the document-level Escape handler.
  */
@@ -41,11 +41,20 @@ let developerFeedCatalog = null;
 let reworkItems = [];
 let intakeItems = [];
 const reworkListRequests = [];
+const promotionPrepareRequests = [];
+const promotionApplyRequests = [];
+let failNextPostPromotionSession = false;
 
 const json = (response, value, status = 200) => {
   response.statusCode = status;
   response.setHeader('content-type', 'application/json');
   response.end(JSON.stringify(value));
+};
+
+const readJson = async (request) => {
+  let raw = '';
+  for await (const chunk of request) raw += chunk;
+  return JSON.parse(raw);
 };
 
 const sessionResponse = () => ({
@@ -201,10 +210,13 @@ document.removeEventListener = (type, handler, options) => {
   return remove(type, handler, options);
 };
 const { mountDeveloperFeedDiffSurface, developerFeedDiffModel,
-  validateDeveloperFeedCatalogDiff } =
+  validateDeveloperFeedCatalogDiff, validateCatalogDirectPromotionPrepared,
+  validateCatalogDirectPromotionResult } =
   await import('/developer-feed-diff.mjs');
 window.developerFeedDiffModel = developerFeedDiffModel;
 window.validateDeveloperFeedCatalogDiff = validateDeveloperFeedCatalogDiff;
+window.validateCatalogDirectPromotionPrepared = validateCatalogDirectPromotionPrepared;
+window.validateCatalogDirectPromotionResult = validateCatalogDirectPromotionResult;
 window.shown = [];
 window.surface = mountDeveloperFeedDiffSurface(document.body, {
   input: {
@@ -225,7 +237,65 @@ const server = createServer((request, response) => {
     const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
     if (request.method === 'POST' && url.pathname === '/api/session') {
       request.resume();
+      if (failNextPostPromotionSession) {
+        failNextPostPromotionSession = false;
+        return json(response, { code: 'fixture_session_refresh_failed' }, 503);
+      }
       return json(response, sessionResponse());
+    }
+    if (request.method === 'POST'
+      && url.pathname === '/api/catalog/operator-promotion/prepare') {
+      void readJson(request).then((body) => {
+        promotionPrepareRequests.push(body);
+        const candidate = developerFeedCatalog?.dev;
+        if (!candidate || body.entryId !== candidate.entryId
+          || body.expectedStateVersion !== candidate.stateVersion) {
+          return json(response, { code: 'catalog_state_conflict' }, 409);
+        }
+        return json(response, {
+          schema: 'catalog.direct-promotion.prepared.v1',
+          operationId: body.operationId,
+          action: 'publish',
+          entryId: candidate.entryId,
+          expectedStateVersion: candidate.stateVersion,
+          fromState: 'candidate',
+          toState: 'published',
+          fromAudience: 'exactUser',
+          toAudience: 'public',
+          runtimeArtifactDigest: candidate.runtime.runtimeArtifactDigest,
+          confirmationCode: 'ABC123',
+        });
+      }).catch((error) => json(response, { detail: String(error) }, 500));
+      return;
+    }
+    if (request.method === 'POST'
+      && url.pathname === '/api/catalog/operator-promotion/apply') {
+      void readJson(request).then((body) => {
+        promotionApplyRequests.push(body);
+        const candidate = developerFeedCatalog?.dev;
+        if (!candidate || body.confirmationCode !== 'ABC123') {
+          return json(response, { code: 'promotion_confirmation_code_mismatch' }, 409);
+        }
+        developerFeedCatalog = catalogDiff({
+          publicEntry: {
+            ...candidate,
+            state: 'published',
+            stateVersion: candidate.stateVersion + 1,
+            stateChangedAt: '2026-08-30T12:01:00Z',
+          },
+        });
+        failNextPostPromotionSession = true;
+        return json(response, {
+          schema: 'catalog.direct-promotion.result.v1',
+          operationId: body.operationId,
+          entryId: candidate.entryId,
+          fromState: 'candidate',
+          toState: 'published',
+          stateVersion: candidate.stateVersion + 1,
+          replayed: false,
+        });
+      }).catch((error) => json(response, { detail: String(error) }, 500));
+      return;
     }
     if (request.method === 'GET' && url.pathname === '/api/operator-playable-reworks') {
       reworkListRequests.push(Date.now());
@@ -537,9 +607,9 @@ try {
   assert.match(catalogText, /dev runtime\s+не сопоставлен/,
     'a catalog entry without a compatible runtime was hidden instead of shown honestly');
 
-  // The read-only contract: no promotion control anywhere on this surface.
-  assert.equal(await sheet.locator('text=Продвинуть').count(), 0,
-    'slice 1 must not carry a promotion control');
+  // This canary has no compatible runtime and therefore no direct-public control.
+  assert.equal(await sheet.locator('text=Сделать доступным всем').count(), 0,
+    'an ineligible canary received a direct-public control');
   assert.equal(await sheet.locator('input, textarea, select').count(), 0,
     'the read-only inventory must contain no focusable form field');
 
@@ -583,7 +653,90 @@ try {
   }
   await desktop.close();
 
-  // ── A4. Nothing in flight → the honest empty state. ─────────────────────
+  // ── A4. Exact candidate → content-bound code → refreshed public row. ─────
+  reworkItems = [];
+  intakeItems = [];
+  const directEntryId = 'abababab-abab-4bab-8bab-abababababab';
+  developerFeedCatalog = catalogDiff({
+    dev: catalogEntry({
+      entryId: directEntryId,
+      state: 'candidate',
+      stateVersion: 7,
+      seriesId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+    }),
+  });
+  const direct = await newPage({ width: 375, height: 812 });
+  await bootFeed(direct, 'operator-direct-promotion');
+  await direct.waitForFunction(() => document.querySelector(
+    '[data-testid="developer-feed-badge"]',
+  ));
+  await direct.locator(badgeSelector).click();
+  const directSheet = direct.locator(sheetSelector);
+  await directSheet.waitFor({ state: 'visible' });
+  const publish = directSheet.locator('[data-action="publish-catalog"]');
+  await publish.waitFor({ state: 'visible' });
+  assert.equal(promotionPrepareRequests.length, 1,
+    'the exact candidate did not issue one bounded prepare');
+  assert.deepEqual(promotionPrepareRequests[0], {
+    schema: 'catalog.direct-promotion.prepare.v1',
+    operationId: promotionPrepareRequests[0].operationId,
+    entryId: directEntryId,
+    expectedStateVersion: 7,
+    action: 'publish',
+  });
+  await publish.click();
+  await directSheet.locator('text=Код: ABC123').waitFor({ state: 'visible' });
+  const codeInput = directSheet.locator('[data-testid="catalog-promotion-code-input"]');
+  await codeInput.fill('abc');
+  await direct.waitForTimeout(1_100);
+  const backgroundSession = direct.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session');
+  await direct.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await backgroundSession;
+  await directSheet.locator('[data-testid="catalog-promotion-confirm"]')
+    .waitFor({ state: 'visible' });
+  assert.equal(await codeInput.inputValue(), 'abc',
+    'a background projection refresh wiped the typed confirmation code');
+
+  await codeInput.fill('000000');
+  const refusedApply = direct.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/catalog/operator-promotion/apply'
+      && response.status() === 409);
+  await directSheet.locator('[data-action="confirm-catalog-publication"]').click();
+  await refusedApply;
+  await directSheet.locator('[role="status"]')
+    .filter({ hasText: 'Публикация не подтверждена' }).waitFor({ state: 'visible' });
+
+  await codeInput.fill('abc123');
+  const failedRefresh = direct.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session'
+      && response.status() === 503);
+  await directSheet.locator('[data-action="confirm-catalog-publication"]').click();
+  await failedRefresh;
+  await directSheet.locator('[role="status"]')
+    .filter({ hasText: 'Опубликовано. Не удалось обновить список' })
+    .waitFor({ state: 'visible' });
+  await direct.waitForTimeout(1_100);
+  const refreshedSession = direct.waitForResponse((response) =>
+    response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/api/session'
+      && response.status() === 200);
+  await direct.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await refreshedSession;
+  await directSheet.locator('[data-row="catalog"]')
+    .filter({ hasText: 'Доступно всем' }).waitFor();
+  assert.equal(promotionApplyRequests.length, 2,
+    'the refused and accepted confirmations were not each issued once');
+  assert.equal(promotionApplyRequests[1].confirmationCode, 'ABC123',
+    'the confirmation code was not normalized before the server check');
+  assert.equal(await directSheet.locator('[data-action="publish-catalog"]').count(), 0,
+    'the committed public row retained a stale promotion control');
+  await direct.close();
+
+  // ── A5. Nothing in flight → the honest empty state. ─────────────────────
   reworkItems = [];
   intakeItems = [];
   developerFeedCatalog = catalogDiff({
@@ -647,6 +800,45 @@ try {
   assert.equal(projection.mechanics[0].adopted, true);
   assert.equal(projection.mechanics[0].status, 'Аудитория: ◉ Лично',
     'the Feed ignored the strict server-owned audience vocabulary');
+  const directWireValidation = await modulePage.evaluate(() => ({
+    preparedExtraRejected: window.validateCatalogDirectPromotionPrepared({
+      schema: 'catalog.direct-promotion.prepared.v1',
+      operationId: 'abababab-abab-4bab-8bab-abababababab',
+      action: 'publish',
+      entryId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+      expectedStateVersion: 7,
+      fromState: 'candidate',
+      toState: 'published',
+      fromAudience: 'exactUser',
+      toAudience: 'public',
+      runtimeArtifactDigest: `sha256:${'a'.repeat(64)}`,
+      confirmationCode: 'ABC123',
+      extra: true,
+    }) === null,
+    resultAccepted: window.validateCatalogDirectPromotionResult({
+      schema: 'catalog.direct-promotion.result.v1',
+      operationId: 'abababab-abab-4bab-8bab-abababababab',
+      entryId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+      fromState: 'candidate',
+      toState: 'published',
+      stateVersion: 8,
+      replayed: false,
+    }) !== null,
+    resultWrongReplayRejected: window.validateCatalogDirectPromotionResult({
+      schema: 'catalog.direct-promotion.result.v1',
+      operationId: 'abababab-abab-4bab-8bab-abababababab',
+      entryId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+      fromState: 'candidate',
+      toState: 'published',
+      stateVersion: 8,
+      replayed: 'false',
+    }) === null,
+  }));
+  assert.deepEqual(directWireValidation, {
+    preparedExtraRejected: true,
+    resultAccepted: true,
+    resultWrongReplayRejected: true,
+  }, 'direct-public validators accepted drifted wire');
   await modulePage.evaluate(() => window.surface.update({
     operatorSurfacesActive: true,
     platform: { sourceSha: 'a'.repeat(40), stamp: 'stamp' },

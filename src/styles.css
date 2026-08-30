@@ -5375,6 +5375,33 @@ body {
   color: #fff;
   font: 800 11px/1 system-ui, sans-serif;
 }
+.dev-diff__action:disabled { opacity: 0.55; }
+.dev-diff__promotion-confirm {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(128, 96, 255, 0.35);
+  border-radius: 12px;
+  background: rgba(91, 64, 180, 0.14);
+}
+.dev-diff__promotion-confirm[hidden] { display: none; }
+.dev-diff__promotion-code {
+  margin: 8px 0;
+  color: #f0eaff;
+  font: 800 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+}
+.dev-diff__promotion-input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  background: rgba(5, 8, 16, 0.75);
+  color: #fff;
+  font: 800 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
 .dev-diff__close {
   width: 100%;
   margin-top: 12px;
