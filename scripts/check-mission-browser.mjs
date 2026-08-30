@@ -282,6 +282,11 @@ try {
   backend.caseTokens = 3;
   await foreground();
   await contractSheet.waitFor({ state: 'visible' });
+  await page.waitForFunction(
+    () => document.activeElement?.classList.contains('mission-contract-sheet') === true,
+    null,
+    { timeout: 15_000 },
+  );
   assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true, 'refresh preserves the open contract');
   backend.caseTokens = 2;
   await foreground();
