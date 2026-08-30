@@ -207,7 +207,6 @@ export function buildMissionUnlockedCeremony(options: {
   const { root, body, actions } = ceremonyShell(options.onClose);
   root.classList.add('mission-ceremony--unlocked');
   const payload = options.event.receipt;
-  body.append(el('div', 'mission-ceremony__moment', 'сразу · подарок открыт'));
   body.append(el(
     'div',
     'mission-ceremony__title',
