@@ -42,6 +42,8 @@ import {
   apiCreatePlatformDevelopmentIntakeRequired,
   apiCancelPlatformDevelopmentIntakeRequired,
   apiListPlatformDevelopmentIntakesRequired,
+  apiPrepareCatalogDirectPromotionRequired,
+  apiApplyCatalogDirectPromotionRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
   apiGetGeneratedOfferRequired,
@@ -60,6 +62,8 @@ import {
   type ChallengeView, type ChallengeInboxItem, type DailyStateResp, type PublicIslandView, type RunTicketRequest,
   type SessionResp,
   type DeveloperFeedCatalogDiffV1,
+  type CatalogDirectPromotionPreparedV1,
+  type CatalogDirectPromotionResultV1,
   type OperatorPlayableReworkQueueItemV1,
   type OperatorPlayableReworkResponseV1,
   type OperatorPlayableEscalationDecisionV1,
@@ -213,7 +217,10 @@ import {
 } from './operator-development-intakes.mjs';
 import {
   mountDeveloperFeedDiffSurface,
+  validateCatalogDirectPromotionPrepared,
+  validateCatalogDirectPromotionResult,
   validateDeveloperFeedCatalogDiff,
+  type CatalogDirectPromotionClientOutcome,
   type DeveloperFeedDiffInput,
   type DeveloperFeedDiffSurface,
 } from './developer-feed-diff.mjs';
@@ -786,11 +793,13 @@ export class Feed {
   private operatorPlayableReworkControlRefreshTimer: number | null = null;
   private developmentIntakeAvailable = false;
   private operatorPresentationVocabulary = resolveOperatorPresentationVocabulary(null);
-  // Read-only «Изменения dev-ленты»: the dev badge + its inventory sheet. It is
-  // a projection of state this class already holds (rework queue, platform
-  // intake receipt, adopted candidate) — it never issues a request of its own.
+  // «Изменения dev-ленты»: read projection plus one server-prepared direct
+  // publication control for an exact candidate identity.
   private developerFeedDiffSurface: DeveloperFeedDiffSurface | null = null;
   private developerFeedCatalog: Readonly<DeveloperFeedCatalogDiffV1> | null = null;
+  private catalogPromotionPrepared: Readonly<CatalogDirectPromotionPreparedV1> | null = null;
+  private catalogPromotionPrepareKey: string | null = null;
+  private catalogPromotionPrepareEpoch = 0;
   private platformDevelopmentIntakeControl: PlatformDevelopmentIntakeControl | null = null;
   private platformDevelopmentIntakeLatest: PlatformDevelopmentIntakeResponseV1 | null = null;
   private platformDevelopmentIntakeSyncEpoch = 0;
@@ -1177,6 +1186,7 @@ export class Feed {
       session.developerFeedCatalog,
     );
     this.refreshDeveloperFeedDiff();
+    void this.prepareDeveloperCatalogPromotion();
     // An adopted immutable candidate is an authenticated operator surface, not
     // a public gameplay occurrence. Keep its server-owned controls available,
     // but never flush/credit results, missions, daily state, social state,
@@ -2841,6 +2851,7 @@ export class Feed {
       adoption: overlay,
       vocabulary: this.operatorPresentationVocabulary,
       catalog: this.developerFeedCatalog,
+      catalogPromotion: this.catalogPromotionPrepared,
     };
   }
 
@@ -2858,7 +2869,82 @@ export class Feed {
     this.developerFeedDiffSurface = mountDeveloperFeedDiffSurface(document.body, {
       input,
       onShowMechanic: (playableId) => this.showMechanicCard(playableId),
+      onPromoteCatalog: (prepared, confirmationCode) => (
+        this.applyDeveloperCatalogPromotion(prepared, confirmationCode)
+      ),
     });
+  }
+
+  private async prepareDeveloperCatalogPromotion(): Promise<void> {
+    const candidate = this.developerFeedCatalog?.dev;
+    if (candidate?.state !== 'candidate' || candidate.runtime === null) {
+      this.catalogPromotionPrepareEpoch += 1;
+      this.catalogPromotionPrepareKey = null;
+      this.catalogPromotionPrepared = null;
+      this.refreshDeveloperFeedDiff();
+      return;
+    }
+    const key = `${candidate.entryId}:${candidate.stateVersion}:${candidate.runtime.runtimeArtifactDigest}`;
+    if (this.catalogPromotionPrepareKey === key) return;
+    this.catalogPromotionPrepareKey = key;
+    this.catalogPromotionPrepared = null;
+    const epoch = ++this.catalogPromotionPrepareEpoch;
+    this.refreshDeveloperFeedDiff();
+    try {
+      const operationId = crypto.randomUUID();
+      const raw = await apiPrepareCatalogDirectPromotionRequired({
+        schema: 'catalog.direct-promotion.prepare.v1',
+        operationId,
+        entryId: candidate.entryId,
+        expectedStateVersion: candidate.stateVersion,
+        action: 'publish',
+      });
+      const prepared = validateCatalogDirectPromotionPrepared(raw);
+      if (epoch !== this.catalogPromotionPrepareEpoch
+        || prepared?.operationId !== operationId
+        || prepared.entryId !== candidate.entryId
+        || prepared.expectedStateVersion !== candidate.stateVersion
+        || prepared.runtimeArtifactDigest !== candidate.runtime.runtimeArtifactDigest) return;
+      this.catalogPromotionPrepared = prepared;
+      this.refreshDeveloperFeedDiff();
+    } catch {
+      // Disabled, stale or ineligible candidates simply expose no mutation
+      // control.  The backend keeps the reason typed; the read projection stays
+      // useful and a later session/state identity gets one fresh preparation.
+      if (epoch === this.catalogPromotionPrepareEpoch) {
+        this.catalogPromotionPrepareKey = null;
+      }
+    }
+  }
+
+  private async applyDeveloperCatalogPromotion(
+    prepared: Readonly<CatalogDirectPromotionPreparedV1>,
+    confirmationCode: string,
+  ): Promise<CatalogDirectPromotionClientOutcome> {
+    const rawResult: CatalogDirectPromotionResultV1 = await apiApplyCatalogDirectPromotionRequired({
+      schema: 'catalog.direct-promotion.apply.v1',
+      operationId: prepared.operationId,
+      entryId: prepared.entryId,
+      expectedStateVersion: prepared.expectedStateVersion,
+      action: 'publish',
+      confirmationCode,
+    });
+    const result = validateCatalogDirectPromotionResult(rawResult);
+    if (result === null
+      || result.operationId !== prepared.operationId
+      || result.entryId !== prepared.entryId
+      || result.stateVersion !== prepared.expectedStateVersion + 1) {
+      throw new Error('catalog_direct_promotion_result_invalid');
+    }
+    const inFlightSession = this.sessionSyncPromise;
+    if (inFlightSession) {
+      await inFlightSession;
+      if (this.sessionSyncPromise === inFlightSession) this.sessionSyncPromise = null;
+    }
+    const refreshed = await this.syncSessionBootstrap();
+    return {
+      status: refreshed ? 'committed_refreshed' : 'committed_refresh_pending',
+    };
   }
 
   /** Jump to a mechanic's card, where `Доработать механику` already lives. */

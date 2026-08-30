@@ -372,6 +372,55 @@ export interface DeveloperFeedCatalogDiffV1 {
   public: DeveloperFeedCatalogEntryV1 | null;
 }
 
+export interface CatalogDirectPromotionPreparedV1 {
+  schema: 'catalog.direct-promotion.prepared.v1';
+  operationId: string;
+  action: 'publish';
+  entryId: string;
+  expectedStateVersion: number;
+  fromState: 'candidate';
+  toState: 'published';
+  fromAudience: 'exactUser';
+  toAudience: 'public';
+  runtimeArtifactDigest: string;
+  confirmationCode: string;
+}
+
+export interface CatalogDirectPromotionResultV1 {
+  schema: 'catalog.direct-promotion.result.v1';
+  operationId: string;
+  entryId: string;
+  fromState: 'candidate';
+  toState: 'published';
+  stateVersion: number;
+  replayed: boolean;
+}
+
+export function apiPrepareCatalogDirectPromotionRequired(payload: {
+  schema: 'catalog.direct-promotion.prepare.v1';
+  operationId: string;
+  entryId: string;
+  expectedStateVersion: number;
+  action: 'publish';
+}): Promise<CatalogDirectPromotionPreparedV1> {
+  return postRequired<CatalogDirectPromotionPreparedV1>(
+    '/api/catalog/operator-promotion/prepare', payload,
+  );
+}
+
+export function apiApplyCatalogDirectPromotionRequired(payload: {
+  schema: 'catalog.direct-promotion.apply.v1';
+  operationId: string;
+  entryId: string;
+  expectedStateVersion: number;
+  action: 'publish';
+  confirmationCode: string;
+}): Promise<CatalogDirectPromotionResultV1> {
+  return postRequired<CatalogDirectPromotionResultV1>(
+    '/api/catalog/operator-promotion/apply', payload,
+  );
+}
+
 export interface DeveloperFeedAdoptionV1 {
   schema: 'feed.playable-source-preview-adoption.v1';
   releaseId: string;

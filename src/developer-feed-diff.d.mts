@@ -1,15 +1,14 @@
 import type {
   DeveloperFeedCatalogDiffV1,
+  CatalogDirectPromotionPreparedV1,
+  CatalogDirectPromotionResultV1,
   OperatorPlayableReworkQueueItemV1,
   PlatformDevelopmentIntakeResponseV1,
 } from './api';
 
 /**
- * Read-only inventory of "what is different in my dev feed right now".
- *
- * Slice 1 of the frozen selective-promotion v1 contract: it aggregates ONLY
- * state the feed client already holds. It owns no mutation authority, issues
- * no request of its own and never carries a promotion control.
+ * Inventory of "what is different in my dev feed right now".  A publication
+ * control exists only for an exact server-prepared candidate closure.
  */
 
 export type DeveloperFeedDiffTone =
@@ -56,6 +55,7 @@ export interface DeveloperFeedDiffCatalogRow {
   status: string;
   detail: string;
   identity: DeveloperFeedDiffIdentityLine[];
+  promotion: Readonly<CatalogDirectPromotionPreparedV1> | null;
 }
 
 export interface DeveloperFeedDiffInput {
@@ -75,6 +75,8 @@ export interface DeveloperFeedDiffInput {
   } | null;
   /** Exact optional server-owned catalog dev/public projection from `/session`. */
   catalog?: DeveloperFeedCatalogDiffV1 | null;
+  /** Exact server-prepared closure; mismatched identities fail closed. */
+  catalogPromotion?: CatalogDirectPromotionPreparedV1 | null;
 }
 
 export interface DeveloperFeedDiffModel {
@@ -97,6 +99,10 @@ export interface DeveloperFeedDiffSurface {
   destroy(): void;
 }
 
+export interface CatalogDirectPromotionClientOutcome {
+  status: 'committed_refreshed' | 'committed_refresh_pending';
+}
+
 export function developerFeedDiffModel(
   input: DeveloperFeedDiffInput,
 ): Readonly<DeveloperFeedDiffModel>;
@@ -105,11 +111,23 @@ export function validateDeveloperFeedCatalogDiff(
   value: unknown,
 ): Readonly<DeveloperFeedCatalogDiffV1> | null;
 
+export function validateCatalogDirectPromotionPrepared(
+  value: unknown,
+): Readonly<CatalogDirectPromotionPreparedV1> | null;
+
+export function validateCatalogDirectPromotionResult(
+  value: unknown,
+): Readonly<CatalogDirectPromotionResultV1> | null;
+
 export function mountDeveloperFeedDiffSurface(
   host: HTMLElement,
   options: {
     input: DeveloperFeedDiffInput;
     /** Jump to the mechanic's card, where `Доработать механику` already lives. */
     onShowMechanic?(playableId: string): void;
+    onPromoteCatalog?(
+      prepared: Readonly<CatalogDirectPromotionPreparedV1>,
+      confirmationCode: string,
+    ): Promise<CatalogDirectPromotionClientOutcome>;
   },
 ): DeveloperFeedDiffSurface;

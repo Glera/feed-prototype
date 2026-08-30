@@ -1,13 +1,10 @@
 /**
  * «Изменения dev-ленты» — the read-only inventory behind the dev-feed badge.
  *
- * Slice 1 of the frozen selective-promotion v1 contract (reconciliation
- * 18.08.2026 §C.2a). It is a PROJECTION of state the feed client already
- * holds: the baked platform identity, the operator rework queue the feed
- * already fetched for its per-mechanic button, the latest platform intake
- * receipt, and the exact candidate this operator adopted. It issues no request
- * of its own, owns no mutation authority, and carries no `Продвинуть…` control
- * — promotion is a separate slice over the existing content-bound approval.
+ * The inventory remains a server-owned projection.  Its one mutation control
+ * appears only after the backend has prepared an exact content-bound
+ * `candidate -> published` closure; the backend revalidates the same closure
+ * and confirmation code before applying it.
  *
  * Every status string here is reused verbatim from the surface that already
  * owns it, so the sheet and the per-mechanic button can never tell the
@@ -112,6 +109,39 @@ export function validateDeveloperFeedCatalogDiff(value) {
     || dev?.state === 'published'
     || (publicEntry !== null && publicEntry.state !== 'published')) return null;
   return Object.freeze({ ...value, dev, public: publicEntry });
+}
+
+/** Strict validator for the server-derived anti-misclick publication closure. */
+export function validateCatalogDirectPromotionPrepared(value) {
+  if (!exactObject(value, [
+    'schema', 'operationId', 'action', 'entryId', 'expectedStateVersion',
+    'fromState', 'toState', 'fromAudience', 'toAudience',
+    'runtimeArtifactDigest', 'confirmationCode',
+  ])) return null;
+  if (value.schema !== 'catalog.direct-promotion.prepared.v1'
+    || !UUID.test(value.operationId) || value.action !== 'publish'
+    || !UUID.test(value.entryId)
+    || !Number.isSafeInteger(value.expectedStateVersion)
+    || value.expectedStateVersion < 0
+    || value.fromState !== 'candidate' || value.toState !== 'published'
+    || value.fromAudience !== 'exactUser' || value.toAudience !== 'public'
+    || !DIGEST.test(value.runtimeArtifactDigest)
+    || !/^[0-9A-F]{6}$/.test(value.confirmationCode)) return null;
+  return Object.freeze({ ...value });
+}
+
+/** Strict validator for the mutation receipt before refreshing server state. */
+export function validateCatalogDirectPromotionResult(value) {
+  if (!exactObject(value, [
+    'schema', 'operationId', 'entryId', 'fromState', 'toState',
+    'stateVersion', 'replayed',
+  ])) return null;
+  if (value.schema !== 'catalog.direct-promotion.result.v1'
+    || !UUID.test(value.operationId) || !UUID.test(value.entryId)
+    || value.fromState !== 'candidate' || value.toState !== 'published'
+    || !Number.isSafeInteger(value.stateVersion) || value.stateVersion < 1
+    || typeof value.replayed !== 'boolean') return null;
+  return Object.freeze({ ...value });
 }
 
 /** `abcdef…` → `abcdef012345`; `sha256:abc…` keeps its algorithm prefix. */
@@ -226,6 +256,9 @@ export function developerFeedDiffModel(input = {}) {
   const intake = platformIntakeRow(input.platformIntake, vocabulary);
   const mechanics = mechanicRows({ ...input, vocabulary });
   const catalog = validateDeveloperFeedCatalogDiff(input.catalog);
+  const preparedPromotion = validateCatalogDirectPromotionPrepared(
+    input.catalogPromotion,
+  );
   const catalogIdentity = [];
   const appendCatalogIdentity = (prefix, entry) => {
     if (!entry) return;
@@ -250,6 +283,12 @@ export function developerFeedDiffModel(input = {}) {
   ].includes(row.state)).length + (intake ? 1 : 0) + catalogChanged;
   const catalogInvalid = input.catalog != null && catalog === null;
   const catalogUnavailable = catalog?.unavailableReason === 'catalog_projection_invalid';
+  const promotion = catalog?.dev?.state === 'candidate'
+    && catalog.dev.runtime !== null
+    && preparedPromotion?.entryId === catalog.dev.entryId
+    && preparedPromotion.expectedStateVersion === catalog.dev.stateVersion
+    && preparedPromotion.runtimeArtifactDigest === catalog.dev.runtime.runtimeArtifactDigest
+    ? preparedPromotion : null;
   return Object.freeze({
     visible: input.operatorSurfacesActive === true || Boolean(input.adoption),
     changed,
@@ -273,6 +312,7 @@ export function developerFeedDiffModel(input = {}) {
         ? CATALOG_INVALID_DETAIL
         : catalogIdentity.length ? '' : CATALOG_DETAIL,
       identity: Object.freeze(catalogIdentity.filter(Boolean)),
+      promotion,
     }),
   });
 }
@@ -327,9 +367,17 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   const onShowMechanic = typeof options.onShowMechanic === 'function'
     ? options.onShowMechanic
     : null;
+  const onPromoteCatalog = typeof options.onPromoteCatalog === 'function'
+    ? options.onPromoteCatalog
+    : null;
 
   let destroyed = false;
   let open = false;
+  let promotionPending = false;
+  let promotionCommitted = false;
+  let promotionConfirmOpen = false;
+  let promotionCode = '';
+  let promotionError = '';
   let model = developerFeedDiffModel(options.input || {});
 
   const root = element('div', 'dev-diff-surface');
@@ -439,6 +487,43 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       catalogRow.append(element('p', 'dev-diff__detail', model.catalog.detail));
     }
     catalogRow.append(identityList(model.catalog.identity));
+    if (model.catalog.promotion && onPromoteCatalog) {
+      const publish = element('button', 'dev-diff__action', 'Сделать доступным всем');
+      publish.type = 'button';
+      publish.dataset.action = 'publish-catalog';
+      publish.disabled = promotionPending || promotionCommitted;
+      catalogRow.append(publish);
+
+      const confirm = element('div', 'dev-diff__promotion-confirm');
+      confirm.dataset.testid = 'catalog-promotion-confirm';
+      confirm.hidden = !promotionConfirmOpen;
+      confirm.append(
+        element('p', 'dev-diff__detail', 'Только мне → Доступно всем'),
+        element('p', 'dev-diff__promotion-code', `Код: ${model.catalog.promotion.confirmationCode}`),
+      );
+      const input = element('input', 'dev-diff__promotion-input');
+      input.dataset.testid = 'catalog-promotion-code-input';
+      input.inputMode = 'text';
+      input.autocomplete = 'off';
+      input.maxLength = 6;
+      input.setAttribute('aria-label', 'Код подтверждения');
+      input.value = promotionCode;
+      input.disabled = promotionPending || promotionCommitted;
+      input.addEventListener('input', () => { promotionCode = input.value; });
+      const applyLabel = promotionCommitted ? 'Опубликовано'
+        : promotionPending ? 'Проверяю…' : 'Подтвердить публикацию';
+      const apply = element('button', 'dev-diff__action', applyLabel);
+      apply.type = 'button';
+      apply.dataset.action = 'confirm-catalog-publication';
+      apply.disabled = promotionPending || promotionCommitted;
+      confirm.append(input, apply);
+      if (promotionError) {
+        const error = element('p', 'dev-diff__blocker', promotionError);
+        error.setAttribute('role', 'status');
+        confirm.append(error);
+      }
+      catalogRow.append(confirm);
+    }
     catalog.append(catalogRow);
     body.append(catalog);
   };
@@ -474,6 +559,49 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       return;
     }
     const jump = target.closest('[data-action="show-mechanic"]');
+    const publish = target.closest('[data-action="publish-catalog"]');
+    if (publish) {
+      promotionConfirmOpen = true;
+      promotionError = '';
+      renderBody();
+      const input = body.querySelector('[data-testid="catalog-promotion-code-input"]');
+      if (input instanceof HTMLInputElement) input.focus();
+      return;
+    }
+    const apply = target.closest('[data-action="confirm-catalog-publication"]');
+    if (apply && model.catalog.promotion && onPromoteCatalog && !promotionPending) {
+      const code = promotionCode.trim().toUpperCase();
+      promotionPending = true;
+      promotionError = '';
+      renderBody();
+      void Promise.resolve(onPromoteCatalog(model.catalog.promotion, code))
+        .then((outcome) => {
+          if (destroyed) return;
+          promotionPending = false;
+          if (outcome?.status === 'committed_refreshed') {
+            promotionCommitted = true;
+            promotionConfirmOpen = false;
+            promotionCode = '';
+            promotionError = '';
+          } else if (outcome?.status === 'committed_refresh_pending') {
+            promotionCommitted = true;
+            promotionConfirmOpen = true;
+            promotionError = 'Опубликовано. Не удалось обновить список — перезапустите ленту.';
+          } else {
+            promotionConfirmOpen = true;
+            promotionError = 'Результат не подтверждён. Обновите ленту перед повтором.';
+          }
+          if (open) renderBody();
+        })
+        .catch(() => {
+          if (destroyed) return;
+          promotionPending = false;
+          promotionConfirmOpen = true;
+          promotionError = 'Код не подошёл или состояние изменилось. Публикация не подтверждена.';
+          if (open) renderBody();
+        });
+      return;
+    }
     if (!jump) return;
     const article = jump.closest('[data-playable-id]');
     const playableId = article instanceof HTMLElement ? article.dataset.playableId : '';
@@ -498,7 +626,16 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     get open() { return open; },
     update(next) {
       if (destroyed) return;
+      const previousPromotionId = model.catalog.promotion?.operationId ?? null;
       model = developerFeedDiffModel(next || {});
+      const nextPromotionId = model.catalog.promotion?.operationId ?? null;
+      if (nextPromotionId === null || nextPromotionId !== previousPromotionId) {
+        promotionPending = false;
+        promotionCommitted = false;
+        promotionConfirmOpen = false;
+        promotionCode = '';
+        promotionError = '';
+      }
       if (open && !model.visible) closeSheet(false);
       renderBadge();
       if (!open) return;
