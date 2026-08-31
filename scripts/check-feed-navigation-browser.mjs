@@ -218,13 +218,23 @@ const assertAutoplayFrameGeometry = async (page, label) => {
   const geometry = await page.locator('.page--in-viewport .game--autoplay').first().evaluate((game) => {
     const slot = game.querySelector('.game__slot');
     const frame = game.querySelector('.game__frame');
-    if (!(slot instanceof HTMLElement) || !(frame instanceof HTMLElement)) return null;
+    const allowed = game.querySelector('.game__autoplay');
+    if (!(slot instanceof HTMLElement)
+      || !(frame instanceof HTMLElement)
+      || !(allowed instanceof HTMLElement)) return null;
     const gameRect = game.getBoundingClientRect();
+    const allowedRect = allowed.getBoundingClientRect();
     const slotRect = slot.getBoundingClientRect();
     const frameRect = frame.getBoundingClientRect();
     const frameDocument = frame instanceof HTMLIFrameElement ? frame.contentDocument : null;
     return {
       game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
+      allowed: {
+        left: allowedRect.left,
+        right: allowedRect.right,
+        top: allowedRect.top,
+        bottom: allowedRect.bottom,
+      },
       slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
       frame: { left: frameRect.left, right: frameRect.right, top: frameRect.top, bottom: frameRect.bottom },
       documentOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -235,18 +245,18 @@ const assertAutoplayFrameGeometry = async (page, label) => {
   });
   assert.ok(geometry, `${label}: autoplay geometry is unavailable`);
   assert.ok(
-    Math.abs(geometry.slot.left - geometry.game.left) < 0.5
-      && Math.abs(geometry.slot.right - geometry.game.right) < 0.5,
-    `${label}: autoplay must preserve the full feed width: ${JSON.stringify(geometry)}`,
+    geometry.slot.left > geometry.allowed.left
+      && geometry.slot.right < geometry.allowed.right
+      && geometry.slot.top > geometry.allowed.top
+      && geometry.slot.bottom < geometry.allowed.bottom,
+    `${label}: autoplay must frame the playable on all four sides: ${JSON.stringify(geometry)}`,
   );
   assert.ok(
     Math.abs(geometry.frame.left - geometry.slot.left) < 0.5
-      && Math.abs(geometry.frame.right - geometry.slot.right) < 0.5,
-    `${label}: iframe must fill the full-width slot: ${JSON.stringify(geometry)}`,
-  );
-  assert.ok(
-    geometry.slot.top > geometry.game.top && geometry.slot.bottom < geometry.game.bottom,
-    `${label}: autoplay must retain a vertical footage frame: ${JSON.stringify(geometry)}`,
+      && Math.abs(geometry.frame.right - geometry.slot.right) < 0.5
+      && Math.abs(geometry.frame.top - geometry.slot.top) < 0.5
+      && Math.abs(geometry.frame.bottom - geometry.slot.bottom) < 0.5,
+    `${label}: iframe must fill the framed autoplay slot: ${JSON.stringify(geometry)}`,
   );
   assert.equal(geometry.documentOverflowX, 0, `${label}: feed introduced horizontal overflow`);
   assert.equal(geometry.frameOverflowX, 0, `${label}: playable introduced horizontal clipping/overflow`);
@@ -310,6 +320,30 @@ const runViewport = async (browser, viewport, label) => {
 
   await pointerClick(page, page.locator('.page--in-viewport .game--autoplay .game__autoplay').first());
   await page.locator('.page--in-viewport .game--manual').waitFor({ state: 'visible' });
+  const manualGeometry = await page.locator('.page--in-viewport .game--manual').first().evaluate((game) => {
+    const slot = game.querySelector('.game__slot');
+    const allowed = game.querySelector('.game__autoplay');
+    if (!(slot instanceof HTMLElement) || !(allowed instanceof HTMLElement)) return null;
+    const gameRect = game.getBoundingClientRect();
+    const allowedRect = allowed.getBoundingClientRect();
+    const slotRect = slot.getBoundingClientRect();
+    return {
+      game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
+      allowed: {
+        left: allowedRect.left,
+        right: allowedRect.right,
+        top: allowedRect.top,
+        bottom: allowedRect.bottom,
+      },
+      slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
+    };
+  });
+  assert.ok(manualGeometry
+    && Math.abs(manualGeometry.slot.left - manualGeometry.allowed.left) < 0.5
+    && Math.abs(manualGeometry.slot.right - manualGeometry.allowed.right) < 0.5
+    && Math.abs(manualGeometry.slot.top - manualGeometry.allowed.top) < 0.5
+    && Math.abs(manualGeometry.slot.bottom - manualGeometry.allowed.bottom) < 0.5,
+  `${label}: manual takeover did not expand to the full allowed mechanic area: ${JSON.stringify(manualGeometry)}`);
   const manualSource = await currentRuntime(page);
   assert.equal(manualSource.manual, true);
   assert.ok(manualSource.lifecycle?.restarts >= 1, `${label}: manual takeover did not reset its playable`);

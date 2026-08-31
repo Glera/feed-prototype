@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   bottomFeedTapAction,
@@ -60,5 +61,47 @@ assert.equal(
   0,
   'velocity cannot promote sub-intent pointer noise',
 );
+
+const styles = readFileSync(new URL('../src/styles.css', import.meta.url), 'utf8');
+const declarationsFor = (selector) => {
+  const prefix = `${selector} {`;
+  const start = styles.indexOf(prefix);
+  assert.notEqual(start, -1, `missing CSS rule ${selector}`);
+  const end = styles.indexOf('}', start + prefix.length);
+  assert.notEqual(end, -1, `unterminated CSS rule ${selector}`);
+  return styles.slice(start + prefix.length, end);
+};
+
+const autoplaySlot = declarationsFor('.game--autoplay .game__slot');
+for (const property of ['top', 'right', 'bottom', 'left']) {
+  assert.match(
+    autoplaySlot,
+    new RegExp(`\\b${property}:\\s*[^;]*autoplay-frame-(?:block|inline)-inset`),
+    `autoplay slot must keep a host-owned ${property} inset`,
+  );
+}
+const autoplayReel = declarationsFor('.game--autoplay .game__reel');
+for (const property of ['top', 'right', 'bottom', 'left']) {
+  assert.match(
+    autoplayReel,
+    new RegExp(`\\b${property}:\\s*[^;]*autoplay-frame-(?:block|inline)-inset`),
+    `autoplay reel chrome must follow the slot's ${property} inset`,
+  );
+}
+assert.match(
+  declarationsFor('.game__slot'),
+  /inset:\s*0 0 var\(--bar-reserve\) 0/,
+  'manual takeover must expand the slot to the complete allowed gameplay rectangle',
+);
+for (const selector of [
+  '.game--candidate-read-only-preview.game--autoplay .game__slot',
+  '.game--candidate-feed-presentation.game--autoplay .game__slot',
+]) {
+  const declarations = declarationsFor(selector);
+  assert.match(declarations, /top:\s*0/);
+  assert.match(declarations, /right:\s*0/);
+  assert.match(declarations, /bottom:\s*var\(--bar-reserve\)/);
+  assert.match(declarations, /left:\s*0/);
+}
 
 console.log('feed navigation deterministic checks passed');

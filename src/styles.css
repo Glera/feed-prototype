@@ -754,6 +754,7 @@ body {
    must NOT page the feed. */
 .game {
   --autoplay-frame-block-inset: 4%;
+  --autoplay-frame-inline-inset: 4%;
   --candidate-autoplay-scale: 0.92;
   position: relative;
   flex: 1 1 auto;
@@ -807,21 +808,25 @@ body {
      still turns above it. */
   z-index: 3;
 }
-/* Autoplay keeps the vertical "footage frame" composition, but never narrows the
-   playable horizontally. Tapping to take over removes game--autoplay and expands
-   the slot back to the full area above the bottom bar. The inset changes in one
-   layout step: animating top/bottom would resize the live iframe every frame. */
+/* Autoplay frames the complete playable inside its allowed area. Tapping to take
+   over removes game--autoplay and expands the slot back to the full area above
+   the bottom bar. Insets change in one layout step: animating the box would
+   resize the live iframe every frame. */
 .game--autoplay .game__slot {
   top: var(--autoplay-frame-block-inset);
+  right: var(--autoplay-frame-inline-inset);
   bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
+  left: var(--autoplay-frame-inline-inset);
 }
 /* The read-only source preview judges the immutable candidate against the full
    gameplay rectangle. Once adopted into the ordinary developer feed, autoplay
-   deliberately keeps the host-owned vertical inset above; tapping to take over
-   removes game--autoplay and expands to the full manual rectangle. */
+   keeps the host-owned four-sided frame above; tapping to take over removes
+   game--autoplay and expands to the full manual rectangle. */
 .game--candidate-read-only-preview.game--autoplay .game__slot {
   top: 0;
+  right: 0;
   bottom: var(--bar-reserve);
+  left: 0;
 }
 /* Issue #119 exact-user platform presentation candidate. The full playable
    surface keeps its original layout viewport and is scaled uniformly, so
@@ -829,7 +834,7 @@ body {
    and Y creates balanced proportional framing; takeover removes only this
    transform and lets the existing slot expand with a bounded ease-out. This
    class exists only when a validated candidate overlay owns the session — the
-   ordinary/public feed keeps the shipped vertical-footage composition above. */
+   ordinary/public feed uses the layout inset above. */
 .game--candidate-feed-presentation .game__slot {
   transform-origin: 50% 50%;
   transition: transform 360ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -837,7 +842,9 @@ body {
 }
 .game--candidate-feed-presentation.game--autoplay .game__slot {
   top: 0;
+  right: 0;
   bottom: var(--bar-reserve);
+  left: 0;
   transform: scale(var(--candidate-autoplay-scale));
 }
 .game__frame {
@@ -1672,16 +1679,22 @@ body {
 }
 .game--autoplay .game__reel {
   top: var(--autoplay-frame-block-inset);
+  right: var(--autoplay-frame-inline-inset);
   bottom: calc(var(--bar-reserve) + var(--autoplay-frame-block-inset));
+  left: var(--autoplay-frame-inline-inset);
   opacity: 1;
 }
 .game--candidate-read-only-preview.game--autoplay .game__reel {
   top: 0;
+  right: 0;
   bottom: var(--bar-reserve);
+  left: 0;
 }
 .game--candidate-feed-presentation.game--autoplay .game__reel {
   top: 0;
+  right: 0;
   bottom: var(--bar-reserve);
+  left: 0;
   transform: scale(var(--candidate-autoplay-scale));
   transform-origin: 50% 50%;
 }
