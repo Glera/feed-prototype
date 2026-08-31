@@ -552,20 +552,29 @@ try {
   assert.equal(await ordinaryPage.locator('.page--in-viewport .game__label').first().textContent(), 'marble-sort-swipe');
   const ordinaryControl = await ordinaryPage.locator('.page--in-viewport .game').first().evaluate((game) => {
     const slot = game.querySelector('.game__slot');
-    if (!(slot instanceof HTMLElement)) return null;
+    const allowed = game.querySelector('.game__autoplay');
+    if (!(slot instanceof HTMLElement) || !(allowed instanceof HTMLElement)) return null;
     const gameRect = game.getBoundingClientRect();
+    const allowedRect = allowed.getBoundingClientRect();
     const slotRect = slot.getBoundingClientRect();
     return {
       sessionPresentation: game.classList.contains('game--candidate-feed-presentation'),
       game: { left: gameRect.left, right: gameRect.right, top: gameRect.top, bottom: gameRect.bottom },
+      allowed: {
+        left: allowedRect.left,
+        right: allowedRect.right,
+        top: allowedRect.top,
+        bottom: allowedRect.bottom,
+      },
       slot: { left: slotRect.left, right: slotRect.right, top: slotRect.top, bottom: slotRect.bottom },
     };
   });
   assert.ok(ordinaryControl && !ordinaryControl.sessionPresentation
-    && Math.abs(ordinaryControl.slot.left - ordinaryControl.game.left) <= 2
-    && Math.abs(ordinaryControl.slot.right - ordinaryControl.game.right) <= 2
-    && ordinaryControl.slot.top > ordinaryControl.game.top,
-  `ordinary/public Marble control did not retain the shipped vertical-only composition: ${JSON.stringify(ordinaryControl)}`);
+    && ordinaryControl.slot.left > ordinaryControl.allowed.left
+    && ordinaryControl.slot.right < ordinaryControl.allowed.right
+    && ordinaryControl.slot.top > ordinaryControl.allowed.top
+    && ordinaryControl.slot.bottom < ordinaryControl.allowed.bottom,
+  `ordinary/public Marble control did not retain four-sided autoplay framing: ${JSON.stringify(ordinaryControl)}`);
   await ordinaryContext.close();
   await new Promise((resolve) => setTimeout(resolve, 100));
   requests.length = 0;
