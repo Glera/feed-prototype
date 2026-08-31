@@ -510,6 +510,11 @@ try {
   await badgeLabelLines.nth(1).waitFor({ state: 'visible' });
   assert.deepEqual(await badgeLabelLines.allTextContents(), ['Dev-лента', '● Только мне'],
     'the dev-feed badge lost its exact two-line label');
+  assert.equal(
+    await badge.evaluate((node) => getComputedStyle(node).borderTopColor),
+    'rgba(255, 214, 102, 0.58)',
+    'the dev-feed badge border is not yellow',
+  );
   const { labelBoxes, lineHeight, fontSize } = await badge.evaluate((node) => ({
     labelBoxes: [...node.querySelectorAll('.dev-diff__badge-label-line')].map((line) => {
       const box = line.getBoundingClientRect();
