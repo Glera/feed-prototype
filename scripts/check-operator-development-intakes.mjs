@@ -5,7 +5,9 @@ import {
   buildPlatformDevelopmentIntakeRequest,
   buildPlatformDevelopmentIntakeCancelRequest,
   persistPlatformDevelopmentIntakePendingRequest,
+  persistPlatformDevelopmentIntakePendingRequestWithFallback,
   platformDevelopmentIntakeAvailable,
+  platformDevelopmentIntakeErrorMessage,
   platformDevelopmentIntakeFailureDisposition,
   platformDevelopmentIntakePendingStorageKey,
   platformDevelopmentIntakeSessionGrant,
@@ -60,6 +62,14 @@ assert.throws(
   () => buildPlatformDevelopmentIntakeRequest({ ...input, route: 'https://outside.example/' }),
   (error) => error?.code === 'development_intake_invalid',
 );
+assert.equal(
+  platformDevelopmentIntakeErrorMessage({ code: 'development_intake_invalid' }),
+  'Описание должно содержать от 1 до 2000 символов.',
+);
+assert.equal(
+  platformDevelopmentIntakeErrorMessage({ code: 'development_intake_pending_not_persisted' }),
+  'Память Mini App недоступна. Скопируйте текст и перезапустите Mini App.',
+);
 
 const pendingOptions = {
   actorUserId: 42,
@@ -95,6 +105,29 @@ assert.equal(values.has(pendingKey), false);
 assert.notEqual(
   platformDevelopmentIntakePendingStorageKey({ ...pendingOptions, actorUserId: 43 }),
   pendingKey,
+);
+const unavailableStorage = {
+  getItem: () => null,
+  setItem: () => { throw new Error('quota exceeded'); },
+};
+const fallbackValues = new Map();
+const fallbackStorage = {
+  getItem: (key) => fallbackValues.get(key) ?? null,
+  setItem: (key, value) => fallbackValues.set(key, value),
+};
+assert.equal(
+  persistPlatformDevelopmentIntakePendingRequestWithFallback(
+    unavailableStorage, fallbackStorage, pendingOptions, request,
+  ),
+  'fallback',
+  'a full/unavailable durable store must fall back to the WebView session store',
+);
+assert.equal(
+  persistPlatformDevelopmentIntakePendingRequestWithFallback(
+    unavailableStorage, unavailableStorage, pendingOptions, request,
+  ),
+  null,
+  'submission must remain fail-closed when neither pending store is writable',
 );
 values.set(pendingKey, JSON.stringify({ ...persisted, unexpected: true }));
 assert.equal(restorePlatformDevelopmentIntakePendingRequest(storage, pendingOptions), null);

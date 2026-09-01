@@ -113,6 +113,12 @@ export function persistPlatformDevelopmentIntakePendingRequest(
   options: { actorUserId: number; buildSha: string; route: string; surface: string },
   request: PlatformDevelopmentIntakeRequestV1,
 ): boolean;
+export function persistPlatformDevelopmentIntakePendingRequestWithFallback(
+  primaryStorage: Pick<Storage, 'getItem' | 'setItem'> | undefined,
+  fallbackStorage: Pick<Storage, 'getItem' | 'setItem'> | undefined,
+  options: { actorUserId: number; buildSha: string; route: string; surface: string },
+  request: PlatformDevelopmentIntakeRequestV1,
+): 'primary' | 'fallback' | null;
 export function validatePlatformDevelopmentIntakeReceipt(
   value: unknown,
   expectedRequest?: PlatformDevelopmentIntakeRequestV1 | null,
@@ -126,6 +132,7 @@ export function buildPlatformDevelopmentIntakeCancelRequest(input: {
   requestHash: string;
 }): Readonly<PlatformDevelopmentIntakeCancelV1>;
 export function platformDevelopmentIntakeFailureDisposition(error: unknown): 'rejected' | 'retry';
+export function platformDevelopmentIntakeErrorMessage(error: unknown): string;
 export function mountPlatformDevelopmentIntakeControl(
   host: HTMLElement,
   options: {
@@ -134,6 +141,7 @@ export function mountPlatformDevelopmentIntakeControl(
     surface: string;
     route: string;
     storage?: Storage;
+    fallbackStorage?: Storage;
     existing?: PlatformDevelopmentIntakeReceiptV1 | null;
     createMutationId(): string;
     submit(request: PlatformDevelopmentIntakeRequestV1): Promise<PlatformDevelopmentIntakeReceiptV1>;
