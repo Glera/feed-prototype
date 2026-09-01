@@ -305,8 +305,8 @@ const server = createServer((request, response) => {
       });
     }
     if (request.method === 'GET' && url.pathname === '/api/development-intake') {
-      if (url.search !== '?limit=1') {
-        return json(response, { detail: 'exact limit=1 required' }, 400);
+      if (url.search !== '?limit=20') {
+        return json(response, { detail: 'exact limit=20 required' }, 400);
       }
       return json(response, {
         schema: 'platform.development-intake.list.v1',

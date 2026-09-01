@@ -507,7 +507,7 @@ export function apiCreatePlatformDevelopmentIntakeRequired(
 }
 
 export function apiListPlatformDevelopmentIntakesRequired(): Promise<PlatformDevelopmentIntakeListV1> {
-  return getRequired<PlatformDevelopmentIntakeListV1>('/api/development-intake?limit=1');
+  return getRequired<PlatformDevelopmentIntakeListV1>('/api/development-intake?limit=20');
 }
 
 export function apiCancelPlatformDevelopmentIntakeRequired(
