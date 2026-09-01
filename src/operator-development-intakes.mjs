@@ -289,26 +289,30 @@ export function platformDevelopmentIntakeErrorMessage(error) {
   return 'Не удалось сохранить задачу.';
 }
 
-function terminalIntakeLabel(receipt) {
-  if (receipt.cancellation?.status === 'confirmed') return 'Неактуально';
-  if (receipt.terminal?.status === 'READY_TO_PLAY') return 'Готово';
-  if (receipt.terminal?.status === 'NEEDS_HELP'
+function resolvedPlatformIntake(receipt) {
+  return receipt.cancellation?.status === 'confirmed'
+    || receipt.terminal?.status === 'READY_TO_PLAY';
+}
+
+function platformIntakeNeedsHelp(receipt) {
+  return receipt.terminal?.status === 'NEEDS_HELP'
     || receipt.delivery.status === 'failed_terminal'
-    || receipt.cancellation?.status === 'failed_terminal') return 'Нужна помощь';
-  return null;
+    || receipt.cancellation?.status === 'failed_terminal';
 }
 
 function platformIntakeQueuePresentation(receipts) {
   const newestFirst = [...receipts].sort((left, right) => (
     Date.parse(right.createdAt) - Date.parse(left.createdAt)
   ));
-  const active = newestFirst.filter((receipt) => terminalIntakeLabel(receipt) === null)
+  const active = newestFirst.filter((receipt) => !resolvedPlatformIntake(receipt))
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-  return active.map((receipt, index) => ({
-    receipt,
-    label: index === 0 ? 'В работе' : `В очереди · №${index}`,
-    state: index === 0 ? 'active' : 'queued',
-  }));
+  return active.map((receipt, index) => platformIntakeNeedsHelp(receipt)
+    ? { receipt, label: 'Нужна помощь', state: 'needs_help' }
+    : {
+      receipt,
+      label: index === 0 ? 'В работе' : `В очереди · №${index}`,
+      state: index === 0 ? 'active' : 'queued',
+    });
 }
 
 function draftKey(options) {
@@ -589,6 +593,14 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const renderEmptyState = () => {
     accepted = null;
     acceptedById.clear();
+    if (!pendingRequest) {
+      setSubmitting(false);
+      submit.textContent = 'Отдать в работу';
+      status.textContent = '';
+      releaseScreenshotField();
+      instruction.readOnly = false;
+      instruction.value = safeDraft(primaryStorage, key) ?? safeDraft(fallbackStorage, key) ?? '';
+    }
     queue.replaceChildren();
     open.textContent = '⚙';
     delete open.dataset.intakeState;
@@ -623,6 +635,13 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
       text.textContent = receipt.request.instruction;
       state.textContent = label;
       item.append(text, state);
+      if (rowState === 'needs_help') {
+        const rowPresentation = platformDevelopmentIntakePresentation(receipt, vocabulary);
+        const summary = document.createElement('small');
+        summary.textContent = rowPresentation?.blocker || receipt.terminal?.summary
+          || 'Задача остановилась.';
+        item.append(summary);
+      }
       return item;
     }));
     const deliveryStatus = accepted.delivery.status;
@@ -843,6 +862,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
         instruction.readOnly = false;
         releaseScreenshotField();
         submit.textContent = 'Отдать в работу';
+        emptyNotice.hidden = false;
         storeDraftWithFallback(primaryStorage, fallbackStorage, key, originalInstruction);
         status.textContent = 'Запрос отклонён сервером. Исправьте описание и отправьте снова.';
       } else {

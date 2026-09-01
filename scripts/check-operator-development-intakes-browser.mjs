@@ -434,6 +434,7 @@ try {
   await operator.locator(openSelector).click();
   assert.equal(await operator.locator(`${formSelector} [data-intake-empty]`).textContent(),
     'Сейчас нет задач по платформе.');
+  assert.equal(await operator.locator(`${formSelector} [data-intake-empty]`).isVisible(), true);
   const instruction = operator.locator(`${formSelector} textarea[name="instruction"]`);
   const paddedInstruction = `  ${INSTRUCTION.replace(' ', '\n')}\n`;
   await instruction.fill(paddedInstruction);
@@ -570,16 +571,6 @@ try {
   assert.equal(projectionItems[0].delivery.nothingPublished, true);
   loseFirstPostResponse = false;
 
-  // 5. Two unresolved requests render as one active row plus one explicit
-  // queue position. Technical wire identity stays collapsed.
-  const secondRequest = {
-    ...buildFixtureRequest({
-      mutationId: '99999999-9999-4999-8999-999999999999',
-      instruction: 'Вторая правка интерфейса.',
-      route,
-    }),
-    capturedAt: new Date(Date.parse(postedRequests[0].capturedAt) + 1_000).toISOString(),
-  };
   const readyTerminal = {
     status: 'READY_TO_PLAY',
     summary: 'Bounded candidate is ready for operator testing.',
@@ -598,6 +589,42 @@ try {
     },
     recordedAt: '2026-08-09T12:35:01.000Z',
     nothingPublished: true,
+  };
+
+  // Completion in the same live Mini App must reset the latched submit
+  // composition even though terminal history no longer exposes «Новая задача».
+  projectionItems = [receiptFor(postedRequests[0], {
+    status: 'confirmed', replayed: true, terminal: readyTerminal,
+  })];
+  await operator.waitForTimeout(1_050);
+  const samePageTerminalSession = awaitSession(operator);
+  const samePageTerminalProjection = operator.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await operator.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await samePageTerminalSession;
+  await samePageTerminalProjection;
+  await operator.waitForFunction((selector) => (
+    document.querySelector(selector)?.getAttribute('data-intake-state') === null
+  ), openSelector);
+  await operator.locator(openSelector).click();
+  assert.equal(await operator.locator(`${formSelector} textarea[name="instruction"]`).isEditable(), true,
+    'same-page completion left the next platform request read-only');
+  assert.equal(await operator.locator(`${formSelector} button[type="submit"]`).isDisabled(), false,
+    'same-page completion left the next submit latched');
+  assert.equal(await operator.locator(`${formSelector} [data-action="cancel"]`).isDisabled(), false,
+    'same-page completion left the create sheet impossible to close');
+  await operator.locator(`${formSelector} [data-action="cancel"]`).click();
+
+  // 5. Two unresolved requests render as one active row plus one explicit
+  // queue position. Technical wire identity stays collapsed.
+  const secondRequest = {
+    ...buildFixtureRequest({
+      mutationId: '99999999-9999-4999-8999-999999999999',
+      instruction: 'Вторая правка интерфейса.',
+      route,
+    }),
+    capturedAt: new Date(Date.parse(postedRequests[0].capturedAt) + 1_000).toISOString(),
   };
   projectionItems = [
     receiptFor(secondRequest, {
@@ -658,6 +685,36 @@ try {
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li a`).count(), 0,
     'completed history leaked into the active platform queue');
 
+  // A failed cancellation is not history: the Issue is still open and must
+  // remain visible as the current unresolved blocker.
+  projectionItems = [{
+    ...receiptFor(postedRequests[0], { status: 'confirmed', replayed: true }),
+    cancellation: {
+      mutationId: '12121212-1212-4121-8121-121212121212',
+      status: 'failed_terminal',
+      reason: 'obsolete',
+      requestedAt: '2026-08-09T12:36:00.000Z',
+      cancelledAt: null,
+      issueClosed: false,
+      lastErrorCode: 'github_close_failed',
+    },
+  }];
+  const failedCancelSession = awaitSession(operator);
+  const failedCancelProjection = operator.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await operator.reload({ waitUntil: 'domcontentloaded' });
+  await failedCancelSession;
+  await failedCancelProjection;
+  await operator.locator(`${openSelector}[data-intake-state="needs_help"]`).waitFor({ state: 'visible' });
+  await operator.locator(openSelector).click();
+  assert.deepEqual(
+    await operator.locator(`${detailsSelector} [data-intake-queue] li b`).allTextContents(),
+    ['Нужна помощь'],
+  );
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li span`).textContent(),
+    INSTRUCTION);
+
   // 6. A reload rehydrates the durable confirmed projection through GET. A
   // later foreground /session revocation removes the whole control from DOM.
   projectionItems = [receiptFor(postedRequests[0], { status: 'confirmed', replayed: true })];
@@ -702,6 +759,7 @@ try {
   await operator.locator(openSelector).click();
   assert.equal(await operator.locator(`${formSelector} [data-intake-empty]`).textContent(),
     'Сейчас нет задач по платформе.');
+  assert.equal(await operator.locator(`${formSelector} [data-intake-empty]`).isVisible(), true);
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li`).count(), 0,
     'terminal history remained visible after the active queue became empty');
   const preservedDraft = 'Черновик после открытия системного выбора файла.';
@@ -884,6 +942,8 @@ try {
   assert.equal(await definitiveInstruction.isEditable(), true,
     'a definitive rejection left the original instruction locked');
   assert.equal(await definitiveInstruction.inputValue(), REJECTED_INSTRUCTION);
+  assert.equal(await definitive.locator(`${formSelector} [data-intake-empty]`).isVisible(), true,
+    'a definitive rejection hid the empty active-queue state');
   assert.equal(await definitive.evaluate(() => [localStorage, sessionStorage].some((storage) =>
     Object.keys(storage).some((key) => key.startsWith('platform-development-intake-pending:v1:')))), false,
   'a definitive rejection retained immutable pending storage');
@@ -1158,6 +1218,7 @@ try {
   await obsoletePage.locator(openSelector).click();
   assert.equal(await obsoletePage.locator(`${formSelector} [data-intake-empty]`).textContent(),
     'Сейчас нет задач по платформе.');
+  assert.equal(await obsoletePage.locator(`${formSelector} [data-intake-empty]`).isVisible(), true);
   await obsoletePage.close();
 
   // 13. A delivered intake closes the exact Issue, and a projection that began
