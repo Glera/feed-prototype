@@ -38,6 +38,9 @@ const exactKeys = (value, keys) => Boolean(value) && typeof value === 'object' &
 const printable = (value, max = 2_000) => typeof value === 'string' && value === value.trim()
   && value.length >= 1 && value.length <= max && new TextEncoder().encode(value).length <= max * 4
   && !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+const normalizeInstruction = (value) => typeof value === 'string'
+  ? value.replace(/\s+/gu, ' ').trim()
+  : value;
 const exactTimestamp = (value) => typeof value === 'string' && TIMESTAMP.test(value)
   && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 const exactActorUserId = (value) => Number.isSafeInteger(value) && value > 0;
@@ -267,6 +270,19 @@ export function platformDevelopmentIntakeFailureDisposition(error) {
     : 'retry';
 }
 
+export function platformDevelopmentIntakeErrorMessage(error) {
+  if (error?.code === SCREENSHOT_INVALID) {
+    return 'Не удалось обработать скриншот. Выберите другое изображение.';
+  }
+  if (error?.code === 'development_intake_invalid') {
+    return 'Описание должно содержать от 1 до 2000 символов.';
+  }
+  if (error?.code === 'development_intake_pending_not_persisted') {
+    return 'Память Mini App недоступна. Скопируйте текст и перезапустите Mini App.';
+  }
+  return 'Не удалось сохранить задачу.';
+}
+
 function draftKey(options) {
   return `platform-development-intake-draft:v1:${options.actorUserId}:${options.buildSha}:${options.route}`;
 }
@@ -354,12 +370,28 @@ export function persistPlatformDevelopmentIntakePendingRequest(storage, options,
   }
 }
 
+export function persistPlatformDevelopmentIntakePendingRequestWithFallback(
+  primaryStorage,
+  fallbackStorage,
+  options,
+  request,
+) {
+  if (persistPlatformDevelopmentIntakePendingRequest(primaryStorage, options, request)) {
+    return 'primary';
+  }
+  if (fallbackStorage && fallbackStorage !== primaryStorage
+    && persistPlatformDevelopmentIntakePendingRequest(fallbackStorage, options, request)) {
+    return 'fallback';
+  }
+  return null;
+}
+
 function safeDraft(storage, key) {
   try {
     const value = storage?.getItem(key);
-    return typeof value === 'string' && value.length <= 2_000 ? value : '';
+    return typeof value === 'string' && value.length <= 2_000 ? value : null;
   } catch {
-    return '';
+    return null;
   }
 }
 
@@ -367,7 +399,17 @@ function storeDraft(storage, key, value) {
   try {
     if (value) storage?.setItem(key, value);
     else storage?.removeItem(key);
-  } catch { /* storage is best-effort; submission remains durable server-side */ }
+    return storage ? (value ? storage.getItem(key) === value : storage.getItem(key) === null) : false;
+  } catch {
+    return false;
+  }
+}
+
+function storeDraftWithFallback(primaryStorage, fallbackStorage, key, value) {
+  const storedPrimary = storeDraft(primaryStorage, key, value);
+  if (!value) storeDraft(fallbackStorage, key, value);
+  else if (storedPrimary) removeStored(fallbackStorage, key);
+  else if (!storedPrimary) storeDraft(fallbackStorage, key, value);
 }
 
 export function mountPlatformDevelopmentIntakeControl(host, options) {
@@ -443,8 +485,17 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const formViewport = observeOperatorFormViewport(form);
   const key = draftKey(options);
   const pendingKey = platformDevelopmentIntakePendingStorageKey(options);
-  let pendingRequest = restorePlatformDevelopmentIntakePendingRequest(options.storage, options);
-  instruction.value = pendingRequest?.instruction ?? safeDraft(options.storage, key);
+  const primaryStorage = options.storage;
+  const fallbackStorage = options.fallbackStorage === primaryStorage
+    ? undefined : options.fallbackStorage;
+  const primaryPending = restorePlatformDevelopmentIntakePendingRequest(primaryStorage, options);
+  const fallbackPending = primaryPending
+    ? null : restorePlatformDevelopmentIntakePendingRequest(fallbackStorage, options);
+  let pendingRequest = primaryPending ?? fallbackPending;
+  instruction.value = pendingRequest?.instruction
+    ?? safeDraft(primaryStorage, key)
+    ?? safeDraft(fallbackStorage, key)
+    ?? '';
   let accepted = null;
   let destroyed = false;
   let submitting = false;
@@ -499,7 +550,8 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     }
     accepted = validated;
     if (pendingRequest) {
-      removeStored(options.storage, pendingKey);
+      removeStored(primaryStorage, pendingKey);
+      removeStored(fallbackStorage, pendingKey);
       pendingRequest = null;
     }
     const deliveryStatus = validated.delivery.status;
@@ -565,7 +617,9 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     const end = instruction.value.length;
     instruction.setSelectionRange?.(end, end);
   });
-  instruction.addEventListener('input', () => storeDraft(options.storage, key, instruction.value));
+  instruction.addEventListener('input', () => storeDraftWithFallback(
+    primaryStorage, fallbackStorage, key, instruction.value,
+  ));
   file.addEventListener('change', () => {
     if (submitting || file.disabled) return;
     status.textContent = '';
@@ -587,7 +641,8 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   details.querySelector('[data-action="new"]').addEventListener('click', () => {
     accepted = null;
     pendingRequest = null;
-    removeStored(options.storage, pendingKey);
+    removeStored(primaryStorage, pendingKey);
+    removeStored(fallbackStorage, pendingKey);
     setSubmitting(false);
     submit.textContent = 'Отдать в работу';
     status.textContent = '';
@@ -598,7 +653,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     open.hidden = true;
     open.setAttribute('aria-controls', form.id);
     open.setAttribute('aria-expanded', 'true');
-    instruction.value = safeDraft(options.storage, key);
+    instruction.value = safeDraft(primaryStorage, key) ?? safeDraft(fallbackStorage, key) ?? '';
     instruction.focus();
   });
   obsolete.addEventListener('click', async () => {
@@ -638,15 +693,20 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
         const screenshot = await prepareScreenshotFromFile(selectedFile, SCREENSHOT_INVALID);
         if (destroyed) return;
         status.textContent = 'Сохраняю…';
+        const normalizedInstruction = normalizeInstruction(instruction.value);
+        instruction.value = normalizedInstruction;
+        storeDraftWithFallback(primaryStorage, fallbackStorage, key, normalizedInstruction);
         const request = buildPlatformDevelopmentIntakeRequest({
           mutationId: options.createMutationId(),
-          instruction: instruction.value,
+          instruction: normalizedInstruction,
           surface: options.surface,
           route: options.route,
           buildSha: options.buildSha,
           screenshot,
         });
-        if (!persistPlatformDevelopmentIntakePendingRequest(options.storage, options, request)) {
+        if (!persistPlatformDevelopmentIntakePendingRequestWithFallback(
+          primaryStorage, fallbackStorage, options, request,
+        )) {
           fail('development_intake_pending_not_persisted', 'pending request could not be persisted');
         }
         pendingRequest = request;
@@ -657,23 +717,22 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
         fail('development_intake_receipt_mismatch', 'receipt does not match the pending request');
       }
       status.textContent = 'Задача сохранена ✓';
-      storeDraft(options.storage, key, '');
+      storeDraftWithFallback(primaryStorage, fallbackStorage, key, '');
       open.focus({ preventScroll: true });
     } catch (error) {
       if (pendingRequest && platformDevelopmentIntakeFailureDisposition(error) === 'rejected') {
         const originalInstruction = pendingRequest.instruction;
-        removeStored(options.storage, pendingKey);
+        removeStored(primaryStorage, pendingKey);
+        removeStored(fallbackStorage, pendingKey);
         pendingRequest = null;
         instruction.value = originalInstruction;
         instruction.readOnly = false;
         releaseScreenshotField();
         submit.textContent = 'Отдать в работу';
-        storeDraft(options.storage, key, originalInstruction);
+        storeDraftWithFallback(primaryStorage, fallbackStorage, key, originalInstruction);
         status.textContent = 'Запрос отклонён сервером. Исправьте описание и отправьте снова.';
       } else {
-        status.textContent = error?.code === SCREENSHOT_INVALID
-          ? 'Не удалось обработать скриншот. Выберите другое изображение.'
-          : 'Не удалось сохранить задачу.';
+        status.textContent = platformDevelopmentIntakeErrorMessage(error);
       }
       setSubmitting(false);
     }

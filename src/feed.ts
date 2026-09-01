@@ -3027,6 +3027,7 @@ export class Feed {
       surface: 'feed',
       route,
       storage: localStorage,
+      fallbackStorage: sessionStorage,
       existing: this.platformDevelopmentIntakeLatest,
       createMutationId: ticketUid,
       submit: (request) => this.submitPlatformDevelopmentIntake(request),

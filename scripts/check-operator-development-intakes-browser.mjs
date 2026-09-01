@@ -430,7 +430,8 @@ try {
   // textarea. Cancelling and reopening must preserve the exact local draft.
   await operator.locator(openSelector).click();
   const instruction = operator.locator(`${formSelector} textarea[name="instruction"]`);
-  await instruction.fill(INSTRUCTION);
+  const paddedInstruction = `  ${INSTRUCTION.replace(' ', '\n')}\n`;
+  await instruction.fill(paddedInstruction);
   await operator.locator(`${formSelector} [data-action="dictate"]`).click();
   assert.equal(await instruction.evaluate((element) => document.activeElement === element), true,
     'dictation did not focus the instruction textarea');
@@ -438,26 +439,44 @@ try {
     'dictation target is not an editable textarea');
   await operator.locator(`${formSelector} [data-action="cancel"]`).click();
   await operator.locator(openSelector).click();
-  assert.equal(await instruction.inputValue(), INSTRUCTION,
+  assert.equal(await instruction.inputValue(), paddedInstruction,
     'cancel/reopen lost the instruction draft');
 
   // 4. The first accepted request loses its HTTP response. A manual retry must
   // survive a full WebView reload, reuse the exact immutable request and
   // mutation identity, then render only a queued/nothing-published status from
   // the stable nested delivery object.
+  await operator.evaluate(() => {
+    const originalSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function setItem(key, value) {
+      if (this === localStorage && String(key).startsWith('platform-development-intake-pending:v1:')) {
+        throw new DOMException('quota exceeded', 'QuotaExceededError');
+      }
+      return originalSetItem.call(this, key, value);
+    };
+  });
   await operator.locator(`${formSelector} button[type="submit"]`).click();
   await operator.waitForFunction(() => document.querySelector('.platform-development-intake output')?.textContent
     === 'Не удалось сохранить задачу.');
   assert.equal(postedRequests.length, 1, 'the lost-response attempt did not reach the server');
   const persistedPending = await operator.evaluate(() => {
-    const key = Object.keys(localStorage).find((item) =>
-      item.startsWith('platform-development-intake-pending:v1:'));
-    return key ? JSON.parse(localStorage.getItem(key)) : null;
+    for (const storage of [localStorage, sessionStorage]) {
+      const key = Object.keys(storage).find((item) =>
+        item.startsWith('platform-development-intake-pending:v1:'));
+      if (key) return JSON.parse(storage.getItem(key));
+    }
+    return null;
   });
   assert.equal(persistedPending?.schema, 'platform.development-intake.pending.v1');
   assert.equal(persistedPending?.actorUserId, sessionUserId);
   assert.deepEqual(persistedPending?.request, postedRequests[0],
-    'localStorage did not retain the complete immutable request');
+    'neither pending store retained the complete immutable request');
+  assert.equal(await operator.evaluate(() => Object.keys(localStorage).some((key) =>
+    key.startsWith('platform-development-intake-pending:v1:'))), false,
+  'the unavailable primary store unexpectedly retained the fallback pending record');
+  assert.equal(await operator.evaluate(() => Object.keys(sessionStorage).some((key) =>
+    key.startsWith('platform-development-intake-pending:v1:'))), true,
+  'the immutable request did not use sessionStorage after localStorage failed');
 
   const retrySession = awaitSession(operator);
   const retryProjection = operator.waitForResponse((response) =>
@@ -486,6 +505,9 @@ try {
       && response.ok());
   await operator.locator(`${formSelector} button[type="submit"]`).click();
   await retryResponse;
+  assert.equal(await operator.evaluate(() => [localStorage, sessionStorage].some((storage) =>
+    Object.keys(storage).some((key) => key.startsWith('platform-development-intake-pending:v1:')))), false,
+  'an accepted fallback request left immutable pending storage behind');
   await operator.locator(openSelector).waitFor({ state: 'visible' });
   assert.equal(postedRequests.length, 2, 'the explicit retry did not issue one second POST');
   assert.deepEqual(postedRequests[1], postedRequests[0],
@@ -755,6 +777,15 @@ try {
   await definitive.locator(openSelector).click();
   const definitiveInstruction = definitive.locator(`${formSelector} textarea[name="instruction"]`);
   await definitiveInstruction.fill(REJECTED_INSTRUCTION);
+  await definitive.evaluate(() => {
+    const originalSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function setItem(key, value) {
+      if (this === localStorage && String(key).startsWith('platform-development-intake-pending:v1:')) {
+        throw new DOMException('quota exceeded', 'QuotaExceededError');
+      }
+      return originalSetItem.call(this, key, value);
+    };
+  });
   const postsBeforeRejection = postedRequests.length;
   rejectNextPostStatus = 422;
   const definitiveResponse = definitive.waitForResponse((response) =>
@@ -767,8 +798,8 @@ try {
   assert.equal(await definitiveInstruction.isEditable(), true,
     'a definitive rejection left the original instruction locked');
   assert.equal(await definitiveInstruction.inputValue(), REJECTED_INSTRUCTION);
-  assert.equal(await definitive.evaluate((route) => Object.keys(localStorage).some((key) =>
-    key.startsWith('platform-development-intake-pending:v1:') && key.endsWith(route)), definitiveRoute), false,
+  assert.equal(await definitive.evaluate(() => [localStorage, sessionStorage].some((storage) =>
+    Object.keys(storage).some((key) => key.startsWith('platform-development-intake-pending:v1:')))), false,
   'a definitive rejection retained immutable pending storage');
 
   const acceptedAfterRejection = definitive.waitForResponse((response) =>
@@ -920,12 +951,9 @@ try {
   assert.ok(captured.screenshot.dataUrl.length < phonePngDataUrl.length,
     'the prepared screenshot was not downscaled below its source');
   await capture.locator(`${openSelector}[data-intake-state="pending"]`).waitFor({ state: 'visible' });
-  const capturePending = await capture.evaluate(() => {
-    const key = Object.keys(localStorage).find((item) =>
-      item.startsWith('platform-development-intake-pending:v1:'));
-    return key ? localStorage.getItem(key) : null;
-  });
-  assert.equal(capturePending, null,
+  const capturePending = await capture.evaluate(() => [localStorage, sessionStorage].some((storage) =>
+    Object.keys(storage).some((key) => key.startsWith('platform-development-intake-pending:v1:'))));
+  assert.equal(capturePending, false,
     'an accepted receipt must release the immutable pending screenshot record');
   await capture.close();
 
