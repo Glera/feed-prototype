@@ -523,8 +523,8 @@ try {
   });
   assert.deepEqual(
     [badgeBorderColor.red, badgeBorderColor.green, badgeBorderColor.blue],
-    [116, 206, 255],
-    `the dev-feed badge border is not blue: ${badgeBorderColor.serialized}`,
+    [255, 0, 0],
+    `the dev-feed badge border is not red: ${badgeBorderColor.serialized}`,
   );
   assert.ok(
     Math.abs(badgeBorderColor.alpha - 0.58) < 0.01,
