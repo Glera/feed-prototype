@@ -5272,12 +5272,12 @@ body {
 }
 .dev-diff__badge-label-line { display: block; }
 .dev-diff__badge-count {
-  min-width: 15px;
-  padding: 0 4px;
+  min-width: 20px;
+  padding: 0 5px;
   border-radius: 999px;
   background: #6f4bc9;
   color: #fff;
-  font: 900 9px/15px system-ui, sans-serif;
+  font: 900 12px/20px system-ui, sans-serif;
   text-align: center;
 }
 .dev-diff__badge-count[hidden] { display: none; }
