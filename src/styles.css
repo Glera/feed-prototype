@@ -3768,14 +3768,9 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  /* Match the level ring's height + top so both backings share one midline
-     (they sit at the same top; equal height keeps their centers aligned). */
+  /* Match the level ring's height + top so both counters share one midline. */
   height: var(--story-size);
   padding: 0 15px 0 10px;
-  border-radius: calc(var(--story-size) / 2);
-  background: linear-gradient(180deg, rgba(40, 30, 58, 0.94), rgba(18, 12, 28, 0.94));
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.16);
   pointer-events: none;
   transform-origin: center;
 }
