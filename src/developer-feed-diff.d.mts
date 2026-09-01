@@ -3,7 +3,6 @@ import type {
   CatalogDirectPromotionPreparedV1,
   CatalogDirectPromotionResultV1,
   OperatorPlayableReworkQueueItemV1,
-  PlatformDevelopmentIntakeResponseV1,
 } from './api';
 
 /**
@@ -15,56 +14,36 @@ export type DeveloperFeedDiffTone =
   | 'ok' | 'warn' | 'error' | 'neutral'
   | 'amber' | 'cyan' | 'red';
 
-export interface DeveloperFeedDiffIdentityLine {
-  label: string;
-  value: string;
-  /** Digest/sha-like values render in the monospace idiom used by receipts. */
-  mono: boolean;
-}
-
 /** One mechanic whose dev state is not the public state. */
 export interface DeveloperFeedDiffMechanicRow {
   playableId: string;
-  /** Reused verbatim from `operatorPlayableReworkPresentation`. */
+  /** Human name used by the founder-facing diff. */
+  title: string;
+  /** Human audience label for the private adopted candidate. */
   status: string;
   state: string;
   tone: DeveloperFeedDiffTone;
-  /** Reused verbatim from the rework details counts strip. */
-  counts: string;
-  blocker: string | null;
-  identity: DeveloperFeedDiffIdentityLine[];
+  /** Original founder requests included in this private candidate. */
+  instructions: readonly string[];
   /** True when this row exists because the operator adopted an exact candidate. */
   adopted: boolean;
 }
 
-export interface DeveloperFeedDiffPlatformRow {
-  /** Always `что живёт сейчас` — the baked identity is what the operator runs. */
-  status: string;
-  identity: DeveloperFeedDiffIdentityLine[];
-  /** Present only while a platform rework is in flight. */
-  intake: {
-    status: string;
-    label: string;
-    icon: string;
-    tone: DeveloperFeedDiffTone;
-    blocker: string | null;
-  } | null;
-}
-
 export interface DeveloperFeedDiffCatalogRow {
+  changed: boolean;
+  /** The server projection is absent or failed strict validation. */
+  unknown: boolean;
   status: string;
   detail: string;
-  identity: DeveloperFeedDiffIdentityLine[];
   promotion: Readonly<CatalogDirectPromotionPreparedV1> | null;
+  promotionPreparing: boolean;
 }
 
 export interface DeveloperFeedDiffInput {
   /** The gate the operator flag UI already uses (rework OR platform intake). */
   operatorSurfacesActive?: boolean;
-  platform?: { sourceSha?: string | null; stamp?: string | null } | null;
   /** Entries of the feed's own `playableId → queue` map. No request is issued. */
   reworks?: Iterable<readonly [string, readonly OperatorPlayableReworkQueueItemV1[]]> | null;
-  platformIntake?: PlatformDevelopmentIntakeResponseV1 | null;
   vocabulary?: import('./operator-presentation-vocabulary.mjs').OperatorPresentationVocabularyV1;
   /** The exact candidate this operator adopted, if any. */
   adoption?: {
@@ -77,6 +56,8 @@ export interface DeveloperFeedDiffInput {
   catalog?: DeveloperFeedCatalogDiffV1 | null;
   /** Exact server-prepared closure; mismatched identities fail closed. */
   catalogPromotion?: CatalogDirectPromotionPreparedV1 | null;
+  /** A prepare request for the current exact candidate is in flight. */
+  catalogPromotionPreparing?: boolean;
 }
 
 export interface DeveloperFeedDiffModel {
@@ -84,9 +65,9 @@ export interface DeveloperFeedDiffModel {
   visible: boolean;
   /** Objects whose dev identity differs from public. */
   changed: number;
-  /** No object is in flight → `Dev не отличается от публичного`. */
+  /** Trusted projection contains no private object. */
   empty: boolean;
-  platform: DeveloperFeedDiffPlatformRow;
+  audience: Readonly<import('./operator-presentation-vocabulary.mjs').OperatorPresentationEntryV1>;
   mechanics: DeveloperFeedDiffMechanicRow[];
   catalog: DeveloperFeedDiffCatalogRow;
 }

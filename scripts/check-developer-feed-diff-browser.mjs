@@ -214,6 +214,7 @@ const { mountDeveloperFeedDiffSurface, developerFeedDiffModel,
   validateCatalogDirectPromotionResult } =
   await import('/developer-feed-diff.mjs');
 window.developerFeedDiffModel = developerFeedDiffModel;
+window.mountDeveloperFeedDiffSurface = mountDeveloperFeedDiffSurface;
 window.validateDeveloperFeedCatalogDiff = validateDeveloperFeedCatalogDiff;
 window.validateCatalogDirectPromotionPrepared = validateCatalogDirectPromotionPrepared;
 window.validateCatalogDirectPromotionResult = validateCatalogDirectPromotionResult;
@@ -546,11 +547,10 @@ try {
     'the two-line dev-feed label lacks safe glyph leading');
   assert.equal(await badge.evaluate((node) => node.tagName), 'BUTTON',
     'the dev-feed badge must be a real control, not a decorative label');
-  // Two actionable mechanic lineages + one platform intake + one dev catalog row;
-  // historical superseded/covered roots remain inspectable but do not inflate
-  // the badge that answers "what still differs now?".
+  // Queue/history rows are not feed differences. Only the private catalog
+  // version differs from release in this fixture.
   await page.locator('[data-testid="dev-diff-badge-count"]')
-    .filter({ hasText: /^4$/ }).waitFor();
+    .filter({ hasText: /^1$/ }).waitFor();
   assert.equal(await page.locator(sheetSelector).isVisible(), false,
     'the inventory sheet was open before the operator asked for it');
 
@@ -562,76 +562,30 @@ try {
   assert.equal(reworkListRequests.length, requestsBeforeOpen,
     'opening the read-only inventory issued its own projection request');
 
-  // Row 1 — platform: the baked identity, labelled as what is live now.
-  const platformRow = sheet.locator('[data-row="platform"]');
-  await platformRow.waitFor({ state: 'visible' });
-  const platformText = await platformRow.innerText();
-  assert.match(platformText, /что живёт сейчас/, 'the platform row lost its status line');
-  assert.match(platformText, new RegExp(BUILD_SHA.slice(0, 12)),
-    'the platform row does not carry the baked source sha');
-  assert.ok(!platformText.includes(BUILD_SHA),
-    'the platform row printed the full sha instead of the short form');
-  assert.match(platformText, /2026-08-18 13:59/,
-    'the platform row does not carry the build stamp baked into the bar');
-  assert.match(platformText,
-    /Дорабатывается: Инженерный тикет создан; изменения ещё не опубликованы\./,
-    'the platform intake status is not the vocabulary the ⚙ control already uses');
-  assert.doesNotMatch(platformText, /READY_TO_PLAY|NEEDS_HELP/,
-    'machine lifecycle tokens leaked into the read-only inventory');
+  assert.equal(await sheet.locator('[data-row="platform"]').count(), 0,
+    'platform work history leaked into the release diff');
+  assert.equal(await sheet.locator('[data-row="mechanic"]').count(), 0,
+    'mechanic work queue leaked into the release diff');
+  assert.equal(await sheet.locator(rowSelector).count(), 1,
+    'the sheet must contain only a literal dev/public difference');
 
-  // Row 2 — mechanics with active reworks, in the existing status vocabulary.
-  const mechanics = sheet.locator('[data-row="mechanic"]');
-  assert.equal(await mechanics.count(), 4, 'the mechanic inventory lost a row');
-  const needsHelp = sheet.locator('[data-playable-id="minesweeper-v1-swipe"]');
-  const ready = sheet.locator('[data-playable-id="solitaire-v1-swipe"]');
-  assert.equal(await needsHelp.getAttribute('data-tone'), 'error');
-  assert.match(await needsHelp.innerText(), /Нужна помощь/,
-    'a blocked rework is not shown with the existing status word');
-  assert.match(await needsHelp.innerText(), /Сборка кандидата не проходит\./,
-    'the blocker summary from the projection is not surfaced');
-  assert.match(await needsHelp.innerText(), /активно 1/,
-    'the counts strip is not derived from the exact visible queue rows');
-  assert.doesNotMatch(await needsHelp.innerText(), /в очереди 2/,
-    'a stale aggregate count invented queue rows absent from the projection');
-  assert.equal(await ready.getAttribute('data-tone'), 'ok');
-  assert.match(await ready.innerText(), /Готово к проверке/,
-    'a delivered effect remained presented as in progress');
-  assert.doesNotMatch(await ready.innerText(), /В работе/,
-    'a delivered effect remained presented as in progress');
-  assert.match(
-    await sheet.locator('[data-playable-id="merge-locked-swipe"]').innerText(),
-    /Историческая заявка · выполнена successor/,
-    'a covered capability-gap root is still presented as active work',
-  );
-  assert.match(
-    await sheet.locator('[data-playable-id="arrows-v1-swipe"]').innerText(),
-    /Заменена следующей правкой/,
-    'a superseded request is still presented as active work',
-  );
-  assert.equal(
-    await sheet.locator('[data-action="show-mechanic"]').count(), 4,
-    'each mechanic row must link to the card where Доработать механику lives');
-
-  assert.equal(await sheet.locator(rowSelector).count(), 6,
-    'the inventory must carry exactly the platform, mechanic and catalog rows');
-
-  // Row 3 — exact server-owned dev/public catalog identity.
+  // The server-owned catalog difference is descriptive, without diagnostics.
   const catalogRow = sheet.locator('[data-row="catalog"]');
   const catalogText = await catalogRow.innerText();
-  assert.match(catalogText, /Только мне · canary/,
-    'the catalog row lost its server-owned dev state');
-  assert.match(catalogText, /bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/,
-    'the catalog row lost its exact dev entry identity');
-  assert.match(catalogText, /dddddddd-dddd-4ddd-8ddd-dddddddddddd/,
-    'the catalog row lost its exact public entry identity');
-  assert.match(catalogText, /dev runtime\s+не сопоставлен/,
-    'a catalog entry without a compatible runtime was hidden instead of shown honestly');
+  assert.match(catalogText, /Marble Sort/);
+  assert.match(catalogText, /Новая версия уровней доступна только в вашей dev-ленте\./);
+  assert.doesNotMatch(catalogText, /bbbbbbbb|dddddddd|runtime|entry|state|source|sha256/,
+    'technical catalog identity leaked into the founder-facing diff');
 
   // This canary has no compatible runtime and therefore no direct-public control.
   assert.equal(await sheet.locator('text=Сделать доступным всем').count(), 0,
     'an ineligible canary received a direct-public control');
-  assert.equal(await sheet.locator('input, textarea, select').count(), 0,
-    'the read-only inventory must contain no focusable form field');
+  assert.equal(await sheet.locator('input[type="checkbox"]').count(), 1,
+    'a real difference must retain its selection affordance');
+  assert.equal(await sheet.locator('input[type="checkbox"]').isDisabled(), true,
+    'an ineligible difference must not pretend it can be published');
+  assert.equal(await sheet.locator('input[type="checkbox"]').isChecked(), false,
+    'an ineligible difference must not look selected for publication');
 
   // The card fades in over 0.2s; a proof screenshot must show the settled sheet.
   await page.waitForTimeout(400);
@@ -648,18 +602,6 @@ try {
   assert.equal(await badge.evaluate((node) => document.activeElement === node), true,
     'closing the inventory did not restore focus to its own control');
 
-  // The row action jumps to the mechanic's card — where `Доработать механику`
-  // already lives — and closes the sheet behind it rather than covering it.
-  await badge.click();
-  await sheet.waitFor({ state: 'visible' });
-  const indexBeforeJump = await page.evaluate(() => window.__feedWarm().current);
-  assert.equal(indexBeforeJump, 0, 'the feed did not start on the first card');
-  await ready.locator('[data-action="show-mechanic"]').click();
-  await sheet.waitFor({ state: 'hidden' });
-  await page.waitForFunction(() => window.__feedWarm().current !== 0);
-  await page.waitForFunction(() => [...document.querySelectorAll('iframe')]
-    .some((frame) => (frame.getAttribute('src') || '').includes('solitaire-v1-swipe')),
-  null, { timeout: 20_000 });
   await page.close();
 
   // ── A3. Desktop proof of the same open sheet. ───────────────────────────
@@ -694,7 +636,17 @@ try {
   const directSheet = direct.locator(sheetSelector);
   await directSheet.waitFor({ state: 'visible' });
   const publish = directSheet.locator('[data-action="publish-catalog"]');
+  const publishAll = directSheet.locator('[data-action="publish-all"]');
+  const selection = directSheet.locator('[data-action="select-catalog"]');
   await publish.waitFor({ state: 'visible' });
+  await publishAll.waitFor({ state: 'visible' });
+  assert.equal(await selection.isChecked(), true,
+    'the only publishable difference was not selected by default');
+  await selection.uncheck();
+  assert.equal(await publish.isDisabled(), true,
+    'publish-selected stayed active with no selected difference');
+  assert.equal(await publishAll.isDisabled(), false,
+    'publish-all was disabled by an empty manual selection');
   assert.equal(promotionPrepareRequests.length, 1,
     'the exact candidate did not issue one bounded prepare');
   assert.deepEqual(promotionPrepareRequests[0], {
@@ -704,6 +656,19 @@ try {
     expectedStateVersion: 7,
     action: 'publish',
   });
+  await publishAll.click();
+  assert.equal(await selection.isChecked(), true,
+    'publish-all did not select the real difference');
+  await directSheet.locator('text=Код: ABC123').waitFor({ state: 'visible' });
+  await selection.uncheck();
+  assert.equal(
+    await directSheet.locator('[data-testid="catalog-promotion-confirm"]').isHidden(),
+    true,
+    'deselecting the item left its publication confirmation active',
+  );
+  assert.equal(promotionApplyRequests.length, 0,
+    'deselecting an item triggered a publication mutation');
+  await selection.check();
   await publish.click();
   await directSheet.locator('text=Код: ABC123').waitFor({ state: 'visible' });
   const codeInput = directSheet.locator('[data-testid="catalog-promotion-code-input"]');
@@ -746,8 +711,8 @@ try {
       && response.status() === 200);
   await direct.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
   await refreshedSession;
-  await directSheet.locator('[data-row="catalog"]')
-    .filter({ hasText: 'Доступно всем' }).waitFor();
+  await directSheet.locator('[data-testid="dev-diff-empty"]')
+    .filter({ hasText: 'Dev-лента совпадает с релизной' }).waitFor();
   assert.equal(promotionApplyRequests.length, 2,
     'the refused and accepted confirmations were not each issued once');
   assert.equal(promotionApplyRequests[1].confirmationCode, 'ABC123',
@@ -775,12 +740,31 @@ try {
     'the badge advertised a change count with nothing in flight');
   await quietBadge.click();
   await quiet.locator('[data-testid="dev-diff-empty"]')
-    .filter({ hasText: 'Dev не отличается от публичного' }).waitFor();
+    .filter({ hasText: 'Dev-лента совпадает с релизной' }).waitFor();
   await quiet.waitForTimeout(400);
   if (screenshotDir) {
     await quiet.screenshot({ path: path.join(screenshotDir, 'dev-diff-empty-375x812.png') });
   }
   await quiet.close();
+
+  // ── A6. An untrusted projection must never claim that both feeds match. ───
+  developerFeedCatalog = {
+    schema: 'feed.developer-catalog-diff.v1',
+    mechanic: 'sort',
+    variant: 'base',
+    available: false,
+    unavailableReason: 'catalog_projection_invalid',
+    dev: null,
+    public: null,
+  };
+  const unknown = await newPage({ width: 375, height: 812 });
+  await bootFeed(unknown, 'operator-catalog-unknown');
+  await unknown.locator(badgeSelector).click();
+  await unknown.locator('[data-testid="dev-diff-catalog-unknown"]')
+    .waitFor({ state: 'visible' });
+  assert.equal(await unknown.locator('[data-testid="dev-diff-empty"]').count(), 0,
+    'an invalid catalog projection claimed that dev and release match');
+  await unknown.close();
 
   // ── B. destroy() drops every listener it added. ─────────────────────────
   const modulePage = await newPage({ width: 390, height: 760 });
@@ -788,10 +772,10 @@ try {
   await modulePage.waitForFunction(() => window.ready === true);
 
   // The pure projection is the contract the DOM renders; assert it directly.
-  const projection = await modulePage.evaluate(() => window.developerFeedDiffModel({
+  const projection = await modulePage.evaluate((matchedRework) => window.developerFeedDiffModel({
     operatorSurfacesActive: true,
     platform: { sourceSha: 'a'.repeat(40), stamp: 'stamp' },
-    reworks: [],
+    reworks: [['marble-sort-swipe', [matchedRework]]],
     platformIntake: null,
     vocabulary: {
       schema: 'platform.operator-presentation-vocabulary.v1',
@@ -811,15 +795,31 @@ try {
     adoption: {
       playableId: 'marble-sort-swipe',
       releaseId: 'pr_777',
-      candidateArtifactDigest: `sha256:${'9'.repeat(64)}`,
+      candidateArtifactDigest: `sha256:${'3'.repeat(64)}`,
       sourceCommit: '8'.repeat(40),
     },
     catalog: null,
+  }), reworkItem({
+    requestId: '56565656-5656-5656-8656-565656565656',
+    playableId: 'marble-sort-swipe',
+    instruction: 'Убрать подложку.',
+    releaseExecution: {
+      releaseId: 'pr_777',
+      state: 'needs_help',
+      bindingDigest: 'f'.repeat(64),
+      code: 'build_failed',
+      summary: 'Сборка кандидата не проходит.',
+      updatedAt: '2026-08-18T08:40:00.000Z',
+      notificationStatus: null,
+    },
   }));
   assert.equal(projection.mechanics.length, 1);
   assert.equal(projection.mechanics[0].adopted, true);
   assert.equal(projection.mechanics[0].status, 'Аудитория: ◉ Лично',
     'the Feed ignored the strict server-owned audience vocabulary');
+  assert.deepEqual(projection.mechanics[0].instructions, ['Убрать подложку.']);
+  assert.equal('blocker' in projection.mechanics[0], false,
+    'engineering queue status leaked into an adopted mechanic difference');
   const directWireValidation = await modulePage.evaluate(() => ({
     preparedExtraRejected: window.validateCatalogDirectPromotionPrepared({
       schema: 'catalog.direct-promotion.prepared.v1',
@@ -907,6 +907,60 @@ try {
   assert.equal(catalogValidation.valid?.schema, 'feed.developer-catalog-diff.v1');
   assert.equal(catalogValidation.extra, null, 'catalog projection accepted an unknown field');
   assert.equal(catalogValidation.mixed, null, 'catalog projection accepted mixed availability');
+
+  // A mixed mechanic + catalog sheet must not claim that the catalog-only
+  // mutation publishes every visible difference.
+  await modulePage.evaluate(() => {
+    window.surface.destroy();
+    const runtimeArtifactDigest = `sha256:${'a'.repeat(64)}`;
+    window.surface = window.mountDeveloperFeedDiffSurface(document.body, {
+      input: {
+        operatorSurfacesActive: true,
+        reworks: [],
+        adoption: {
+          playableId: 'marble-sort-swipe',
+          releaseId: 'pr_mixed',
+          candidateArtifactDigest: `sha256:${'3'.repeat(64)}`,
+          sourceCommit: '8'.repeat(40),
+        },
+        catalog: {
+          schema: 'feed.developer-catalog-diff.v1', mechanic: 'sort', variant: 'base',
+          available: true, unavailableReason: null,
+          dev: {
+            entryId: 'abababab-abab-4bab-8bab-abababababab',
+            kind: 'series', state: 'candidate', stateVersion: 7,
+            seriesId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd', levelSpecHash: null,
+            runtime: {
+              releaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+              playableId: 'marble-sort-swipe', runtimeArtifactDigest,
+              sourceCommit: 'b'.repeat(40),
+            },
+            stateChangedAt: '2026-08-27T12:00:00Z',
+          },
+          public: null,
+        },
+        catalogPromotion: {
+          schema: 'catalog.direct-promotion.prepared.v1',
+          operationId: '12121212-1212-4212-8212-121212121212',
+          action: 'publish', entryId: 'abababab-abab-4bab-8bab-abababababab',
+          expectedStateVersion: 7, fromState: 'candidate', toState: 'published',
+          fromAudience: 'exactUser', toAudience: 'public', runtimeArtifactDigest,
+          confirmationCode: 'ABC123',
+        },
+      },
+      onPromoteCatalog: async () => ({ status: 'committed_refreshed' }),
+    });
+  });
+  await modulePage.locator(badgeSelector).click();
+  await modulePage.locator(sheetSelector).waitFor({ state: 'visible' });
+  assert.equal(await modulePage.locator('[data-row="mechanic"] input[type="checkbox"]')
+    .isDisabled(), true, 'a separately published mechanic looked batch-publishable');
+  await modulePage.locator('[data-action="publish-all"]')
+    .filter({ hasText: 'Выложить уровни' }).waitFor();
+  assert.equal(await modulePage.locator('[data-action="publish-all"]')
+    .filter({ hasText: 'Выложить всё' }).count(), 0,
+  'a catalog-only mutation over-claimed that it publishes every visible difference');
+  await modulePage.locator('[data-close]').last().click();
 
   const listenerBalance = () => modulePage.evaluate(() =>
     Object.fromEntries(window.documentListeners));

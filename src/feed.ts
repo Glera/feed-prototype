@@ -798,10 +798,10 @@ export class Feed {
   private developerFeedDiffSurface: DeveloperFeedDiffSurface | null = null;
   private developerFeedCatalog: Readonly<DeveloperFeedCatalogDiffV1> | null = null;
   private catalogPromotionPrepared: Readonly<CatalogDirectPromotionPreparedV1> | null = null;
+  private catalogPromotionPreparing = false;
   private catalogPromotionPrepareKey: string | null = null;
   private catalogPromotionPrepareEpoch = 0;
   private platformDevelopmentIntakeControl: PlatformDevelopmentIntakeControl | null = null;
-  private platformDevelopmentIntakeLatest: PlatformDevelopmentIntakeResponseV1 | null = null;
   private platformDevelopmentIntakes: PlatformDevelopmentIntakeResponseV1[] = [];
   private platformDevelopmentIntakeSyncEpoch = 0;
   private platformDevelopmentIntakeActorUserId: number | null = null;
@@ -2839,20 +2839,14 @@ export class Feed {
     const overlay = this.readOnlyPreview ? null : candidatePlayableOverlay();
     return {
       operatorSurfacesActive,
-      platform: {
-        sourceSha: typeof __PLATFORM_SOURCE_SHA__ === 'string' ? __PLATFORM_SOURCE_SHA__ : null,
-        stamp: typeof __PLATFORM_VERSION__ === 'string' ? __PLATFORM_VERSION__ : null,
-      },
       reworks: this.operatorLevelFlaggingAvailable
         ? Array.from(this.operatorPlayableReworks.entries())
         : [],
-      platformIntake: this.developmentIntakeAvailable
-        ? this.platformDevelopmentIntakeLatest
-        : null,
       adoption: overlay,
       vocabulary: this.operatorPresentationVocabulary,
       catalog: this.developerFeedCatalog,
       catalogPromotion: this.catalogPromotionPrepared,
+      catalogPromotionPreparing: this.catalogPromotionPreparing,
     };
   }
 
@@ -2882,6 +2876,7 @@ export class Feed {
       this.catalogPromotionPrepareEpoch += 1;
       this.catalogPromotionPrepareKey = null;
       this.catalogPromotionPrepared = null;
+      this.catalogPromotionPreparing = false;
       this.refreshDeveloperFeedDiff();
       return;
     }
@@ -2889,6 +2884,7 @@ export class Feed {
     if (this.catalogPromotionPrepareKey === key) return;
     this.catalogPromotionPrepareKey = key;
     this.catalogPromotionPrepared = null;
+    this.catalogPromotionPreparing = true;
     const epoch = ++this.catalogPromotionPrepareEpoch;
     this.refreshDeveloperFeedDiff();
     try {
@@ -2901,12 +2897,18 @@ export class Feed {
         action: 'publish',
       });
       const prepared = validateCatalogDirectPromotionPrepared(raw);
-      if (epoch !== this.catalogPromotionPrepareEpoch
-        || prepared?.operationId !== operationId
+      if (epoch !== this.catalogPromotionPrepareEpoch) return;
+      if (prepared?.operationId !== operationId
         || prepared.entryId !== candidate.entryId
         || prepared.expectedStateVersion !== candidate.stateVersion
-        || prepared.runtimeArtifactDigest !== candidate.runtime.runtimeArtifactDigest) return;
+        || prepared.runtimeArtifactDigest !== candidate.runtime.runtimeArtifactDigest) {
+        this.catalogPromotionPrepareKey = null;
+        this.catalogPromotionPreparing = false;
+        this.refreshDeveloperFeedDiff();
+        return;
+      }
       this.catalogPromotionPrepared = prepared;
+      this.catalogPromotionPreparing = false;
       this.refreshDeveloperFeedDiff();
     } catch {
       // Disabled, stale or ineligible candidates simply expose no mutation
@@ -2914,6 +2916,8 @@ export class Feed {
       // useful and a later session/state identity gets one fresh preparation.
       if (epoch === this.catalogPromotionPrepareEpoch) {
         this.catalogPromotionPrepareKey = null;
+        this.catalogPromotionPreparing = false;
+        this.refreshDeveloperFeedDiff();
       }
     }
   }
@@ -2969,7 +2973,6 @@ export class Feed {
     );
     if (!this.developmentIntakeAvailable) {
       this.platformDevelopmentIntakeSyncEpoch += 1;
-      this.platformDevelopmentIntakeLatest = null;
       this.platformDevelopmentIntakes = [];
       this.platformDevelopmentIntakeControl?.destroy();
       this.platformDevelopmentIntakeControl = null;
@@ -2990,11 +2993,7 @@ export class Feed {
       );
       if (epoch !== this.platformDevelopmentIntakeSyncEpoch || !this.developmentIntakeAvailable
         || this.platformDevelopmentIntakeActorUserId !== this.authenticatedUserId) return;
-      const latest = [...projection.items].sort((left, right) => (
-        Date.parse(right.createdAt) - Date.parse(left.createdAt)
-      ))[0] ?? null;
       this.platformDevelopmentIntakes = [...projection.items];
-      this.platformDevelopmentIntakeLatest = latest;
       this.refreshDeveloperFeedDiff();
       if (this.platformDevelopmentIntakeControl) {
         this.platformDevelopmentIntakeControl.update(this.platformDevelopmentIntakes);
@@ -3021,7 +3020,6 @@ export class Feed {
       && this.platformDevelopmentIntakeActorUserId === actorUserId) return;
     if (this.platformDevelopmentIntakeActorUserId !== actorUserId) {
       this.platformDevelopmentIntakeSyncEpoch += 1;
-      this.platformDevelopmentIntakeLatest = null;
       this.platformDevelopmentIntakes = [];
       this.platformDevelopmentIntakeControl?.destroy();
       this.platformDevelopmentIntakeControl = null;
@@ -3067,7 +3065,6 @@ export class Feed {
     } catch {
       throw new ApiRequestError(503, 'Development intake receipt differs', 'development_intake_receipt_invalid');
     }
-    this.platformDevelopmentIntakeLatest = response;
     this.platformDevelopmentIntakes = [
       response,
       ...this.platformDevelopmentIntakes.filter((item) => item.requestId !== response.requestId),
@@ -3100,7 +3097,6 @@ export class Feed {
       || this.platformDevelopmentIntakeActorUserId !== this.authenticatedUserId) {
       throw new ApiRequestError(503, 'Cancellation receipt differs', 'development_intake_receipt_invalid');
     }
-    this.platformDevelopmentIntakeLatest = response;
     this.platformDevelopmentIntakes = this.platformDevelopmentIntakes.map((item) => (
       item.requestId === response.requestId ? response : item
     ));

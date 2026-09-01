@@ -780,12 +780,12 @@ try {
   const adoptedCatalogRow = page.locator('[data-testid="dev-diff-sheet"] [data-row="catalog"]');
   await adoptedCatalogRow.waitFor({ state: 'visible' });
   const adoptedCatalogText = await adoptedCatalogRow.innerText();
-  assert.match(adoptedCatalogText, /Только мне · canary/,
+  assert.match(adoptedCatalogText, /Marble Sort\s+Только мне/,
     'adopted candidate boot dropped the read-only dev catalog state');
-  assert.match(adoptedCatalogText, /bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/,
-    'adopted candidate boot dropped the exact dev catalog identity');
-  assert.match(adoptedCatalogText, /dddddddd-dddd-4ddd-8ddd-dddddddddddd/,
-    'adopted candidate boot dropped the exact public catalog identity');
+  assert.match(adoptedCatalogText, /Новая версия уровней доступна только в вашей dev-ленте\./,
+    'adopted candidate boot lost the founder-facing difference');
+  assert.doesNotMatch(adoptedCatalogText, /bbbbbbbb|dddddddd|runtime|entry|sha256/,
+    'technical catalog identity leaked into the founder-facing diff');
   await page.keyboard.press('Escape');
   await page.locator('[data-testid="dev-diff-sheet"]').waitFor({ state: 'hidden' });
   const adoptedFrame = page.locator('.page').first().locator('iframe');
