@@ -1400,6 +1400,41 @@ body {
 .platform-development-intake__details[hidden] { display: none; }
 .platform-development-intake__details p { margin: 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .platform-development-intake__details small { display: block; color: #acd0df; }
+.platform-development-intake__queue {
+  display: grid;
+  gap: 8px;
+  max-height: min(260px, 42vh);
+  margin: 10px 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.platform-development-intake__queue li {
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.platform-development-intake__queue span {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.platform-development-intake__queue b { color: #9dffc1; font-size: 11px; }
+.platform-development-intake__queue small { color: #acd0df; }
+.platform-development-intake__queue a { color: #9dffc1; font-weight: 700; }
+.platform-development-intake__queue [data-intake-status="needs_help"] b { color: #ffb096; }
+.platform-development-intake__queue [data-intake-status="cancelled"] b { color: #acd0df; }
+.platform-development-intake__queue [data-intake-status="queued"] b { color: #ffe08a; }
+.platform-development-intake__summary { margin: 8px 0; color: #eef9ff; }
+.platform-development-intake__technical {
+  margin-top: 10px;
+  color: #acd0df;
+}
+.platform-development-intake__technical summary { cursor: pointer; }
 .platform-development-intake__receipt { margin: 9px 0; }
 .platform-development-intake__receipt div { margin: 4px 0; }
 .platform-development-intake__receipt dt { color: #acd0df; }

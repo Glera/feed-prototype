@@ -81,7 +81,7 @@ export interface PlatformDevelopmentIntakeReceiptV1 {
 
 export interface PlatformDevelopmentIntakeControl {
   destroy(): void;
-  update(receipt: PlatformDevelopmentIntakeReceiptV1): void;
+  update(receipts: ReadonlyArray<PlatformDevelopmentIntakeReceiptV1>): void;
 }
 
 export function platformDevelopmentIntakeAvailable(value: unknown): boolean;
@@ -142,7 +142,7 @@ export function mountPlatformDevelopmentIntakeControl(
     route: string;
     storage?: Storage;
     fallbackStorage?: Storage;
-    existing?: PlatformDevelopmentIntakeReceiptV1 | null;
+    existing?: ReadonlyArray<PlatformDevelopmentIntakeReceiptV1>;
     createMutationId(): string;
     submit(request: PlatformDevelopmentIntakeRequestV1): Promise<PlatformDevelopmentIntakeReceiptV1>;
     cancel?(

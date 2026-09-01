@@ -802,6 +802,7 @@ export class Feed {
   private catalogPromotionPrepareEpoch = 0;
   private platformDevelopmentIntakeControl: PlatformDevelopmentIntakeControl | null = null;
   private platformDevelopmentIntakeLatest: PlatformDevelopmentIntakeResponseV1 | null = null;
+  private platformDevelopmentIntakes: PlatformDevelopmentIntakeResponseV1[] = [];
   private platformDevelopmentIntakeSyncEpoch = 0;
   private platformDevelopmentIntakeActorUserId: number | null = null;
   private operatorLevelFlagDraft: Readonly<{
@@ -2969,6 +2970,7 @@ export class Feed {
     if (!this.developmentIntakeAvailable) {
       this.platformDevelopmentIntakeSyncEpoch += 1;
       this.platformDevelopmentIntakeLatest = null;
+      this.platformDevelopmentIntakes = [];
       this.platformDevelopmentIntakeControl?.destroy();
       this.platformDevelopmentIntakeControl = null;
       this.platformDevelopmentIntakeActorUserId = null;
@@ -2988,11 +2990,14 @@ export class Feed {
       );
       if (epoch !== this.platformDevelopmentIntakeSyncEpoch || !this.developmentIntakeAvailable
         || this.platformDevelopmentIntakeActorUserId !== this.authenticatedUserId) return;
-      const latest = projection.items[0] ?? null;
+      const latest = [...projection.items].sort((left, right) => (
+        Date.parse(right.createdAt) - Date.parse(left.createdAt)
+      ))[0] ?? null;
+      this.platformDevelopmentIntakes = [...projection.items];
       this.platformDevelopmentIntakeLatest = latest;
       this.refreshDeveloperFeedDiff();
-      if (latest && this.platformDevelopmentIntakeControl) {
-        this.platformDevelopmentIntakeControl.update(latest);
+      if (this.platformDevelopmentIntakeControl) {
+        this.platformDevelopmentIntakeControl.update(this.platformDevelopmentIntakes);
       } else {
         this.refreshPlatformDevelopmentIntakeControl();
       }
@@ -3017,6 +3022,7 @@ export class Feed {
     if (this.platformDevelopmentIntakeActorUserId !== actorUserId) {
       this.platformDevelopmentIntakeSyncEpoch += 1;
       this.platformDevelopmentIntakeLatest = null;
+      this.platformDevelopmentIntakes = [];
       this.platformDevelopmentIntakeControl?.destroy();
       this.platformDevelopmentIntakeControl = null;
     }
@@ -3028,7 +3034,7 @@ export class Feed {
       route,
       storage: localStorage,
       fallbackStorage: sessionStorage,
-      existing: this.platformDevelopmentIntakeLatest,
+      existing: this.platformDevelopmentIntakes,
       createMutationId: ticketUid,
       submit: (request) => this.submitPlatformDevelopmentIntake(request),
       cancel: (requestId, request) => this.cancelPlatformDevelopmentIntake(requestId, request),
@@ -3062,6 +3068,10 @@ export class Feed {
       throw new ApiRequestError(503, 'Development intake receipt differs', 'development_intake_receipt_invalid');
     }
     this.platformDevelopmentIntakeLatest = response;
+    this.platformDevelopmentIntakes = [
+      response,
+      ...this.platformDevelopmentIntakes.filter((item) => item.requestId !== response.requestId),
+    ];
     return response;
   }
 
@@ -3091,6 +3101,9 @@ export class Feed {
       throw new ApiRequestError(503, 'Cancellation receipt differs', 'development_intake_receipt_invalid');
     }
     this.platformDevelopmentIntakeLatest = response;
+    this.platformDevelopmentIntakes = this.platformDevelopmentIntakes.map((item) => (
+      item.requestId === response.requestId ? response : item
+    ));
     this.refreshDeveloperFeedDiff();
     return response;
   }

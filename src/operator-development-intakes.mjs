@@ -256,9 +256,15 @@ export function validatePlatformDevelopmentIntakeList(value) {
     || value.schema !== 'platform.development-intake.list.v1' || !Array.isArray(value.items)) {
     fail('development_intake_receipt_invalid', 'development intake list shape is invalid');
   }
+  const items = [];
+  for (const item of value.items) {
+    try {
+      items.push(validatePlatformDevelopmentIntakeReceipt(item));
+    } catch { /* one malformed historical row cannot hide healthy current work */ }
+  }
   return Object.freeze({
     schema: value.schema,
-    items: Object.freeze(value.items.map((item) => validatePlatformDevelopmentIntakeReceipt(item))),
+    items: Object.freeze(items),
   });
 }
 
@@ -281,6 +287,50 @@ export function platformDevelopmentIntakeErrorMessage(error) {
     return 'Память Mini App недоступна. Скопируйте текст и перезапустите Mini App.';
   }
   return 'Не удалось сохранить задачу.';
+}
+
+function terminalIntakeLabel(receipt) {
+  if (receipt.cancellation?.status === 'confirmed') return 'Неактуально';
+  if (receipt.terminal?.status === 'READY_TO_PLAY') return 'Готово';
+  if (receipt.terminal?.status === 'NEEDS_HELP'
+    || receipt.delivery.status === 'failed_terminal'
+    || receipt.cancellation?.status === 'failed_terminal') return 'Нужна помощь';
+  return null;
+}
+
+function terminalIntakeState(receipt) {
+  if (receipt.cancellation?.status === 'confirmed') return 'cancelled';
+  if (receipt.terminal?.status === 'READY_TO_PLAY') return 'ready';
+  return 'needs_help';
+}
+
+function platformIntakeQueuePresentation(receipts) {
+  const newestFirst = [...receipts].sort((left, right) => (
+    Date.parse(right.createdAt) - Date.parse(left.createdAt)
+  ));
+  const active = newestFirst.filter((receipt) => terminalIntakeLabel(receipt) === null)
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  if (active.length === 0) {
+    return newestFirst.slice(0, 1).map((receipt) => ({
+      receipt,
+      label: terminalIntakeLabel(receipt) || 'В работе',
+      state: terminalIntakeState(receipt),
+    }));
+  }
+  const rows = active.map((receipt, index) => ({
+    receipt,
+    label: index === 0 ? 'В работе' : `В очереди · №${index}`,
+    state: index === 0 ? 'active' : 'queued',
+  }));
+  const newestTerminal = newestFirst.find((receipt) => terminalIntakeLabel(receipt) !== null);
+  if (newestTerminal) {
+    rows.push({
+      receipt: newestTerminal,
+      label: terminalIntakeLabel(newestTerminal),
+      state: terminalIntakeState(newestTerminal),
+    });
+  }
+  return rows;
 }
 
 function draftKey(options) {
@@ -443,20 +493,25 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
       <output class="game__operator-flag-status" aria-live="polite"></output>
     </form>
     <section class="platform-development-intake__details" id="${controlId}-details" hidden>
-      <b>Запрошенная правка платформы</b>
-      <p data-intake-instruction></p>
-      <small data-intake-status></small>
-      <dl class="platform-development-intake__receipt" aria-label="Durable receipt">
-        <div><dt>requestId</dt><dd data-intake-request-id></dd></div>
-        <div><dt>mutationId</dt><dd data-intake-mutation-id></dd></div>
-        <div><dt>requestHash</dt><dd data-intake-request-hash></dd></div>
-        <div><dt>replayed</dt><dd data-intake-replayed></dd></div>
-        <div><dt>Issue delivery</dt><dd data-intake-delivery-state></dd></div>
-      </dl>
+      <b>Правки платформы</b>
+      <ol class="platform-development-intake__queue" data-intake-queue></ol>
+      <small class="platform-development-intake__summary" data-intake-summary hidden></small>
       <p class="platform-development-intake__blocker" data-intake-blocker hidden></p>
       <a class="platform-development-intake__result" data-intake-result target="_blank" rel="noreferrer" hidden>Открыть результат</a>
       <button type="button" data-action="obsolete" hidden>Неактуально</button>
       <button type="button" data-action="new">Новая задача</button>
+      <details class="platform-development-intake__technical">
+        <summary>Технические детали</summary>
+        <p data-intake-instruction></p>
+        <small data-intake-status></small>
+        <dl class="platform-development-intake__receipt" aria-label="Durable receipt">
+          <div><dt>requestId</dt><dd data-intake-request-id></dd></div>
+          <div><dt>mutationId</dt><dd data-intake-mutation-id></dd></div>
+          <div><dt>requestHash</dt><dd data-intake-request-hash></dd></div>
+          <div><dt>replayed</dt><dd data-intake-replayed></dd></div>
+          <div><dt>Issue delivery</dt><dd data-intake-delivery-state></dd></div>
+        </dl>
+      </details>
     </section>`;
   host.appendChild(root);
   const open = root.querySelector('.platform-development-intake__open');
@@ -468,6 +523,8 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const dictate = form.querySelector('[data-action="dictate"]');
   const cancel = form.querySelector('[data-action="cancel"]');
   const details = root.querySelector('.platform-development-intake__details');
+  const queue = details.querySelector('[data-intake-queue]');
+  const detailSummary = details.querySelector('[data-intake-summary]');
   const detailInstruction = details.querySelector('[data-intake-instruction]');
   const detailStatus = details.querySelector('[data-intake-status]');
   const detailRequestId = details.querySelector('[data-intake-request-id]');
@@ -497,6 +554,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     ?? safeDraft(fallbackStorage, key)
     ?? '';
   let accepted = null;
+  const acceptedById = new Map();
   let destroyed = false;
   let submitting = false;
   let cancelling = false;
@@ -541,23 +599,71 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     status.textContent = 'Есть незавершённая отправка — повторите сохранение.';
   };
 
-  const renderAccepted = (receipt) => {
-    let validated;
-    try {
-      validated = validatePlatformDevelopmentIntakeReceipt(receipt, pendingRequest);
-    } catch {
-      return false;
-    }
-    accepted = validated;
-    if (pendingRequest) {
-      removeStored(primaryStorage, pendingKey);
-      removeStored(fallbackStorage, pendingKey);
-      pendingRequest = null;
-    }
-    const deliveryStatus = validated.delivery.status;
-    const cancellation = validated.cancellation;
+  const clearPending = () => {
+    removeStored(primaryStorage, pendingKey);
+    removeStored(fallbackStorage, pendingKey);
+    pendingRequest = null;
+  };
+
+  const renderEmptyState = () => {
+    accepted = null;
+    acceptedById.clear();
+    queue.replaceChildren();
+    open.textContent = '⚙';
+    delete open.dataset.intakeState;
+    open.setAttribute('aria-label', 'Доработать платформу');
+    open.setAttribute('aria-controls', form.id);
+    open.setAttribute('aria-expanded', 'false');
+    detailSummary.hidden = true;
+    detailSummary.textContent = '';
+    blocker.hidden = true;
+    blocker.textContent = '';
+    resultLink.hidden = true;
+    resultLink.removeAttribute('href');
+    obsolete.hidden = true;
+    details.hidden = true;
+    form.hidden = true;
+    open.hidden = false;
+    return true;
+  };
+
+  const renderAcceptedState = () => {
+    const acceptedReceipts = [...acceptedById.values()];
+    const presentationRows = platformIntakeQueuePresentation(acceptedReceipts);
+    accepted = presentationRows[0]?.receipt ?? null;
+    queue.replaceChildren(...presentationRows.map(({ receipt, label, state: rowState }) => {
+      const item = document.createElement('li');
+      const text = document.createElement('span');
+      const state = document.createElement('b');
+      const rowPresentation = platformDevelopmentIntakePresentation(receipt, vocabulary);
+      item.dataset.intakeStatus = rowState;
+      text.textContent = receipt.request.instruction;
+      state.textContent = label;
+      item.append(text, state);
+      if (terminalIntakeLabel(receipt)) {
+        const summary = document.createElement('small');
+        summary.textContent = receipt.cancellation?.status === 'confirmed'
+          ? receipt.cancellation.issueClosed
+            ? 'Задача закрыта.'
+            : 'Задача отменена.'
+          : rowPresentation?.blocker || receipt.terminal?.summary || '';
+        if (summary.textContent) item.append(summary);
+        if (receipt.terminal?.status === 'READY_TO_PLAY') {
+          const link = document.createElement('a');
+          link.href = receipt.terminal.candidate.url;
+          link.target = '_blank';
+          link.rel = 'noreferrer';
+          link.textContent = 'Открыть результат';
+          item.append(link);
+        }
+      }
+      return item;
+    }));
+    if (!accepted) return false;
+    const deliveryStatus = accepted.delivery.status;
+    const cancellation = accepted.cancellation;
     const cancelled = cancellation?.status === 'confirmed';
-    const presentation = platformDevelopmentIntakePresentation(validated, vocabulary);
+    const presentation = platformDevelopmentIntakePresentation(accepted, vocabulary);
     const terminalReady = presentation?.state === 'ready';
     const failed = presentation?.state === 'needsHelp';
     const confirmed = deliveryStatus === 'confirmed';
@@ -566,27 +672,30 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
       ? 'needs_help' : terminalReady ? 'ready' : confirmed ? 'confirmed' : 'pending';
     open.setAttribute('aria-label', cancelled ? '× Неактуально'
       : `${presentation?.icon || '…'} ${presentation?.label || 'Дорабатывается'}`);
-    detailInstruction.textContent = validated.request.instruction;
-    detailRequestId.textContent = validated.requestId;
-    detailMutationId.textContent = validated.mutationId;
-    detailRequestHash.textContent = validated.requestHash;
-    detailReplayed.textContent = String(validated.replayed);
+    detailInstruction.textContent = accepted.request.instruction;
+    detailRequestId.textContent = accepted.requestId;
+    detailMutationId.textContent = accepted.mutationId;
+    detailRequestHash.textContent = accepted.requestHash;
+    detailReplayed.textContent = String(accepted.replayed);
     detailDeliveryState.textContent = deliveryStatus;
     detailStatus.textContent = cancelled
       ? cancellation.issueClosed
         ? 'Неактуально: инженерный тикет помечен и закрыт.'
         : 'Неактуально: задача отменена до создания инженерного тикета.'
       : presentation?.detail || 'Дорабатывается';
+    const casualSummary = cancelled
+      ? detailStatus.textContent
+      : accepted.terminal?.summary || '';
+    detailSummary.textContent = casualSummary;
+    detailSummary.hidden = casualSummary.length === 0;
     blocker.textContent = presentation?.blocker || '';
     blocker.hidden = !presentation?.blocker;
-    const resultUrl = terminalReady
-      ? validated.terminal.candidate.url
-      : confirmed ? validated.delivery.issueUrl : null;
+    const resultUrl = terminalReady ? accepted.terminal.candidate.url : null;
     resultLink.hidden = !resultUrl;
     if (resultUrl) resultLink.href = resultUrl;
     else resultLink.removeAttribute('href');
     obsolete.hidden = typeof options.cancel !== 'function'
-      || Boolean(validated.terminal) || Boolean(cancellation);
+      || Boolean(accepted.terminal) || Boolean(cancellation);
     obsolete.disabled = false;
     form.hidden = true;
     open.hidden = false;
@@ -595,8 +704,48 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     details.hidden = true;
     return true;
   };
-  if (options.existing && !renderAccepted(options.existing)) renderPending();
-  else if (!options.existing) renderPending();
+
+  const renderAccepted = (receipt) => {
+    let validated;
+    try {
+      validated = validatePlatformDevelopmentIntakeReceipt(receipt, pendingRequest);
+    } catch {
+      return false;
+    }
+    acceptedById.set(validated.requestId, validated);
+    if (pendingRequest) {
+      clearPending();
+    }
+    return renderAcceptedState();
+  };
+
+  const renderProjection = (receipts) => {
+    const validated = [];
+    for (const receipt of receipts) {
+      try {
+        validated.push(validatePlatformDevelopmentIntakeReceipt(receipt));
+      } catch { /* one malformed historical row cannot hide healthy current work */ }
+    }
+    if (receipts.length > 0 && validated.length === 0) return false;
+    if (pendingRequest) {
+      const matching = validated.find((receipt) => {
+        try {
+          validatePlatformDevelopmentIntakeReceipt(receipt, pendingRequest);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (!matching) return false;
+      clearPending();
+    }
+    acceptedById.clear();
+    validated.forEach((receipt) => acceptedById.set(receipt.requestId, receipt));
+    return validated.length > 0 ? renderAcceptedState() : renderEmptyState();
+  };
+  if (Array.isArray(options.existing) && options.existing.length > 0) {
+    if (!renderProjection(options.existing)) renderPending();
+  } else renderPending();
 
   root.addEventListener('pointerdown', (event) => event.stopPropagation());
   root.addEventListener('pointerup', (event) => event.stopPropagation());
@@ -739,10 +888,12 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   });
   return Object.freeze({
     destroy() { destroyed = true; formViewport.release(); root.remove(); },
-    update(receipt) {
+    update(receipts) {
       // A foreground projection must not close an actively composed follow-up
       // (notably when the OS file picker backgrounds and restores the TMA).
-      if (!destroyed && receipt && (accepted || form.hidden)) renderAccepted(receipt);
+      if (!destroyed && Array.isArray(receipts) && (accepted || form.hidden)) {
+        renderProjection(receipts);
+      }
     },
   });
 }

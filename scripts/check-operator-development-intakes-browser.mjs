@@ -94,10 +94,13 @@ const sessionResponse = () => ({
 
 const receiptFor = (
   request,
-  { status = 'queued', replayed = false, terminal = null } = {},
+  {
+    status = 'queued', replayed = false, terminal = null,
+    requestId = '11111111-1111-5111-8111-111111111111',
+  } = {},
 ) => ({
   schema: 'platform.development-intake.response.v1',
-  requestId: '11111111-1111-5111-8111-111111111111',
+  requestId,
   mutationId: request.mutationId,
   requestHash: 'c'.repeat(64),
   delivery: {
@@ -149,8 +152,8 @@ const server = createServer(async (request, response) => {
       return json(response, sessionResponse());
     }
     if (request.method === 'GET' && url.pathname === '/api/development-intake') {
-      if (url.search !== '?limit=1') {
-        return json(response, { detail: 'development intake list must request exact limit=1' }, 400);
+      if (url.search !== '?limit=20') {
+        return json(response, { detail: 'development intake list must request exact limit=20' }, 400);
       }
       const snapshot = {
         schema: 'platform.development-intake.list.v1',
@@ -478,6 +481,15 @@ try {
     key.startsWith('platform-development-intake-pending:v1:'))), true,
   'the immutable request did not use sessionStorage after localStorage failed');
 
+  const unrelatedOlderRequest = buildFixtureRequest({
+    mutationId: '88888888-8888-4888-8888-888888888888',
+    instruction: 'Старая несвязанная правка.',
+    route,
+  });
+  projectionItems = [receiptFor(unrelatedOlderRequest, {
+    status: 'confirmed', requestId: '77777777-7777-5777-8777-777777777777',
+  })];
+
   const retrySession = awaitSession(operator);
   const retryProjection = operator.waitForResponse((response) =>
     response.request().method() === 'GET'
@@ -532,10 +544,16 @@ try {
   });
   assert.equal(await operator.locator(openSelector).getAttribute('data-intake-state'), 'pending');
   await operator.locator(openSelector).click();
-  const pendingStatus = operator.locator(`${detailsSelector} [data-intake-status]`);
-  await pendingStatus.waitFor({ state: 'visible' });
+  const pendingStatus = operator.locator(`${detailsSelector} details [data-intake-status]`);
   assert.equal(await pendingStatus.textContent(),
     'Дорабатывается: Задача ждёт синхронизации.');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li`).count(), 1);
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li span`).textContent(),
+    INSTRUCTION);
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li b`).textContent(),
+    'В работе');
+  assert.equal(await operator.locator(`${detailsSelector} details`).getAttribute('open'), null,
+    'technical receipt fields must stay collapsed by default');
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-request-id]`).textContent(),
     '11111111-1111-5111-8111-111111111111');
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-mutation-id]`).textContent(),
@@ -550,7 +568,97 @@ try {
   assert.equal(projectionItems[0].delivery.nothingPublished, true);
   loseFirstPostResponse = false;
 
-  // 5. A reload rehydrates the durable confirmed projection through GET. A
+  // 5. Two unresolved requests render as one active row plus one explicit
+  // queue position. Technical wire identity stays collapsed.
+  const secondRequest = {
+    ...buildFixtureRequest({
+      mutationId: '99999999-9999-4999-8999-999999999999',
+      instruction: 'Вторая правка интерфейса.',
+      route,
+    }),
+    capturedAt: new Date(Date.parse(postedRequests[0].capturedAt) + 1_000).toISOString(),
+  };
+  const readyTerminal = {
+    status: 'READY_TO_PLAY',
+    summary: 'Bounded candidate is ready for operator testing.',
+    candidate: {
+      repository: 'Glera/feed-prototype',
+      commitSha: 'd'.repeat(40),
+      artifactDigest: `sha256:${'e'.repeat(64)}`,
+      url: 'https://example.test/candidate/17',
+    },
+    blocker: null,
+    review: {
+      provider: 'claude',
+      verdict: 'APPROVE',
+      patchDigest: `sha256:${'f'.repeat(64)}`,
+      reviewedAt: '2026-08-09T12:35:00.000Z',
+    },
+    recordedAt: '2026-08-09T12:35:01.000Z',
+    nothingPublished: true,
+  };
+  projectionItems = [
+    receiptFor(secondRequest, {
+      status: 'confirmed', requestId: '33333333-3333-5333-8333-333333333333',
+    }),
+    { schema: 'platform.development-intake.response.v1', malformed: true },
+    receiptFor(postedRequests[0], { status: 'confirmed', replayed: true }),
+  ];
+  const queueSession = awaitSession(operator);
+  const queueProjection = operator.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await operator.reload({ waitUntil: 'domcontentloaded' });
+  await queueSession;
+  await queueProjection;
+  await operator.locator(`${openSelector}[data-intake-state="confirmed"]`).waitFor({ state: 'visible' });
+  await operator.locator(openSelector).click();
+  await operator.waitForFunction(() => (
+    document.querySelectorAll('.platform-development-intake__details [data-intake-queue] li').length === 2
+  ));
+  const queueRows = operator.locator(`${detailsSelector} [data-intake-queue] li`);
+  assert.equal(await queueRows.count(), 2);
+  assert.deepEqual(await queueRows.locator('span').allTextContents(), [
+    INSTRUCTION, 'Вторая правка интерфейса.',
+  ]);
+  assert.deepEqual(await queueRows.locator('b').allTextContents(), [
+    'В работе', 'В очереди · №1',
+  ]);
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-request-id]`).textContent(),
+    '11111111-1111-5111-8111-111111111111',
+  'the single cancellation action must target the row labelled В работе');
+
+  // A newly queued request must not hide the most recent terminal result.
+  projectionItems = [
+    receiptFor(secondRequest, {
+      status: 'confirmed', requestId: '33333333-3333-5333-8333-333333333333',
+    }),
+    receiptFor(postedRequests[0], {
+      status: 'confirmed', replayed: true, terminal: readyTerminal,
+    }),
+  ];
+  const mixedSession = awaitSession(operator);
+  const mixedProjection = operator.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await operator.reload({ waitUntil: 'domcontentloaded' });
+  await mixedSession;
+  await mixedProjection;
+  await operator.locator(`${openSelector}[data-intake-state="confirmed"]`).waitFor({ state: 'visible' });
+  await operator.locator(openSelector).click();
+  await operator.waitForFunction(() => (
+    document.querySelectorAll('.platform-development-intake__details [data-intake-queue] li').length === 2
+  ));
+  assert.deepEqual(await operator.locator(`${detailsSelector} [data-intake-queue] li b`).allTextContents(), [
+    'В работе', 'Готово',
+  ]);
+  assert.equal(
+    await operator.locator(`${detailsSelector} [data-intake-queue] li a`).getAttribute('href'),
+    'https://example.test/candidate/17',
+    'an active successor hid the most recent playable result',
+  );
+
+  // 6. A reload rehydrates the durable confirmed projection through GET. A
   // later foreground /session revocation removes the whole control from DOM.
   projectionItems = [receiptFor(postedRequests[0], { status: 'confirmed', replayed: true })];
   const reloadSession = awaitSession(operator);
@@ -564,37 +672,18 @@ try {
   assert.equal(await operator.locator(intakeSelector).count(), 1,
     'GET rehydration stacked or lost the confirmed control');
   await operator.locator(openSelector).click();
-  const confirmedStatus = operator.locator(`${detailsSelector} [data-intake-status]`);
-  await confirmedStatus.waitFor({ state: 'visible' });
+  const confirmedStatus = operator.locator(`${detailsSelector} details [data-intake-status]`);
   assert.equal(await confirmedStatus.textContent(),
     'Дорабатывается: Инженерный тикет создан; изменения ещё не опубликованы.');
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-delivery-state]`).textContent(),
     'confirmed');
-  assert.equal(await operator.locator(`${detailsSelector} [data-intake-result]`).getAttribute('href'),
-    'https://github.com/Glera/p4g-workspace-meta/issues/17');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-result]`).getAttribute('href'), null,
+    'an internal engineering Issue leaked into the casual operator surface');
 
   projectionItems = [receiptFor(postedRequests[0], {
     status: 'confirmed',
     replayed: true,
-    terminal: {
-      status: 'READY_TO_PLAY',
-      summary: 'Bounded candidate is ready for operator testing.',
-      candidate: {
-        repository: 'Glera/feed-prototype',
-        commitSha: 'd'.repeat(40),
-        artifactDigest: `sha256:${'e'.repeat(64)}`,
-        url: 'https://example.test/candidate/17',
-      },
-      blocker: null,
-      review: {
-        provider: 'claude',
-        verdict: 'APPROVE',
-        patchDigest: `sha256:${'f'.repeat(64)}`,
-        reviewedAt: '2026-08-09T12:35:00.000Z',
-      },
-      recordedAt: '2026-08-09T12:35:01.000Z',
-      nothingPublished: true,
-    },
+    terminal: readyTerminal,
   })];
   await operator.waitForTimeout(1_050);
   const readySession = awaitSession(operator);
@@ -609,7 +698,6 @@ try {
     '▶ Можно проверить',
     'terminal-ready must read in the current operator status vocabulary');
   await operator.locator(openSelector).click();
-  await confirmedStatus.waitFor({ state: 'visible' });
   assert.equal(await confirmedStatus.textContent(),
     'Можно проверить: Bounded candidate is ready for operator testing.');
   assert.doesNotMatch(await confirmedStatus.textContent(), /READY_TO_PLAY|NEEDS_HELP/,
@@ -1068,7 +1156,7 @@ try {
     },
   }]);
   assert.equal(
-    await obsoletePage.locator(`${detailsSelector} [data-intake-status]`).textContent(),
+    await obsoletePage.locator(`${detailsSelector} details [data-intake-status]`).textContent(),
     'Неактуально: задача отменена до создания инженерного тикета.',
   );
   await obsoletePage.close();
@@ -1111,7 +1199,7 @@ try {
     'the post-delivery branch did not close the exact engineering Issue');
   await deliveredObsolete.locator(openSelector).click();
   assert.equal(
-    await deliveredObsolete.locator(`${detailsSelector} [data-intake-status]`).textContent(),
+    await deliveredObsolete.locator(`${detailsSelector} details [data-intake-status]`).textContent(),
     'Неактуально: инженерный тикет помечен и закрыт.',
   );
   const staleCancelResponse = deliveredObsolete.waitForResponse((response) =>
@@ -1242,7 +1330,7 @@ try {
     'a resize after the intake form closed still re-asserted field visibility');
   await keyboard.close();
 
-  console.log('operator development intake browser: visible request/mutation/hash/replay/delivery receipt, result link, exact retry, prepared screenshot capture, submit latch, typed screenshot failure, keyboard-viewport field visibility, and capability fences verified');
+  console.log('operator development intake browser: casual queue statuses, collapsed technical receipt, result link, exact retry, prepared screenshot capture, submit latch, typed screenshot failure, keyboard-viewport field visibility, and capability fences verified');
 } finally {
   if (heldProjection) releaseHeldProjection();
   if (heldPost) releaseHeldPost();
