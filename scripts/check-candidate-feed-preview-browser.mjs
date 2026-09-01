@@ -385,7 +385,7 @@ const server = createServer(async (request, response) => {
       catalog_lab_authorization_available: true,
       operator_level_flagging_available: true,
       development_intake_available: true,
-      development_intake_context: { buildSha: BUILD_SHA },
+      development_intake_context: { contract: 'platform.development-intake.request.v1' },
       feedRoster: roster,
       ...(adopted ? { developerFeedAdoption: {
         schema: 'feed.playable-source-preview-adoption.v1',

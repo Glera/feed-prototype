@@ -36,6 +36,7 @@
     "check:operator-playable-reworks": "node scripts/check-operator-playable-reworks.mjs",
     "check:operator-playable-reworks-browser": "node scripts/check-operator-playable-reworks-browser.mjs",
     "check:operator-development-intakes": "node scripts/check-operator-development-intakes.mjs",
+    "check:tier0-cosmetic": "node scripts/check-tier0-cosmetic.mjs",
     "check:operator-development-intakes-browser": "node scripts/check-operator-development-intakes-browser.mjs",
     "check:developer-feed-diff-browser": "node scripts/check-developer-feed-diff-browser.mjs",
     "check:operator-level-flags-browser": "node scripts/check-operator-level-flags-browser.mjs",

@@ -32,6 +32,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: feed-prototype
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout pinned private swipe-ugc sibling
@@ -59,7 +60,20 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Lint (tsc --noEmit + contract check scripts)
+        if: ${{ !startsWith(github.head_ref, 'codex/platform-tier0-') }}
         run: npm run lint
 
-      - name: Build (tsc + vite build)
+      - name: Verify Tier 0 scope independently
+        if: ${{ startsWith(github.head_ref, 'codex/platform-tier0-') }}
+        run: npm run check:tier0-cosmetic -- --base origin/master
+
+      - name: Tier 0 intake contract
+        if: ${{ startsWith(github.head_ref, 'codex/platform-tier0-') }}
+        run: npm run check:operator-development-intakes
+
+      - name: Tier 0 visual regression
+        if: ${{ startsWith(github.head_ref, 'codex/platform-tier0-') }}
+        run: npm run check:developer-feed-diff-browser
+
+      - name: Build (Tier 0 fast path or full closure)
         run: npm run build

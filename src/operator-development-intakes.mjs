@@ -25,6 +25,7 @@ const CANCELLATION_STATUSES = new Set([
 const TERMINAL_STATUSES = new Set(['READY_TO_PLAY', 'NEEDS_HELP']);
 const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429]);
 const SCREENSHOT_INVALID = 'development_intake_screenshot_invalid';
+export const PLATFORM_DEVELOPMENT_INTAKE_CONTRACT = 'platform.development-intake.request.v1';
 let controlSequence = 0;
 
 const fail = (code, message) => {
@@ -68,8 +69,9 @@ export function platformDevelopmentIntakeAvailable(value) {
 export function platformDevelopmentIntakeSessionGrant(value, context, buildSha) {
   return platformDevelopmentIntakeAvailable(value)
     && SHA.test(String(buildSha))
-    && exactKeys(context, ['buildSha'])
-    && context.buildSha === buildSha;
+    && ((exactKeys(context, ['contract'])
+      && context.contract === PLATFORM_DEVELOPMENT_INTAKE_CONTRACT)
+      || (exactKeys(context, ['buildSha']) && context.buildSha === buildSha));
 }
 
 export function buildPlatformDevelopmentIntakeRequest({
@@ -88,7 +90,7 @@ export function buildPlatformDevelopmentIntakeRequest({
     fail('development_intake_invalid', 'platform intake identity is invalid');
   }
   return Object.freeze({
-    schema: 'platform.development-intake.request.v1',
+    schema: PLATFORM_DEVELOPMENT_INTAKE_CONTRACT,
     mutationId,
     instruction,
     surface,
@@ -117,26 +119,42 @@ function exactTerminal(value) {
   if (!exactKeys(value, [
     'status', 'summary', 'candidate', 'blocker', 'review', 'recordedAt', 'nothingPublished',
   ]) || !TERMINAL_STATUSES.has(value.status) || !printable(value.summary, 240)
-    || !exactTimestamp(value.recordedAt) || value.nothingPublished !== true) {
+    || !exactTimestamp(value.recordedAt) || typeof value.nothingPublished !== 'boolean') {
     fail('development_intake_receipt_invalid', 'terminal receipt shape is invalid');
   }
   if (value.status === 'READY_TO_PLAY') {
+    const attendedReview = exactKeys(value.review, ['provider', 'verdict', 'patchDigest', 'reviewedAt'])
+      && value.review.provider === 'claude' && value.review.verdict === 'APPROVE'
+      && /^sha256:[0-9a-f]{64}$/.test(value.review.patchDigest)
+      && exactTimestamp(value.review.reviewedAt);
+    const liveReview = exactKeys(value.review, [
+      'provider', 'verdict', 'platformCommitSha', 'deployedAt', 'stageTimings',
+    ]) && value.review.provider === 'platform-delivery' && value.review.verdict === 'LIVE'
+      && SHA.test(value.review.platformCommitSha) && exactTimestamp(value.review.deployedAt)
+      && exactKeys(value.review.stageTimings, [
+        'queueSeconds', 'authoringSeconds', 'ciMergeSeconds', 'rolloutSeconds', 'totalSeconds',
+      ])
+      && ['queueSeconds', 'authoringSeconds', 'ciMergeSeconds', 'rolloutSeconds', 'totalSeconds']
+        .every((key) => Number.isSafeInteger(value.review.stageTimings[key])
+          && value.review.stageTimings[key] >= 0 && value.review.stageTimings[key] <= 86_400)
+      && value.review.stageTimings.totalSeconds === value.review.stageTimings.queueSeconds
+        + value.review.stageTimings.authoringSeconds + value.review.stageTimings.ciMergeSeconds
+        + value.review.stageTimings.rolloutSeconds;
     if (!exactKeys(value.candidate, ['repository', 'commitSha', 'artifactDigest', 'url'])
       || !/^Glera\/(p4g-workspace-meta|swipe-backend|feed-prototype|swipe-generator|swipe-ugc|playables)$/.test(value.candidate.repository)
       || !SHA.test(value.candidate.commitSha)
       || !/^sha256:[0-9a-f]{64}$/.test(value.candidate.artifactDigest)
       || !/^https:\/\/\S+$/.test(value.candidate.url)
       || value.blocker !== null
-      || !exactKeys(value.review, ['provider', 'verdict', 'patchDigest', 'reviewedAt'])
-      || value.review.provider !== 'claude' || value.review.verdict !== 'APPROVE'
-      || !/^sha256:[0-9a-f]{64}$/.test(value.review.patchDigest)
-      || !exactTimestamp(value.review.reviewedAt)) {
+      || (!attendedReview && !liveReview)
+      || value.nothingPublished !== !liveReview) {
       fail('development_intake_receipt_invalid', 'READY_TO_PLAY receipt is invalid');
     }
   } else if (value.candidate !== null
     || !exactKeys(value.blocker, ['reasonCode', 'operatorAction'])
     || !/^[a-z0-9_]{3,64}$/.test(value.blocker.reasonCode)
     || !printable(value.blocker.operatorAction, 240)
+    || value.nothingPublished !== true
     || (value.review !== null && !exactKeys(
       value.review, ['provider', 'verdict', 'patchDigest', 'reviewedAt'],
     ))) {
@@ -168,7 +186,7 @@ export function validatePlatformDevelopmentIntakeReceipt(value, expectedRequest 
     || !exactKeys(value.delivery, ['deliveryId', 'status', 'issueUrl', 'nothingPublished'])
     || !UUID.test(String(value.delivery?.deliveryId))
     || !DELIVERY_STATUSES.has(value.delivery?.status)
-    || value.delivery?.nothingPublished !== true) {
+    || typeof value.delivery?.nothingPublished !== 'boolean') {
     fail('development_intake_receipt_invalid', 'development intake receipt shape is invalid');
   }
   const confirmed = value.delivery.status === 'confirmed';
@@ -199,13 +217,17 @@ export function validatePlatformDevelopmentIntakeReceipt(value, expectedRequest 
     }
     cancellation = Object.freeze({ ...item });
   }
+  const terminal = exactTerminal(value.terminal);
+  if (value.delivery.nothingPublished !== (terminal?.nothingPublished ?? true)) {
+    fail('development_intake_receipt_invalid', 'delivery publication state differs from terminal');
+  }
   const receipt = {
     schema: value.schema,
     requestId: value.requestId,
     mutationId: value.mutationId,
     requestHash: value.requestHash,
     delivery: Object.freeze({ ...value.delivery }),
-    terminal: exactTerminal(value.terminal),
+    terminal,
     request,
     replayed: value.replayed,
     createdAt: value.createdAt,

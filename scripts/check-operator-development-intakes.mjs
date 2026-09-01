@@ -33,11 +33,21 @@ assert.deepEqual(request, {
 });
 assert.equal(platformDevelopmentIntakeAvailable(true), true);
 assert.equal(platformDevelopmentIntakeAvailable(1), false);
-assert.equal(platformDevelopmentIntakeSessionGrant(true, { buildSha: input.buildSha }, input.buildSha), true);
 assert.equal(platformDevelopmentIntakeSessionGrant(
-  true, { buildSha: input.buildSha, extra: true }, input.buildSha,
+  true, { contract: 'platform.development-intake.request.v1' }, input.buildSha,
+), true);
+assert.equal(platformDevelopmentIntakeSessionGrant(
+  true, { buildSha: input.buildSha }, input.buildSha,
+), true, 'the transitional client must accept the exact legacy build pin');
+assert.equal(platformDevelopmentIntakeSessionGrant(
+  true, { buildSha: 'b'.repeat(40) }, input.buildSha,
 ), false);
-assert.equal(platformDevelopmentIntakeSessionGrant(true, { buildSha: 'b'.repeat(40) }, input.buildSha), false);
+assert.equal(platformDevelopmentIntakeSessionGrant(
+  true, { contract: 'platform.development-intake.request.v1', extra: true }, input.buildSha,
+), false);
+assert.equal(platformDevelopmentIntakeSessionGrant(
+  true, { contract: 'platform.development-intake.request.v2' }, input.buildSha,
+), false);
 assert.throws(
   () => buildPlatformDevelopmentIntakeRequest({ ...input, buildSha: 'short' }),
   (error) => error?.code === 'development_intake_invalid',
@@ -243,6 +253,40 @@ const readyReceipt = {
 assert.equal(
   validatePlatformDevelopmentIntakeReceipt(readyReceipt).terminal.status,
   'READY_TO_PLAY',
+);
+const liveReceipt = {
+  ...readyReceipt,
+  delivery: { ...readyReceipt.delivery, nothingPublished: false },
+  terminal: {
+    ...readyReceipt.terminal,
+    review: {
+      provider: 'platform-delivery',
+      verdict: 'LIVE',
+      platformCommitSha: 'a'.repeat(40),
+      deployedAt: '2026-08-09T12:35:01.000Z',
+      stageTimings: {
+        queueSeconds: 5,
+        authoringSeconds: 20,
+        ciMergeSeconds: 15,
+        rolloutSeconds: 20,
+        totalSeconds: 60,
+      },
+    },
+    nothingPublished: false,
+  },
+};
+assert.equal(
+  validatePlatformDevelopmentIntakeReceipt(liveReceipt).terminal.review.verdict,
+  'LIVE',
+  'a proven live rollout must be distinct from the pre-publication terminal',
+);
+assert.throws(
+  () => validatePlatformDevelopmentIntakeReceipt({
+    ...liveReceipt,
+    delivery: { ...liveReceipt.delivery, nothingPublished: true },
+  }),
+  (error) => error?.code === 'development_intake_receipt_invalid',
+  'the delivery and terminal publication states must be byte-consistent',
 );
 
 const pendingCancellation = {
