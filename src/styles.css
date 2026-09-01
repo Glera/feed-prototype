@@ -1399,6 +1399,7 @@ body {
 }
 .platform-development-intake__details[hidden] { display: none; }
 .platform-development-intake__details p { margin: 7px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.platform-development-intake__empty { margin: 0 0 12px; color: #acd0df; }
 .platform-development-intake__details small { display: block; color: #acd0df; }
 .platform-development-intake__queue {
   display: grid;

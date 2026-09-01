@@ -298,39 +298,17 @@ function terminalIntakeLabel(receipt) {
   return null;
 }
 
-function terminalIntakeState(receipt) {
-  if (receipt.cancellation?.status === 'confirmed') return 'cancelled';
-  if (receipt.terminal?.status === 'READY_TO_PLAY') return 'ready';
-  return 'needs_help';
-}
-
 function platformIntakeQueuePresentation(receipts) {
   const newestFirst = [...receipts].sort((left, right) => (
     Date.parse(right.createdAt) - Date.parse(left.createdAt)
   ));
   const active = newestFirst.filter((receipt) => terminalIntakeLabel(receipt) === null)
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-  if (active.length === 0) {
-    return newestFirst.slice(0, 1).map((receipt) => ({
-      receipt,
-      label: terminalIntakeLabel(receipt) || 'В работе',
-      state: terminalIntakeState(receipt),
-    }));
-  }
-  const rows = active.map((receipt, index) => ({
+  return active.map((receipt, index) => ({
     receipt,
     label: index === 0 ? 'В работе' : `В очереди · №${index}`,
     state: index === 0 ? 'active' : 'queued',
   }));
-  const newestTerminal = newestFirst.find((receipt) => terminalIntakeLabel(receipt) !== null);
-  if (newestTerminal) {
-    rows.push({
-      receipt: newestTerminal,
-      label: terminalIntakeLabel(newestTerminal),
-      state: terminalIntakeState(newestTerminal),
-    });
-  }
-  return rows;
 }
 
 function draftKey(options) {
@@ -475,6 +453,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   root.innerHTML = `
     <button class="platform-development-intake__open" type="button" aria-expanded="false" aria-controls="${controlId}-form" aria-label="Доработать платформу" title="Доработать платформу">⚙</button>
     <form class="game__operator-flag-form" id="${controlId}-form" hidden>
+      <p class="platform-development-intake__empty" data-intake-empty>Сейчас нет задач по платформе.</p>
       <label>Что поправить в платформе
         <textarea name="instruction" rows="4" required placeholder="Например: сделать подпись версии заметнее" aria-describedby="${controlId}-dictation-hint"></textarea>
       </label>
@@ -523,6 +502,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const dictate = form.querySelector('[data-action="dictate"]');
   const cancel = form.querySelector('[data-action="cancel"]');
   const details = root.querySelector('.platform-development-intake__details');
+  const emptyNotice = form.querySelector('[data-intake-empty]');
   const queue = details.querySelector('[data-intake-queue]');
   const detailSummary = details.querySelector('[data-intake-summary]');
   const detailInstruction = details.querySelector('[data-intake-instruction]');
@@ -591,6 +571,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
 
   const renderPending = () => {
     if (!pendingRequest) return;
+    emptyNotice.hidden = true;
     instruction.value = pendingRequest.instruction;
     instruction.readOnly = true;
     file.disabled = true;
@@ -621,6 +602,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     resultLink.hidden = true;
     resultLink.removeAttribute('href');
     obsolete.hidden = true;
+    emptyNotice.hidden = false;
     details.hidden = true;
     form.hidden = true;
     open.hidden = false;
@@ -631,35 +613,18 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
     const acceptedReceipts = [...acceptedById.values()];
     const presentationRows = platformIntakeQueuePresentation(acceptedReceipts);
     accepted = presentationRows[0]?.receipt ?? null;
+    if (!accepted) return renderEmptyState();
+    emptyNotice.hidden = true;
     queue.replaceChildren(...presentationRows.map(({ receipt, label, state: rowState }) => {
       const item = document.createElement('li');
       const text = document.createElement('span');
       const state = document.createElement('b');
-      const rowPresentation = platformDevelopmentIntakePresentation(receipt, vocabulary);
       item.dataset.intakeStatus = rowState;
       text.textContent = receipt.request.instruction;
       state.textContent = label;
       item.append(text, state);
-      if (terminalIntakeLabel(receipt)) {
-        const summary = document.createElement('small');
-        summary.textContent = receipt.cancellation?.status === 'confirmed'
-          ? receipt.cancellation.issueClosed
-            ? 'Задача закрыта.'
-            : 'Задача отменена.'
-          : rowPresentation?.blocker || receipt.terminal?.summary || '';
-        if (summary.textContent) item.append(summary);
-        if (receipt.terminal?.status === 'READY_TO_PLAY') {
-          const link = document.createElement('a');
-          link.href = receipt.terminal.candidate.url;
-          link.target = '_blank';
-          link.rel = 'noreferrer';
-          link.textContent = 'Открыть результат';
-          item.append(link);
-        }
-      }
       return item;
     }));
-    if (!accepted) return false;
     const deliveryStatus = accepted.delivery.status;
     const cancellation = accepted.cancellation;
     const cancelled = cancellation?.status === 'confirmed';
