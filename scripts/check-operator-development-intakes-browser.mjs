@@ -626,6 +626,14 @@ try {
     }),
     capturedAt: new Date(Date.parse(postedRequests[0].capturedAt) + 1_000).toISOString(),
   };
+  const thirdRequest = {
+    ...buildFixtureRequest({
+      mutationId: '56565656-5656-4565-8565-565656565656',
+      instruction: 'Третья правка интерфейса.',
+      route,
+    }),
+    capturedAt: new Date(Date.parse(postedRequests[0].capturedAt) + 2_000).toISOString(),
+  };
   projectionItems = [
     receiptFor(secondRequest, {
       status: 'confirmed', requestId: '33333333-3333-5333-8333-333333333333',
@@ -714,6 +722,35 @@ try {
   );
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li span`).textContent(),
     INSTRUCTION);
+
+  projectionItems = [
+    projectionItems[0],
+    receiptFor(secondRequest, {
+      status: 'confirmed', requestId: '33333333-3333-5333-8333-333333333333',
+    }),
+    receiptFor(thirdRequest, {
+      status: 'confirmed', requestId: '56565656-5656-5565-8565-565656565656',
+    }),
+  ];
+  const blockedPlusWorkSession = awaitSession(operator);
+  const blockedPlusWorkProjection = operator.waitForResponse((response) =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/development-intake');
+  await operator.reload({ waitUntil: 'domcontentloaded' });
+  await blockedPlusWorkSession;
+  await blockedPlusWorkProjection;
+  await operator.locator(`${openSelector}[data-intake-state="confirmed"]`).waitFor({ state: 'visible' });
+  await operator.locator(openSelector).click();
+  assert.deepEqual(
+    await operator.locator(`${detailsSelector} [data-intake-queue] li b`).allTextContents(),
+    ['Нужна помощь', 'В работе', 'В очереди · №1'],
+    'a blocked row consumed the active FIFO position',
+  );
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-request-id]`).textContent(),
+    '33333333-3333-5333-8333-333333333333',
+  'the action panel bound itself to the blocked row instead of current work');
+  assert.equal(await operator.locator(`${detailsSelector} [data-action="obsolete"]`).isVisible(), true,
+    'a blocked row hid cancellation for the current active request');
 
   // 6. A reload rehydrates the durable confirmed projection through GET. A
   // later foreground /session revocation removes the whole control from DOM.

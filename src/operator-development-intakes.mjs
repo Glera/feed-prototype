@@ -306,13 +306,19 @@ function platformIntakeQueuePresentation(receipts) {
   ));
   const active = newestFirst.filter((receipt) => !resolvedPlatformIntake(receipt))
     .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-  return active.map((receipt, index) => platformIntakeNeedsHelp(receipt)
-    ? { receipt, label: 'Нужна помощь', state: 'needs_help' }
-    : {
+  let workPosition = 0;
+  return active.map((receipt) => {
+    if (platformIntakeNeedsHelp(receipt)) {
+      return { receipt, label: 'Нужна помощь', state: 'needs_help' };
+    }
+    const position = workPosition;
+    workPosition += 1;
+    return {
       receipt,
-      label: index === 0 ? 'В работе' : `В очереди · №${index}`,
-      state: index === 0 ? 'active' : 'queued',
-    });
+      label: position === 0 ? 'В работе' : `В очереди · №${position}`,
+      state: position === 0 ? 'active' : 'queued',
+    };
+  });
 }
 
 function draftKey(options) {
@@ -624,7 +630,8 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
   const renderAcceptedState = () => {
     const acceptedReceipts = [...acceptedById.values()];
     const presentationRows = platformIntakeQueuePresentation(acceptedReceipts);
-    accepted = presentationRows[0]?.receipt ?? null;
+    accepted = presentationRows.find(({ state: rowState }) => rowState !== 'needs_help')?.receipt
+      ?? presentationRows[0]?.receipt ?? null;
     if (!accepted) return renderEmptyState();
     emptyNotice.hidden = true;
     queue.replaceChildren(...presentationRows.map(({ receipt, label, state: rowState }) => {
