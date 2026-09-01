@@ -37,7 +37,7 @@ const detailsSelector = '.platform-development-intake__details';
 let origin = '';
 let sessionUserId = 42;
 let developmentIntakeAvailable = false;
-let developmentIntakeContextBuildSha = BUILD_SHA;
+let developmentIntakeContract = 'platform.development-intake.request.v1';
 let catalogLabAvailable = false;
 let sessionUnauthorized = false;
 let loseFirstPostResponse = false;
@@ -82,7 +82,7 @@ const sessionResponse = () => ({
   operator_level_flagging_available: false,
   development_intake_available: developmentIntakeAvailable,
   ...(developmentIntakeAvailable ? {
-    development_intake_context: { buildSha: developmentIntakeContextBuildSha },
+    development_intake_context: { contract: developmentIntakeContract },
   } : {}),
   builtin_feed_bindings: {
     schema: 'feed.builtin-bindings.v1',
@@ -367,17 +367,17 @@ try {
   await diagnostics.close();
 
   developmentIntakeAvailable = true;
-  developmentIntakeContextBuildSha = 'a'.repeat(40);
+  developmentIntakeContract = 'platform.development-intake.request.v2';
   const mismatchedContext = await newPage();
   const mismatchedContextSession = awaitSession(mismatchedContext);
   await mismatchedContext.goto(`${origin}/?browserCase=context-mismatch`, { waitUntil: 'domcontentloaded' });
   await mismatchedContextSession;
   await mismatchedContext.locator('iframe').first().waitFor({ state: 'attached' });
   assert.equal(await mismatchedContext.locator(intakeSelector).count(), 0,
-    'a mismatched server-pinned build context mounted the intake control');
+    'a mismatched server contract mounted the intake control');
   await mismatchedContext.close();
 
-  developmentIntakeContextBuildSha = BUILD_SHA;
+  developmentIntakeContract = 'platform.development-intake.request.v1';
   sessionUserId = null;
   const missingActor = await newPage();
   const missingActorSession = awaitSession(missingActor);
@@ -392,7 +392,7 @@ try {
   // 2. The exact capability mounts one visible action that remains separate
   // from the centred product switcher at supported narrow phone widths.
   developmentIntakeAvailable = true;
-  developmentIntakeContextBuildSha = BUILD_SHA;
+  developmentIntakeContract = 'platform.development-intake.request.v1';
   catalogLabAvailable = true;
   loseFirstPostResponse = true;
   projectionItems = [];

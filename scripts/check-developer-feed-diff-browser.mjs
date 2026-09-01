@@ -68,7 +68,7 @@ const sessionResponse = () => ({
   operator_level_flagging_available: operatorLevelFlaggingAvailable,
   development_intake_available: developmentIntakeAvailable,
   ...(developmentIntakeAvailable
-    ? { development_intake_context: { buildSha: BUILD_SHA } }
+    ? { development_intake_context: { contract: 'platform.development-intake.request.v1' } }
     : {}),
   builtin_feed_bindings: {
     schema: 'feed.builtin-bindings.v1',

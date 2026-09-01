@@ -32,7 +32,7 @@ export interface PlatformDevelopmentIntakeReceiptV1 {
     deliveryId: string;
     status: 'queued' | 'send_started' | 'outcome_unknown' | 'retry_wait' | 'confirmed' | 'failed_terminal';
     issueUrl: string | null;
-    nothingPublished: true;
+    nothingPublished: boolean;
   };
   terminal: {
     status: 'READY_TO_PLAY' | 'NEEDS_HELP';
@@ -44,14 +44,26 @@ export interface PlatformDevelopmentIntakeReceiptV1 {
       url: string;
     } | null;
     blocker: { reasonCode: string; operatorAction: string } | null;
-    review: {
+    review: ({
       provider: 'claude';
       verdict: 'APPROVE';
       patchDigest: string;
       reviewedAt: string;
-    } | null;
+    } | {
+      provider: 'platform-delivery';
+      verdict: 'LIVE';
+      platformCommitSha: string;
+      deployedAt: string;
+      stageTimings: {
+        queueSeconds: number;
+        authoringSeconds: number;
+        ciMergeSeconds: number;
+        rolloutSeconds: number;
+        totalSeconds: number;
+      };
+    }) | null;
     recordedAt: string;
-    nothingPublished: true;
+    nothingPublished: boolean;
   } | null;
   cancellation?: {
     mutationId: string;

@@ -322,7 +322,9 @@ export interface SessionResp {
   catalog_lab_authorization_available?: boolean;
   operator_level_flagging_available?: boolean;
   development_intake_available?: boolean;
-  development_intake_context?: { buildSha: string };
+  development_intake_context?:
+    | { buildSha: string }
+    | { contract: 'platform.development-intake.request.v1' };
   operatorPresentationVocabulary?: OperatorPresentationVocabularyV1;
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
@@ -444,7 +446,7 @@ export interface PlatformDevelopmentIntakeResponseV1 {
     deliveryId: string;
     status: 'queued' | 'send_started' | 'outcome_unknown' | 'retry_wait' | 'confirmed' | 'failed_terminal';
     issueUrl: string | null;
-    nothingPublished: true;
+    nothingPublished: boolean;
   };
   terminal: {
     status: 'READY_TO_PLAY' | 'NEEDS_HELP';
@@ -456,14 +458,26 @@ export interface PlatformDevelopmentIntakeResponseV1 {
       url: string;
     } | null;
     blocker: { reasonCode: string; operatorAction: string } | null;
-    review: {
+    review: ({
       provider: 'claude';
       verdict: 'APPROVE';
       patchDigest: string;
       reviewedAt: string;
-    } | null;
+    } | {
+      provider: 'platform-delivery';
+      verdict: 'LIVE';
+      platformCommitSha: string;
+      deployedAt: string;
+      stageTimings: {
+        queueSeconds: number;
+        authoringSeconds: number;
+        ciMergeSeconds: number;
+        rolloutSeconds: number;
+        totalSeconds: number;
+      };
+    }) | null;
     recordedAt: string;
-    nothingPublished: true;
+    nothingPublished: boolean;
   } | null;
   cancellation?: {
     mutationId: string;
