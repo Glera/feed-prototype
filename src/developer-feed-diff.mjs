@@ -12,32 +12,41 @@
  */
 import {
   groupOperatorPlayableReworkQueue,
-  operatorPlayableReworkPresentation,
-  operatorPlayableReworkQueuePresentation,
 } from './operator-playable-reworks.mjs';
 import {
   operatorAudiencePresentation,
-  platformDevelopmentIntakePresentation,
   resolveOperatorPresentationVocabulary,
 } from './operator-presentation-vocabulary.mjs';
 
-const PLATFORM_STATUS = 'что живёт сейчас';
-const EMPTY_STATUS = 'Dev не отличается от публичного';
+const EMPTY_STATUS = 'Dev-лента совпадает с релизной';
 const CATALOG_STATUS = 'данных пока нет';
 const CATALOG_DETAIL = 'Для sort/base пока нет dev или public записи каталога.';
 const CATALOG_INVALID_STATUS = 'Проекция недоступна';
 const CATALOG_INVALID_DETAIL = 'Server-owned состояние каталога не прошло проверку.';
 
-const TONE_ORDER = { error: 0, ok: 1, warn: 2, neutral: 3 };
-
-const toneForReworkState = (state) => {
-  if (state === 'needs_help' || state === 'blocked' || state === 'capability_gap_root') return 'error';
-  if (state === 'ready_for_approval') return 'ok';
-  if (state === 'preparing' || state === 'escalated_to_mac_b') return 'warn';
-  return 'neutral';
-};
-
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
+
+const MECHANIC_NAMES = Object.freeze({
+  'arrows-v1-swipe': 'Arrows',
+  'marble-sort-swipe': 'Marble Sort',
+  'merge-locked-v1-swipe': 'Merge',
+  'merge-second-board-v1-swipe': 'Merge · второе поле',
+  'merge-second-board-v2-swipe': 'Merge · второе поле',
+  'merge-timepress-v1-swipe': 'Timepress',
+  'merge-timepress-v2-swipe': 'Timepress',
+  'merge-timepress-no-orders-v1-swipe': 'Timepress',
+  'minesweeper-v1-swipe': 'Minesweeper',
+  'pins-swipe': 'Pins',
+  'pins-l3-swipe': 'Pins',
+  'pins-l5-swipe': 'Pins',
+  'pins-l7-swipe': 'Pins',
+  'pins-l9-swipe': 'Pins',
+  'short-drama-swipe': 'Short Drama',
+  'solitaire-v1-swipe': 'Klondike',
+});
+
+const mechanicName = (playableId) => MECHANIC_NAMES[playableId]
+  || playableId.replace(/-v\d+(?:-swipe)?$/, '').replace(/-swipe$/, '').replaceAll('-', ' ');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA = /^[0-9a-f]{40}$/;
@@ -144,145 +153,55 @@ export function validateCatalogDirectPromotionResult(value) {
   return Object.freeze({ ...value });
 }
 
-/** `abcdef…` → `abcdef012345`; `sha256:abc…` keeps its algorithm prefix. */
-const shortDigest = (value) => {
-  const raw = text(value);
-  if (!raw) return '';
-  const separator = raw.indexOf(':');
-  if (separator > 0) {
-    const prefix = raw.slice(0, separator + 1);
-    const body = raw.slice(separator + 1);
-    return body.length > 12 ? `${prefix}${body.slice(0, 12)}…` : raw;
-  }
-  return raw.length > 12 ? `${raw.slice(0, 12)}…` : raw;
-};
-
-const identityLine = (label, value, mono = false) => {
-  const resolved = text(value);
-  return resolved ? { label, value: resolved, mono } : null;
-};
-
-/** The counts strip, worded exactly as the rework details panel words it. */
-const reworkCounts = (presentation) => [
-  presentation.active ? `активно ${presentation.active}` : '',
-  presentation.queued ? `в очереди ${presentation.queued}` : '',
-  presentation.duplicates ? `возможных дублей ${presentation.duplicates}` : '',
-].filter(Boolean).join(' · ') || 'Новых замечаний пока нет';
-
-/**
- * The platform intake status, worded exactly as the ⚙ intake details word it.
- * `null` when no platform rework is in flight.
- */
-function platformIntakeRow(receipt, vocabulary) {
-  const presentation = platformDevelopmentIntakePresentation(receipt, vocabulary);
-  if (!presentation?.visible) return null;
-  return Object.freeze({
-    status: presentation.detail,
-    label: presentation.label,
-    icon: presentation.icon,
-    tone: presentation.tone,
-    blocker: presentation.blocker,
-  });
-}
-
 function mechanicRows(input) {
+  const adoption = input.adoption;
+  if (!adoption || typeof adoption.playableId !== 'string' || !adoption.playableId) return [];
   const audience = operatorAudiencePresentation(input.vocabulary, 'exactUser');
   const adoptedStatus = `Аудитория: ${audience.icon} ${audience.label}`;
-  const rows = new Map();
+  const instructions = [];
   const entries = input.reworks ? Array.from(input.reworks) : [];
   for (const entry of entries) {
     if (!Array.isArray(entry) || entry.length < 2) continue;
     const [playableId, rawQueue] = entry;
-    if (typeof playableId !== 'string' || !playableId) continue;
-    // Re-filter through the shared grouper: the presentation helpers read raw
-    // fields and must never be handed an unvalidated projection item.
+    if (playableId !== adoption.playableId) continue;
     const queue = groupOperatorPlayableReworkQueue(
       Array.isArray(rawQueue) ? rawQueue : [],
     ).get(playableId) || [];
-    if (queue.length === 0) continue;
-    const newest = queue[0];
-    const task = operatorPlayableReworkPresentation(newest);
-    const aggregate = operatorPlayableReworkQueuePresentation(queue);
-    rows.set(playableId, {
-      playableId,
-      status: task.label,
-      state: task.state,
-      tone: toneForReworkState(task.state),
-      counts: reworkCounts(aggregate),
-      blocker: task.blocker,
-      identity: [
-        identityLine('runtime', shortDigest(newest.request?.runtime?.artifactDigest), true),
-        identityLine('source', shortDigest(newest.request?.runtime?.sourceCommit), true),
-      ].filter(Boolean),
-      adopted: false,
-    });
-  }
-
-  const adoption = input.adoption;
-  if (adoption && typeof adoption.playableId === 'string' && adoption.playableId) {
-    const existing = rows.get(adoption.playableId);
-    const identity = [
-      identityLine('release', adoption.releaseId, true),
-      identityLine('artifact', shortDigest(adoption.candidateArtifactDigest), true),
-      identityLine('source', shortDigest(adoption.sourceCommit), true),
-    ].filter(Boolean);
-    if (existing) {
-      existing.adopted = true;
-      existing.identity = identity;
-    } else {
-      rows.set(adoption.playableId, {
-        playableId: adoption.playableId,
-        status: adoptedStatus,
-        state: 'adopted',
-        tone: 'ok',
-        counts: 'Новых замечаний пока нет',
-        blocker: null,
-        identity,
-        adopted: true,
-      });
+    for (const item of queue) {
+      if (text(item.request?.runtime?.artifactDigest) !== text(adoption.candidateArtifactDigest)) {
+        continue;
+      }
+      const instruction = text(item.request?.instruction);
+      if (instruction && !instructions.includes(instruction)) instructions.push(instruction);
     }
   }
 
-  return Array.from(rows.values()).sort((left, right) => {
-    const byTone = TONE_ORDER[left.tone] - TONE_ORDER[right.tone];
-    return byTone !== 0 ? byTone : left.playableId.localeCompare(right.playableId);
-  }).map((row) => Object.freeze({ ...row, identity: Object.freeze(row.identity) }));
+  // A work request is not a feed difference. The one immutable candidate
+  // currently adopted into this operator's feed is.
+  return [Object.freeze({
+    playableId: adoption.playableId,
+    title: mechanicName(adoption.playableId),
+    status: adoptedStatus,
+    state: 'adopted',
+    tone: 'ok',
+    instructions: Object.freeze(instructions),
+    adopted: true,
+  })];
 }
 
 export function developerFeedDiffModel(input = {}) {
   const vocabulary = resolveOperatorPresentationVocabulary(input.vocabulary);
   const exactUserAudience = operatorAudiencePresentation(vocabulary, 'exactUser');
-  const platformInput = input.platform || {};
-  const intake = platformIntakeRow(input.platformIntake, vocabulary);
   const mechanics = mechanicRows({ ...input, vocabulary });
   const catalog = validateDeveloperFeedCatalogDiff(input.catalog);
   const preparedPromotion = validateCatalogDirectPromotionPrepared(
     input.catalogPromotion,
   );
-  const catalogIdentity = [];
-  const appendCatalogIdentity = (prefix, entry) => {
-    if (!entry) return;
-    catalogIdentity.push(identityLine(`${prefix} entry`, entry.entryId, true));
-    catalogIdentity.push(identityLine(`${prefix} state`, `${entry.state} · v${entry.stateVersion}`));
-    catalogIdentity.push(identityLine(
-      `${prefix} content`, entry.seriesId || entry.levelSpecHash || entry.kind, true,
-    ));
-    if (entry.runtime) {
-      catalogIdentity.push(identityLine(`${prefix} runtime`, shortDigest(
-        entry.runtime.runtimeArtifactDigest,
-      ), true));
-    } else {
-      catalogIdentity.push(identityLine(`${prefix} runtime`, 'не сопоставлен'));
-    }
-  };
-  appendCatalogIdentity('dev', catalog?.dev);
-  appendCatalogIdentity('public', catalog?.public);
   const catalogChanged = catalog?.dev ? 1 : 0;
-  const changed = mechanics.filter((row) => ![
-    'superseded', 'capability_gap_root_covered', 'obsolete',
-  ].includes(row.state)).length + (intake ? 1 : 0) + catalogChanged;
+  const changed = mechanics.length + catalogChanged;
   const catalogInvalid = input.catalog != null && catalog === null;
   const catalogUnavailable = catalog?.unavailableReason === 'catalog_projection_invalid';
+  const catalogUnknown = input.catalog == null || catalogInvalid || catalogUnavailable;
   const promotion = catalog?.dev?.state === 'candidate'
     && catalog.dev.runtime !== null
     && preparedPromotion?.entryId === catalog.dev.entryId
@@ -292,27 +211,21 @@ export function developerFeedDiffModel(input = {}) {
   return Object.freeze({
     visible: input.operatorSurfacesActive === true || Boolean(input.adoption),
     changed,
-    empty: changed === 0,
+    empty: changed === 0 && !catalogUnknown,
     audience: exactUserAudience,
-    platform: Object.freeze({
-      status: PLATFORM_STATUS,
-      identity: Object.freeze([
-        identityLine('source', shortDigest(platformInput.sourceSha), true),
-        identityLine('сборка', platformInput.stamp),
-      ].filter(Boolean)),
-      intake,
-    }),
     mechanics: Object.freeze(mechanics),
     catalog: Object.freeze({
-      status: catalogInvalid || catalogUnavailable
+      changed: catalogChanged === 1,
+      unknown: catalogUnknown,
+      status: catalogUnknown
         ? CATALOG_INVALID_STATUS
         : catalog?.dev ? `Только мне · ${catalog.dev.state}`
           : catalog?.public ? 'Доступно всем' : CATALOG_STATUS,
-      detail: catalogInvalid || catalogUnavailable
+      detail: catalogUnknown
         ? CATALOG_INVALID_DETAIL
-        : catalogIdentity.length ? '' : CATALOG_DETAIL,
-      identity: Object.freeze(catalogIdentity.filter(Boolean)),
+        : catalog?.dev || catalog?.public ? '' : CATALOG_DETAIL,
       promotion,
+      promotionPreparing: input.catalogPromotionPreparing === true,
     }),
   });
 }
@@ -325,19 +238,6 @@ const element = (tag, className, textContent) => {
   if (textContent !== undefined) node.textContent = textContent;
   return node;
 };
-
-function identityList(lines) {
-  const list = element('dl', 'dev-diff__identity');
-  for (const line of lines) {
-    const row = element('div');
-    row.append(element('dt', null, line.label));
-    const value = element('dd', line.mono ? 'dev-diff__mono' : null, line.value);
-    row.append(value);
-    list.append(row);
-  }
-  list.hidden = lines.length === 0;
-  return list;
-}
 
 function groupSection(title) {
   const group = element('section', 'dev-diff__group');
@@ -378,6 +278,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   let promotionConfirmOpen = false;
   let promotionCode = '';
   let promotionError = '';
+  let catalogSelected = true;
   let model = developerFeedDiffModel(options.input || {});
 
   const root = element('div', 'dev-diff-surface');
@@ -440,92 +341,142 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       empty.dataset.testid = 'dev-diff-empty';
       body.append(empty);
     }
-
-    const platform = groupSection('Платформа');
-    const platformRow = rowArticle('platform', model.platform.intake?.tone || 'neutral');
-    platformRow.append(rowHead('Feed shell', model.platform.status));
-    platformRow.append(identityList(model.platform.identity));
-    if (model.platform.intake) {
-      platformRow.append(element('p', 'dev-diff__detail', model.platform.intake.status));
-      if (model.platform.intake.blocker) {
-        platformRow.append(element('p', 'dev-diff__blocker', model.platform.intake.blocker));
-      }
-    }
-    platform.append(platformRow);
-    body.append(platform);
-
-    const mechanics = groupSection('Механики и очередь правок');
-    if (model.mechanics.length === 0) {
-      // Scoped wording: the sheet-wide `Dev не отличается от публичного` is
-      // already above, and repeating it per group reads as two verdicts.
-      mechanics.append(element('p', 'dev-diff__none', 'Новых замечаний пока нет'));
-    }
-    for (const row of model.mechanics) {
-      const article = rowArticle('mechanic', row.tone);
-      article.dataset.playableId = row.playableId;
-      article.append(rowHead(row.playableId, row.status));
-      if (row.adopted) {
-        article.append(element('small', 'dev-diff__adopted', row.status));
-      }
-      article.append(element('small', 'dev-diff__counts', row.counts));
-      if (row.blocker) article.append(element('p', 'dev-diff__blocker', row.blocker));
-      article.append(identityList(row.identity));
-      if (onShowMechanic) {
-        const jump = element('button', 'dev-diff__action', 'Показать механику');
-        jump.type = 'button';
-        jump.dataset.action = 'show-mechanic';
-        article.append(jump);
-      }
-      mechanics.append(article);
-    }
-    body.append(mechanics);
-
-    const catalog = groupSection('Catalog (marble-sort)');
-    const catalogRow = rowArticle('catalog', 'neutral');
-    catalogRow.append(rowHead('sort/base', model.catalog.status));
-    if (model.catalog.detail) {
-      catalogRow.append(element('p', 'dev-diff__detail', model.catalog.detail));
-    }
-    catalogRow.append(identityList(model.catalog.identity));
-    if (model.catalog.promotion && onPromoteCatalog) {
-      const publish = element('button', 'dev-diff__action', 'Сделать доступным всем');
-      publish.type = 'button';
-      publish.dataset.action = 'publish-catalog';
-      publish.disabled = promotionPending || promotionCommitted;
-      catalogRow.append(publish);
-
-      const confirm = element('div', 'dev-diff__promotion-confirm');
-      confirm.dataset.testid = 'catalog-promotion-confirm';
-      confirm.hidden = !promotionConfirmOpen;
-      confirm.append(
-        element('p', 'dev-diff__detail', 'Только мне → Доступно всем'),
-        element('p', 'dev-diff__promotion-code', `Код: ${model.catalog.promotion.confirmationCode}`),
+    if (model.catalog.unknown) {
+      const unknown = rowArticle('catalog-status', 'warn');
+      unknown.dataset.testid = 'dev-diff-catalog-unknown';
+      unknown.append(
+        rowHead('Уровни', model.catalog.status),
+        element('p', 'dev-diff__description', 'Не удалось проверить отличия. Обновите ленту.'),
       );
-      const input = element('input', 'dev-diff__promotion-input');
-      input.dataset.testid = 'catalog-promotion-code-input';
-      input.inputMode = 'text';
-      input.autocomplete = 'off';
-      input.maxLength = 6;
-      input.setAttribute('aria-label', 'Код подтверждения');
-      input.value = promotionCode;
-      input.disabled = promotionPending || promotionCommitted;
-      input.addEventListener('input', () => { promotionCode = input.value; });
-      const applyLabel = promotionCommitted ? 'Опубликовано'
-        : promotionPending ? 'Проверяю…' : 'Подтвердить публикацию';
-      const apply = element('button', 'dev-diff__action', applyLabel);
-      apply.type = 'button';
-      apply.dataset.action = 'confirm-catalog-publication';
-      apply.disabled = promotionPending || promotionCommitted;
-      confirm.append(input, apply);
-      if (promotionError) {
-        const error = element('p', 'dev-diff__blocker', promotionError);
-        error.setAttribute('role', 'status');
-        confirm.append(error);
-      }
-      catalogRow.append(confirm);
+      body.append(unknown);
     }
-    catalog.append(catalogRow);
-    body.append(catalog);
+
+    if (model.mechanics.length > 0) {
+      const mechanics = groupSection('Механики');
+      for (const row of model.mechanics) {
+        const article = rowArticle('mechanic', row.tone);
+        article.dataset.playableId = row.playableId;
+        const selectableHead = element('div', 'dev-diff__selectable-head');
+        const checkbox = element('input', 'dev-diff__checkbox');
+        checkbox.type = 'checkbox';
+        checkbox.checked = false;
+        checkbox.disabled = true;
+        checkbox.setAttribute('aria-label', `${row.title}: публикуется отдельно`);
+        selectableHead.append(checkbox, rowHead(row.title, 'Только мне'));
+        article.append(selectableHead);
+        const instructions = row.instructions.length > 0
+          ? row.instructions : ['Приватная версия механики отличается от релизной.'];
+        for (const instruction of instructions) {
+          article.append(element('p', 'dev-diff__description', instruction));
+        }
+        article.append(element('p', 'dev-diff__pending', 'Механика публикуется отдельно'));
+        if (onShowMechanic) {
+          const jump = element('button', 'dev-diff__action', 'Показать механику');
+          jump.type = 'button';
+          jump.dataset.action = 'show-mechanic';
+          article.append(jump);
+        }
+        mechanics.append(article);
+      }
+      body.append(mechanics);
+    }
+
+    if (model.catalog.changed) {
+      const catalog = groupSection('Уровни');
+      const catalogRow = rowArticle('catalog', 'neutral');
+      const selectableHead = element('div', 'dev-diff__selectable-head');
+      const checkbox = element('input', 'dev-diff__checkbox');
+      checkbox.type = 'checkbox';
+      checkbox.checked = catalogSelected && Boolean(model.catalog.promotion);
+      checkbox.disabled = !model.catalog.promotion || promotionPending || promotionCommitted;
+      checkbox.dataset.action = 'select-catalog';
+      checkbox.setAttribute('aria-label', 'Выбрать Marble Sort');
+      checkbox.addEventListener('change', () => {
+        catalogSelected = checkbox.checked;
+        if (!catalogSelected) {
+          promotionConfirmOpen = false;
+          promotionCode = '';
+          promotionError = '';
+        }
+        if (open) renderBody();
+      });
+      selectableHead.append(checkbox, rowHead('Marble Sort', 'Только мне'));
+      catalogRow.append(selectableHead);
+      catalogRow.append(element(
+        'p',
+        'dev-diff__description',
+        'Новая версия уровней доступна только в вашей dev-ленте.',
+      ));
+      if (!model.catalog.promotion) {
+        catalogRow.append(element(
+          'p',
+          'dev-diff__pending',
+          model.catalog.promotionPreparing
+            ? 'Проверяю возможность публикации…'
+            : 'Пока нельзя выложить',
+        ));
+      }
+
+      if (model.catalog.promotion && onPromoteCatalog) {
+        const confirm = element('div', 'dev-diff__promotion-confirm');
+        confirm.dataset.testid = 'catalog-promotion-confirm';
+        confirm.hidden = !promotionConfirmOpen;
+        confirm.append(
+          element('p', 'dev-diff__detail', 'Только мне → Доступно всем'),
+          element(
+            'p',
+            'dev-diff__promotion-code',
+            `Код: ${model.catalog.promotion.confirmationCode}`,
+          ),
+        );
+        const input = element('input', 'dev-diff__promotion-input');
+        input.dataset.testid = 'catalog-promotion-code-input';
+        input.inputMode = 'text';
+        input.autocomplete = 'off';
+        input.maxLength = 6;
+        input.setAttribute('aria-label', 'Код подтверждения');
+        input.value = promotionCode;
+        input.disabled = promotionPending || promotionCommitted;
+        input.addEventListener('input', () => { promotionCode = input.value; });
+        const applyLabel = promotionCommitted ? 'Опубликовано'
+          : promotionPending ? 'Проверяю…' : 'Подтвердить публикацию';
+        const apply = element('button', 'dev-diff__action', applyLabel);
+        apply.type = 'button';
+        apply.dataset.action = 'confirm-catalog-publication';
+        apply.disabled = !catalogSelected || promotionPending || promotionCommitted;
+        confirm.append(input, apply);
+        if (promotionError) {
+          const error = element('p', 'dev-diff__blocker', promotionError);
+          error.setAttribute('role', 'status');
+          confirm.append(error);
+        }
+        catalogRow.append(confirm);
+      }
+      catalog.append(catalogRow);
+      body.append(catalog);
+
+      if (model.catalog.promotion && onPromoteCatalog) {
+        const actions = element('div', 'dev-diff__publish-actions');
+        const selected = element(
+          'button',
+          'dev-diff__action dev-diff__action--primary',
+          'Выложить выбранное',
+        );
+        selected.type = 'button';
+        selected.dataset.action = 'publish-catalog';
+        selected.disabled = !catalogSelected || promotionPending || promotionCommitted;
+        const all = element(
+          'button',
+          'dev-diff__action',
+          model.mechanics.length > 0 ? 'Выложить уровни' : 'Выложить всё',
+        );
+        all.type = 'button';
+        all.dataset.action = 'publish-all';
+        all.disabled = promotionPending || promotionCommitted;
+        actions.append(selected, all);
+        body.append(actions);
+      }
+    }
   };
 
   const openSheet = () => {
@@ -559,8 +510,11 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       return;
     }
     const jump = target.closest('[data-action="show-mechanic"]');
+    const publishAll = target.closest('[data-action="publish-all"]');
     const publish = target.closest('[data-action="publish-catalog"]');
-    if (publish) {
+    if (publishAll) catalogSelected = true;
+    if (publish || publishAll) {
+      if (!catalogSelected) return;
       promotionConfirmOpen = true;
       promotionError = '';
       renderBody();
@@ -569,7 +523,8 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       return;
     }
     const apply = target.closest('[data-action="confirm-catalog-publication"]');
-    if (apply && model.catalog.promotion && onPromoteCatalog && !promotionPending) {
+    if (apply && catalogSelected && model.catalog.promotion
+      && onPromoteCatalog && !promotionPending) {
       const code = promotionCode.trim().toUpperCase();
       promotionPending = true;
       promotionError = '';
@@ -630,6 +585,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       model = developerFeedDiffModel(next || {});
       const nextPromotionId = model.catalog.promotion?.operationId ?? null;
       if (nextPromotionId === null || nextPromotionId !== previousPromotionId) {
+        catalogSelected = true;
         promotionPending = false;
         promotionCommitted = false;
         promotionConfirmOpen = false;
