@@ -15,7 +15,6 @@ import {
 } from './playables';
 import {
   mountOperatorFeedViewToggle,
-  operatorFeedView,
   operatorFeedViewUrl,
 } from './operator-feed-view.mjs';
 // Series-reward gift icons (inlined into the single-file feed bundle). One is picked
@@ -752,8 +751,10 @@ export class Feed {
   // Default-off dogfood bridge. It never derives a catalog candidate locally:
   // every slot starts from a projected built-in opportunity and accepts only
   // the server's opaque authority → allocation → ticket → exact spec bundle.
-  private readonly catalogDogfoodAccountEligible = operatorFeedView(location.search) !== 'release'
-    && catalogDogfoodAccountEligible((import.meta as any).env, getInitData());
+  private readonly catalogDogfoodAccountEligible = catalogDogfoodAccountEligible(
+    (import.meta as any).env,
+    getInitData(),
+  );
   private readonly catalogDogfoodEnabled = catalogFeedDogfoodEnabled(
     (import.meta as any).env,
     controlPlaneEnabled(),
@@ -1399,7 +1400,8 @@ export class Feed {
       let allocation: Extract<CatalogAllocationDecisionResult, { outcome: 'allocated' }> | null = null;
       let canaryProjectionRequired = false;
 
-      if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
+      if (!this.operatorReleasePreview
+        && this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
         && !this.catalogCanaryServedThisPage
         && !this.catalogCanaryTerminallyUnavailable) {
         try {
@@ -2099,7 +2101,8 @@ export class Feed {
       // entry/spec/runtime identity. Only its opaque authorization enters the
       // existing Player-v2 delivery closure. A precise no-invitation 404 is the
       // sole edge that falls through to ordinary effectful feed policy.
-      if (this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
+      if (!this.operatorReleasePreview
+        && this.catalogCanaryDogfoodEnabled && !this.catalogCanaryClaimed
         && !this.catalogCanaryServedThisPage
         && !this.catalogCanaryTerminallyUnavailable) {
         this.catalogCanaryClaimed = true;
