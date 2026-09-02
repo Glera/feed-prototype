@@ -11,6 +11,10 @@
  * operator two different stories about the same task.
  */
 import {
+  groupOperatorPlayableReworkQueue,
+  operatorPlayableReworkPresentation,
+} from './operator-playable-reworks.mjs';
+import {
   operatorAudiencePresentation,
   resolveOperatorPresentationVocabulary,
 } from './operator-presentation-vocabulary.mjs';
@@ -162,6 +166,19 @@ const validatePlayablePublicationItem = (value) => {
   return Object.freeze({ ...value, changes: Object.freeze([...value.changes]) });
 };
 
+const visiblePendingRequest = (item) => {
+  const presentation = operatorPlayableReworkPresentation(item);
+  if (['superseded', 'capability_gap_root_covered', 'obsolete']
+    .includes(presentation.state)) return null;
+  const instruction = text(item.request?.instruction);
+  if (!instruction) return null;
+  return Object.freeze({
+    instruction,
+    status: presentation.label,
+    detail: presentation.blocker || 'Эта правка ещё не вошла в готовую версию.',
+  });
+};
+
 export function validatePlayablePublicationPrepared(value) {
   if (!exactObject(value, [
     'schema', 'operationId', 'action', 'clientInstanceId', 'items', 'confirmationCode',
@@ -193,7 +210,15 @@ function mechanicRows(input) {
   const audience = operatorAudiencePresentation(input.vocabulary, 'exactUser');
   const adoptedStatus = `Аудитория: ${audience.icon} ${audience.label}`;
   const prepared = validatePlayablePublicationPrepared(input.mechanicPublication);
-  return adoptions.flatMap((adoption) => {
+  const pendingByPlayable = new Map();
+  for (const entry of input.reworks ? Array.from(input.reworks) : []) {
+    if (!Array.isArray(entry) || entry.length < 2 || typeof entry[0] !== 'string') continue;
+    const queue = groupOperatorPlayableReworkQueue(
+      Array.isArray(entry[1]) ? entry[1] : [],
+    ).get(entry[0]) || [];
+    if (queue.length > 0) pendingByPlayable.set(entry[0], queue);
+  }
+  const rows = adoptions.flatMap((adoption) => {
     if (!adoption || typeof adoption.playableId !== 'string' || !adoption.playableId) return [];
     const preparedItem = prepared?.items.find((item) => (
       item.releaseId === adoption.releaseId
@@ -202,6 +227,9 @@ function mechanicRows(input) {
       && item.candidateArtifactDigest === adoption.candidateArtifactDigest
     ));
     const instructions = preparedItem ? [...new Set(preparedItem.changes)] : [];
+    const pendingRequests = (pendingByPlayable.get(adoption.playableId) || [])
+      .map(visiblePendingRequest).filter(Boolean);
+    pendingByPlayable.delete(adoption.playableId);
     return [Object.freeze({
       playableId: adoption.playableId,
       title: mechanicName(adoption.playableId),
@@ -209,10 +237,27 @@ function mechanicRows(input) {
       state: 'adopted',
       tone: 'ok',
       instructions: Object.freeze(instructions),
+      pendingRequests: Object.freeze(pendingRequests),
       adopted: true,
       publication: preparedItem ? prepared : null,
     })];
   });
+  for (const [playableId, queue] of pendingByPlayable) {
+    const pendingRequests = queue.map(visiblePendingRequest).filter(Boolean);
+    if (pendingRequests.length === 0) continue;
+    rows.push(Object.freeze({
+      playableId,
+      title: mechanicName(playableId),
+      status: pendingRequests[0].status,
+      state: 'pending',
+      tone: 'warn',
+      instructions: Object.freeze([]),
+      pendingRequests: Object.freeze(pendingRequests),
+      adopted: false,
+      publication: null,
+    }));
+  }
+  return rows;
 }
 
 export function developerFeedDiffModel(input = {}) {
@@ -313,8 +358,11 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   let promotionError = '';
   let catalogSelected = true;
   let model = developerFeedDiffModel(options.input || {});
-  let mechanicSelected = new Set(model.mechanics.map((row) => row.playableId));
-  let mechanicPublication = model.mechanics[0]?.publication ?? null;
+  let mechanicSelected = new Set(
+    model.mechanics.filter((row) => row.adopted).map((row) => row.playableId),
+  );
+  let mechanicQueued = new Set();
+  let mechanicPublication = model.mechanics.find((row) => row.adopted)?.publication ?? null;
   let mechanicPublicationPending = false;
   let mechanicPublicationCommitted = false;
   let mechanicPublicationConfirmOpen = false;
@@ -393,15 +441,16 @@ export function mountDeveloperFeedDiffSurface(host, options) {
 
     if (model.mechanics.length > 0) {
       const mechanics = groupSection('Механики');
+      const publishableRows = model.mechanics.filter((row) => row.adopted);
       for (const row of model.mechanics) {
         const article = rowArticle('mechanic', row.tone);
         article.dataset.playableId = row.playableId;
         const selectableHead = element('div', 'dev-diff__selectable-head');
         const checkbox = element('input', 'dev-diff__checkbox');
         checkbox.type = 'checkbox';
-        checkbox.checked = mechanicSelected.has(row.playableId);
-        checkbox.disabled = !onPrepareMechanics || !onPublishMechanic || mechanicPublicationPending
-          || mechanicPublicationCommitted;
+        checkbox.checked = row.adopted && mechanicSelected.has(row.playableId);
+        checkbox.disabled = !row.adopted || mechanicQueued.has(row.playableId)
+          || !onPrepareMechanics || !onPublishMechanic || mechanicPublicationPending;
         checkbox.dataset.action = 'select-mechanic';
         checkbox.setAttribute('aria-label', `Выбрать ${row.title}`);
         checkbox.addEventListener('change', () => {
@@ -413,12 +462,23 @@ export function mountDeveloperFeedDiffSurface(host, options) {
           mechanicPublicationError = '';
           if (open) renderBody();
         });
-        selectableHead.append(checkbox, rowHead(row.title, 'Только мне'));
+        selectableHead.append(checkbox, rowHead(
+          row.title,
+          mechanicQueued.has(row.playableId) ? 'Публикация запущена' : row.status,
+        ));
         article.append(selectableHead);
         const instructions = row.instructions.length > 0
-          ? row.instructions : ['Приватная версия механики отличается от релизной.'];
+          ? row.instructions : row.adopted
+            ? ['Приватная версия механики отличается от релизной.'] : [];
         for (const instruction of instructions) {
           article.append(element('p', 'dev-diff__description', instruction));
+        }
+        for (const pending of row.pendingRequests) {
+          article.append(element(
+            'p',
+            'dev-diff__pending',
+            `${pending.instruction} — ${pending.status}. ${pending.detail}`,
+          ));
         }
         if (model.mechanicPublicationPreparing) article.append(element(
           'p',
@@ -435,7 +495,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       }
       body.append(mechanics);
 
-      if (onPrepareMechanics && onPublishMechanic) {
+      if (publishableRows.length > 0 && onPrepareMechanics && onPublishMechanic) {
         const actions = element('div', 'dev-diff__publish-actions');
         const selected = element(
           'button',
@@ -444,12 +504,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         );
         selected.type = 'button';
         selected.dataset.action = 'publish-mechanic';
-        selected.disabled = mechanicSelected.size === 0 || mechanicPublicationPending
-          || mechanicPublicationCommitted;
+        selected.disabled = mechanicSelected.size === 0 || mechanicPublicationPending;
         const all = element('button', 'dev-diff__action', 'Выложить все механики');
         all.type = 'button';
         all.dataset.action = 'publish-all-mechanics';
-        all.disabled = mechanicPublicationPending || mechanicPublicationCommitted;
+        all.disabled = mechanicPublicationPending
+          || publishableRows.every((row) => mechanicQueued.has(row.playableId));
         actions.append(selected, all);
         body.append(actions);
 
@@ -623,7 +683,9 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     const publishMechanic = target.closest('[data-action="publish-mechanic"]');
     const publishAllMechanics = target.closest('[data-action="publish-all-mechanics"]');
     if (publishAllMechanics) {
-      mechanicSelected = new Set(model.mechanics.map((row) => row.playableId));
+      mechanicSelected = new Set(model.mechanics
+        .filter((row) => row.adopted && !mechanicQueued.has(row.playableId))
+        .map((row) => row.playableId));
     }
     if (publishMechanic || publishAllMechanics) {
       if (mechanicSelected.size === 0 || !onPrepareMechanics) return;
@@ -667,7 +729,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
           mechanicPublicationPending = false;
           if (['queued_refreshed', 'queued_refresh_pending', 'published_refreshed']
             .includes(outcome?.status)) {
-            mechanicPublicationCommitted = true;
+            for (const item of mechanicPublication.items) {
+              mechanicQueued.add(item.playableId);
+              mechanicSelected.delete(item.playableId);
+            }
+            mechanicPublicationCommitted = false;
+            mechanicPublication = null;
             mechanicPublicationConfirmOpen = true;
             mechanicPublicationCode = '';
             mechanicPublicationError = outcome.status === 'queued_refresh_pending'
@@ -779,8 +846,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         `${row.playableId}:${row.publication?.items.find((item) => item.playableId === row.playableId)?.releaseId ?? ''}`
       )).join('|');
       if (nextMechanics !== previousMechanics) {
-        mechanicSelected = new Set(model.mechanics.map((row) => row.playableId));
-        mechanicPublication = model.mechanics[0]?.publication ?? null;
+        const currentIds = new Set(model.mechanics.map((row) => row.playableId));
+        mechanicQueued = new Set([...mechanicQueued].filter((id) => currentIds.has(id)));
+        mechanicSelected = new Set(model.mechanics
+          .filter((row) => row.adopted && !mechanicQueued.has(row.playableId))
+          .map((row) => row.playableId));
+        mechanicPublication = model.mechanics.find((row) => row.adopted)?.publication ?? null;
         mechanicPublicationPending = false;
         mechanicPublicationCommitted = false;
         mechanicPublicationConfirmOpen = false;

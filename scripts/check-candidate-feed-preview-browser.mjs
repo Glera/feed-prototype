@@ -440,6 +440,9 @@ const server = createServer(async (request, response) => {
       feedRoster: roster,
       ...(adopted ? { developerFeedAdoptions: [{
         schema: 'feed.playable-source-preview-adoption.v1',
+        releaseId: 'not-a-release-id',
+      }, {
+        schema: 'feed.playable-source-preview-adoption.v1',
         releaseId: reworkAdoption ? releaseId : sourceReleaseId,
         playableId,
         candidatePath: reworkAdoption ? candidatePath : sourceCandidatePath,
@@ -1039,6 +1042,17 @@ try {
     `/${playableId}.html`, 'published candidate stayed mounted from its preview path');
   assert.equal(await publishedPage.locator('.game--candidate-overlay').count(), 0,
     'published candidate remained presented as dev-only adoption');
+  const releaseDeepLink = new URL(origin);
+  releaseDeepLink.searchParams.set('tgWebAppStartParam', `r_${playableId}`);
+  releaseDeepLink.searchParams.set('tgWebAppPlatform', 'android');
+  await publishedPage.goto(releaseDeepLink.toString(), { waitUntil: 'domcontentloaded' });
+  await publishedPage.locator('.page--in-viewport .game--autoplay').waitFor({ state: 'visible' });
+  assert.equal(await publishedPage.locator('.page').first().locator('.game__label').textContent(),
+    playableId, 'publication Telegram link did not open the exact public mechanic first');
+  assert.equal(await publishedPage.locator('[data-testid="developer-feed-badge"]').count(), 0,
+    'publication Telegram link exposed the private dev-feed inventory');
+  assert.equal(await publishedPage.locator('.game__operator-playable-rework').count(), 0,
+    'publication Telegram link exposed mechanic authoring controls');
   await publishedContext.close();
 
   for (const malformed of [

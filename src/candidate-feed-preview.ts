@@ -401,13 +401,19 @@ export async function resolveDeveloperFeedAdoptions(
   if (!Array.isArray(value) || value.length < 1 || value.length > 20) {
     throw new Error('developer_feed_adoptions_invalid');
   }
-  const resolved = await Promise.all(
+  const settled = await Promise.allSettled(
     value.map((item) => resolveDeveloperFeedAdoption(item, origin, fetchBinding)),
   );
-  const playableIds = new Set(resolved.map((item) => item.playableId));
-  const releaseIds = new Set(resolved.map((item) => item.releaseId));
-  if (playableIds.size !== resolved.length || releaseIds.size !== resolved.length) {
-    throw new Error('developer_feed_adoptions_invalid');
+  const resolved = settled.flatMap((result) => (
+    result.status === 'fulfilled' ? [result.value] : []
+  ));
+  const playableCounts = new Map<string, number>();
+  const releaseCounts = new Map<string, number>();
+  for (const item of resolved) {
+    playableCounts.set(item.playableId, (playableCounts.get(item.playableId) ?? 0) + 1);
+    releaseCounts.set(item.releaseId, (releaseCounts.get(item.releaseId) ?? 0) + 1);
   }
-  return Object.freeze(resolved);
+  return Object.freeze(resolved.filter((item) => (
+    playableCounts.get(item.playableId) === 1 && releaseCounts.get(item.releaseId) === 1
+  )));
 }

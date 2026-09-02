@@ -11362,7 +11362,11 @@ export function createFeed(
   rosterSnapshot: FeedRosterSessionV1 | null = null,
   friendAcceptCode: string | null = null,
   initialSessionPromise: Promise<SessionResp> | null = null,
-  mode: Readonly<{ readOnlyPreview: boolean; operatorReleasePreview?: boolean }> | undefined = undefined,
+  mode: Readonly<{
+    readOnlyPreview: boolean;
+    operatorReleasePreview?: boolean;
+    releasePlayableId?: string | null;
+  }> | undefined = undefined,
 ) {
   const resolution: FeedRosterResolutionV1 = resolveFeedRosterSession(
     rosterSnapshot,
@@ -11388,13 +11392,16 @@ export function createFeed(
   }
   let order = [...resolution.playables];
   let rosterEntries = [...resolution.entries];
-  const candidateOverlays = candidatePlayableOverlays();
-  if (candidateOverlays.length > 0 && !mode) throw new Error('candidate_feed_mode_required');
+  const projectedCandidateOverlays = candidatePlayableOverlays();
+  if (projectedCandidateOverlays.length > 0 && !mode) throw new Error('candidate_feed_mode_required');
   const readOnlyPreview = mode?.readOnlyPreview ?? false;
   const operatorReleasePreview = mode?.operatorReleasePreview ?? false;
-  if (candidateOverlays.some(
-    (candidate) => !order.some((playable) => playable.id === candidate.playableId),
-  )) throw new Error('candidate_feed_target_not_in_live_roster');
+  const candidateOverlays = projectedCandidateOverlays.filter(
+    (candidate) => order.some((playable) => playable.id === candidate.playableId),
+  );
+  if (readOnlyPreview && candidateOverlays.length !== projectedCandidateOverlays.length) {
+    throw new Error('candidate_feed_target_not_in_live_roster');
+  }
   if (readOnlyPreview && candidateOverlays.length === 1) {
     const candidateIndex = order.findIndex(
       (playable) => playable.id === candidateOverlays[0].playableId,
@@ -11407,6 +11414,21 @@ export function createFeed(
         ...rosterEntries.slice(candidateIndex + 1),
       ];
     }
+  }
+  const releasePlayableIndex = operatorReleasePreview && mode?.releasePlayableId
+    ? order.findIndex((playable) => playable.id === mode.releasePlayableId)
+    : -1;
+  if (releasePlayableIndex > 0) {
+    order = [
+      order[releasePlayableIndex],
+      ...order.slice(0, releasePlayableIndex),
+      ...order.slice(releasePlayableIndex + 1),
+    ];
+    rosterEntries = [
+      rosterEntries[releasePlayableIndex],
+      ...rosterEntries.slice(0, releasePlayableIndex),
+      ...rosterEntries.slice(releasePlayableIndex + 1),
+    ];
   }
   let ch = challenge;
   // Arriving via a challenge deep-link: put the challenged mechanic first so the

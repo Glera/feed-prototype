@@ -27,6 +27,12 @@ export interface DeveloperFeedDiffMechanicRow {
   tone: DeveloperFeedDiffTone;
   /** Original founder requests included in this private candidate. */
   instructions: readonly string[];
+  /** Requests still in progress or blocked and therefore excluded from publication. */
+  pendingRequests: readonly Readonly<{
+    instruction: string;
+    status: string;
+    detail: string;
+  }>[];
   /** True when this row exists because the operator adopted an exact candidate. */
   adopted: boolean;
   publication: Readonly<PlayablePublicationPreparedV1> | null;

@@ -550,10 +550,15 @@ try {
     'the two-line dev-feed label lacks safe glyph leading');
   assert.equal(await badge.evaluate((node) => node.tagName), 'BUTTON',
     'the dev-feed badge must be a real control, not a decorative label');
-  // Queue/history rows are not feed differences. Only the private catalog
-  // version differs from release in this fixture.
-  await page.locator('[data-testid="dev-diff-badge-count"]')
-    .filter({ hasText: /^1$/ }).waitFor();
+  // Active/NEEDS_HELP work stays visible with a human reason, alongside the
+  // private catalog difference, but is never selectable for publication.
+  const operatorBadgeCount = page.locator('[data-testid="dev-diff-badge-count"]');
+  await operatorBadgeCount.waitFor({ state: 'visible' });
+  await page.waitForFunction(() => Number(
+    document.querySelector('[data-testid="dev-diff-badge-count"]')?.textContent,
+  ) >= 3);
+  assert.equal(await operatorBadgeCount.textContent(), '3',
+    'the badge omitted visible active/NEEDS_HELP work');
   assert.equal(await page.locator(sheetSelector).isVisible(), false,
     'the inventory sheet was open before the operator asked for it');
 
@@ -567,10 +572,16 @@ try {
 
   assert.equal(await sheet.locator('[data-row="platform"]').count(), 0,
     'platform work history leaked into the release diff');
-  assert.equal(await sheet.locator('[data-row="mechanic"]').count(), 0,
-    'mechanic work queue leaked into the release diff');
-  assert.equal(await sheet.locator(rowSelector).count(), 1,
-    'the sheet must contain only a literal dev/public difference');
+  assert.equal(await sheet.locator('[data-row="mechanic"]').count(), 2,
+    'active and NEEDS_HELP mechanic work was hidden from the operator');
+  assert.equal(await sheet.locator(rowSelector).count(), 3,
+    'the sheet omitted active work or the literal catalog difference');
+  const mechanicQueueText = await sheet.locator('[data-row="mechanic"]').allInnerTexts();
+  assert.match(mechanicQueueText.join('\n'), /Исправить центрирование\./);
+  assert.match(mechanicQueueText.join('\n'), /Перезапечь обложку\./);
+  assert.match(mechanicQueueText.join('\n'), /Нужна помощь/);
+  assert.doesNotMatch(mechanicQueueText.join('\n'), /66666666|77777777|sha256|requestId/,
+    'technical queue identity leaked into the founder-facing reason');
 
   // The server-owned catalog difference is descriptive, without diagnostics.
   const catalogRow = sheet.locator('[data-row="catalog"]');
@@ -583,12 +594,14 @@ try {
   // This canary has no compatible runtime and therefore no direct-public control.
   assert.equal(await sheet.locator('text=Сделать доступным всем').count(), 0,
     'an ineligible canary received a direct-public control');
-  assert.equal(await sheet.locator('input[type="checkbox"]').count(), 1,
-    'a real difference must retain its selection affordance');
-  assert.equal(await sheet.locator('input[type="checkbox"]').isDisabled(), true,
-    'an ineligible difference must not pretend it can be published');
-  assert.equal(await sheet.locator('input[type="checkbox"]').isChecked(), false,
-    'an ineligible difference must not look selected for publication');
+  assert.equal(await sheet.locator('input[type="checkbox"]').count(), 3,
+    'visible ineligible work did not retain a disabled selection affordance');
+  for (const checkbox of await sheet.locator('input[type="checkbox"]').all()) {
+    assert.equal(await checkbox.isDisabled(), true,
+      'an ineligible row pretended it could be published');
+    assert.equal(await checkbox.isChecked(), false,
+      'an ineligible row looked selected for publication');
+  }
 
   // The card fades in over 0.2s; a proof screenshot must show the settled sheet.
   await page.waitForTimeout(400);
@@ -850,8 +863,11 @@ try {
     'the Feed ignored the strict server-owned audience vocabulary');
   assert.deepEqual(projection.mechanics[0].instructions, [],
     'a NEEDS_HELP queue item leaked into the successful publication receipt');
-  assert.equal('blocker' in projection.mechanics[0], false,
-    'engineering queue status leaked into an adopted mechanic difference');
+  assert.deepEqual(projection.mechanics[0].pendingRequests, [{
+    instruction: 'Убрать подложку.',
+    status: 'Нужна помощь',
+    detail: 'Сборка кандидата не проходит.',
+  }], 'a NEEDS_HELP request was not shown with its plain-language reason');
   const directWireValidation = await modulePage.evaluate(() => ({
     preparedExtraRejected: window.validateCatalogDirectPromotionPrepared({
       schema: 'catalog.direct-promotion.prepared.v1',

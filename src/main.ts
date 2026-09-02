@@ -24,11 +24,15 @@ const query = new URLSearchParams(location.search);
 const restoredStartParam = getStartParam();
 const developerFeedHandoff = consumeDeveloperFeedHandoff(restoredStartParam);
 const startParam = developerFeedHandoff ? null : restoredStartParam;
+const releasePlayableMatch = typeof startParam === 'string'
+  ? startParam.match(/^r_([a-z0-9][a-z0-9._-]{0,60})$/) : null;
+const releasePlayableId = releasePlayableMatch?.[1] ?? null;
 const candidateFeedStartRequested = candidateFeedStartParamRequested(startParam);
 const candidateFeedRequested = candidateFeedPreviewRequested(location.search, startParam);
 const missionDemoLaunch = missionDemoRequested({ search: location.search, startParam });
 const selectedOperatorFeedView = operatorFeedView(location.search);
-const operatorReleasePreview = !candidateFeedRequested && selectedOperatorFeedView === 'release';
+const operatorReleasePreview = !candidateFeedRequested
+  && (selectedOperatorFeedView === 'release' || releasePlayableId !== null);
 setCandidatePlayableOverlayVisible(!operatorReleasePreview);
 setTelegramReadOnlyPreviewMode(candidateFeedRequested);
 setTelemetryReadOnlyPreviewMode(candidateFeedRequested || missionDemoLaunch);
@@ -177,7 +181,7 @@ async function boot(): Promise<void> {
       rosterSnapshot,
       friendAcceptCode,
       initialSessionPromise,
-      { readOnlyPreview: candidateFeedRequested, operatorReleasePreview },
+      { readOnlyPreview: candidateFeedRequested, operatorReleasePreview, releasePlayableId },
     );
   };
   if (candidateFeedRequested) try {
@@ -194,7 +198,15 @@ async function boot(): Promise<void> {
     // The two-line `Dev-лента` / `Только мне` badge is owned by the feed itself: it is the
     // entry point of the read-only «Изменения dev-ленты» inventory, which needs
     // the operator capabilities and rework queue the feed already holds.
-    mountFeed();
+    try {
+      mountFeed();
+    } catch {
+      // A stale private overlay must never turn one independent playable into
+      // a blank-app boot. Retry once with the public roster only.
+      setCandidatePlayableOverlays([]);
+      setTelemetryReadOnlyPreviewMode(false);
+      mountFeed();
+    }
   }
 }
 const routedStartParam = startParam;
