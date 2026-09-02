@@ -11,9 +11,6 @@
  * operator two different stories about the same task.
  */
 import {
-  groupOperatorPlayableReworkQueue,
-} from './operator-playable-reworks.mjs';
-import {
   operatorAudiencePresentation,
   resolveOperatorPresentationVocabulary,
 } from './operator-presentation-vocabulary.mjs';
@@ -196,7 +193,6 @@ function mechanicRows(input) {
   const audience = operatorAudiencePresentation(input.vocabulary, 'exactUser');
   const adoptedStatus = `Аудитория: ${audience.icon} ${audience.label}`;
   const prepared = validatePlayablePublicationPrepared(input.mechanicPublication);
-  const entries = input.reworks ? Array.from(input.reworks) : [];
   return adoptions.flatMap((adoption) => {
     if (!adoption || typeof adoption.playableId !== 'string' || !adoption.playableId) return [];
     const preparedItem = prepared?.items.find((item) => (
@@ -206,19 +202,6 @@ function mechanicRows(input) {
       && item.candidateArtifactDigest === adoption.candidateArtifactDigest
     ));
     const instructions = preparedItem ? [...new Set(preparedItem.changes)] : [];
-    for (const entry of entries) {
-      if (!Array.isArray(entry) || entry.length < 2) continue;
-      const [playableId, rawQueue] = entry;
-      if (playableId !== adoption.playableId) continue;
-      const queue = groupOperatorPlayableReworkQueue(
-        Array.isArray(rawQueue) ? rawQueue : [],
-      ).get(playableId) || [];
-      for (const item of queue) {
-        if (text(item.releaseExecution?.releaseId) !== text(adoption.releaseId)) continue;
-        const instruction = text(item.request?.instruction);
-        if (instruction && !instructions.includes(instruction)) instructions.push(instruction);
-      }
-    }
     return [Object.freeze({
       playableId: adoption.playableId,
       title: mechanicName(adoption.playableId),
@@ -463,7 +446,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         selected.dataset.action = 'publish-mechanic';
         selected.disabled = mechanicSelected.size === 0 || mechanicPublicationPending
           || mechanicPublicationCommitted;
-        const all = element('button', 'dev-diff__action', 'Выложить всё');
+        const all = element('button', 'dev-diff__action', 'Выложить все механики');
         all.type = 'button';
         all.dataset.action = 'publish-all-mechanics';
         all.disabled = mechanicPublicationPending || mechanicPublicationCommitted;
@@ -647,16 +630,11 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       const selectedIds = model.mechanics
         .filter((row) => mechanicSelected.has(row.playableId))
         .map((row) => row.playableId);
-      const projected = model.mechanics[0]?.publication ?? null;
-      const prepared = projected
-        && projected.items.length === selectedIds.length
-        && projected.items.every((item) => selectedIds.includes(item.playableId))
-        ? projected : null;
       mechanicPublicationPending = true;
       mechanicPublicationConfirmOpen = false;
       mechanicPublicationError = '';
       renderBody();
-      void Promise.resolve(prepared ?? onPrepareMechanics(selectedIds))
+      void Promise.resolve(onPrepareMechanics(selectedIds))
         .then((next) => {
           if (destroyed) return;
           mechanicPublicationPending = false;
@@ -704,6 +682,8 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         .catch(() => {
           if (destroyed) return;
           mechanicPublicationPending = false;
+          mechanicPublication = null;
+          mechanicPublicationCode = '';
           mechanicPublicationConfirmOpen = true;
           mechanicPublicationError = 'Код не подошёл или кандидат изменился. Обновите ленту.';
           if (open) renderBody();

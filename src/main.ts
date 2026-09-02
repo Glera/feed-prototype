@@ -227,6 +227,7 @@ if (missionDemoLaunch) {
 // Debug panel lives on the feed bar (left of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
 if (!missionDemoLaunch && !candidateFeedRequested && !candidateReviewReleaseId && !labAuthLaunch
+  && !operatorReleasePreview
   && (query.get('diag') === '1' || routedStartParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
 }

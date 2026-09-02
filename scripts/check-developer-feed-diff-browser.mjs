@@ -626,6 +626,8 @@ try {
     'the Labs entry leaked into the release projection');
   assert.equal(await releaseView.locator('.feed-bar__debug').count(), 0,
     'the debug entry leaked into the release projection');
+  assert.equal(await releaseView.locator('[data-panel="swipe-debug"]').count(), 0,
+    'the diagnostic panel leaked into the release projection');
   assert.equal(await releaseView.locator('.feed-bar__version:visible').count(), 0,
     'the technical build stamp leaked into the release projection');
   if (screenshotDir) {
@@ -846,7 +848,8 @@ try {
   assert.equal(projection.mechanics[0].adopted, true);
   assert.equal(projection.mechanics[0].status, 'Аудитория: ◉ Лично',
     'the Feed ignored the strict server-owned audience vocabulary');
-  assert.deepEqual(projection.mechanics[0].instructions, ['Убрать подложку.']);
+  assert.deepEqual(projection.mechanics[0].instructions, [],
+    'a NEEDS_HELP queue item leaked into the successful publication receipt');
   assert.equal('blocker' in projection.mechanics[0], false,
     'engineering queue status leaked into an adopted mechanic difference');
   const directWireValidation = await modulePage.evaluate(() => ({
@@ -1021,6 +1024,7 @@ try {
       confirmationCode: 'D0C0DE',
     };
     window.mechanicPublications = [];
+    window.mechanicPublicationPreparations = [];
     window.surface = window.mountDeveloperFeedDiffSurface(document.body, {
       input: {
         operatorSurfacesActive: true,
@@ -1043,7 +1047,10 @@ try {
         },
         mechanicPublication: prepared,
       },
-      onPrepareMechanics: async () => prepared,
+      onPrepareMechanics: async (playableIds) => {
+        window.mechanicPublicationPreparations.push(playableIds);
+        return prepared;
+      },
       onPublishMechanic: async (value, code) => {
         window.mechanicPublications.push({ value, code });
         return { status: 'queued_refreshed' };
@@ -1073,8 +1080,15 @@ try {
   assert.equal(await modulePage.locator('[data-action="publish-mechanic"]').isDisabled(), true,
     'publish-selected stayed active with no selected mechanic');
   await modulePage.locator('[data-action="publish-all-mechanics"]').click();
+  await modulePage.locator('[data-action="publish-all-mechanics"]')
+    .filter({ hasText: 'Выложить все механики' }).waitFor();
   assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 2,
     'publish-all did not select every eligible mechanic');
+  assert.deepEqual(
+    await modulePage.evaluate(() => window.mechanicPublicationPreparations),
+    [['marble-sort-swipe', 'arrows-v1-swipe']],
+    'publication reused a stale projected code instead of preparing the selected set afresh',
+  );
   await modulePage.locator('text=Код: D0C0DE').waitFor({ state: 'visible' });
   await modulePage.locator('[data-testid="mechanic-publication-code-input"]').fill('d0c0de');
   await modulePage.locator('[data-action="confirm-mechanic-publication"]').click();
