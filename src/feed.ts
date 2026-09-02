@@ -10804,7 +10804,14 @@ export class Feed {
   private updateHud(animate: boolean = true) {
     const level = this.levelForStars(this.totalStars);
     const progress = this.starsIntoLevel(this.totalStars) / this.starsForLevel(level);
-    if (this.levelEl) this.levelEl.textContent = String(level);
+    if (this.levelEl) {
+      const levelText = String(level);
+      // Preserve the familiar size through level 99, then shrink by one step
+      // for every added digit so the value stays inside the circular HUD badge.
+      const digitScale = 0.8 ** Math.max(0, levelText.length - 2);
+      this.levelEl.textContent = levelText;
+      this.levelEl.style.setProperty('--hud-level-font-size', `${Math.round(2000 * digitScale) / 100}px`);
+    }
     this.setLevelProgress(progress, animate);
   }
 
