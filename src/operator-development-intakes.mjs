@@ -300,12 +300,34 @@ function platformIntakeNeedsHelp(receipt) {
     || receipt.cancellation?.status === 'failed_terminal';
 }
 
-function platformIntakeQueuePresentation(receipts) {
+function platformIntakeIssueNumber(receipt) {
+  const match = /\/issues\/([1-9][0-9]*)$/u.exec(receipt.delivery.issueUrl ?? '');
+  return match ? Number(match[1]) : null;
+}
+
+export function platformDevelopmentIntakeQueuePresentation(receipts) {
   const newestFirst = [...receipts].sort((left, right) => (
     Date.parse(right.createdAt) - Date.parse(left.createdAt)
   ));
-  const active = newestFirst.filter((receipt) => !resolvedPlatformIntake(receipt))
-    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  // GitHub Issue number is the dispatcher's durable FIFO key. Early/recovery
+  // deliveries predate the Backend terminal projection and therefore remain
+  // terminal=null forever. A later successfully terminalized Issue proves an
+  // older confirmed, non-blocked Issue is one of those legacy gaps. Delivery
+  // attempts without an Issue and explicit NEEDS_HELP rows always remain
+  // visible: neither is completed work.
+  const completedIssueNumbers = newestFirst
+    .filter((receipt) => receipt.terminal?.status === 'READY_TO_PLAY')
+    .map(platformIntakeIssueNumber)
+    .filter((issueNumber) => issueNumber !== null);
+  const completionWatermark = completedIssueNumbers.length > 0
+    ? Math.max(...completedIssueNumbers) : null;
+  const active = newestFirst.filter((receipt) => (
+    !resolvedPlatformIntake(receipt)
+      && (platformIntakeNeedsHelp(receipt)
+        || receipt.delivery.status !== 'confirmed'
+        || completionWatermark === null
+        || platformIntakeIssueNumber(receipt) > completionWatermark)
+  )).sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
   let workPosition = 0;
   return active.map((receipt) => {
     if (platformIntakeNeedsHelp(receipt)) {
@@ -629,7 +651,7 @@ export function mountPlatformDevelopmentIntakeControl(host, options) {
 
   const renderAcceptedState = () => {
     const acceptedReceipts = [...acceptedById.values()];
-    const presentationRows = platformIntakeQueuePresentation(acceptedReceipts);
+    const presentationRows = platformDevelopmentIntakeQueuePresentation(acceptedReceipts);
     accepted = presentationRows.find(({ state: rowState }) => rowState !== 'needs_help')?.receipt
       ?? presentationRows[0]?.receipt ?? null;
     if (!accepted) return renderEmptyState();
