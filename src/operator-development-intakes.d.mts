@@ -133,6 +133,13 @@ export function buildPlatformDevelopmentIntakeCancelRequest(input: {
 }): Readonly<PlatformDevelopmentIntakeCancelV1>;
 export function platformDevelopmentIntakeFailureDisposition(error: unknown): 'rejected' | 'retry';
 export function platformDevelopmentIntakeErrorMessage(error: unknown): string;
+export function platformDevelopmentIntakeQueuePresentation(
+  receipts: ReadonlyArray<PlatformDevelopmentIntakeReceiptV1>,
+): ReadonlyArray<Readonly<{
+  receipt: PlatformDevelopmentIntakeReceiptV1;
+  label: string;
+  state: 'active' | 'queued' | 'needs_help';
+}>>;
 export function mountPlatformDevelopmentIntakeControl(
   host: HTMLElement,
   options: {

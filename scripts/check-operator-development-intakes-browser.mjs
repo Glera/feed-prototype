@@ -97,6 +97,7 @@ const receiptFor = (
   {
     status = 'queued', replayed = false, terminal = null,
     requestId = '11111111-1111-5111-8111-111111111111',
+    issueNumber = 17,
   } = {},
 ) => ({
   schema: 'platform.development-intake.response.v1',
@@ -107,7 +108,7 @@ const receiptFor = (
     deliveryId: '22222222-2222-5222-8222-222222222222',
     status,
     issueUrl: status === 'confirmed'
-      ? 'https://github.com/Glera/p4g-workspace-meta/issues/17'
+      ? `https://github.com/Glera/p4g-workspace-meta/issues/${issueNumber}`
       : null,
     nothingPublished: true,
   },
@@ -634,9 +635,17 @@ try {
     }),
     capturedAt: new Date(Date.parse(postedRequests[0].capturedAt) + 2_000).toISOString(),
   };
+  const legacyTerminalGapRequest = {
+    ...buildFixtureRequest({
+      mutationId: '78787878-7878-4787-8787-787878787878',
+      instruction: 'Старая уже выполненная правка без terminal-проекции.',
+      route,
+    }),
+    capturedAt: new Date(Date.parse(postedRequests[0].capturedAt) - 2_000).toISOString(),
+  };
   projectionItems = [
     receiptFor(secondRequest, {
-      status: 'confirmed', requestId: '33333333-3333-5333-8333-333333333333',
+      status: 'confirmed', requestId: '33333333-3333-5333-8333-333333333333', issueNumber: 18,
     }),
     { schema: 'platform.development-intake.response.v1', malformed: true },
     receiptFor(postedRequests[0], { status: 'confirmed', replayed: true }),
@@ -665,14 +674,17 @@ try {
     '11111111-1111-5111-8111-111111111111',
   'the single cancellation action must target the row labelled В работе');
 
-  // Terminal history never occupies the active queue. The durable receipt is
-  // still returned by the backend and remains available to diagnostics.
+  // Terminal history never occupies the active queue. The durable receipt
+  // remains in the backend history for diagnostics.
   projectionItems = [
     receiptFor(secondRequest, {
-      status: 'confirmed', requestId: '33333333-3333-5333-8333-333333333333',
+      status: 'confirmed', requestId: '33333333-3333-5333-8333-333333333333', issueNumber: 18,
     }),
     receiptFor(postedRequests[0], {
       status: 'confirmed', replayed: true, terminal: readyTerminal,
+    }),
+    receiptFor(legacyTerminalGapRequest, {
+      status: 'confirmed', requestId: '77777777-7777-5777-8777-777777777777', issueNumber: 16,
     }),
   ];
   const mixedSession = awaitSession(operator);
@@ -692,6 +704,9 @@ try {
   ]);
   assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li a`).count(), 0,
     'completed history leaked into the active platform queue');
+  assert.equal(await operator.locator(`${detailsSelector} [data-intake-queue] li span`).textContent(),
+    'Вторая правка интерфейса.',
+  'a legacy terminal gap older than a trusted FIFO completion remained visible');
 
   // A failed cancellation is not history: the Issue is still open and must
   // remain visible as the current unresolved blocker.

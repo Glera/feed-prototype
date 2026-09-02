@@ -10,6 +10,7 @@ import {
   platformDevelopmentIntakeErrorMessage,
   platformDevelopmentIntakeFailureDisposition,
   platformDevelopmentIntakePendingStorageKey,
+  platformDevelopmentIntakeQueuePresentation,
   platformDevelopmentIntakeSessionGrant,
   restorePlatformDevelopmentIntakePendingRequest,
   validatePlatformDevelopmentIntakeList,
@@ -312,6 +313,78 @@ assert.equal(
   validatePlatformDevelopmentIntakeReceipt(liveReceipt).terminal.review.verdict,
   'LIVE',
   'a proven live rollout must be distinct from the pre-publication terminal',
+);
+
+const queueReceipt = ({
+  requestId, issueNumber = null, createdAt, terminal = null,
+  deliveryStatus = issueNumber === null ? 'queued' : 'confirmed',
+  cancellation: itemCancellation = null,
+}) => ({
+  ...receipt,
+  requestId,
+  createdAt,
+  delivery: {
+    ...receipt.delivery,
+    status: deliveryStatus,
+    issueUrl: issueNumber === null
+      ? null : `https://github.com/Glera/p4g-workspace-meta/issues/${issueNumber}`,
+  },
+  terminal,
+  ...(itemCancellation === null ? {} : { cancellation: itemCancellation }),
+});
+const successfulQueueReceipt = queueReceipt({
+  requestId: '17171717-1717-5171-8171-171717171717',
+  issueNumber: 17,
+  createdAt: '2026-08-09T12:35:00.000Z',
+  terminal: readyReceipt.terminal,
+});
+const legacyTerminalGap = queueReceipt({
+  requestId: '16161616-1616-5161-8161-161616161616',
+  issueNumber: 16,
+  createdAt: '2026-08-09T12:34:00.000Z',
+});
+const newerConfirmedWork = queueReceipt({
+  requestId: '18181818-1818-5181-8181-181818181818',
+  issueNumber: 18,
+  createdAt: '2026-08-09T12:36:00.000Z',
+});
+const retryingDelivery = queueReceipt({
+  requestId: '15151515-1515-5151-8151-151515151515',
+  createdAt: '2026-08-09T12:33:00.000Z',
+  deliveryStatus: 'retry_wait',
+});
+const olderNeedsHelp = queueReceipt({
+  requestId: '14141414-1414-5141-8141-141414141414',
+  issueNumber: 14,
+  createdAt: '2026-08-09T12:32:00.000Z',
+  terminal: {
+    ...readyReceipt.terminal,
+    status: 'NEEDS_HELP',
+    candidate: null,
+    blocker: { reasonCode: 'operator_action_required', operatorAction: 'Проверьте задачу.' },
+    review: null,
+  },
+});
+const queueRows = platformDevelopmentIntakeQueuePresentation([
+  legacyTerminalGap,
+  successfulQueueReceipt,
+  newerConfirmedWork,
+  retryingDelivery,
+  olderNeedsHelp,
+  cancelledReceipt,
+]);
+assert.deepEqual(queueRows.map(({ receipt: item }) => item.requestId), [
+  olderNeedsHelp.requestId,
+  retryingDelivery.requestId,
+  newerConfirmedWork.requestId,
+], 'the Issue FIFO watermark must hide only confirmed legacy gaps');
+assert.deepEqual(queueRows.map(({ label }) => label), [
+  'Нужна помощь', 'В работе', 'В очереди · №1',
+]);
+assert.deepEqual(
+  platformDevelopmentIntakeQueuePresentation([legacyTerminalGap, successfulQueueReceipt]),
+  [],
+  'a successful terminal plus older legacy gaps must render an empty active queue',
 );
 assert.throws(
   () => validatePlatformDevelopmentIntakeReceipt({
