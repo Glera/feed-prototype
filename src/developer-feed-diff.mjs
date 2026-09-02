@@ -190,49 +190,46 @@ export function validatePlayablePublicationRequested(value) {
 }
 
 function mechanicRows(input) {
-  const adoption = input.adoption;
-  if (!adoption || typeof adoption.playableId !== 'string' || !adoption.playableId) return [];
+  const adoptions = Array.isArray(input.adoptions)
+    ? input.adoptions : input.adoption ? [input.adoption] : [];
+  if (adoptions.length > 20) return [];
   const audience = operatorAudiencePresentation(input.vocabulary, 'exactUser');
   const adoptedStatus = `Аудитория: ${audience.icon} ${audience.label}`;
   const prepared = validatePlayablePublicationPrepared(input.mechanicPublication);
-  const publication = prepared?.items.length === 1
-    && prepared.items[0].releaseId === adoption.releaseId
-    && prepared.items[0].playableId === adoption.playableId
-    && prepared.items[0].bindingDigest === adoption.bindingDigest
-    && prepared.items[0].candidateArtifactDigest === adoption.candidateArtifactDigest
-    ? prepared : null;
-  const instructions = publication
-    ? [...new Set(publication.items.flatMap((item) => item.changes))]
-    : [];
   const entries = input.reworks ? Array.from(input.reworks) : [];
-  for (const entry of entries) {
-    if (!Array.isArray(entry) || entry.length < 2) continue;
-    const [playableId, rawQueue] = entry;
-    if (playableId !== adoption.playableId) continue;
-    const queue = groupOperatorPlayableReworkQueue(
-      Array.isArray(rawQueue) ? rawQueue : [],
-    ).get(playableId) || [];
-    for (const item of queue) {
-      if (text(item.releaseExecution?.releaseId) !== text(adoption.releaseId)) {
-        continue;
+  return adoptions.flatMap((adoption) => {
+    if (!adoption || typeof adoption.playableId !== 'string' || !adoption.playableId) return [];
+    const preparedItem = prepared?.items.find((item) => (
+      item.releaseId === adoption.releaseId
+      && item.playableId === adoption.playableId
+      && item.bindingDigest === adoption.bindingDigest
+      && item.candidateArtifactDigest === adoption.candidateArtifactDigest
+    ));
+    const instructions = preparedItem ? [...new Set(preparedItem.changes)] : [];
+    for (const entry of entries) {
+      if (!Array.isArray(entry) || entry.length < 2) continue;
+      const [playableId, rawQueue] = entry;
+      if (playableId !== adoption.playableId) continue;
+      const queue = groupOperatorPlayableReworkQueue(
+        Array.isArray(rawQueue) ? rawQueue : [],
+      ).get(playableId) || [];
+      for (const item of queue) {
+        if (text(item.releaseExecution?.releaseId) !== text(adoption.releaseId)) continue;
+        const instruction = text(item.request?.instruction);
+        if (instruction && !instructions.includes(instruction)) instructions.push(instruction);
       }
-      const instruction = text(item.request?.instruction);
-      if (instruction && !instructions.includes(instruction)) instructions.push(instruction);
     }
-  }
-
-  // A work request is not a feed difference. The one immutable candidate
-  // currently adopted into this operator's feed is.
-  return [Object.freeze({
-    playableId: adoption.playableId,
-    title: mechanicName(adoption.playableId),
-    status: adoptedStatus,
-    state: 'adopted',
-    tone: 'ok',
-    instructions: Object.freeze(instructions),
-    adopted: true,
-    publication,
-  })];
+    return [Object.freeze({
+      playableId: adoption.playableId,
+      title: mechanicName(adoption.playableId),
+      status: adoptedStatus,
+      state: 'adopted',
+      tone: 'ok',
+      instructions: Object.freeze(instructions),
+      adopted: true,
+      publication: preparedItem ? prepared : null,
+    })];
+  });
 }
 
 export function developerFeedDiffModel(input = {}) {
@@ -255,7 +252,7 @@ export function developerFeedDiffModel(input = {}) {
     && preparedPromotion.runtimeArtifactDigest === catalog.dev.runtime.runtimeArtifactDigest
     ? preparedPromotion : null;
   return Object.freeze({
-    visible: input.operatorSurfacesActive === true || Boolean(input.adoption),
+    visible: input.operatorSurfacesActive === true || mechanics.length > 0,
     changed,
     empty: changed === 0 && !catalogUnknown,
     audience: exactUserAudience,
@@ -320,6 +317,9 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   const onPublishMechanic = typeof options.onPublishMechanic === 'function'
     ? options.onPublishMechanic
     : null;
+  const onPrepareMechanics = typeof options.onPrepareMechanics === 'function'
+    ? options.onPrepareMechanics
+    : null;
 
   let destroyed = false;
   let open = false;
@@ -329,13 +329,14 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   let promotionCode = '';
   let promotionError = '';
   let catalogSelected = true;
-  let mechanicSelected = true;
+  let model = developerFeedDiffModel(options.input || {});
+  let mechanicSelected = new Set(model.mechanics.map((row) => row.playableId));
+  let mechanicPublication = model.mechanics[0]?.publication ?? null;
   let mechanicPublicationPending = false;
   let mechanicPublicationCommitted = false;
   let mechanicPublicationConfirmOpen = false;
   let mechanicPublicationCode = '';
   let mechanicPublicationError = '';
-  let model = developerFeedDiffModel(options.input || {});
 
   const root = element('div', 'dev-diff-surface');
   root.dataset.testid = 'dev-diff-surface';
@@ -415,18 +416,18 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         const selectableHead = element('div', 'dev-diff__selectable-head');
         const checkbox = element('input', 'dev-diff__checkbox');
         checkbox.type = 'checkbox';
-        checkbox.checked = mechanicSelected && Boolean(row.publication);
-        checkbox.disabled = !row.publication || mechanicPublicationPending
+        checkbox.checked = mechanicSelected.has(row.playableId);
+        checkbox.disabled = !onPrepareMechanics || !onPublishMechanic || mechanicPublicationPending
           || mechanicPublicationCommitted;
         checkbox.dataset.action = 'select-mechanic';
         checkbox.setAttribute('aria-label', `Выбрать ${row.title}`);
         checkbox.addEventListener('change', () => {
-          mechanicSelected = checkbox.checked;
-          if (!mechanicSelected) {
-            mechanicPublicationConfirmOpen = false;
-            mechanicPublicationCode = '';
-            mechanicPublicationError = '';
-          }
+          if (checkbox.checked) mechanicSelected.add(row.playableId);
+          else mechanicSelected.delete(row.playableId);
+          mechanicPublication = null;
+          mechanicPublicationConfirmOpen = false;
+          mechanicPublicationCode = '';
+          mechanicPublicationError = '';
           if (open) renderBody();
         });
         selectableHead.append(checkbox, rowHead(row.title, 'Только мне'));
@@ -436,12 +437,10 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         for (const instruction of instructions) {
           article.append(element('p', 'dev-diff__description', instruction));
         }
-        if (!row.publication) article.append(element(
+        if (model.mechanicPublicationPreparing) article.append(element(
           'p',
           'dev-diff__pending',
-          model.mechanicPublicationPreparing
-            ? 'Проверяю возможность публикации…'
-            : 'Пока нельзя выложить',
+          'Проверяю возможность публикации…',
         ));
         if (onShowMechanic) {
           const jump = element('button', 'dev-diff__action', 'Показать механику');
@@ -453,9 +452,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       }
       body.append(mechanics);
 
-      const publication = model.mechanics.length === 1
-        ? model.mechanics[0].publication : null;
-      if (publication && onPublishMechanic) {
+      if (onPrepareMechanics && onPublishMechanic) {
         const actions = element('div', 'dev-diff__publish-actions');
         const selected = element(
           'button',
@@ -464,7 +461,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         );
         selected.type = 'button';
         selected.dataset.action = 'publish-mechanic';
-        selected.disabled = !mechanicSelected || mechanicPublicationPending
+        selected.disabled = mechanicSelected.size === 0 || mechanicPublicationPending
           || mechanicPublicationCommitted;
         const all = element('button', 'dev-diff__action', 'Выложить всё');
         all.type = 'button';
@@ -478,7 +475,11 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         confirm.hidden = !mechanicPublicationConfirmOpen;
         confirm.append(
           element('p', 'dev-diff__detail', 'Только мне → Доступно всем'),
-          element('p', 'dev-diff__promotion-code', `Код: ${publication.confirmationCode}`),
+          element(
+            'p',
+            'dev-diff__promotion-code',
+            mechanicPublication ? `Код: ${mechanicPublication.confirmationCode}` : '',
+          ),
         );
         const input = element('input', 'dev-diff__promotion-input');
         input.dataset.testid = 'mechanic-publication-code-input';
@@ -494,7 +495,8 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         const apply = element('button', 'dev-diff__action', applyLabel);
         apply.type = 'button';
         apply.dataset.action = 'confirm-mechanic-publication';
-        apply.disabled = !mechanicSelected || mechanicPublicationPending
+        apply.disabled = mechanicSelected.size === 0 || !mechanicPublication
+          || mechanicPublicationPending
           || mechanicPublicationCommitted;
         confirm.append(input, apply);
         if (mechanicPublicationError) {
@@ -637,20 +639,45 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     const jump = target.closest('[data-action="show-mechanic"]');
     const publishMechanic = target.closest('[data-action="publish-mechanic"]');
     const publishAllMechanics = target.closest('[data-action="publish-all-mechanics"]');
-    if (publishAllMechanics) mechanicSelected = true;
+    if (publishAllMechanics) {
+      mechanicSelected = new Set(model.mechanics.map((row) => row.playableId));
+    }
     if (publishMechanic || publishAllMechanics) {
-      if (!mechanicSelected) return;
-      mechanicPublicationConfirmOpen = true;
+      if (mechanicSelected.size === 0 || !onPrepareMechanics) return;
+      const selectedIds = model.mechanics
+        .filter((row) => mechanicSelected.has(row.playableId))
+        .map((row) => row.playableId);
+      const projected = model.mechanics[0]?.publication ?? null;
+      const prepared = projected
+        && projected.items.length === selectedIds.length
+        && projected.items.every((item) => selectedIds.includes(item.playableId))
+        ? projected : null;
+      mechanicPublicationPending = true;
+      mechanicPublicationConfirmOpen = false;
       mechanicPublicationError = '';
       renderBody();
-      const input = body.querySelector('[data-testid="mechanic-publication-code-input"]');
-      if (input instanceof HTMLInputElement) input.focus();
+      void Promise.resolve(prepared ?? onPrepareMechanics(selectedIds))
+        .then((next) => {
+          if (destroyed) return;
+          mechanicPublicationPending = false;
+          mechanicPublication = next;
+          mechanicPublicationConfirmOpen = true;
+          renderBody();
+          const input = body.querySelector('[data-testid="mechanic-publication-code-input"]');
+          if (input instanceof HTMLInputElement) input.focus();
+        })
+        .catch(() => {
+          if (destroyed) return;
+          mechanicPublicationPending = false;
+          mechanicPublication = null;
+          mechanicPublicationConfirmOpen = true;
+          mechanicPublicationError = 'Не удалось подготовить точный набор. Обновите ленту.';
+          renderBody();
+        });
       return;
     }
     const applyMechanic = target.closest('[data-action="confirm-mechanic-publication"]');
-    const mechanicPublication = model.mechanics.length === 1
-      ? model.mechanics[0].publication : null;
-    if (applyMechanic && mechanicSelected && mechanicPublication
+    if (applyMechanic && mechanicSelected.size > 0 && mechanicPublication
       && onPublishMechanic && !mechanicPublicationPending) {
       const code = mechanicPublicationCode.trim().toUpperCase();
       mechanicPublicationPending = true;
@@ -755,7 +782,9 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     update(next) {
       if (destroyed) return;
       const previousPromotionId = model.catalog.promotion?.operationId ?? null;
-      const previousMechanicOperation = model.mechanics[0]?.publication?.operationId ?? null;
+      const previousMechanics = model.mechanics.map((row) => (
+        `${row.playableId}:${row.publication?.items.find((item) => item.playableId === row.playableId)?.releaseId ?? ''}`
+      )).join('|');
       model = developerFeedDiffModel(next || {});
       const nextPromotionId = model.catalog.promotion?.operationId ?? null;
       if (nextPromotionId === null || nextPromotionId !== previousPromotionId) {
@@ -766,9 +795,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         promotionCode = '';
         promotionError = '';
       }
-      const nextMechanicOperation = model.mechanics[0]?.publication?.operationId ?? null;
-      if (nextMechanicOperation === null || nextMechanicOperation !== previousMechanicOperation) {
-        mechanicSelected = true;
+      const nextMechanics = model.mechanics.map((row) => (
+        `${row.playableId}:${row.publication?.items.find((item) => item.playableId === row.playableId)?.releaseId ?? ''}`
+      )).join('|');
+      if (nextMechanics !== previousMechanics) {
+        mechanicSelected = new Set(model.mechanics.map((row) => row.playableId));
+        mechanicPublication = model.mechanics[0]?.publication ?? null;
         mechanicPublicationPending = false;
         mechanicPublicationCommitted = false;
         mechanicPublicationConfirmOpen = false;

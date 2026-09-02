@@ -391,3 +391,23 @@ export async function resolveDeveloperFeedAdoption(
   }
   return Object.freeze({ ...identity, releaseId: identity.releaseId.toLowerCase() });
 }
+
+/** Revalidate the complete bounded exact-user overlay set. */
+export async function resolveDeveloperFeedAdoptions(
+  value: unknown,
+  origin = location.origin,
+  fetchBinding: typeof fetch = fetch,
+): Promise<readonly DeveloperFeedAdoptionIdentity[]> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 20) {
+    throw new Error('developer_feed_adoptions_invalid');
+  }
+  const resolved = await Promise.all(
+    value.map((item) => resolveDeveloperFeedAdoption(item, origin, fetchBinding)),
+  );
+  const playableIds = new Set(resolved.map((item) => item.playableId));
+  const releaseIds = new Set(resolved.map((item) => item.releaseId));
+  if (playableIds.size !== resolved.length || releaseIds.size !== resolved.length) {
+    throw new Error('developer_feed_adoptions_invalid');
+  }
+  return Object.freeze(resolved);
+}

@@ -329,6 +329,7 @@ export interface SessionResp {
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
   developerFeedAdoption?: DeveloperFeedAdoptionV1;
+  developerFeedAdoptions?: DeveloperFeedAdoptionV1[];
   developerFeedCatalog?: DeveloperFeedCatalogDiffV1;
   /** Mission slice v0: present (true) only for an enrolled dogfood account while
    *  `ENABLE_MISSION_READ` is on. Absent is how every other payload stays

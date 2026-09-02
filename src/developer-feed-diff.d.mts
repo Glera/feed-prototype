@@ -48,14 +48,14 @@ export interface DeveloperFeedDiffInput {
   /** Entries of the feed's own `playableId → queue` map. No request is issued. */
   reworks?: Iterable<readonly [string, readonly OperatorPlayableReworkQueueItemV1[]]> | null;
   vocabulary?: import('./operator-presentation-vocabulary.mjs').OperatorPresentationVocabularyV1;
-  /** The exact candidate this operator adopted, if any. */
-  adoption?: {
+  /** Current exact candidate heads, at most one per playable. */
+  adoptions?: readonly {
     playableId: string;
     releaseId: string;
     candidateArtifactDigest: string;
     bindingDigest?: string;
     sourceCommit?: string;
-  } | null;
+  }[];
   /** Exact optional server-owned catalog dev/public projection from `/session`. */
   catalog?: DeveloperFeedCatalogDiffV1 | null;
   /** Exact server-prepared closure; mismatched identities fail closed. */
@@ -134,5 +134,8 @@ export function mountDeveloperFeedDiffSurface(
       prepared: Readonly<PlayablePublicationPreparedV1>,
       confirmationCode: string,
     ): Promise<PlayablePublicationClientOutcome>;
+    onPrepareMechanics?(
+      playableIds: readonly string[],
+    ): Promise<Readonly<PlayablePublicationPreparedV1>>;
   },
 ): DeveloperFeedDiffSurface;

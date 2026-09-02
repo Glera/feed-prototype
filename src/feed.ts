@@ -10,6 +10,7 @@ import {
   mechanicIsAvailable,
   mechanicReleaseIdentity,
   candidatePlayableOverlay,
+  candidatePlayableOverlays,
   type Playable,
 } from './playables';
 import {
@@ -2879,20 +2880,25 @@ export class Feed {
       && (this.operatorLevelFlaggingAvailable || this.developmentIntakeAvailable);
     // A resolved overlay outside the read-only candidate route is exactly the
     // developer-feed adoption main.ts used to badge.
-    const rawOverlay = this.readOnlyPreview ? null : candidatePlayableOverlay();
-    const overlay = rawOverlay ? {
-      playableId: rawOverlay.playableId,
-      releaseId: rawOverlay.releaseId,
-      candidateArtifactDigest: rawOverlay.candidateArtifactDigest,
-      bindingDigest: rawOverlay.bindingDigest,
-      sourceCommit: rawOverlay.sourceCommit,
-    } : null;
+    const overlayByPlayable = new Map(
+      candidatePlayableOverlays().map((item) => [item.playableId, item]),
+    );
+    const overlays = this.readOnlyPreview ? [] : this.playables.flatMap(({ id }) => {
+      const rawOverlay = overlayByPlayable.get(id);
+      return rawOverlay ? [{
+        playableId: rawOverlay.playableId,
+        releaseId: rawOverlay.releaseId,
+        candidateArtifactDigest: rawOverlay.candidateArtifactDigest,
+        bindingDigest: rawOverlay.bindingDigest,
+        sourceCommit: rawOverlay.sourceCommit,
+      }] : [];
+    });
     return {
       operatorSurfacesActive,
       reworks: this.operatorLevelFlaggingAvailable
         ? Array.from(this.operatorPlayableReworks.entries())
         : [],
-      adoption: overlay,
+      adoptions: overlays,
       vocabulary: this.operatorPresentationVocabulary,
       catalog: this.developerFeedCatalog,
       catalogPromotion: this.catalogPromotionPrepared,
@@ -2904,7 +2910,7 @@ export class Feed {
 
   private refreshDeveloperFeedDiff(): void {
     const input = this.developerFeedDiffInput();
-    if (!input.operatorSurfacesActive && !input.adoption) {
+    if (!input.operatorSurfacesActive && (input.adoptions?.length ?? 0) === 0) {
       this.developerFeedDiffSurface?.destroy();
       this.developerFeedDiffSurface = null;
       return;
@@ -2922,18 +2928,58 @@ export class Feed {
       onPublishMechanic: (prepared, confirmationCode) => (
         this.applyDeveloperPlayablePublication(prepared, confirmationCode)
       ),
+      onPrepareMechanics: (playableIds) => (
+        this.prepareDeveloperPlayablePublicationSelection(playableIds)
+      ),
     });
   }
 
-  private playablePublicationSelection(): PlayablePublicationSelectionV1[] | null {
-    const adoption = this.readOnlyPreview ? null : candidatePlayableOverlay();
-    if (!adoption?.releaseId || !adoption.bindingDigest
-      || !adoption.candidateArtifactDigest) return null;
-    return [{
-      releaseId: adoption.releaseId,
-      bindingDigest: adoption.bindingDigest,
-      candidateArtifactDigest: adoption.candidateArtifactDigest,
-    }];
+  private playablePublicationSelection(
+    playableIds: readonly string[] | null = null,
+  ): PlayablePublicationSelectionV1[] | null {
+    if (this.readOnlyPreview) return null;
+    const selected = playableIds === null ? null : new Set(playableIds);
+    const byPlayable = new Map(
+      candidatePlayableOverlays().map((adoption) => [adoption.playableId, adoption]),
+    );
+    const items = this.playables.flatMap(({ id }) => {
+      if (selected !== null && !selected.has(id)) return [];
+      const adoption = byPlayable.get(id);
+      return adoption?.releaseId && adoption.bindingDigest
+        && adoption.candidateArtifactDigest ? [{
+          releaseId: adoption.releaseId,
+          bindingDigest: adoption.bindingDigest,
+          candidateArtifactDigest: adoption.candidateArtifactDigest,
+        }] : [];
+    });
+    return items.length > 0 ? items : null;
+  }
+
+  private async prepareDeveloperPlayablePublicationSelection(
+    playableIds: readonly string[],
+  ): Promise<Readonly<PlayablePublicationPreparedV1>> {
+    const items = this.playablePublicationSelection(playableIds);
+    if (!items || items.length !== new Set(playableIds).size || this.operatorReleasePreview) {
+      throw new Error('playable_publication_candidate_changed');
+    }
+    const operationId = crypto.randomUUID();
+    const raw = await apiPreparePlayablePublicationRequired({
+      schema: 'feed.playable-publication.prepare.v1',
+      operationId,
+      action: 'publish',
+      items,
+    });
+    const prepared = validatePlayablePublicationPrepared(raw);
+    const exact = prepared?.items.length === items.length
+      && prepared.items.every((item, index) => (
+        item.releaseId === items[index].releaseId
+        && item.bindingDigest === items[index].bindingDigest
+        && item.candidateArtifactDigest === items[index].candidateArtifactDigest
+      ));
+    if (prepared?.operationId !== operationId || !exact) {
+      throw new Error('playable_publication_prepare_invalid');
+    }
+    return prepared;
   }
 
   private async prepareDeveloperPlayablePublication(): Promise<void> {
@@ -2956,27 +3002,10 @@ export class Feed {
     const epoch = ++this.mechanicPublicationPrepareEpoch;
     this.refreshDeveloperFeedDiff();
     try {
-      const operationId = crypto.randomUUID();
-      const raw = await apiPreparePlayablePublicationRequired({
-        schema: 'feed.playable-publication.prepare.v1',
-        operationId,
-        action: 'publish',
-        items,
-      });
-      const prepared = validatePlayablePublicationPrepared(raw);
-      const exact = prepared?.items.length === items.length
-        && prepared.items.every((item, index) => (
-          item.releaseId === items[index].releaseId
-          && item.bindingDigest === items[index].bindingDigest
-          && item.candidateArtifactDigest === items[index].candidateArtifactDigest
-        ));
+      const prepared = await this.prepareDeveloperPlayablePublicationSelection(
+        candidatePlayableOverlays().map((item) => item.playableId),
+      );
       if (epoch !== this.mechanicPublicationPrepareEpoch) return;
-      if (prepared?.operationId !== operationId || !exact) {
-        this.mechanicPublicationPrepareKey = null;
-        this.mechanicPublicationPreparing = false;
-        this.refreshDeveloperFeedDiff();
-        return;
-      }
       this.mechanicPublicationPrepared = prepared;
       this.mechanicPublicationPreparing = false;
       this.refreshDeveloperFeedDiff();
@@ -2993,7 +3022,9 @@ export class Feed {
     prepared: Readonly<PlayablePublicationPreparedV1>,
     confirmationCode: string,
   ): Promise<PlayablePublicationClientOutcome> {
-    const selection = this.playablePublicationSelection();
+    const selection = this.playablePublicationSelection(
+      prepared.items.map((item) => item.playableId),
+    );
     if (!selection || selection.length !== prepared.items.length
       || !prepared.items.every((item, index) => (
         item.releaseId === selection[index].releaseId
@@ -11357,13 +11388,17 @@ export function createFeed(
   }
   let order = [...resolution.playables];
   let rosterEntries = [...resolution.entries];
-  const candidateOverlay = candidatePlayableOverlay();
-  if (candidateOverlay && !mode) throw new Error('candidate_feed_mode_required');
+  const candidateOverlays = candidatePlayableOverlays();
+  if (candidateOverlays.length > 0 && !mode) throw new Error('candidate_feed_mode_required');
   const readOnlyPreview = mode?.readOnlyPreview ?? false;
   const operatorReleasePreview = mode?.operatorReleasePreview ?? false;
-  if (candidateOverlay) {
-    const candidateIndex = order.findIndex((playable) => playable.id === candidateOverlay.playableId);
-    if (candidateIndex < 0) throw new Error('candidate_feed_target_not_in_live_roster');
+  if (candidateOverlays.some(
+    (candidate) => !order.some((playable) => playable.id === candidate.playableId),
+  )) throw new Error('candidate_feed_target_not_in_live_roster');
+  if (readOnlyPreview && candidateOverlays.length === 1) {
+    const candidateIndex = order.findIndex(
+      (playable) => playable.id === candidateOverlays[0].playableId,
+    );
     if (candidateIndex > 0) {
       order = [order[candidateIndex], ...order.slice(0, candidateIndex), ...order.slice(candidateIndex + 1)];
       rosterEntries = [
@@ -11411,7 +11446,7 @@ export function createFeed(
     friendAcceptCode,
     initialSessionPromise,
     readOnlyPreview,
-    candidateOverlay !== null,
+    candidateOverlays.length > 0,
     operatorReleasePreview,
   );
 }

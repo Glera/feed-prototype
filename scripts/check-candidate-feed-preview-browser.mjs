@@ -438,7 +438,7 @@ const server = createServer(async (request, response) => {
       development_intake_available: true,
       development_intake_context: { contract: 'platform.development-intake.request.v1' },
       feedRoster: roster,
-      ...(adopted ? { developerFeedAdoption: {
+      ...(adopted ? { developerFeedAdoptions: [{
         schema: 'feed.playable-source-preview-adoption.v1',
         releaseId: reworkAdoption ? releaseId : sourceReleaseId,
         playableId,
@@ -456,7 +456,7 @@ const server = createServer(async (request, response) => {
         receiptDigest: '6'.repeat(64),
         audience: 'exact-user',
         publicRollout: false,
-      }, developerFeedCatalog: {
+      }], developerFeedCatalog: {
         schema: 'feed.developer-catalog-diff.v1',
         mechanic: 'sort',
         variant: 'base',
@@ -849,7 +849,13 @@ try {
     'technical catalog identity leaked into the founder-facing diff');
   await page.keyboard.press('Escape');
   await page.locator('[data-testid="dev-diff-sheet"]').waitFor({ state: 'hidden' });
-  const adoptedFrame = page.locator('.page').first().locator('iframe');
+  assert.deepEqual(
+    await page.locator('.page .game__label').allTextContents(),
+    rosterEntries.map((entry) => entry.playableId),
+    'adopted developer candidate reordered the canonical roster',
+  );
+  await advanceToPlayable(page, playableId);
+  const adoptedFrame = page.locator('.page--in-viewport').locator('iframe');
   await adoptedFrame.waitFor({ state: 'attached' });
   assert.equal(new URL((await adoptedFrame.getAttribute('src')) || '', origin).pathname, sourceCandidatePath);
   await adoptedFrame.contentFrame().getByText('EXACT IMMUTABLE CANDIDATE', { exact: true }).waitFor();

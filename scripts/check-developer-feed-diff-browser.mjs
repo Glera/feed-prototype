@@ -1010,6 +1010,13 @@ try {
         candidateArtifactDigest,
         runtimeArtifactDigest: `sha256:${'6'.repeat(64)}`,
         changes: ['Убрать подложку.'],
+      }, {
+        releaseId: '67676767-6767-4767-8767-676767676767',
+        playableId: 'arrows-v1-swipe',
+        bindingDigest: '7'.repeat(64),
+        candidateArtifactDigest: '8'.repeat(64),
+        runtimeArtifactDigest: `sha256:${'9'.repeat(64)}`,
+        changes: ['Сделать стрелки ярче.'],
       }],
       confirmationCode: 'D0C0DE',
     };
@@ -1018,12 +1025,17 @@ try {
       input: {
         operatorSurfacesActive: true,
         reworks: [],
-        adoption: {
+        adoptions: [{
           playableId: 'marble-sort-swipe',
           releaseId: prepared.items[0].releaseId,
           bindingDigest,
           candidateArtifactDigest,
-        },
+        }, {
+          playableId: 'arrows-v1-swipe',
+          releaseId: prepared.items[1].releaseId,
+          bindingDigest: prepared.items[1].bindingDigest,
+          candidateArtifactDigest: prepared.items[1].candidateArtifactDigest,
+        }],
         catalog: {
           schema: 'feed.developer-catalog-diff.v1', mechanic: 'sort', variant: 'base',
           available: false, unavailableReason: 'catalog_entry_unavailable',
@@ -1031,6 +1043,7 @@ try {
         },
         mechanicPublication: prepared,
       },
+      onPrepareMechanics: async () => prepared,
       onPublishMechanic: async (value, code) => {
         window.mechanicPublications.push({ value, code });
         return { status: 'queued_refreshed' };
@@ -1054,11 +1067,13 @@ try {
     requestedAccepted: true,
   }, 'mechanic publication validators accepted a drifted wire');
   await modulePage.locator(badgeSelector).click();
-  await modulePage.locator('[data-action="select-mechanic"]').uncheck();
+  for (const checkbox of await modulePage.locator('[data-action="select-mechanic"]').all()) {
+    await checkbox.uncheck();
+  }
   assert.equal(await modulePage.locator('[data-action="publish-mechanic"]').isDisabled(), true,
     'publish-selected stayed active with no selected mechanic');
   await modulePage.locator('[data-action="publish-all-mechanics"]').click();
-  assert.equal(await modulePage.locator('[data-action="select-mechanic"]').isChecked(), true,
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 2,
     'publish-all did not select every eligible mechanic');
   await modulePage.locator('text=Код: D0C0DE').waitFor({ state: 'visible' });
   await modulePage.locator('[data-testid="mechanic-publication-code-input"]').fill('d0c0de');
@@ -1069,7 +1084,7 @@ try {
     'publish-all issued more than one publication mutation');
   assert.equal(submittedMechanicPublication[0].code, 'D0C0DE',
     'the one publication code was not normalized and submitted once');
-  assert.equal(submittedMechanicPublication[0].value.items.length, 1,
+  assert.equal(submittedMechanicPublication[0].value.items.length, 2,
     'the complete prepared mechanic set was not submitted atomically');
   await modulePage.locator('[data-close]').last().click();
 

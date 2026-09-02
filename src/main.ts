@@ -3,6 +3,7 @@ import { createFeed } from './feed';
 import {
   candidateMatchesPublicManifest,
   setCandidatePlayableOverlay,
+  setCandidatePlayableOverlays,
   setCandidatePlayableOverlayVisible,
   setMechanicVersions,
 } from './playables';
@@ -13,7 +14,7 @@ import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 import { feedRosterSnapshotForBoot, loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 import { userScopedStorage } from './user-scope';
 import { candidateReviewReleaseIdFromParam } from './candidate-review';
-import { candidateFeedPreviewRequested, resolveCandidateFeedPreview, resolveDeveloperFeedAdoption, type CandidateFeedPreviewIdentity } from './candidate-feed-preview';
+import { candidateFeedPreviewRequested, resolveCandidateFeedPreview, resolveDeveloperFeedAdoptions, type CandidateFeedPreviewIdentity } from './candidate-feed-preview';
 import { candidateFeedStartParamRequested } from './candidate-feed-start-param.mjs';
 import { consumeDeveloperFeedHandoff, mountCandidateFeedAdoption } from './candidate-feed-adoption';
 import { missionDemoRequested } from './mission-demo-route.mjs';
@@ -149,16 +150,19 @@ async function boot(): Promise<void> {
     rosterSnapshot = initial === timeout
       ? persisted
       : await feedRosterSnapshotForBoot(persisted, initial?.feedRoster);
-    if (!operatorReleasePreview && initial !== timeout && initial?.developerFeedAdoption) {
+    const projectedAdoptions = initial !== timeout
+      ? initial?.developerFeedAdoptions ?? (
+        initial?.developerFeedAdoption ? [initial.developerFeedAdoption] : null
+      )
+      : null;
+    if (!operatorReleasePreview && projectedAdoptions) {
       try {
-        const adopted = await resolveDeveloperFeedAdoption(initial.developerFeedAdoption);
-        if (candidateMatchesPublicManifest(adopted)) {
-          // The exact adopted bytes are public now.  Keeping the operator
-          // overlay would falsely present a dev-only audience and suppress
-          // ordinary telemetry after publication.
-          setCandidatePlayableOverlay(null);
-        } else {
-          setCandidatePlayableOverlay(adopted);
+        const adopted = await resolveDeveloperFeedAdoptions(projectedAdoptions);
+        const privateAdoptions = adopted.filter(
+          (candidate) => !candidateMatchesPublicManifest(candidate),
+        );
+        setCandidatePlayableOverlays(privateAdoptions);
+        if (privateAdoptions.length > 0) {
           setTelemetryReadOnlyPreviewMode(true);
         }
       } catch { /* invalid/tampered dev adoption fails closed to the public manifest */ }
