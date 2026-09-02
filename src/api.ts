@@ -329,6 +329,7 @@ export interface SessionResp {
   builtin_feed_bindings?: BuiltinFeedBindingsV1;
   feedRoster?: FeedRosterSessionV1;
   developerFeedAdoption?: DeveloperFeedAdoptionV1;
+  developerFeedAdoptions?: DeveloperFeedAdoptionV1[];
   developerFeedCatalog?: DeveloperFeedCatalogDiffV1;
   /** Mission slice v0: present (true) only for an enrolled dogfood account while
    *  `ENABLE_MISSION_READ` is on. Absent is how every other payload stays
@@ -398,6 +399,62 @@ export interface CatalogDirectPromotionResultV1 {
   replayed: boolean;
 }
 
+export interface PlayablePublicationItemV1 {
+  releaseId: string;
+  playableId: string;
+  bindingDigest: string;
+  candidateArtifactDigest: string;
+  runtimeArtifactDigest: string;
+  changes: string[];
+}
+
+export interface PlayablePublicationPreparedV1 {
+  schema: 'feed.playable-publication.prepared.v1';
+  operationId: string;
+  action: 'publish';
+  clientInstanceId: string;
+  items: PlayablePublicationItemV1[];
+  confirmationCode: string;
+}
+
+export interface PlayablePublicationRequestedV1 {
+  schema: 'feed.playable-publication.requested.v1';
+  operationId: string;
+  action: 'publish';
+  items: PlayablePublicationItemV1[];
+  status: 'queued' | 'published';
+  replayed: boolean;
+}
+
+export interface PlayablePublicationSelectionV1 {
+  releaseId: string;
+  bindingDigest: string;
+  candidateArtifactDigest: string;
+}
+
+export function apiPreparePlayablePublicationRequired(payload: {
+  schema: 'feed.playable-publication.prepare.v1';
+  operationId: string;
+  action: 'publish';
+  items: PlayablePublicationSelectionV1[];
+}): Promise<PlayablePublicationPreparedV1> {
+  return postRequired<PlayablePublicationPreparedV1>(
+    '/api/operator/playable-publications/prepare', payload,
+  );
+}
+
+export function apiApplyPlayablePublicationRequired(payload: {
+  schema: 'feed.playable-publication.apply.v1';
+  operationId: string;
+  action: 'publish';
+  items: PlayablePublicationSelectionV1[];
+  confirmationCode: string;
+}): Promise<PlayablePublicationRequestedV1> {
+  return postRequired<PlayablePublicationRequestedV1>(
+    '/api/operator/playable-publications/apply', payload,
+  );
+}
+
 export function apiPrepareCatalogDirectPromotionRequired(payload: {
   schema: 'catalog.direct-promotion.prepare.v1';
   operationId: string;
@@ -429,6 +486,7 @@ export interface DeveloperFeedAdoptionV1 {
   playableId: string;
   candidatePath: string;
   candidateArtifactDigest: string;
+  bindingDigest: string;
   runtimeArtifactDigest: string;
   reviewBindingDigest: string;
   sourceCommit: string;

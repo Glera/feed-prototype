@@ -211,13 +211,16 @@ document.removeEventListener = (type, handler, options) => {
 };
 const { mountDeveloperFeedDiffSurface, developerFeedDiffModel,
   validateDeveloperFeedCatalogDiff, validateCatalogDirectPromotionPrepared,
-  validateCatalogDirectPromotionResult } =
+  validateCatalogDirectPromotionResult, validatePlayablePublicationPrepared,
+  validatePlayablePublicationRequested } =
   await import('/developer-feed-diff.mjs');
 window.developerFeedDiffModel = developerFeedDiffModel;
 window.mountDeveloperFeedDiffSurface = mountDeveloperFeedDiffSurface;
 window.validateDeveloperFeedCatalogDiff = validateDeveloperFeedCatalogDiff;
 window.validateCatalogDirectPromotionPrepared = validateCatalogDirectPromotionPrepared;
 window.validateCatalogDirectPromotionResult = validateCatalogDirectPromotionResult;
+window.validatePlayablePublicationPrepared = validatePlayablePublicationPrepared;
+window.validatePlayablePublicationRequested = validatePlayablePublicationRequested;
 window.shown = [];
 window.surface = mountDeveloperFeedDiffSurface(document.body, {
   input: {
@@ -418,11 +421,11 @@ try {
     }));
     return page;
   };
-  const bootFeed = async (page, label) => {
+  const bootFeed = async (page, label, extraQuery = '') => {
     const session = page.waitForResponse((response) =>
       response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/session');
-    await page.goto(`${origin}/?browserCase=${label}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${origin}/?browserCase=${label}${extraQuery}`, { waitUntil: 'domcontentloaded' });
     await session;
     await page.locator('iframe').first().waitFor({ state: 'attached' });
     await page.waitForFunction(() => !document.querySelector('.preloader'));
@@ -547,10 +550,15 @@ try {
     'the two-line dev-feed label lacks safe glyph leading');
   assert.equal(await badge.evaluate((node) => node.tagName), 'BUTTON',
     'the dev-feed badge must be a real control, not a decorative label');
-  // Queue/history rows are not feed differences. Only the private catalog
-  // version differs from release in this fixture.
-  await page.locator('[data-testid="dev-diff-badge-count"]')
-    .filter({ hasText: /^1$/ }).waitFor();
+  // Active/NEEDS_HELP work stays visible with a human reason, alongside the
+  // private catalog difference, but is never selectable for publication.
+  const operatorBadgeCount = page.locator('[data-testid="dev-diff-badge-count"]');
+  await operatorBadgeCount.waitFor({ state: 'visible' });
+  await page.waitForFunction(() => Number(
+    document.querySelector('[data-testid="dev-diff-badge-count"]')?.textContent,
+  ) >= 3);
+  assert.equal(await operatorBadgeCount.textContent(), '3',
+    'the badge omitted visible active/NEEDS_HELP work');
   assert.equal(await page.locator(sheetSelector).isVisible(), false,
     'the inventory sheet was open before the operator asked for it');
 
@@ -564,10 +572,16 @@ try {
 
   assert.equal(await sheet.locator('[data-row="platform"]').count(), 0,
     'platform work history leaked into the release diff');
-  assert.equal(await sheet.locator('[data-row="mechanic"]').count(), 0,
-    'mechanic work queue leaked into the release diff');
-  assert.equal(await sheet.locator(rowSelector).count(), 1,
-    'the sheet must contain only a literal dev/public difference');
+  assert.equal(await sheet.locator('[data-row="mechanic"]').count(), 2,
+    'active and NEEDS_HELP mechanic work was hidden from the operator');
+  assert.equal(await sheet.locator(rowSelector).count(), 3,
+    'the sheet omitted active work or the literal catalog difference');
+  const mechanicQueueText = await sheet.locator('[data-row="mechanic"]').allInnerTexts();
+  assert.match(mechanicQueueText.join('\n'), /Исправить центрирование\./);
+  assert.match(mechanicQueueText.join('\n'), /Перезапечь обложку\./);
+  assert.match(mechanicQueueText.join('\n'), /Нужна помощь/);
+  assert.doesNotMatch(mechanicQueueText.join('\n'), /66666666|77777777|sha256|requestId/,
+    'technical queue identity leaked into the founder-facing reason');
 
   // The server-owned catalog difference is descriptive, without diagnostics.
   const catalogRow = sheet.locator('[data-row="catalog"]');
@@ -580,12 +594,14 @@ try {
   // This canary has no compatible runtime and therefore no direct-public control.
   assert.equal(await sheet.locator('text=Сделать доступным всем').count(), 0,
     'an ineligible canary received a direct-public control');
-  assert.equal(await sheet.locator('input[type="checkbox"]').count(), 1,
-    'a real difference must retain its selection affordance');
-  assert.equal(await sheet.locator('input[type="checkbox"]').isDisabled(), true,
-    'an ineligible difference must not pretend it can be published');
-  assert.equal(await sheet.locator('input[type="checkbox"]').isChecked(), false,
-    'an ineligible difference must not look selected for publication');
+  assert.equal(await sheet.locator('input[type="checkbox"]').count(), 3,
+    'visible ineligible work did not retain a disabled selection affordance');
+  for (const checkbox of await sheet.locator('input[type="checkbox"]').all()) {
+    assert.equal(await checkbox.isDisabled(), true,
+      'an ineligible row pretended it could be published');
+    assert.equal(await checkbox.isChecked(), false,
+      'an ineligible row looked selected for publication');
+  }
 
   // The card fades in over 0.2s; a proof screenshot must show the settled sheet.
   await page.waitForTimeout(400);
@@ -603,6 +619,34 @@ try {
     'closing the inventory did not restore focus to its own control');
 
   await page.close();
+
+  // Release mode is the ordinary public projection with clean product chrome.
+  // The founder keeps only the compact view switch; all dev controls and
+  // diagnostics are absent rather than cosmetically disabled.
+  const releaseView = await newPage({ width: 375, height: 812 });
+  await bootFeed(releaseView, 'operator-release-view', '&feedView=release&diag=1');
+  await releaseView.locator('[data-testid="operator-feed-view-toggle"]')
+    .waitFor({ state: 'visible' });
+  assert.equal(await releaseView.locator('[data-feed-view="release"]')
+    .getAttribute('aria-pressed'), 'true');
+  assert.equal(await releaseView.locator(badgeSelector).count(), 0,
+    'the dev-feed badge leaked into the release projection');
+  assert.equal(await releaseView.locator('.platform-development-intake').count(), 0,
+    'the platform edit control leaked into the release projection');
+  assert.equal(await releaseView.locator('.game__operator-playable-rework').count(), 0,
+    'the mechanic edit control leaked into the release projection');
+  assert.equal(await releaseView.locator('.feed-bar__lab:not([hidden])').count(), 0,
+    'the Labs entry leaked into the release projection');
+  assert.equal(await releaseView.locator('.feed-bar__debug').count(), 0,
+    'the debug entry leaked into the release projection');
+  assert.equal(await releaseView.locator('[data-panel="swipe-debug"]').count(), 0,
+    'the diagnostic panel leaked into the release projection');
+  assert.equal(await releaseView.locator('.feed-bar__version:visible').count(), 0,
+    'the technical build stamp leaked into the release projection');
+  if (screenshotDir) {
+    await releaseView.screenshot({ path: path.join(screenshotDir, 'release-feed-mobile-375x812.png') });
+  }
+  await releaseView.close();
 
   // ── A3. Desktop proof of the same open sheet. ───────────────────────────
   const desktop = await newPage({ width: 1280, height: 800 });
@@ -817,9 +861,13 @@ try {
   assert.equal(projection.mechanics[0].adopted, true);
   assert.equal(projection.mechanics[0].status, 'Аудитория: ◉ Лично',
     'the Feed ignored the strict server-owned audience vocabulary');
-  assert.deepEqual(projection.mechanics[0].instructions, ['Убрать подложку.']);
-  assert.equal('blocker' in projection.mechanics[0], false,
-    'engineering queue status leaked into an adopted mechanic difference');
+  assert.deepEqual(projection.mechanics[0].instructions, [],
+    'a NEEDS_HELP queue item leaked into the successful publication receipt');
+  assert.deepEqual(projection.mechanics[0].pendingRequests, [{
+    instruction: 'Убрать подложку.',
+    status: 'Нужна помощь',
+    detail: 'Сборка кандидата не проходит.',
+  }], 'a NEEDS_HELP request was not shown with its plain-language reason');
   const directWireValidation = await modulePage.evaluate(() => ({
     preparedExtraRejected: window.validateCatalogDirectPromotionPrepared({
       schema: 'catalog.direct-promotion.prepared.v1',
@@ -960,6 +1008,114 @@ try {
   assert.equal(await modulePage.locator('[data-action="publish-all"]')
     .filter({ hasText: 'Выложить всё' }).count(), 0,
   'a catalog-only mutation over-claimed that it publishes every visible difference');
+  await modulePage.locator('[data-close]').last().click();
+
+  // One content-bound confirmation publishes the complete selected mechanic
+  // set. The current server projection contains one adopted head, while the
+  // wire and surface stay batch-shaped for the later multi-head projection.
+  const mechanicPublication = await modulePage.evaluate(() => {
+    window.surface.destroy();
+    const bindingDigest = '4'.repeat(64);
+    const candidateArtifactDigest = '5'.repeat(64);
+    const prepared = {
+      schema: 'feed.playable-publication.prepared.v1',
+      operationId: '34343434-3434-4434-8434-343434343434',
+      action: 'publish',
+      clientInstanceId: '45454545-4545-4454-8454-454545454545',
+      items: [{
+        releaseId: '56565656-5656-4656-8656-565656565656',
+        playableId: 'marble-sort-swipe',
+        bindingDigest,
+        candidateArtifactDigest,
+        runtimeArtifactDigest: `sha256:${'6'.repeat(64)}`,
+        changes: ['Убрать подложку.'],
+      }, {
+        releaseId: '67676767-6767-4767-8767-676767676767',
+        playableId: 'arrows-v1-swipe',
+        bindingDigest: '7'.repeat(64),
+        candidateArtifactDigest: '8'.repeat(64),
+        runtimeArtifactDigest: `sha256:${'9'.repeat(64)}`,
+        changes: ['Сделать стрелки ярче.'],
+      }],
+      confirmationCode: 'D0C0DE',
+    };
+    window.mechanicPublications = [];
+    window.mechanicPublicationPreparations = [];
+    window.surface = window.mountDeveloperFeedDiffSurface(document.body, {
+      input: {
+        operatorSurfacesActive: true,
+        reworks: [],
+        adoptions: [{
+          playableId: 'marble-sort-swipe',
+          releaseId: prepared.items[0].releaseId,
+          bindingDigest,
+          candidateArtifactDigest,
+        }, {
+          playableId: 'arrows-v1-swipe',
+          releaseId: prepared.items[1].releaseId,
+          bindingDigest: prepared.items[1].bindingDigest,
+          candidateArtifactDigest: prepared.items[1].candidateArtifactDigest,
+        }],
+        catalog: {
+          schema: 'feed.developer-catalog-diff.v1', mechanic: 'sort', variant: 'base',
+          available: false, unavailableReason: 'catalog_entry_unavailable',
+          dev: null, public: null,
+        },
+        mechanicPublication: prepared,
+      },
+      onPrepareMechanics: async (playableIds) => {
+        window.mechanicPublicationPreparations.push(playableIds);
+        return prepared;
+      },
+      onPublishMechanic: async (value, code) => {
+        window.mechanicPublications.push({ value, code });
+        return { status: 'queued_refreshed' };
+      },
+    });
+    return {
+      preparedAccepted: window.validatePlayablePublicationPrepared(prepared) !== null,
+      preparedExtraRejected: window.validatePlayablePublicationPrepared({
+        ...prepared, extra: true,
+      }) === null,
+      requestedAccepted: window.validatePlayablePublicationRequested({
+        schema: 'feed.playable-publication.requested.v1',
+        operationId: prepared.operationId,
+        action: 'publish', items: prepared.items, status: 'queued', replayed: false,
+      }) !== null,
+    };
+  });
+  assert.deepEqual(mechanicPublication, {
+    preparedAccepted: true,
+    preparedExtraRejected: true,
+    requestedAccepted: true,
+  }, 'mechanic publication validators accepted a drifted wire');
+  await modulePage.locator(badgeSelector).click();
+  for (const checkbox of await modulePage.locator('[data-action="select-mechanic"]').all()) {
+    await checkbox.uncheck();
+  }
+  assert.equal(await modulePage.locator('[data-action="publish-mechanic"]').isDisabled(), true,
+    'publish-selected stayed active with no selected mechanic');
+  await modulePage.locator('[data-action="publish-all-mechanics"]').click();
+  await modulePage.locator('[data-action="publish-all-mechanics"]')
+    .filter({ hasText: 'Выложить все механики' }).waitFor();
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 2,
+    'publish-all did not select every eligible mechanic');
+  assert.deepEqual(
+    await modulePage.evaluate(() => window.mechanicPublicationPreparations),
+    [['marble-sort-swipe', 'arrows-v1-swipe']],
+    'publication reused a stale projected code instead of preparing the selected set afresh',
+  );
+  await modulePage.locator('text=Код: D0C0DE').waitFor({ state: 'visible' });
+  await modulePage.locator('[data-testid="mechanic-publication-code-input"]').fill('d0c0de');
+  await modulePage.locator('[data-action="confirm-mechanic-publication"]').click();
+  await modulePage.locator('text=Публикация запущена').last().waitFor({ state: 'visible' });
+  const submittedMechanicPublication = await modulePage.evaluate(() => window.mechanicPublications);
+  assert.equal(submittedMechanicPublication.length, 1,
+    'publish-all issued more than one publication mutation');
+  assert.equal(submittedMechanicPublication[0].code, 'D0C0DE',
+    'the one publication code was not normalized and submitted once');
+  assert.equal(submittedMechanicPublication[0].value.items.length, 2,
+    'the complete prepared mechanic set was not submitted atomically');
   await modulePage.locator('[data-close]').last().click();
 
   const listenerBalance = () => modulePage.evaluate(() =>

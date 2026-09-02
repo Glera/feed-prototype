@@ -3,6 +3,8 @@ import { createFeed } from './feed';
 import {
   candidateMatchesPublicManifest,
   setCandidatePlayableOverlay,
+  setCandidatePlayableOverlays,
+  setCandidatePlayableOverlayVisible,
   setMechanicVersions,
 } from './playables';
 import { initTelegram, getInitData, getStartParam, hasTelegramHostContext, hasTelegramLaunchUserIdentity, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam, setTelegramReadOnlyPreviewMode } from './telegram';
@@ -12,18 +14,26 @@ import { catalogLabAuthRequested } from './catalog-lab-navigation.mjs';
 import { feedRosterSnapshotForBoot, loadVerifiedFeedRosterSessionSnapshot } from './feed-roster.mjs';
 import { userScopedStorage } from './user-scope';
 import { candidateReviewReleaseIdFromParam } from './candidate-review';
-import { candidateFeedPreviewRequested, resolveCandidateFeedPreview, resolveDeveloperFeedAdoption, type CandidateFeedPreviewIdentity } from './candidate-feed-preview';
+import { candidateFeedPreviewRequested, resolveCandidateFeedPreview, resolveDeveloperFeedAdoptions, type CandidateFeedPreviewIdentity } from './candidate-feed-preview';
 import { candidateFeedStartParamRequested } from './candidate-feed-start-param.mjs';
 import { consumeDeveloperFeedHandoff, mountCandidateFeedAdoption } from './candidate-feed-adoption';
 import { missionDemoRequested } from './mission-demo-route.mjs';
+import { operatorFeedView } from './operator-feed-view.mjs';
 
 const query = new URLSearchParams(location.search);
 const restoredStartParam = getStartParam();
 const developerFeedHandoff = consumeDeveloperFeedHandoff(restoredStartParam);
 const startParam = developerFeedHandoff ? null : restoredStartParam;
+const releasePlayableMatch = typeof startParam === 'string'
+  ? startParam.match(/^r_([a-z0-9][a-z0-9._-]{0,60})$/) : null;
+const releasePlayableId = releasePlayableMatch?.[1] ?? null;
 const candidateFeedStartRequested = candidateFeedStartParamRequested(startParam);
 const candidateFeedRequested = candidateFeedPreviewRequested(location.search, startParam);
 const missionDemoLaunch = missionDemoRequested({ search: location.search, startParam });
+const selectedOperatorFeedView = operatorFeedView(location.search);
+const operatorReleasePreview = !candidateFeedRequested
+  && (selectedOperatorFeedView === 'release' || releasePlayableId !== null);
+setCandidatePlayableOverlayVisible(!operatorReleasePreview);
 setTelegramReadOnlyPreviewMode(candidateFeedRequested);
 setTelemetryReadOnlyPreviewMode(candidateFeedRequested || missionDemoLaunch);
 
@@ -144,16 +154,19 @@ async function boot(): Promise<void> {
     rosterSnapshot = initial === timeout
       ? persisted
       : await feedRosterSnapshotForBoot(persisted, initial?.feedRoster);
-    if (initial !== timeout && initial?.developerFeedAdoption) {
+    const projectedAdoptions = initial !== timeout
+      ? initial?.developerFeedAdoptions ?? (
+        initial?.developerFeedAdoption ? [initial.developerFeedAdoption] : null
+      )
+      : null;
+    if (!operatorReleasePreview && projectedAdoptions) {
       try {
-        const adopted = await resolveDeveloperFeedAdoption(initial.developerFeedAdoption);
-        if (candidateMatchesPublicManifest(adopted)) {
-          // The exact adopted bytes are public now.  Keeping the operator
-          // overlay would falsely present a dev-only audience and suppress
-          // ordinary telemetry after publication.
-          setCandidatePlayableOverlay(null);
-        } else {
-          setCandidatePlayableOverlay(adopted);
+        const adopted = await resolveDeveloperFeedAdoptions(projectedAdoptions);
+        const privateAdoptions = adopted.filter(
+          (candidate) => !candidateMatchesPublicManifest(candidate),
+        );
+        setCandidatePlayableOverlays(privateAdoptions);
+        if (privateAdoptions.length > 0) {
           setTelemetryReadOnlyPreviewMode(true);
         }
       } catch { /* invalid/tampered dev adoption fails closed to the public manifest */ }
@@ -168,7 +181,7 @@ async function boot(): Promise<void> {
       rosterSnapshot,
       friendAcceptCode,
       initialSessionPromise,
-      { readOnlyPreview: candidateFeedRequested },
+      { readOnlyPreview: candidateFeedRequested, operatorReleasePreview, releasePlayableId },
     );
   };
   if (candidateFeedRequested) try {
@@ -185,7 +198,15 @@ async function boot(): Promise<void> {
     // The two-line `Dev-лента` / `Только мне` badge is owned by the feed itself: it is the
     // entry point of the read-only «Изменения dev-ленты» inventory, which needs
     // the operator capabilities and rework queue the feed already holds.
-    mountFeed();
+    try {
+      mountFeed();
+    } catch {
+      // A stale private overlay must never turn one independent playable into
+      // a blank-app boot. Retry once with the public roster only.
+      setCandidatePlayableOverlays([]);
+      setTelemetryReadOnlyPreviewMode(false);
+      mountFeed();
+    }
   }
 }
 const routedStartParam = startParam;
@@ -218,6 +239,7 @@ if (missionDemoLaunch) {
 // Debug panel lives on the feed bar (left of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
 if (!missionDemoLaunch && !candidateFeedRequested && !candidateReviewReleaseId && !labAuthLaunch
+  && !operatorReleasePreview
   && (query.get('diag') === '1' || routedStartParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
 }

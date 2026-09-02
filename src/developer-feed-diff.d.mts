@@ -2,6 +2,8 @@ import type {
   DeveloperFeedCatalogDiffV1,
   CatalogDirectPromotionPreparedV1,
   CatalogDirectPromotionResultV1,
+  PlayablePublicationPreparedV1,
+  PlayablePublicationRequestedV1,
   OperatorPlayableReworkQueueItemV1,
 } from './api';
 
@@ -25,8 +27,15 @@ export interface DeveloperFeedDiffMechanicRow {
   tone: DeveloperFeedDiffTone;
   /** Original founder requests included in this private candidate. */
   instructions: readonly string[];
+  /** Requests still in progress or blocked and therefore excluded from publication. */
+  pendingRequests: readonly Readonly<{
+    instruction: string;
+    status: string;
+    detail: string;
+  }>[];
   /** True when this row exists because the operator adopted an exact candidate. */
   adopted: boolean;
+  publication: Readonly<PlayablePublicationPreparedV1> | null;
 }
 
 export interface DeveloperFeedDiffCatalogRow {
@@ -45,19 +54,23 @@ export interface DeveloperFeedDiffInput {
   /** Entries of the feed's own `playableId → queue` map. No request is issued. */
   reworks?: Iterable<readonly [string, readonly OperatorPlayableReworkQueueItemV1[]]> | null;
   vocabulary?: import('./operator-presentation-vocabulary.mjs').OperatorPresentationVocabularyV1;
-  /** The exact candidate this operator adopted, if any. */
-  adoption?: {
+  /** Current exact candidate heads, at most one per playable. */
+  adoptions?: readonly {
     playableId: string;
     releaseId: string;
     candidateArtifactDigest: string;
+    bindingDigest?: string;
     sourceCommit?: string;
-  } | null;
+  }[];
   /** Exact optional server-owned catalog dev/public projection from `/session`. */
   catalog?: DeveloperFeedCatalogDiffV1 | null;
   /** Exact server-prepared closure; mismatched identities fail closed. */
   catalogPromotion?: CatalogDirectPromotionPreparedV1 | null;
   /** A prepare request for the current exact candidate is in flight. */
   catalogPromotionPreparing?: boolean;
+  /** Exact server-prepared private mechanic → public publication closure. */
+  mechanicPublication?: PlayablePublicationPreparedV1 | null;
+  mechanicPublicationPreparing?: boolean;
 }
 
 export interface DeveloperFeedDiffModel {
@@ -69,6 +82,7 @@ export interface DeveloperFeedDiffModel {
   empty: boolean;
   audience: Readonly<import('./operator-presentation-vocabulary.mjs').OperatorPresentationEntryV1>;
   mechanics: DeveloperFeedDiffMechanicRow[];
+  mechanicPublicationPreparing: boolean;
   catalog: DeveloperFeedDiffCatalogRow;
 }
 
@@ -82,6 +96,10 @@ export interface DeveloperFeedDiffSurface {
 
 export interface CatalogDirectPromotionClientOutcome {
   status: 'committed_refreshed' | 'committed_refresh_pending';
+}
+
+export interface PlayablePublicationClientOutcome {
+  status: 'queued_refreshed' | 'queued_refresh_pending' | 'published_refreshed';
 }
 
 export function developerFeedDiffModel(
@@ -100,6 +118,14 @@ export function validateCatalogDirectPromotionResult(
   value: unknown,
 ): Readonly<CatalogDirectPromotionResultV1> | null;
 
+export function validatePlayablePublicationPrepared(
+  value: unknown,
+): Readonly<PlayablePublicationPreparedV1> | null;
+
+export function validatePlayablePublicationRequested(
+  value: unknown,
+): Readonly<PlayablePublicationRequestedV1> | null;
+
 export function mountDeveloperFeedDiffSurface(
   host: HTMLElement,
   options: {
@@ -110,5 +136,12 @@ export function mountDeveloperFeedDiffSurface(
       prepared: Readonly<CatalogDirectPromotionPreparedV1>,
       confirmationCode: string,
     ): Promise<CatalogDirectPromotionClientOutcome>;
+    onPublishMechanic?(
+      prepared: Readonly<PlayablePublicationPreparedV1>,
+      confirmationCode: string,
+    ): Promise<PlayablePublicationClientOutcome>;
+    onPrepareMechanics?(
+      playableIds: readonly string[],
+    ): Promise<Readonly<PlayablePublicationPreparedV1>>;
   },
 ): DeveloperFeedDiffSurface;

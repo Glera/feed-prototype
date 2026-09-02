@@ -29,6 +29,7 @@ export interface CandidateFeedPreviewIdentity {
 
 export interface DeveloperFeedAdoptionIdentity extends CandidateFeedPreviewIdentity {
   schema: 'feed.playable-source-preview-adoption.v1';
+  bindingDigest?: string;
   runtimeArtifactDigest: string;
   sourceCommit: string;
   receiptDigest: string;
@@ -350,15 +351,20 @@ export async function resolveDeveloperFeedAdoption(
   origin = location.origin,
   fetchBinding: typeof fetch = fetch,
 ): Promise<DeveloperFeedAdoptionIdentity> {
-  if (!exactKeys(value, [
+  const legacyKeys = [
     'schema', 'releaseId', 'playableId', 'candidatePath', 'candidateArtifactDigest',
     'runtimeArtifactDigest', 'reviewBindingDigest', 'sourceCommit', 'receiptDigest',
     'audience', 'publicRollout',
-  ])) throw new Error('developer_feed_adoption_invalid');
+  ];
+  if (!exactKeys(value, legacyKeys)
+    && !exactKeys(value, [...legacyKeys, 'bindingDigest'])) {
+    throw new Error('developer_feed_adoption_invalid');
+  }
   const identity = value as DeveloperFeedAdoptionIdentity;
   if (identity.schema !== 'feed.playable-source-preview-adoption.v1'
     || !UUID.test(identity.releaseId) || !PLAYABLE_ID.test(identity.playableId)
     || !DIGEST.test(identity.candidateArtifactDigest)
+    || (identity.bindingDigest !== undefined && !DIGEST.test(identity.bindingDigest))
     || !/^sha256:[0-9a-f]{64}$/.test(identity.runtimeArtifactDigest)
     || !DIGEST.test(identity.reviewBindingDigest)
     || !DIGEST.test(identity.receiptDigest)
@@ -384,4 +390,30 @@ export async function resolveDeveloperFeedAdoption(
     await validateReworkRuntimeIdentity(binding, identity, origin, fetchBinding);
   }
   return Object.freeze({ ...identity, releaseId: identity.releaseId.toLowerCase() });
+}
+
+/** Revalidate the complete bounded exact-user overlay set. */
+export async function resolveDeveloperFeedAdoptions(
+  value: unknown,
+  origin = location.origin,
+  fetchBinding: typeof fetch = fetch,
+): Promise<readonly DeveloperFeedAdoptionIdentity[]> {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 20) {
+    throw new Error('developer_feed_adoptions_invalid');
+  }
+  const settled = await Promise.allSettled(
+    value.map((item) => resolveDeveloperFeedAdoption(item, origin, fetchBinding)),
+  );
+  const resolved = settled.flatMap((result) => (
+    result.status === 'fulfilled' ? [result.value] : []
+  ));
+  const playableCounts = new Map<string, number>();
+  const releaseCounts = new Map<string, number>();
+  for (const item of resolved) {
+    playableCounts.set(item.playableId, (playableCounts.get(item.playableId) ?? 0) + 1);
+    releaseCounts.set(item.releaseId, (releaseCounts.get(item.releaseId) ?? 0) + 1);
+  }
+  return Object.freeze(resolved.filter((item) => (
+    playableCounts.get(item.playableId) === 1 && releaseCounts.get(item.releaseId) === 1
+  )));
 }

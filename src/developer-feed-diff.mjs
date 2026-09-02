@@ -12,6 +12,7 @@
  */
 import {
   groupOperatorPlayableReworkQueue,
+  operatorPlayableReworkPresentation,
 } from './operator-playable-reworks.mjs';
 import {
   operatorAudiencePresentation,
@@ -153,40 +154,110 @@ export function validateCatalogDirectPromotionResult(value) {
   return Object.freeze({ ...value });
 }
 
+const validatePlayablePublicationItem = (value) => {
+  if (!exactObject(value, [
+    'releaseId', 'playableId', 'bindingDigest', 'candidateArtifactDigest',
+    'runtimeArtifactDigest', 'changes',
+  ]) || !UUID.test(value.releaseId) || !PLAYABLE_ID.test(value.playableId)
+    || !HASH.test(value.bindingDigest) || !HASH.test(value.candidateArtifactDigest)
+    || !DIGEST.test(value.runtimeArtifactDigest)
+    || !Array.isArray(value.changes) || value.changes.length < 1 || value.changes.length > 20
+    || value.changes.some((change) => !text(change) || change !== text(change))) return null;
+  return Object.freeze({ ...value, changes: Object.freeze([...value.changes]) });
+};
+
+const visiblePendingRequest = (item) => {
+  const presentation = operatorPlayableReworkPresentation(item);
+  if (['superseded', 'capability_gap_root_covered', 'obsolete']
+    .includes(presentation.state)) return null;
+  const instruction = text(item.request?.instruction);
+  if (!instruction) return null;
+  return Object.freeze({
+    instruction,
+    status: presentation.label,
+    detail: presentation.blocker || 'Эта правка ещё не вошла в готовую версию.',
+  });
+};
+
+export function validatePlayablePublicationPrepared(value) {
+  if (!exactObject(value, [
+    'schema', 'operationId', 'action', 'clientInstanceId', 'items', 'confirmationCode',
+  ]) || value.schema !== 'feed.playable-publication.prepared.v1'
+    || !UUID.test(value.operationId) || value.action !== 'publish'
+    || !UUID.test(value.clientInstanceId) || !/^[0-9A-F]{6}$/.test(value.confirmationCode)
+    || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 20) return null;
+  const items = value.items.map(validatePlayablePublicationItem);
+  if (items.some((item) => item === null)) return null;
+  return Object.freeze({ ...value, items: Object.freeze(items) });
+}
+
+export function validatePlayablePublicationRequested(value) {
+  if (!exactObject(value, [
+    'schema', 'operationId', 'action', 'items', 'status', 'replayed',
+  ]) || value.schema !== 'feed.playable-publication.requested.v1'
+    || !UUID.test(value.operationId) || value.action !== 'publish'
+    || !['queued', 'published'].includes(value.status) || typeof value.replayed !== 'boolean'
+    || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 20) return null;
+  const items = value.items.map(validatePlayablePublicationItem);
+  if (items.some((item) => item === null)) return null;
+  return Object.freeze({ ...value, items: Object.freeze(items) });
+}
+
 function mechanicRows(input) {
-  const adoption = input.adoption;
-  if (!adoption || typeof adoption.playableId !== 'string' || !adoption.playableId) return [];
+  const adoptions = Array.isArray(input.adoptions)
+    ? input.adoptions : input.adoption ? [input.adoption] : [];
+  if (adoptions.length > 20) return [];
   const audience = operatorAudiencePresentation(input.vocabulary, 'exactUser');
   const adoptedStatus = `Аудитория: ${audience.icon} ${audience.label}`;
-  const instructions = [];
-  const entries = input.reworks ? Array.from(input.reworks) : [];
-  for (const entry of entries) {
-    if (!Array.isArray(entry) || entry.length < 2) continue;
-    const [playableId, rawQueue] = entry;
-    if (playableId !== adoption.playableId) continue;
+  const prepared = validatePlayablePublicationPrepared(input.mechanicPublication);
+  const pendingByPlayable = new Map();
+  for (const entry of input.reworks ? Array.from(input.reworks) : []) {
+    if (!Array.isArray(entry) || entry.length < 2 || typeof entry[0] !== 'string') continue;
     const queue = groupOperatorPlayableReworkQueue(
-      Array.isArray(rawQueue) ? rawQueue : [],
-    ).get(playableId) || [];
-    for (const item of queue) {
-      if (text(item.request?.runtime?.artifactDigest) !== text(adoption.candidateArtifactDigest)) {
-        continue;
-      }
-      const instruction = text(item.request?.instruction);
-      if (instruction && !instructions.includes(instruction)) instructions.push(instruction);
-    }
+      Array.isArray(entry[1]) ? entry[1] : [],
+    ).get(entry[0]) || [];
+    if (queue.length > 0) pendingByPlayable.set(entry[0], queue);
   }
-
-  // A work request is not a feed difference. The one immutable candidate
-  // currently adopted into this operator's feed is.
-  return [Object.freeze({
-    playableId: adoption.playableId,
-    title: mechanicName(adoption.playableId),
-    status: adoptedStatus,
-    state: 'adopted',
-    tone: 'ok',
-    instructions: Object.freeze(instructions),
-    adopted: true,
-  })];
+  const rows = adoptions.flatMap((adoption) => {
+    if (!adoption || typeof adoption.playableId !== 'string' || !adoption.playableId) return [];
+    const preparedItem = prepared?.items.find((item) => (
+      item.releaseId === adoption.releaseId
+      && item.playableId === adoption.playableId
+      && item.bindingDigest === adoption.bindingDigest
+      && item.candidateArtifactDigest === adoption.candidateArtifactDigest
+    ));
+    const instructions = preparedItem ? [...new Set(preparedItem.changes)] : [];
+    const pendingRequests = (pendingByPlayable.get(adoption.playableId) || [])
+      .map(visiblePendingRequest).filter(Boolean);
+    pendingByPlayable.delete(adoption.playableId);
+    return [Object.freeze({
+      playableId: adoption.playableId,
+      title: mechanicName(adoption.playableId),
+      status: adoptedStatus,
+      state: 'adopted',
+      tone: 'ok',
+      instructions: Object.freeze(instructions),
+      pendingRequests: Object.freeze(pendingRequests),
+      adopted: true,
+      publication: preparedItem ? prepared : null,
+    })];
+  });
+  for (const [playableId, queue] of pendingByPlayable) {
+    const pendingRequests = queue.map(visiblePendingRequest).filter(Boolean);
+    if (pendingRequests.length === 0) continue;
+    rows.push(Object.freeze({
+      playableId,
+      title: mechanicName(playableId),
+      status: pendingRequests[0].status,
+      state: 'pending',
+      tone: 'warn',
+      instructions: Object.freeze([]),
+      pendingRequests: Object.freeze(pendingRequests),
+      adopted: false,
+      publication: null,
+    }));
+  }
+  return rows;
 }
 
 export function developerFeedDiffModel(input = {}) {
@@ -209,11 +280,12 @@ export function developerFeedDiffModel(input = {}) {
     && preparedPromotion.runtimeArtifactDigest === catalog.dev.runtime.runtimeArtifactDigest
     ? preparedPromotion : null;
   return Object.freeze({
-    visible: input.operatorSurfacesActive === true || Boolean(input.adoption),
+    visible: input.operatorSurfacesActive === true || mechanics.length > 0,
     changed,
     empty: changed === 0 && !catalogUnknown,
     audience: exactUserAudience,
     mechanics: Object.freeze(mechanics),
+    mechanicPublicationPreparing: input.mechanicPublicationPreparing === true,
     catalog: Object.freeze({
       changed: catalogChanged === 1,
       unknown: catalogUnknown,
@@ -270,6 +342,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   const onPromoteCatalog = typeof options.onPromoteCatalog === 'function'
     ? options.onPromoteCatalog
     : null;
+  const onPublishMechanic = typeof options.onPublishMechanic === 'function'
+    ? options.onPublishMechanic
+    : null;
+  const onPrepareMechanics = typeof options.onPrepareMechanics === 'function'
+    ? options.onPrepareMechanics
+    : null;
 
   let destroyed = false;
   let open = false;
@@ -280,6 +358,16 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   let promotionError = '';
   let catalogSelected = true;
   let model = developerFeedDiffModel(options.input || {});
+  let mechanicSelected = new Set(
+    model.mechanics.filter((row) => row.adopted).map((row) => row.playableId),
+  );
+  let mechanicQueued = new Set();
+  let mechanicPublication = model.mechanics.find((row) => row.adopted)?.publication ?? null;
+  let mechanicPublicationPending = false;
+  let mechanicPublicationCommitted = false;
+  let mechanicPublicationConfirmOpen = false;
+  let mechanicPublicationCode = '';
+  let mechanicPublicationError = '';
 
   const root = element('div', 'dev-diff-surface');
   root.dataset.testid = 'dev-diff-surface';
@@ -353,23 +441,50 @@ export function mountDeveloperFeedDiffSurface(host, options) {
 
     if (model.mechanics.length > 0) {
       const mechanics = groupSection('Механики');
+      const publishableRows = model.mechanics.filter((row) => row.adopted);
       for (const row of model.mechanics) {
         const article = rowArticle('mechanic', row.tone);
         article.dataset.playableId = row.playableId;
         const selectableHead = element('div', 'dev-diff__selectable-head');
         const checkbox = element('input', 'dev-diff__checkbox');
         checkbox.type = 'checkbox';
-        checkbox.checked = false;
-        checkbox.disabled = true;
-        checkbox.setAttribute('aria-label', `${row.title}: публикуется отдельно`);
-        selectableHead.append(checkbox, rowHead(row.title, 'Только мне'));
+        checkbox.checked = row.adopted && mechanicSelected.has(row.playableId);
+        checkbox.disabled = !row.adopted || mechanicQueued.has(row.playableId)
+          || !onPrepareMechanics || !onPublishMechanic || mechanicPublicationPending;
+        checkbox.dataset.action = 'select-mechanic';
+        checkbox.setAttribute('aria-label', `Выбрать ${row.title}`);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) mechanicSelected.add(row.playableId);
+          else mechanicSelected.delete(row.playableId);
+          mechanicPublication = null;
+          mechanicPublicationConfirmOpen = false;
+          mechanicPublicationCode = '';
+          mechanicPublicationError = '';
+          if (open) renderBody();
+        });
+        selectableHead.append(checkbox, rowHead(
+          row.title,
+          mechanicQueued.has(row.playableId) ? 'Публикация запущена' : row.status,
+        ));
         article.append(selectableHead);
         const instructions = row.instructions.length > 0
-          ? row.instructions : ['Приватная версия механики отличается от релизной.'];
+          ? row.instructions : row.adopted
+            ? ['Приватная версия механики отличается от релизной.'] : [];
         for (const instruction of instructions) {
           article.append(element('p', 'dev-diff__description', instruction));
         }
-        article.append(element('p', 'dev-diff__pending', 'Механика публикуется отдельно'));
+        for (const pending of row.pendingRequests) {
+          article.append(element(
+            'p',
+            'dev-diff__pending',
+            `${pending.instruction} — ${pending.status}. ${pending.detail}`,
+          ));
+        }
+        if (model.mechanicPublicationPreparing) article.append(element(
+          'p',
+          'dev-diff__pending',
+          'Проверяю возможность публикации…',
+        ));
         if (onShowMechanic) {
           const jump = element('button', 'dev-diff__action', 'Показать механику');
           jump.type = 'button';
@@ -379,6 +494,61 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         mechanics.append(article);
       }
       body.append(mechanics);
+
+      if (publishableRows.length > 0 && onPrepareMechanics && onPublishMechanic) {
+        const actions = element('div', 'dev-diff__publish-actions');
+        const selected = element(
+          'button',
+          'dev-diff__action dev-diff__action--primary',
+          'Выложить выбранное',
+        );
+        selected.type = 'button';
+        selected.dataset.action = 'publish-mechanic';
+        selected.disabled = mechanicSelected.size === 0 || mechanicPublicationPending;
+        const all = element('button', 'dev-diff__action', 'Выложить все механики');
+        all.type = 'button';
+        all.dataset.action = 'publish-all-mechanics';
+        all.disabled = mechanicPublicationPending
+          || publishableRows.every((row) => mechanicQueued.has(row.playableId));
+        actions.append(selected, all);
+        body.append(actions);
+
+        const confirm = element('div', 'dev-diff__promotion-confirm');
+        confirm.dataset.testid = 'mechanic-publication-confirm';
+        confirm.hidden = !mechanicPublicationConfirmOpen;
+        confirm.append(
+          element('p', 'dev-diff__detail', 'Только мне → Доступно всем'),
+          element(
+            'p',
+            'dev-diff__promotion-code',
+            mechanicPublication ? `Код: ${mechanicPublication.confirmationCode}` : '',
+          ),
+        );
+        const input = element('input', 'dev-diff__promotion-input');
+        input.dataset.testid = 'mechanic-publication-code-input';
+        input.inputMode = 'text';
+        input.autocomplete = 'off';
+        input.maxLength = 6;
+        input.setAttribute('aria-label', 'Код подтверждения');
+        input.value = mechanicPublicationCode;
+        input.disabled = mechanicPublicationPending || mechanicPublicationCommitted;
+        input.addEventListener('input', () => { mechanicPublicationCode = input.value; });
+        const applyLabel = mechanicPublicationCommitted ? 'Публикация запущена'
+          : mechanicPublicationPending ? 'Проверяю…' : 'Подтвердить публикацию';
+        const apply = element('button', 'dev-diff__action', applyLabel);
+        apply.type = 'button';
+        apply.dataset.action = 'confirm-mechanic-publication';
+        apply.disabled = mechanicSelected.size === 0 || !mechanicPublication
+          || mechanicPublicationPending
+          || mechanicPublicationCommitted;
+        confirm.append(input, apply);
+        if (mechanicPublicationError) {
+          const error = element('p', 'dev-diff__blocker', mechanicPublicationError);
+          error.setAttribute('role', 'status');
+          confirm.append(error);
+        }
+        body.append(confirm);
+      }
     }
 
     if (model.catalog.changed) {
@@ -510,6 +680,83 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       return;
     }
     const jump = target.closest('[data-action="show-mechanic"]');
+    const publishMechanic = target.closest('[data-action="publish-mechanic"]');
+    const publishAllMechanics = target.closest('[data-action="publish-all-mechanics"]');
+    if (publishAllMechanics) {
+      mechanicSelected = new Set(model.mechanics
+        .filter((row) => row.adopted && !mechanicQueued.has(row.playableId))
+        .map((row) => row.playableId));
+    }
+    if (publishMechanic || publishAllMechanics) {
+      if (mechanicSelected.size === 0 || !onPrepareMechanics) return;
+      const selectedIds = model.mechanics
+        .filter((row) => mechanicSelected.has(row.playableId))
+        .map((row) => row.playableId);
+      mechanicPublicationPending = true;
+      mechanicPublicationConfirmOpen = false;
+      mechanicPublicationError = '';
+      renderBody();
+      void Promise.resolve(onPrepareMechanics(selectedIds))
+        .then((next) => {
+          if (destroyed) return;
+          mechanicPublicationPending = false;
+          mechanicPublication = next;
+          mechanicPublicationConfirmOpen = true;
+          renderBody();
+          const input = body.querySelector('[data-testid="mechanic-publication-code-input"]');
+          if (input instanceof HTMLInputElement) input.focus();
+        })
+        .catch(() => {
+          if (destroyed) return;
+          mechanicPublicationPending = false;
+          mechanicPublication = null;
+          mechanicPublicationConfirmOpen = true;
+          mechanicPublicationError = 'Не удалось подготовить точный набор. Обновите ленту.';
+          renderBody();
+        });
+      return;
+    }
+    const applyMechanic = target.closest('[data-action="confirm-mechanic-publication"]');
+    if (applyMechanic && mechanicSelected.size > 0 && mechanicPublication
+      && onPublishMechanic && !mechanicPublicationPending) {
+      const code = mechanicPublicationCode.trim().toUpperCase();
+      mechanicPublicationPending = true;
+      mechanicPublicationError = '';
+      renderBody();
+      void Promise.resolve(onPublishMechanic(mechanicPublication, code))
+        .then((outcome) => {
+          if (destroyed) return;
+          mechanicPublicationPending = false;
+          if (['queued_refreshed', 'queued_refresh_pending', 'published_refreshed']
+            .includes(outcome?.status)) {
+            for (const item of mechanicPublication.items) {
+              mechanicQueued.add(item.playableId);
+              mechanicSelected.delete(item.playableId);
+            }
+            mechanicPublicationCommitted = false;
+            mechanicPublication = null;
+            mechanicPublicationConfirmOpen = true;
+            mechanicPublicationCode = '';
+            mechanicPublicationError = outcome.status === 'queued_refresh_pending'
+              ? 'Публикация запущена. Обновите ленту, чтобы увидеть результат.'
+              : 'Публикация запущена. После проверки релиз обновится автоматически.';
+          } else {
+            mechanicPublicationConfirmOpen = true;
+            mechanicPublicationError = 'Результат не подтверждён. Обновите ленту перед повтором.';
+          }
+          if (open) renderBody();
+        })
+        .catch(() => {
+          if (destroyed) return;
+          mechanicPublicationPending = false;
+          mechanicPublication = null;
+          mechanicPublicationCode = '';
+          mechanicPublicationConfirmOpen = true;
+          mechanicPublicationError = 'Код не подошёл или кандидат изменился. Обновите ленту.';
+          if (open) renderBody();
+        });
+      return;
+    }
     const publishAll = target.closest('[data-action="publish-all"]');
     const publish = target.closest('[data-action="publish-catalog"]');
     if (publishAll) catalogSelected = true;
@@ -582,6 +829,9 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     update(next) {
       if (destroyed) return;
       const previousPromotionId = model.catalog.promotion?.operationId ?? null;
+      const previousMechanics = model.mechanics.map((row) => (
+        `${row.playableId}:${row.publication?.items.find((item) => item.playableId === row.playableId)?.releaseId ?? ''}`
+      )).join('|');
       model = developerFeedDiffModel(next || {});
       const nextPromotionId = model.catalog.promotion?.operationId ?? null;
       if (nextPromotionId === null || nextPromotionId !== previousPromotionId) {
@@ -591,6 +841,22 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         promotionConfirmOpen = false;
         promotionCode = '';
         promotionError = '';
+      }
+      const nextMechanics = model.mechanics.map((row) => (
+        `${row.playableId}:${row.publication?.items.find((item) => item.playableId === row.playableId)?.releaseId ?? ''}`
+      )).join('|');
+      if (nextMechanics !== previousMechanics) {
+        const currentIds = new Set(model.mechanics.map((row) => row.playableId));
+        mechanicQueued = new Set([...mechanicQueued].filter((id) => currentIds.has(id)));
+        mechanicSelected = new Set(model.mechanics
+          .filter((row) => row.adopted && !mechanicQueued.has(row.playableId))
+          .map((row) => row.playableId));
+        mechanicPublication = model.mechanics.find((row) => row.adopted)?.publication ?? null;
+        mechanicPublicationPending = false;
+        mechanicPublicationCommitted = false;
+        mechanicPublicationConfirmOpen = false;
+        mechanicPublicationCode = '';
+        mechanicPublicationError = '';
       }
       if (open && !model.visible) closeSheet(false);
       renderBadge();

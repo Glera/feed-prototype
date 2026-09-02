@@ -39,22 +39,42 @@ export interface CandidatePlayableOverlay {
   playableId: string;
   candidatePath: string;
   candidateArtifactDigest: string;
+  bindingDigest?: string;
   reviewBindingDigest: string;
   sourceCommit?: string;
   runtimeArtifactDigest?: string;
 }
-let CANDIDATE_OVERLAY: CandidatePlayableOverlay | null = null;
+let CANDIDATE_OVERLAYS: ReadonlyMap<string, CandidatePlayableOverlay> = new Map();
+let CANDIDATE_OVERLAY_VISIBLE = true;
 
 export function setCandidatePlayableOverlay(overlay: CandidatePlayableOverlay | null): void {
-  CANDIDATE_OVERLAY = overlay ? Object.freeze({ ...overlay }) : null;
+  setCandidatePlayableOverlays(overlay ? [overlay] : []);
+}
+
+export function setCandidatePlayableOverlays(overlays: readonly CandidatePlayableOverlay[]): void {
+  const next = new Map<string, CandidatePlayableOverlay>();
+  for (const overlay of overlays) {
+    if (next.has(overlay.playableId)) throw new Error('candidate_feed_duplicate_playable');
+    next.set(overlay.playableId, Object.freeze({ ...overlay }));
+  }
+  CANDIDATE_OVERLAYS = next;
+}
+
+/** Switch between the exact operator overlay and the ordinary public bytes. */
+export function setCandidatePlayableOverlayVisible(visible: boolean): void {
+  CANDIDATE_OVERLAY_VISIBLE = visible;
 }
 
 export function candidatePlayableOverlay(): CandidatePlayableOverlay | null {
-  return CANDIDATE_OVERLAY;
+  return candidatePlayableOverlays()[0] ?? null;
+}
+
+export function candidatePlayableOverlays(): readonly CandidatePlayableOverlay[] {
+  return CANDIDATE_OVERLAY_VISIBLE ? [...CANDIDATE_OVERLAYS.values()] : [];
 }
 
 function candidateOverlayFor(id: string): CandidatePlayableOverlay | null {
-  return CANDIDATE_OVERLAY?.playableId === id ? CANDIDATE_OVERLAY : null;
+  return CANDIDATE_OVERLAY_VISIBLE ? CANDIDATE_OVERLAYS.get(id) ?? null : null;
 }
 
 export function setMechanicVersions(m: Record<string, MechanicManifestValue> | null | undefined): void {

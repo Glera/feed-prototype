@@ -438,13 +438,17 @@ const server = createServer(async (request, response) => {
       development_intake_available: true,
       development_intake_context: { contract: 'platform.development-intake.request.v1' },
       feedRoster: roster,
-      ...(adopted ? { developerFeedAdoption: {
+      ...(adopted ? { developerFeedAdoptions: [{
+        schema: 'feed.playable-source-preview-adoption.v1',
+        releaseId: 'not-a-release-id',
+      }, {
         schema: 'feed.playable-source-preview-adoption.v1',
         releaseId: reworkAdoption ? releaseId : sourceReleaseId,
         playableId,
         candidatePath: reworkAdoption ? candidatePath : sourceCandidatePath,
         candidateArtifactDigest: reworkAdoption
           ? candidateArtifactDigest : sourceCandidateArtifactDigest,
+        bindingDigest: 'e'.repeat(64),
         runtimeArtifactDigest: reworkAdoption
           ? reworkRuntimeArtifactDigest : sourceRuntimeArtifactDigest,
         reviewBindingDigest: reworkAdoption
@@ -455,7 +459,7 @@ const server = createServer(async (request, response) => {
         receiptDigest: '6'.repeat(64),
         audience: 'exact-user',
         publicRollout: false,
-      }, developerFeedCatalog: {
+      }], developerFeedCatalog: {
         schema: 'feed.developer-catalog-diff.v1',
         mechanic: 'sort',
         variant: 'base',
@@ -645,6 +649,10 @@ try {
     if (window === window.top) localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
   }, roster);
   const page = await context.newPage();
+  await page.goto(`${validUrl}&feedView=release`, { waitUntil: 'domcontentloaded' });
+  await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
+  assert.equal(await page.locator('.game--candidate-read-only-preview').count(), 1,
+    'the operator release query masked an explicit immutable candidate route');
   await page.goto(validUrl, { waitUntil: 'domcontentloaded' });
   await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
   await page.waitForFunction(() => window.__feedWarm?.().current === 0);
@@ -844,7 +852,13 @@ try {
     'technical catalog identity leaked into the founder-facing diff');
   await page.keyboard.press('Escape');
   await page.locator('[data-testid="dev-diff-sheet"]').waitFor({ state: 'hidden' });
-  const adoptedFrame = page.locator('.page').first().locator('iframe');
+  assert.deepEqual(
+    await page.locator('.page .game__label').allTextContents(),
+    rosterEntries.map((entry) => entry.playableId),
+    'adopted developer candidate reordered the canonical roster',
+  );
+  await advanceToPlayable(page, playableId);
+  const adoptedFrame = page.locator('.page--in-viewport').locator('iframe');
   await adoptedFrame.waitFor({ state: 'attached' });
   assert.equal(new URL((await adoptedFrame.getAttribute('src')) || '', origin).pathname, sourceCandidatePath);
   await adoptedFrame.contentFrame().getByText('EXACT IMMUTABLE CANDIDATE', { exact: true }).waitFor();
@@ -1028,6 +1042,17 @@ try {
     `/${playableId}.html`, 'published candidate stayed mounted from its preview path');
   assert.equal(await publishedPage.locator('.game--candidate-overlay').count(), 0,
     'published candidate remained presented as dev-only adoption');
+  const releaseDeepLink = new URL(origin);
+  releaseDeepLink.searchParams.set('tgWebAppStartParam', `r_${playableId}`);
+  releaseDeepLink.searchParams.set('tgWebAppPlatform', 'android');
+  await publishedPage.goto(releaseDeepLink.toString(), { waitUntil: 'domcontentloaded' });
+  await publishedPage.locator('.page--in-viewport .game--autoplay').waitFor({ state: 'visible' });
+  assert.equal(await publishedPage.locator('.page').first().locator('.game__label').textContent(),
+    playableId, 'publication Telegram link did not open the exact public mechanic first');
+  assert.equal(await publishedPage.locator('[data-testid="developer-feed-badge"]').count(), 0,
+    'publication Telegram link exposed the private dev-feed inventory');
+  assert.equal(await publishedPage.locator('.game__operator-playable-rework').count(), 0,
+    'publication Telegram link exposed mechanic authoring controls');
   await publishedContext.close();
 
   for (const malformed of [

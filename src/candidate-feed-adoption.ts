@@ -43,6 +43,15 @@ function exactAdoption(
     && value.publicRollout === false;
 }
 
+function exactSessionAdoption(
+  session: SessionResp | null,
+  candidate: CandidateFeedPreviewIdentity,
+): boolean {
+  const projected = session?.developerFeedAdoptions
+    ?? (session?.developerFeedAdoption ? [session.developerFeedAdoption] : []);
+  return projected.some((value) => exactAdoption(value, candidate));
+}
+
 function exactReceipt(
   value: PlayableReleaseDecisionReceipt,
   candidate: CandidateFeedPreviewIdentity,
@@ -106,7 +115,7 @@ export function mountCandidateFeedAdoption(
   panel.append(label, button, status, open);
 
   let pending = false;
-  let adopted = exactAdoption(session.developerFeedAdoption, candidate);
+  let adopted = exactSessionAdoption(session, candidate);
   const mutationId = crypto.randomUUID();
   const render = (): void => {
     button.disabled = pending || adopted;
@@ -120,7 +129,7 @@ export function mountCandidateFeedAdoption(
   const reconcile = async (): Promise<boolean> => {
     try {
       const refreshed = await apiSourcePreviewSessionRequired();
-      return exactAdoption(refreshed.developerFeedAdoption, candidate);
+      return exactSessionAdoption(refreshed, candidate);
     } catch {
       return false;
     }
