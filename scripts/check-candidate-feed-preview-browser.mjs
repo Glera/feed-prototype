@@ -53,6 +53,44 @@ const sourceBinding = {
 };
 const sourceBindingBytes = Buffer.from(JSON.stringify(sourceBinding));
 const sourceReviewBindingDigest = createHash('sha256').update(sourceBindingBytes).digest('hex');
+const reworkRuntimeArtifactDigest = `sha256:${'9'.repeat(64)}`;
+const reworkSourceCommit = '8'.repeat(40);
+const reworkRuntimeArtifact = {
+  schema: 'runtime-artifact.v1',
+  playableId,
+  digest: reworkRuntimeArtifactDigest,
+  digestCanonicalization: 'fixture-canonicalization-v1',
+  sourceCommit: reworkSourceCommit,
+  files: [{ path: `${playableId}.html`, bytes: 1, sha256: `sha256:${candidateArtifactDigest}` }],
+};
+const reworkRuntimeArtifactBytes = Buffer.from(JSON.stringify(reworkRuntimeArtifact));
+const reworkRuntimeArtifactSha256 = createHash('sha256')
+  .update(reworkRuntimeArtifactBytes).digest('hex');
+const reworkArtifactManifest = {
+  schema: 'lab.playable-release-artifacts.v1',
+  playableId,
+  files: [
+    { bytes: 1, path: `${playableId}.html`, sha256: candidateArtifactDigest },
+    {
+      bytes: reworkRuntimeArtifactBytes.length,
+      path: `${playableId}.runtime-artifact.json`,
+      sha256: reworkRuntimeArtifactSha256,
+    },
+  ],
+};
+const reworkArtifactManifestBytes = Buffer.from(JSON.stringify(reworkArtifactManifest));
+const reworkBindingFor = (variant) => {
+  if (variant === 'source-fields') return {
+    ...binding,
+    review: { ...binding.review, sourceId: playableId, sourceCommit: reworkSourceCommit },
+  };
+  if (variant === 'invalid-request-id') return {
+    ...binding,
+    review: { ...binding.review, reworkRequestId: 'not-a-request-id' },
+  };
+  return binding;
+};
+const reworkBindingBytesFor = (variant) => Buffer.from(JSON.stringify(reworkBindingFor(variant)));
 const candidateStartParam = encodeCandidateFeedStartParam({
   releaseId: sourceReleaseId,
   reviewBindingDigest: sourceReviewBindingDigest,
@@ -309,6 +347,8 @@ const readTakeoverTransitionProbe = async (page) => page.evaluate(
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
+  const reworkFixture = String(request.headers['x-rework-fixture'] || '');
+  const reworkAdoption = adopted && reworkFixture.length > 0;
   requests.push(`${request.method} ${url.pathname}${url.search}`);
   if (url.pathname === '/' || url.pathname === '/index.html') {
     response.setHeader('content-type', 'text/html; charset=utf-8');
@@ -349,9 +389,20 @@ const server = createServer(async (request, response) => {
     },
   });
   if (url.pathname === `/playable-previews/${releaseId}/review-binding.json`) {
+    const bytes = reworkBindingBytesFor(reworkFixture);
     response.setHeader('content-type', 'application/json; charset=utf-8');
-    response.setHeader('content-length', String(bindingBytes.length));
-    return response.end(bindingBytes);
+    response.setHeader('content-length', String(bytes.length));
+    return response.end(bytes);
+  }
+  if (url.pathname === `/playable-previews/${releaseId}/artifact-manifest.json`) {
+    response.setHeader('content-type', 'application/json; charset=utf-8');
+    response.setHeader('content-length', String(reworkArtifactManifestBytes.length));
+    return response.end(reworkArtifactManifestBytes);
+  }
+  if (url.pathname === `/playable-previews/${releaseId}/${playableId}.runtime-artifact.json`) {
+    response.setHeader('content-type', 'application/json; charset=utf-8');
+    response.setHeader('content-length', String(reworkRuntimeArtifactBytes.length));
+    return response.end(reworkRuntimeArtifactBytes);
   }
   if (url.pathname === `/playable-previews/${sourceReleaseId}/review-binding.json`) {
     response.setHeader('content-type', 'application/json; charset=utf-8');
@@ -389,13 +440,18 @@ const server = createServer(async (request, response) => {
       feedRoster: roster,
       ...(adopted ? { developerFeedAdoption: {
         schema: 'feed.playable-source-preview-adoption.v1',
-        releaseId: sourceReleaseId,
+        releaseId: reworkAdoption ? releaseId : sourceReleaseId,
         playableId,
-        candidatePath: sourceCandidatePath,
-        candidateArtifactDigest: sourceCandidateArtifactDigest,
-        runtimeArtifactDigest: sourceRuntimeArtifactDigest,
-        reviewBindingDigest: sourceReviewBindingDigest,
-        sourceCommit: '7'.repeat(40),
+        candidatePath: reworkAdoption ? candidatePath : sourceCandidatePath,
+        candidateArtifactDigest: reworkAdoption
+          ? candidateArtifactDigest : sourceCandidateArtifactDigest,
+        runtimeArtifactDigest: reworkAdoption
+          ? reworkRuntimeArtifactDigest : sourceRuntimeArtifactDigest,
+        reviewBindingDigest: reworkAdoption
+          ? createHash('sha256').update(reworkBindingBytesFor(reworkFixture)).digest('hex')
+          : sourceReviewBindingDigest,
+        sourceCommit: reworkFixture === 'source-commit-drift'
+          ? 'f'.repeat(40) : reworkAdoption ? reworkSourceCommit : '7'.repeat(40),
         receiptDigest: '6'.repeat(64),
         audience: 'exact-user',
         publicRollout: false,
@@ -885,6 +941,67 @@ try {
   assert.equal(adoptionPosts, 1, 'normal dev feed replayed the adoption mutation');
   assert.equal(await page.getByText('Кандидат — не опубликовано', { exact: true }).count(), 0,
     'one-shot handoff restored the physical Telegram candidate start_param');
+
+  // An accepted rework carries its source identity in the adoption projection,
+  // while the immutable review binding is intentionally request-bound and has
+  // null source fields. It must be admitted with the same exact-user and static
+  // artifact checks as a source-created candidate.
+  const reworkAdoptionContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    extraHTTPHeaders: { 'x-rework-fixture': 'valid' },
+  });
+  await reworkAdoptionContext.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: telegramSdk,
+  }));
+  await reworkAdoptionContext.addInitScript((snapshot) => {
+    if (window === window.top) {
+      localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
+    }
+  }, roster);
+  const reworkAdoptionPage = await reworkAdoptionContext.newPage();
+  await reworkAdoptionPage.goto(origin, { waitUntil: 'domcontentloaded' });
+  await advanceToPlayable(reworkAdoptionPage, playableId);
+  const reworkAdoptionOverlay = reworkAdoptionPage.locator(
+    '.page--in-viewport .game--candidate-overlay',
+  );
+  assert.equal(await reworkAdoptionOverlay.count(), 1,
+    'accepted rework candidate was rejected by the developer-feed binding validator');
+  assert.equal(await reworkAdoptionOverlay.locator('.game__label').textContent(), playableId,
+    'accepted rework overlay was mounted for a different playable');
+  const reworkAdoptionFrame = reworkAdoptionPage.locator('.page--in-viewport iframe').first();
+  await reworkAdoptionFrame.waitFor({ state: 'attached' });
+  assert.equal(new URL((await reworkAdoptionFrame.getAttribute('src')) || '', origin).pathname,
+    candidatePath, 'accepted rework candidate was not mounted from its immutable preview path');
+  await reworkAdoptionContext.close();
+
+  for (const variant of ['source-fields', 'invalid-request-id', 'source-commit-drift']) {
+    const rejectedContext = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      extraHTTPHeaders: { 'x-rework-fixture': variant },
+    });
+    await rejectedContext.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/javascript',
+      body: telegramSdk,
+    }));
+    await rejectedContext.addInitScript((snapshot) => {
+      if (window === window.top) {
+        localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
+      }
+    }, roster);
+    const rejectedPage = await rejectedContext.newPage();
+    await rejectedPage.goto(origin, { waitUntil: 'domcontentloaded' });
+    await advanceToPlayable(rejectedPage, playableId);
+    const rejectedFrame = rejectedPage.locator('.page--in-viewport iframe').first();
+    await rejectedFrame.waitFor({ state: 'attached' });
+    assert.equal(new URL((await rejectedFrame.getAttribute('src')) || '', origin).pathname,
+      `/${playableId}.html`, `${variant}: invalid rework adoption did not fail closed to public bytes`);
+    assert.equal(await rejectedPage.locator('.game--candidate-overlay').count(), 0,
+      `${variant}: invalid rework adoption mounted a developer-only overlay`);
+    await rejectedContext.close();
+  }
 
   // Once the immutable candidate runtime identity is the public manifest
   // runtime identity, the

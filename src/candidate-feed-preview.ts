@@ -5,8 +5,12 @@ import {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PLAYABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
+const STATIC_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
+const PREFIXED_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const MAX_BINDING_BYTES = 32_768;
+const MAX_ARTIFACT_MANIFEST_BYTES = 64_000;
+const MAX_RUNTIME_ARTIFACT_BYTES = 32_768;
 
 export const CANDIDATE_FEED_PARAMS = Object.freeze({
   releaseId: 'candidateFeedRelease',
@@ -44,6 +48,137 @@ interface CandidateReviewBinding {
     sourceId: string | null;
     sourceCommit: string | null;
   };
+}
+
+interface CandidateArtifactManifest {
+  schema: 'lab.playable-release-artifacts.v1';
+  playableId: string;
+  files: Array<{ bytes: number; path: string; sha256: string }>;
+}
+
+interface CandidateRuntimeArtifact {
+  schema: 'runtime-artifact.v1';
+  playableId: string;
+  digest: string;
+  digestCanonicalization: string;
+  sourceCommit: string;
+  files: Array<{ path: string; bytes: number; sha256: string }>;
+}
+
+function reviewBindingMatchesAdoption(
+  review: CandidateReviewBinding['review'],
+  sourceCommit: string,
+): boolean {
+  if (review.kind === 'source') {
+    return review.reworkRequestId === null
+      && review.sourceCommit === sourceCommit;
+  }
+  return typeof review.reworkRequestId === 'string'
+    && UUID.test(review.reworkRequestId)
+    && review.sourceId === null
+    && review.sourceCommit === null;
+}
+
+async function fetchImmutableBytes(
+  path: string,
+  maximumBytes: number,
+  origin: string,
+  fetchResource: typeof fetch,
+): Promise<Uint8Array> {
+  const url = new URL(path, origin);
+  if (url.origin !== origin || url.pathname !== path) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  const response = await fetchResource(url, { cache: 'no-store', credentials: 'same-origin' });
+  const responseUrl = new URL(response.url);
+  if (!response.ok || response.redirected || responseUrl.origin !== origin
+    || responseUrl.pathname !== path) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  const contentLength = response.headers.get('content-length');
+  if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > maximumBytes)) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length < 2 || bytes.length > maximumBytes) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  return bytes;
+}
+
+function decodeJson(bytes: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+}
+
+async function validateReworkRuntimeIdentity(
+  binding: CandidateReviewBinding,
+  identity: DeveloperFeedAdoptionIdentity,
+  origin: string,
+  fetchResource: typeof fetch,
+): Promise<void> {
+  // Rework bindings intentionally identify the originating request instead of
+  // duplicating source provenance. Re-anchor that provenance through the
+  // immutable artifact manifest and its hashed runtime-artifact sidecar.
+  const root = `/playable-previews/${identity.releaseId.toLowerCase()}`;
+  const manifest = decodeJson(await fetchImmutableBytes(
+    `${root}/artifact-manifest.json`, MAX_ARTIFACT_MANIFEST_BYTES, origin, fetchResource,
+  ));
+  if (!exactKeys(manifest, ['schema', 'playableId', 'files'])) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  const artifactManifest = manifest as CandidateArtifactManifest;
+  if (artifactManifest.schema !== 'lab.playable-release-artifacts.v1'
+    || artifactManifest.playableId !== identity.playableId
+    || !Array.isArray(artifactManifest.files)
+    || artifactManifest.files.length < 2 || artifactManifest.files.length > 128) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  const entries = new Map<string, { bytes: number; sha256: string }>();
+  for (const item of artifactManifest.files) {
+    if (!exactKeys(item, ['bytes', 'path', 'sha256'])
+      || !Number.isSafeInteger(item.bytes) || item.bytes < 1 || item.bytes > 16_777_216
+      || typeof item.path !== 'string' || !STATIC_FILE.test(item.path)
+      || !DIGEST.test(item.sha256) || entries.has(item.path)) {
+      throw new Error('developer_feed_adoption_runtime_mismatch');
+    }
+    entries.set(item.path, { bytes: item.bytes, sha256: item.sha256 });
+  }
+  const candidateName = `${identity.playableId}.html`;
+  const runtimeName = `${identity.playableId}.runtime-artifact.json`;
+  if (entries.get(candidateName)?.sha256 !== binding.candidateArtifactDigest) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  const runtimeEntry = entries.get(runtimeName);
+  if (!runtimeEntry || runtimeEntry.bytes > MAX_RUNTIME_ARTIFACT_BYTES) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  const runtimeBytes = await fetchImmutableBytes(
+    `${root}/${runtimeName}`, MAX_RUNTIME_ARTIFACT_BYTES, origin, fetchResource,
+  );
+  if (runtimeBytes.length !== runtimeEntry.bytes
+    || await sha256Hex(runtimeBytes) !== runtimeEntry.sha256) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
+  const runtime = decodeJson(runtimeBytes);
+  if (!exactKeys(runtime, [
+    'schema', 'playableId', 'digest', 'digestCanonicalization', 'sourceCommit', 'files',
+  ])) throw new Error('developer_feed_adoption_runtime_mismatch');
+  const artifact = runtime as CandidateRuntimeArtifact;
+  if (artifact.schema !== 'runtime-artifact.v1'
+    || artifact.playableId !== identity.playableId
+    || artifact.digest !== identity.runtimeArtifactDigest
+    || !PREFIXED_DIGEST.test(artifact.digest)
+    || artifact.sourceCommit !== identity.sourceCommit
+    || !/^[0-9a-f]{40}$/.test(artifact.sourceCommit)
+    || typeof artifact.digestCanonicalization !== 'string'
+    || artifact.digestCanonicalization.length < 1
+    || !Array.isArray(artifact.files)) {
+    throw new Error('developer_feed_adoption_runtime_mismatch');
+  }
 }
 
 const exactKeys = (value: unknown, keys: string[]): boolean => Boolean(value)
@@ -242,10 +377,11 @@ export async function resolveDeveloperFeedAdoption(
   if (binding.playableId !== identity.playableId
     || binding.candidatePath !== identity.candidatePath
     || binding.candidateArtifactDigest !== identity.candidateArtifactDigest
-    || binding.review.kind !== 'source'
-    || binding.review.reworkRequestId !== null
-    || binding.review.sourceCommit !== identity.sourceCommit) {
+    || !reviewBindingMatchesAdoption(binding.review, identity.sourceCommit)) {
     throw new Error('developer_feed_adoption_binding_mismatch');
+  }
+  if (binding.review.kind === 'rework') {
+    await validateReworkRuntimeIdentity(binding, identity, origin, fetchBinding);
   }
   return Object.freeze({ ...identity, releaseId: identity.releaseId.toLowerCase() });
 }
