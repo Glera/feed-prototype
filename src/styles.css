@@ -5292,7 +5292,18 @@ body {
   gap: 7px;
   appearance: none;
   cursor: pointer;
+  overflow: visible;
   pointer-events: auto;
+}
+.dev-diff__badge::after {
+  content: "правка 1";
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 50%;
+  transform: translateX(-50%);
+  color: #baf5d9;
+  font: 700 9px/1.2 system-ui, -apple-system, sans-serif;
+  white-space: nowrap;
 }
 .dev-diff__badge-label {
   display: flex;
