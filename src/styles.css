@@ -2026,7 +2026,7 @@ body {
 }
 
 .hud__level-value {
-  font-size: 20px;
+  font-size: var(--hud-level-font-size, 20px);
   line-height: 1;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
