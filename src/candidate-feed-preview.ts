@@ -29,6 +29,7 @@ export interface CandidateFeedPreviewIdentity {
 
 export interface DeveloperFeedAdoptionIdentity extends CandidateFeedPreviewIdentity {
   schema: 'feed.playable-source-preview-adoption.v1';
+  bindingDigest?: string;
   runtimeArtifactDigest: string;
   sourceCommit: string;
   receiptDigest: string;
@@ -350,15 +351,20 @@ export async function resolveDeveloperFeedAdoption(
   origin = location.origin,
   fetchBinding: typeof fetch = fetch,
 ): Promise<DeveloperFeedAdoptionIdentity> {
-  if (!exactKeys(value, [
+  const legacyKeys = [
     'schema', 'releaseId', 'playableId', 'candidatePath', 'candidateArtifactDigest',
     'runtimeArtifactDigest', 'reviewBindingDigest', 'sourceCommit', 'receiptDigest',
     'audience', 'publicRollout',
-  ])) throw new Error('developer_feed_adoption_invalid');
+  ];
+  if (!exactKeys(value, legacyKeys)
+    && !exactKeys(value, [...legacyKeys, 'bindingDigest'])) {
+    throw new Error('developer_feed_adoption_invalid');
+  }
   const identity = value as DeveloperFeedAdoptionIdentity;
   if (identity.schema !== 'feed.playable-source-preview-adoption.v1'
     || !UUID.test(identity.releaseId) || !PLAYABLE_ID.test(identity.playableId)
     || !DIGEST.test(identity.candidateArtifactDigest)
+    || (identity.bindingDigest !== undefined && !DIGEST.test(identity.bindingDigest))
     || !/^sha256:[0-9a-f]{64}$/.test(identity.runtimeArtifactDigest)
     || !DIGEST.test(identity.reviewBindingDigest)
     || !DIGEST.test(identity.receiptDigest)

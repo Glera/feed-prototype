@@ -12,6 +12,11 @@ import {
   candidatePlayableOverlay,
   type Playable,
 } from './playables';
+import {
+  mountOperatorFeedViewToggle,
+  operatorFeedView,
+  operatorFeedViewUrl,
+} from './operator-feed-view.mjs';
 // Series-reward gift icons (inlined into the single-file feed bundle). One is picked
 // at random per mechanic for the chest in the series-row panel.
 import REWARD_ICON_1 from './assets/reward_lvl1.png';
@@ -44,6 +49,8 @@ import {
   apiListPlatformDevelopmentIntakesRequired,
   apiPrepareCatalogDirectPromotionRequired,
   apiApplyCatalogDirectPromotionRequired,
+  apiPreparePlayablePublicationRequired,
+  apiApplyPlayablePublicationRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
   apiGetGeneratedOfferRequired,
@@ -64,6 +71,9 @@ import {
   type DeveloperFeedCatalogDiffV1,
   type CatalogDirectPromotionPreparedV1,
   type CatalogDirectPromotionResultV1,
+  type PlayablePublicationPreparedV1,
+  type PlayablePublicationRequestedV1,
+  type PlayablePublicationSelectionV1,
   type OperatorPlayableReworkQueueItemV1,
   type OperatorPlayableReworkResponseV1,
   type OperatorPlayableEscalationDecisionV1,
@@ -220,7 +230,10 @@ import {
   validateCatalogDirectPromotionPrepared,
   validateCatalogDirectPromotionResult,
   validateDeveloperFeedCatalogDiff,
+  validatePlayablePublicationPrepared,
+  validatePlayablePublicationRequested,
   type CatalogDirectPromotionClientOutcome,
+  type PlayablePublicationClientOutcome,
   type DeveloperFeedDiffInput,
   type DeveloperFeedDiffSurface,
 } from './developer-feed-diff.mjs';
@@ -738,10 +751,8 @@ export class Feed {
   // Default-off dogfood bridge. It never derives a catalog candidate locally:
   // every slot starts from a projected built-in opportunity and accepts only
   // the server's opaque authority → allocation → ticket → exact spec bundle.
-  private readonly catalogDogfoodAccountEligible = catalogDogfoodAccountEligible(
-    (import.meta as any).env,
-    getInitData(),
-  );
+  private readonly catalogDogfoodAccountEligible = operatorFeedView(location.search) !== 'release'
+    && catalogDogfoodAccountEligible((import.meta as any).env, getInitData());
   private readonly catalogDogfoodEnabled = catalogFeedDogfoodEnabled(
     (import.meta as any).env,
     controlPlaneEnabled(),
@@ -801,6 +812,10 @@ export class Feed {
   private catalogPromotionPreparing = false;
   private catalogPromotionPrepareKey: string | null = null;
   private catalogPromotionPrepareEpoch = 0;
+  private mechanicPublicationPrepared: Readonly<PlayablePublicationPreparedV1> | null = null;
+  private mechanicPublicationPreparing = false;
+  private mechanicPublicationPrepareKey: string | null = null;
+  private mechanicPublicationPrepareEpoch = 0;
   private platformDevelopmentIntakeControl: PlatformDevelopmentIntakeControl | null = null;
   private platformDevelopmentIntakes: PlatformDevelopmentIntakeResponseV1[] = [];
   private platformDevelopmentIntakeSyncEpoch = 0;
@@ -953,6 +968,8 @@ export class Feed {
   private initialSessionPromise: Promise<SessionResp> | null;
   private readonly readOnlyPreview: boolean;
   private readonly suppressGameplayEffects: boolean;
+  private readonly operatorReleasePreview: boolean;
+  private operatorFeedViewToggle: Readonly<{ destroy(): void }> | null = null;
 
   // When the user taps to take over an autoplay demo, restart the mechanic from
   // scratch (fresh level) by default. `?takeover=continue` keeps the old behavior
@@ -1003,6 +1020,7 @@ export class Feed {
     initialSessionPromise: Promise<SessionResp> | null = null,
     readOnlyPreview = false,
     suppressGameplayEffects = readOnlyPreview,
+    operatorReleasePreview = false,
   ) {
     this.viewport = viewport;
     this.feedEl = feedEl;
@@ -1016,6 +1034,7 @@ export class Feed {
     this.initialSessionPromise = initialSessionPromise;
     this.readOnlyPreview = readOnlyPreview;
     this.suppressGameplayEffects = suppressGameplayEffects;
+    this.operatorReleasePreview = operatorReleasePreview;
     this.initialTarget = Math.min(INITIAL_BATCH, this.N);
     this.build();
     const initialPlayableId = this.playables[this.realIndex()]?.id;
@@ -1169,12 +1188,21 @@ export class Feed {
     this.operatorPresentationVocabulary = resolveOperatorPresentationVocabulary(
       session.operatorPresentationVocabulary,
     );
-    this.applyCatalogLabAuthorizationCapability(session.catalog_lab_authorization_available);
-    this.applyOperatorDebugEntryCapability(session.catalog_lab_authorization_available);
-    this.applyOperatorLevelFlaggingCapability(session.operator_level_flagging_available);
+    const operatorSurface = session.operator_level_flagging_available === true
+      || session.development_intake_available === true;
+    if (operatorSurface && !this.readOnlyPreview) this.mountOperatorFeedViewToggle();
+    this.applyCatalogLabAuthorizationCapability(
+      this.operatorReleasePreview ? false : session.catalog_lab_authorization_available,
+    );
+    this.applyOperatorDebugEntryCapability(
+      this.operatorReleasePreview ? false : session.catalog_lab_authorization_available,
+    );
+    this.applyOperatorLevelFlaggingCapability(
+      this.operatorReleasePreview ? false : session.operator_level_flagging_available,
+    );
     this.applyDevelopmentIntakeCapability(
-      session.development_intake_available,
-      session.development_intake_context,
+      this.operatorReleasePreview ? false : session.development_intake_available,
+      this.operatorReleasePreview ? undefined : session.development_intake_context,
     );
     if (session.backend_version) {
       this.backendVersion = session.backend_version;
@@ -1183,11 +1211,11 @@ export class Feed {
     // The catalog diff is a server-owned, read-only operator projection.  It
     // must survive adopted-candidate boot even though gameplay side effects
     // below are intentionally suppressed for those immutable bytes.
-    this.developerFeedCatalog = validateDeveloperFeedCatalogDiff(
-      session.developerFeedCatalog,
-    );
+    this.developerFeedCatalog = this.operatorReleasePreview ? null
+      : validateDeveloperFeedCatalogDiff(session.developerFeedCatalog);
     this.refreshDeveloperFeedDiff();
     void this.prepareDeveloperCatalogPromotion();
+    void this.prepareDeveloperPlayablePublication();
     // An adopted immutable candidate is an authenticated operator surface, not
     // a public gameplay occurrence. Keep its server-owned controls available,
     // but never flush/credit results, missions, daily state, social state,
@@ -1216,6 +1244,16 @@ export class Feed {
     // above: it no-ops unless the Meta tab was actually mounted.
     void this.refreshIslandGiftsBadge();
     this.scheduleGeneratedOfferPrefetch();
+  }
+
+  private mountOperatorFeedViewToggle(): void {
+    if (this.operatorFeedViewToggle) return;
+    this.operatorFeedViewToggle = mountOperatorFeedViewToggle(document.body, {
+      view: this.operatorReleasePreview ? 'release' : 'dev',
+      onChange: (view: 'dev' | 'release') => {
+        location.assign(operatorFeedViewUrl(view, location.href));
+      },
+    });
   }
 
   /**
@@ -2792,6 +2830,11 @@ export class Feed {
   // live with your latest push before testing changes.
   private renderVersionLabel(): void {
     if (!this.versionEl) return;
+    if (this.operatorReleasePreview) {
+      this.versionEl.hidden = true;
+      return;
+    }
+    this.versionEl.hidden = false;
     // holdcover debug: show ONLY the short slot readout (platform/time/api make the
     // line overflow off-screen). This is the TRUE in-Telegram slot aspect → tells us
     // exactly what to bake at (fill-stretch = |slot − bake|).
@@ -2836,7 +2879,14 @@ export class Feed {
       && (this.operatorLevelFlaggingAvailable || this.developmentIntakeAvailable);
     // A resolved overlay outside the read-only candidate route is exactly the
     // developer-feed adoption main.ts used to badge.
-    const overlay = this.readOnlyPreview ? null : candidatePlayableOverlay();
+    const rawOverlay = this.readOnlyPreview ? null : candidatePlayableOverlay();
+    const overlay = rawOverlay ? {
+      playableId: rawOverlay.playableId,
+      releaseId: rawOverlay.releaseId,
+      candidateArtifactDigest: rawOverlay.candidateArtifactDigest,
+      bindingDigest: rawOverlay.bindingDigest,
+      sourceCommit: rawOverlay.sourceCommit,
+    } : null;
     return {
       operatorSurfacesActive,
       reworks: this.operatorLevelFlaggingAvailable
@@ -2847,6 +2897,8 @@ export class Feed {
       catalog: this.developerFeedCatalog,
       catalogPromotion: this.catalogPromotionPrepared,
       catalogPromotionPreparing: this.catalogPromotionPreparing,
+      mechanicPublication: this.mechanicPublicationPrepared,
+      mechanicPublicationPreparing: this.mechanicPublicationPreparing,
     };
   }
 
@@ -2867,7 +2919,108 @@ export class Feed {
       onPromoteCatalog: (prepared, confirmationCode) => (
         this.applyDeveloperCatalogPromotion(prepared, confirmationCode)
       ),
+      onPublishMechanic: (prepared, confirmationCode) => (
+        this.applyDeveloperPlayablePublication(prepared, confirmationCode)
+      ),
     });
+  }
+
+  private playablePublicationSelection(): PlayablePublicationSelectionV1[] | null {
+    const adoption = this.readOnlyPreview ? null : candidatePlayableOverlay();
+    if (!adoption?.releaseId || !adoption.bindingDigest
+      || !adoption.candidateArtifactDigest) return null;
+    return [{
+      releaseId: adoption.releaseId,
+      bindingDigest: adoption.bindingDigest,
+      candidateArtifactDigest: adoption.candidateArtifactDigest,
+    }];
+  }
+
+  private async prepareDeveloperPlayablePublication(): Promise<void> {
+    const items = this.playablePublicationSelection();
+    if (!items || this.operatorReleasePreview) {
+      this.mechanicPublicationPrepareEpoch += 1;
+      this.mechanicPublicationPrepareKey = null;
+      this.mechanicPublicationPrepared = null;
+      this.mechanicPublicationPreparing = false;
+      this.refreshDeveloperFeedDiff();
+      return;
+    }
+    const key = items.map((item) => (
+      `${item.releaseId}:${item.bindingDigest}:${item.candidateArtifactDigest}`
+    )).join('|');
+    if (this.mechanicPublicationPrepareKey === key) return;
+    this.mechanicPublicationPrepareKey = key;
+    this.mechanicPublicationPrepared = null;
+    this.mechanicPublicationPreparing = true;
+    const epoch = ++this.mechanicPublicationPrepareEpoch;
+    this.refreshDeveloperFeedDiff();
+    try {
+      const operationId = crypto.randomUUID();
+      const raw = await apiPreparePlayablePublicationRequired({
+        schema: 'feed.playable-publication.prepare.v1',
+        operationId,
+        action: 'publish',
+        items,
+      });
+      const prepared = validatePlayablePublicationPrepared(raw);
+      const exact = prepared?.items.length === items.length
+        && prepared.items.every((item, index) => (
+          item.releaseId === items[index].releaseId
+          && item.bindingDigest === items[index].bindingDigest
+          && item.candidateArtifactDigest === items[index].candidateArtifactDigest
+        ));
+      if (epoch !== this.mechanicPublicationPrepareEpoch) return;
+      if (prepared?.operationId !== operationId || !exact) {
+        this.mechanicPublicationPrepareKey = null;
+        this.mechanicPublicationPreparing = false;
+        this.refreshDeveloperFeedDiff();
+        return;
+      }
+      this.mechanicPublicationPrepared = prepared;
+      this.mechanicPublicationPreparing = false;
+      this.refreshDeveloperFeedDiff();
+    } catch {
+      if (epoch === this.mechanicPublicationPrepareEpoch) {
+        this.mechanicPublicationPrepareKey = null;
+        this.mechanicPublicationPreparing = false;
+        this.refreshDeveloperFeedDiff();
+      }
+    }
+  }
+
+  private async applyDeveloperPlayablePublication(
+    prepared: Readonly<PlayablePublicationPreparedV1>,
+    confirmationCode: string,
+  ): Promise<PlayablePublicationClientOutcome> {
+    const selection = this.playablePublicationSelection();
+    if (!selection || selection.length !== prepared.items.length
+      || !prepared.items.every((item, index) => (
+        item.releaseId === selection[index].releaseId
+        && item.bindingDigest === selection[index].bindingDigest
+        && item.candidateArtifactDigest === selection[index].candidateArtifactDigest
+      ))) throw new Error('playable_publication_candidate_changed');
+    const rawResult: PlayablePublicationRequestedV1 = await apiApplyPlayablePublicationRequired({
+      schema: 'feed.playable-publication.apply.v1',
+      operationId: prepared.operationId,
+      action: 'publish',
+      items: selection,
+      confirmationCode,
+    });
+    const result = validatePlayablePublicationRequested(rawResult);
+    if (result === null || result.operationId !== prepared.operationId
+      || result.items.length !== prepared.items.length
+      || !result.items.every((item, index) => (
+        item.releaseId === prepared.items[index].releaseId
+        && item.bindingDigest === prepared.items[index].bindingDigest
+        && item.candidateArtifactDigest === prepared.items[index].candidateArtifactDigest
+      ))) throw new Error('playable_publication_result_invalid');
+    const refreshed = await this.syncSessionBootstrap();
+    return {
+      status: result.status === 'published' && refreshed
+        ? 'published_refreshed'
+        : refreshed ? 'queued_refreshed' : 'queued_refresh_pending',
+    };
   }
 
   private async prepareDeveloperCatalogPromotion(): Promise<void> {
@@ -6435,6 +6588,12 @@ export class Feed {
    * and a session that loses the capability drops the element it created.
    */
   private applyOperatorDebugEntryCapability(value: unknown): void {
+    if (this.operatorReleasePreview) {
+      this.debugEntryQaRoute = false;
+      this.debugEntryEl?.remove();
+      this.debugEntryEl = null;
+      return;
+    }
     if (operatorDebugPanelAvailable(value)) {
       this.ensureDebugEntry();
       return;
@@ -11172,7 +11331,7 @@ export function createFeed(
   rosterSnapshot: FeedRosterSessionV1 | null = null,
   friendAcceptCode: string | null = null,
   initialSessionPromise: Promise<SessionResp> | null = null,
-  mode: Readonly<{ readOnlyPreview: boolean }> | undefined = undefined,
+  mode: Readonly<{ readOnlyPreview: boolean; operatorReleasePreview?: boolean }> | undefined = undefined,
 ) {
   const resolution: FeedRosterResolutionV1 = resolveFeedRosterSession(
     rosterSnapshot,
@@ -11201,6 +11360,7 @@ export function createFeed(
   const candidateOverlay = candidatePlayableOverlay();
   if (candidateOverlay && !mode) throw new Error('candidate_feed_mode_required');
   const readOnlyPreview = mode?.readOnlyPreview ?? false;
+  const operatorReleasePreview = mode?.operatorReleasePreview ?? false;
   if (candidateOverlay) {
     const candidateIndex = order.findIndex((playable) => playable.id === candidateOverlay.playableId);
     if (candidateIndex < 0) throw new Error('candidate_feed_target_not_in_live_roster');
@@ -11252,5 +11412,6 @@ export function createFeed(
     initialSessionPromise,
     readOnlyPreview,
     candidateOverlay !== null,
+    operatorReleasePreview,
   );
 }

@@ -3,6 +3,7 @@ import { createFeed } from './feed';
 import {
   candidateMatchesPublicManifest,
   setCandidatePlayableOverlay,
+  setCandidatePlayableOverlayVisible,
   setMechanicVersions,
 } from './playables';
 import { initTelegram, getInitData, getStartParam, hasTelegramHostContext, hasTelegramLaunchUserIdentity, islandOwnerFromParam, islandFriendCodeFromParam, isChallengeParam, setTelegramReadOnlyPreviewMode } from './telegram';
@@ -16,6 +17,7 @@ import { candidateFeedPreviewRequested, resolveCandidateFeedPreview, resolveDeve
 import { candidateFeedStartParamRequested } from './candidate-feed-start-param.mjs';
 import { consumeDeveloperFeedHandoff, mountCandidateFeedAdoption } from './candidate-feed-adoption';
 import { missionDemoRequested } from './mission-demo-route.mjs';
+import { operatorFeedView } from './operator-feed-view.mjs';
 
 const query = new URLSearchParams(location.search);
 const restoredStartParam = getStartParam();
@@ -24,6 +26,9 @@ const startParam = developerFeedHandoff ? null : restoredStartParam;
 const candidateFeedStartRequested = candidateFeedStartParamRequested(startParam);
 const candidateFeedRequested = candidateFeedPreviewRequested(location.search, startParam);
 const missionDemoLaunch = missionDemoRequested({ search: location.search, startParam });
+const selectedOperatorFeedView = operatorFeedView(location.search);
+const operatorReleasePreview = !candidateFeedRequested && selectedOperatorFeedView === 'release';
+setCandidatePlayableOverlayVisible(!operatorReleasePreview);
 setTelegramReadOnlyPreviewMode(candidateFeedRequested);
 setTelemetryReadOnlyPreviewMode(candidateFeedRequested || missionDemoLaunch);
 
@@ -144,7 +149,7 @@ async function boot(): Promise<void> {
     rosterSnapshot = initial === timeout
       ? persisted
       : await feedRosterSnapshotForBoot(persisted, initial?.feedRoster);
-    if (initial !== timeout && initial?.developerFeedAdoption) {
+    if (!operatorReleasePreview && initial !== timeout && initial?.developerFeedAdoption) {
       try {
         const adopted = await resolveDeveloperFeedAdoption(initial.developerFeedAdoption);
         if (candidateMatchesPublicManifest(adopted)) {
@@ -168,7 +173,7 @@ async function boot(): Promise<void> {
       rosterSnapshot,
       friendAcceptCode,
       initialSessionPromise,
-      { readOnlyPreview: candidateFeedRequested },
+      { readOnlyPreview: candidateFeedRequested, operatorReleasePreview },
     );
   };
   if (candidateFeedRequested) try {

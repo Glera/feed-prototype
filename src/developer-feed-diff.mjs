@@ -153,12 +153,57 @@ export function validateCatalogDirectPromotionResult(value) {
   return Object.freeze({ ...value });
 }
 
+const validatePlayablePublicationItem = (value) => {
+  if (!exactObject(value, [
+    'releaseId', 'playableId', 'bindingDigest', 'candidateArtifactDigest',
+    'runtimeArtifactDigest', 'changes',
+  ]) || !UUID.test(value.releaseId) || !PLAYABLE_ID.test(value.playableId)
+    || !HASH.test(value.bindingDigest) || !HASH.test(value.candidateArtifactDigest)
+    || !DIGEST.test(value.runtimeArtifactDigest)
+    || !Array.isArray(value.changes) || value.changes.length < 1 || value.changes.length > 20
+    || value.changes.some((change) => !text(change) || change !== text(change))) return null;
+  return Object.freeze({ ...value, changes: Object.freeze([...value.changes]) });
+};
+
+export function validatePlayablePublicationPrepared(value) {
+  if (!exactObject(value, [
+    'schema', 'operationId', 'action', 'clientInstanceId', 'items', 'confirmationCode',
+  ]) || value.schema !== 'feed.playable-publication.prepared.v1'
+    || !UUID.test(value.operationId) || value.action !== 'publish'
+    || !UUID.test(value.clientInstanceId) || !/^[0-9A-F]{6}$/.test(value.confirmationCode)
+    || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 20) return null;
+  const items = value.items.map(validatePlayablePublicationItem);
+  if (items.some((item) => item === null)) return null;
+  return Object.freeze({ ...value, items: Object.freeze(items) });
+}
+
+export function validatePlayablePublicationRequested(value) {
+  if (!exactObject(value, [
+    'schema', 'operationId', 'action', 'items', 'status', 'replayed',
+  ]) || value.schema !== 'feed.playable-publication.requested.v1'
+    || !UUID.test(value.operationId) || value.action !== 'publish'
+    || !['queued', 'published'].includes(value.status) || typeof value.replayed !== 'boolean'
+    || !Array.isArray(value.items) || value.items.length < 1 || value.items.length > 20) return null;
+  const items = value.items.map(validatePlayablePublicationItem);
+  if (items.some((item) => item === null)) return null;
+  return Object.freeze({ ...value, items: Object.freeze(items) });
+}
+
 function mechanicRows(input) {
   const adoption = input.adoption;
   if (!adoption || typeof adoption.playableId !== 'string' || !adoption.playableId) return [];
   const audience = operatorAudiencePresentation(input.vocabulary, 'exactUser');
   const adoptedStatus = `Аудитория: ${audience.icon} ${audience.label}`;
-  const instructions = [];
+  const prepared = validatePlayablePublicationPrepared(input.mechanicPublication);
+  const publication = prepared?.items.length === 1
+    && prepared.items[0].releaseId === adoption.releaseId
+    && prepared.items[0].playableId === adoption.playableId
+    && prepared.items[0].bindingDigest === adoption.bindingDigest
+    && prepared.items[0].candidateArtifactDigest === adoption.candidateArtifactDigest
+    ? prepared : null;
+  const instructions = publication
+    ? [...new Set(publication.items.flatMap((item) => item.changes))]
+    : [];
   const entries = input.reworks ? Array.from(input.reworks) : [];
   for (const entry of entries) {
     if (!Array.isArray(entry) || entry.length < 2) continue;
@@ -168,7 +213,7 @@ function mechanicRows(input) {
       Array.isArray(rawQueue) ? rawQueue : [],
     ).get(playableId) || [];
     for (const item of queue) {
-      if (text(item.request?.runtime?.artifactDigest) !== text(adoption.candidateArtifactDigest)) {
+      if (text(item.releaseExecution?.releaseId) !== text(adoption.releaseId)) {
         continue;
       }
       const instruction = text(item.request?.instruction);
@@ -186,6 +231,7 @@ function mechanicRows(input) {
     tone: 'ok',
     instructions: Object.freeze(instructions),
     adopted: true,
+    publication,
   })];
 }
 
@@ -214,6 +260,7 @@ export function developerFeedDiffModel(input = {}) {
     empty: changed === 0 && !catalogUnknown,
     audience: exactUserAudience,
     mechanics: Object.freeze(mechanics),
+    mechanicPublicationPreparing: input.mechanicPublicationPreparing === true,
     catalog: Object.freeze({
       changed: catalogChanged === 1,
       unknown: catalogUnknown,
@@ -270,6 +317,9 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   const onPromoteCatalog = typeof options.onPromoteCatalog === 'function'
     ? options.onPromoteCatalog
     : null;
+  const onPublishMechanic = typeof options.onPublishMechanic === 'function'
+    ? options.onPublishMechanic
+    : null;
 
   let destroyed = false;
   let open = false;
@@ -279,6 +329,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   let promotionCode = '';
   let promotionError = '';
   let catalogSelected = true;
+  let mechanicSelected = true;
+  let mechanicPublicationPending = false;
+  let mechanicPublicationCommitted = false;
+  let mechanicPublicationConfirmOpen = false;
+  let mechanicPublicationCode = '';
+  let mechanicPublicationError = '';
   let model = developerFeedDiffModel(options.input || {});
 
   const root = element('div', 'dev-diff-surface');
@@ -359,9 +415,20 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         const selectableHead = element('div', 'dev-diff__selectable-head');
         const checkbox = element('input', 'dev-diff__checkbox');
         checkbox.type = 'checkbox';
-        checkbox.checked = false;
-        checkbox.disabled = true;
-        checkbox.setAttribute('aria-label', `${row.title}: публикуется отдельно`);
+        checkbox.checked = mechanicSelected && Boolean(row.publication);
+        checkbox.disabled = !row.publication || mechanicPublicationPending
+          || mechanicPublicationCommitted;
+        checkbox.dataset.action = 'select-mechanic';
+        checkbox.setAttribute('aria-label', `Выбрать ${row.title}`);
+        checkbox.addEventListener('change', () => {
+          mechanicSelected = checkbox.checked;
+          if (!mechanicSelected) {
+            mechanicPublicationConfirmOpen = false;
+            mechanicPublicationCode = '';
+            mechanicPublicationError = '';
+          }
+          if (open) renderBody();
+        });
         selectableHead.append(checkbox, rowHead(row.title, 'Только мне'));
         article.append(selectableHead);
         const instructions = row.instructions.length > 0
@@ -369,7 +436,13 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         for (const instruction of instructions) {
           article.append(element('p', 'dev-diff__description', instruction));
         }
-        article.append(element('p', 'dev-diff__pending', 'Механика публикуется отдельно'));
+        if (!row.publication) article.append(element(
+          'p',
+          'dev-diff__pending',
+          model.mechanicPublicationPreparing
+            ? 'Проверяю возможность публикации…'
+            : 'Пока нельзя выложить',
+        ));
         if (onShowMechanic) {
           const jump = element('button', 'dev-diff__action', 'Показать механику');
           jump.type = 'button';
@@ -379,6 +452,58 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         mechanics.append(article);
       }
       body.append(mechanics);
+
+      const publication = model.mechanics.length === 1
+        ? model.mechanics[0].publication : null;
+      if (publication && onPublishMechanic) {
+        const actions = element('div', 'dev-diff__publish-actions');
+        const selected = element(
+          'button',
+          'dev-diff__action dev-diff__action--primary',
+          'Выложить выбранное',
+        );
+        selected.type = 'button';
+        selected.dataset.action = 'publish-mechanic';
+        selected.disabled = !mechanicSelected || mechanicPublicationPending
+          || mechanicPublicationCommitted;
+        const all = element('button', 'dev-diff__action', 'Выложить всё');
+        all.type = 'button';
+        all.dataset.action = 'publish-all-mechanics';
+        all.disabled = mechanicPublicationPending || mechanicPublicationCommitted;
+        actions.append(selected, all);
+        body.append(actions);
+
+        const confirm = element('div', 'dev-diff__promotion-confirm');
+        confirm.dataset.testid = 'mechanic-publication-confirm';
+        confirm.hidden = !mechanicPublicationConfirmOpen;
+        confirm.append(
+          element('p', 'dev-diff__detail', 'Только мне → Доступно всем'),
+          element('p', 'dev-diff__promotion-code', `Код: ${publication.confirmationCode}`),
+        );
+        const input = element('input', 'dev-diff__promotion-input');
+        input.dataset.testid = 'mechanic-publication-code-input';
+        input.inputMode = 'text';
+        input.autocomplete = 'off';
+        input.maxLength = 6;
+        input.setAttribute('aria-label', 'Код подтверждения');
+        input.value = mechanicPublicationCode;
+        input.disabled = mechanicPublicationPending || mechanicPublicationCommitted;
+        input.addEventListener('input', () => { mechanicPublicationCode = input.value; });
+        const applyLabel = mechanicPublicationCommitted ? 'Публикация запущена'
+          : mechanicPublicationPending ? 'Проверяю…' : 'Подтвердить публикацию';
+        const apply = element('button', 'dev-diff__action', applyLabel);
+        apply.type = 'button';
+        apply.dataset.action = 'confirm-mechanic-publication';
+        apply.disabled = !mechanicSelected || mechanicPublicationPending
+          || mechanicPublicationCommitted;
+        confirm.append(input, apply);
+        if (mechanicPublicationError) {
+          const error = element('p', 'dev-diff__blocker', mechanicPublicationError);
+          error.setAttribute('role', 'status');
+          confirm.append(error);
+        }
+        body.append(confirm);
+      }
     }
 
     if (model.catalog.changed) {
@@ -510,6 +635,54 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       return;
     }
     const jump = target.closest('[data-action="show-mechanic"]');
+    const publishMechanic = target.closest('[data-action="publish-mechanic"]');
+    const publishAllMechanics = target.closest('[data-action="publish-all-mechanics"]');
+    if (publishAllMechanics) mechanicSelected = true;
+    if (publishMechanic || publishAllMechanics) {
+      if (!mechanicSelected) return;
+      mechanicPublicationConfirmOpen = true;
+      mechanicPublicationError = '';
+      renderBody();
+      const input = body.querySelector('[data-testid="mechanic-publication-code-input"]');
+      if (input instanceof HTMLInputElement) input.focus();
+      return;
+    }
+    const applyMechanic = target.closest('[data-action="confirm-mechanic-publication"]');
+    const mechanicPublication = model.mechanics.length === 1
+      ? model.mechanics[0].publication : null;
+    if (applyMechanic && mechanicSelected && mechanicPublication
+      && onPublishMechanic && !mechanicPublicationPending) {
+      const code = mechanicPublicationCode.trim().toUpperCase();
+      mechanicPublicationPending = true;
+      mechanicPublicationError = '';
+      renderBody();
+      void Promise.resolve(onPublishMechanic(mechanicPublication, code))
+        .then((outcome) => {
+          if (destroyed) return;
+          mechanicPublicationPending = false;
+          if (['queued_refreshed', 'queued_refresh_pending', 'published_refreshed']
+            .includes(outcome?.status)) {
+            mechanicPublicationCommitted = true;
+            mechanicPublicationConfirmOpen = true;
+            mechanicPublicationCode = '';
+            mechanicPublicationError = outcome.status === 'queued_refresh_pending'
+              ? 'Публикация запущена. Обновите ленту, чтобы увидеть результат.'
+              : 'Публикация запущена. После проверки релиз обновится автоматически.';
+          } else {
+            mechanicPublicationConfirmOpen = true;
+            mechanicPublicationError = 'Результат не подтверждён. Обновите ленту перед повтором.';
+          }
+          if (open) renderBody();
+        })
+        .catch(() => {
+          if (destroyed) return;
+          mechanicPublicationPending = false;
+          mechanicPublicationConfirmOpen = true;
+          mechanicPublicationError = 'Код не подошёл или кандидат изменился. Обновите ленту.';
+          if (open) renderBody();
+        });
+      return;
+    }
     const publishAll = target.closest('[data-action="publish-all"]');
     const publish = target.closest('[data-action="publish-catalog"]');
     if (publishAll) catalogSelected = true;
@@ -582,6 +755,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     update(next) {
       if (destroyed) return;
       const previousPromotionId = model.catalog.promotion?.operationId ?? null;
+      const previousMechanicOperation = model.mechanics[0]?.publication?.operationId ?? null;
       model = developerFeedDiffModel(next || {});
       const nextPromotionId = model.catalog.promotion?.operationId ?? null;
       if (nextPromotionId === null || nextPromotionId !== previousPromotionId) {
@@ -591,6 +765,15 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         promotionConfirmOpen = false;
         promotionCode = '';
         promotionError = '';
+      }
+      const nextMechanicOperation = model.mechanics[0]?.publication?.operationId ?? null;
+      if (nextMechanicOperation === null || nextMechanicOperation !== previousMechanicOperation) {
+        mechanicSelected = true;
+        mechanicPublicationPending = false;
+        mechanicPublicationCommitted = false;
+        mechanicPublicationConfirmOpen = false;
+        mechanicPublicationCode = '';
+        mechanicPublicationError = '';
       }
       if (open && !model.visible) closeSheet(false);
       renderBadge();

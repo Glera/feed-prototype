@@ -211,13 +211,16 @@ document.removeEventListener = (type, handler, options) => {
 };
 const { mountDeveloperFeedDiffSurface, developerFeedDiffModel,
   validateDeveloperFeedCatalogDiff, validateCatalogDirectPromotionPrepared,
-  validateCatalogDirectPromotionResult } =
+  validateCatalogDirectPromotionResult, validatePlayablePublicationPrepared,
+  validatePlayablePublicationRequested } =
   await import('/developer-feed-diff.mjs');
 window.developerFeedDiffModel = developerFeedDiffModel;
 window.mountDeveloperFeedDiffSurface = mountDeveloperFeedDiffSurface;
 window.validateDeveloperFeedCatalogDiff = validateDeveloperFeedCatalogDiff;
 window.validateCatalogDirectPromotionPrepared = validateCatalogDirectPromotionPrepared;
 window.validateCatalogDirectPromotionResult = validateCatalogDirectPromotionResult;
+window.validatePlayablePublicationPrepared = validatePlayablePublicationPrepared;
+window.validatePlayablePublicationRequested = validatePlayablePublicationRequested;
 window.shown = [];
 window.surface = mountDeveloperFeedDiffSurface(document.body, {
   input: {
@@ -418,11 +421,11 @@ try {
     }));
     return page;
   };
-  const bootFeed = async (page, label) => {
+  const bootFeed = async (page, label, extraQuery = '') => {
     const session = page.waitForResponse((response) =>
       response.request().method() === 'POST'
       && new URL(response.url()).pathname === '/api/session');
-    await page.goto(`${origin}/?browserCase=${label}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${origin}/?browserCase=${label}${extraQuery}`, { waitUntil: 'domcontentloaded' });
     await session;
     await page.locator('iframe').first().waitFor({ state: 'attached' });
     await page.waitForFunction(() => !document.querySelector('.preloader'));
@@ -603,6 +606,32 @@ try {
     'closing the inventory did not restore focus to its own control');
 
   await page.close();
+
+  // Release mode is the ordinary public projection with clean product chrome.
+  // The founder keeps only the compact view switch; all dev controls and
+  // diagnostics are absent rather than cosmetically disabled.
+  const releaseView = await newPage({ width: 375, height: 812 });
+  await bootFeed(releaseView, 'operator-release-view', '&feedView=release&diag=1');
+  await releaseView.locator('[data-testid="operator-feed-view-toggle"]')
+    .waitFor({ state: 'visible' });
+  assert.equal(await releaseView.locator('[data-feed-view="release"]')
+    .getAttribute('aria-pressed'), 'true');
+  assert.equal(await releaseView.locator(badgeSelector).count(), 0,
+    'the dev-feed badge leaked into the release projection');
+  assert.equal(await releaseView.locator('.platform-development-intake').count(), 0,
+    'the platform edit control leaked into the release projection');
+  assert.equal(await releaseView.locator('.game__operator-playable-rework').count(), 0,
+    'the mechanic edit control leaked into the release projection');
+  assert.equal(await releaseView.locator('.feed-bar__lab:not([hidden])').count(), 0,
+    'the Labs entry leaked into the release projection');
+  assert.equal(await releaseView.locator('.feed-bar__debug').count(), 0,
+    'the debug entry leaked into the release projection');
+  assert.equal(await releaseView.locator('.feed-bar__version:visible').count(), 0,
+    'the technical build stamp leaked into the release projection');
+  if (screenshotDir) {
+    await releaseView.screenshot({ path: path.join(screenshotDir, 'release-feed-mobile-375x812.png') });
+  }
+  await releaseView.close();
 
   // ── A3. Desktop proof of the same open sheet. ───────────────────────────
   const desktop = await newPage({ width: 1280, height: 800 });
@@ -960,6 +989,88 @@ try {
   assert.equal(await modulePage.locator('[data-action="publish-all"]')
     .filter({ hasText: 'Выложить всё' }).count(), 0,
   'a catalog-only mutation over-claimed that it publishes every visible difference');
+  await modulePage.locator('[data-close]').last().click();
+
+  // One content-bound confirmation publishes the complete selected mechanic
+  // set. The current server projection contains one adopted head, while the
+  // wire and surface stay batch-shaped for the later multi-head projection.
+  const mechanicPublication = await modulePage.evaluate(() => {
+    window.surface.destroy();
+    const bindingDigest = '4'.repeat(64);
+    const candidateArtifactDigest = '5'.repeat(64);
+    const prepared = {
+      schema: 'feed.playable-publication.prepared.v1',
+      operationId: '34343434-3434-4434-8434-343434343434',
+      action: 'publish',
+      clientInstanceId: '45454545-4545-4454-8454-454545454545',
+      items: [{
+        releaseId: '56565656-5656-4656-8656-565656565656',
+        playableId: 'marble-sort-swipe',
+        bindingDigest,
+        candidateArtifactDigest,
+        runtimeArtifactDigest: `sha256:${'6'.repeat(64)}`,
+        changes: ['Убрать подложку.'],
+      }],
+      confirmationCode: 'D0C0DE',
+    };
+    window.mechanicPublications = [];
+    window.surface = window.mountDeveloperFeedDiffSurface(document.body, {
+      input: {
+        operatorSurfacesActive: true,
+        reworks: [],
+        adoption: {
+          playableId: 'marble-sort-swipe',
+          releaseId: prepared.items[0].releaseId,
+          bindingDigest,
+          candidateArtifactDigest,
+        },
+        catalog: {
+          schema: 'feed.developer-catalog-diff.v1', mechanic: 'sort', variant: 'base',
+          available: false, unavailableReason: 'catalog_entry_unavailable',
+          dev: null, public: null,
+        },
+        mechanicPublication: prepared,
+      },
+      onPublishMechanic: async (value, code) => {
+        window.mechanicPublications.push({ value, code });
+        return { status: 'queued_refreshed' };
+      },
+    });
+    return {
+      preparedAccepted: window.validatePlayablePublicationPrepared(prepared) !== null,
+      preparedExtraRejected: window.validatePlayablePublicationPrepared({
+        ...prepared, extra: true,
+      }) === null,
+      requestedAccepted: window.validatePlayablePublicationRequested({
+        schema: 'feed.playable-publication.requested.v1',
+        operationId: prepared.operationId,
+        action: 'publish', items: prepared.items, status: 'queued', replayed: false,
+      }) !== null,
+    };
+  });
+  assert.deepEqual(mechanicPublication, {
+    preparedAccepted: true,
+    preparedExtraRejected: true,
+    requestedAccepted: true,
+  }, 'mechanic publication validators accepted a drifted wire');
+  await modulePage.locator(badgeSelector).click();
+  await modulePage.locator('[data-action="select-mechanic"]').uncheck();
+  assert.equal(await modulePage.locator('[data-action="publish-mechanic"]').isDisabled(), true,
+    'publish-selected stayed active with no selected mechanic');
+  await modulePage.locator('[data-action="publish-all-mechanics"]').click();
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]').isChecked(), true,
+    'publish-all did not select every eligible mechanic');
+  await modulePage.locator('text=Код: D0C0DE').waitFor({ state: 'visible' });
+  await modulePage.locator('[data-testid="mechanic-publication-code-input"]').fill('d0c0de');
+  await modulePage.locator('[data-action="confirm-mechanic-publication"]').click();
+  await modulePage.locator('text=Публикация запущена').last().waitFor({ state: 'visible' });
+  const submittedMechanicPublication = await modulePage.evaluate(() => window.mechanicPublications);
+  assert.equal(submittedMechanicPublication.length, 1,
+    'publish-all issued more than one publication mutation');
+  assert.equal(submittedMechanicPublication[0].code, 'D0C0DE',
+    'the one publication code was not normalized and submitted once');
+  assert.equal(submittedMechanicPublication[0].value.items.length, 1,
+    'the complete prepared mechanic set was not submitted atomically');
   await modulePage.locator('[data-close]').last().click();
 
   const listenerBalance = () => modulePage.evaluate(() =>

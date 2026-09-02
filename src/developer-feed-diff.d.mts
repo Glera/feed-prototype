@@ -2,6 +2,8 @@ import type {
   DeveloperFeedCatalogDiffV1,
   CatalogDirectPromotionPreparedV1,
   CatalogDirectPromotionResultV1,
+  PlayablePublicationPreparedV1,
+  PlayablePublicationRequestedV1,
   OperatorPlayableReworkQueueItemV1,
 } from './api';
 
@@ -27,6 +29,7 @@ export interface DeveloperFeedDiffMechanicRow {
   instructions: readonly string[];
   /** True when this row exists because the operator adopted an exact candidate. */
   adopted: boolean;
+  publication: Readonly<PlayablePublicationPreparedV1> | null;
 }
 
 export interface DeveloperFeedDiffCatalogRow {
@@ -50,6 +53,7 @@ export interface DeveloperFeedDiffInput {
     playableId: string;
     releaseId: string;
     candidateArtifactDigest: string;
+    bindingDigest?: string;
     sourceCommit?: string;
   } | null;
   /** Exact optional server-owned catalog dev/public projection from `/session`. */
@@ -58,6 +62,9 @@ export interface DeveloperFeedDiffInput {
   catalogPromotion?: CatalogDirectPromotionPreparedV1 | null;
   /** A prepare request for the current exact candidate is in flight. */
   catalogPromotionPreparing?: boolean;
+  /** Exact server-prepared private mechanic → public publication closure. */
+  mechanicPublication?: PlayablePublicationPreparedV1 | null;
+  mechanicPublicationPreparing?: boolean;
 }
 
 export interface DeveloperFeedDiffModel {
@@ -69,6 +76,7 @@ export interface DeveloperFeedDiffModel {
   empty: boolean;
   audience: Readonly<import('./operator-presentation-vocabulary.mjs').OperatorPresentationEntryV1>;
   mechanics: DeveloperFeedDiffMechanicRow[];
+  mechanicPublicationPreparing: boolean;
   catalog: DeveloperFeedDiffCatalogRow;
 }
 
@@ -82,6 +90,10 @@ export interface DeveloperFeedDiffSurface {
 
 export interface CatalogDirectPromotionClientOutcome {
   status: 'committed_refreshed' | 'committed_refresh_pending';
+}
+
+export interface PlayablePublicationClientOutcome {
+  status: 'queued_refreshed' | 'queued_refresh_pending' | 'published_refreshed';
 }
 
 export function developerFeedDiffModel(
@@ -100,6 +112,14 @@ export function validateCatalogDirectPromotionResult(
   value: unknown,
 ): Readonly<CatalogDirectPromotionResultV1> | null;
 
+export function validatePlayablePublicationPrepared(
+  value: unknown,
+): Readonly<PlayablePublicationPreparedV1> | null;
+
+export function validatePlayablePublicationRequested(
+  value: unknown,
+): Readonly<PlayablePublicationRequestedV1> | null;
+
 export function mountDeveloperFeedDiffSurface(
   host: HTMLElement,
   options: {
@@ -110,5 +130,9 @@ export function mountDeveloperFeedDiffSurface(
       prepared: Readonly<CatalogDirectPromotionPreparedV1>,
       confirmationCode: string,
     ): Promise<CatalogDirectPromotionClientOutcome>;
+    onPublishMechanic?(
+      prepared: Readonly<PlayablePublicationPreparedV1>,
+      confirmationCode: string,
+    ): Promise<PlayablePublicationClientOutcome>;
   },
 ): DeveloperFeedDiffSurface;

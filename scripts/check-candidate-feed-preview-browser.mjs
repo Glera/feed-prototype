@@ -445,6 +445,7 @@ const server = createServer(async (request, response) => {
         candidatePath: reworkAdoption ? candidatePath : sourceCandidatePath,
         candidateArtifactDigest: reworkAdoption
           ? candidateArtifactDigest : sourceCandidateArtifactDigest,
+        bindingDigest: 'e'.repeat(64),
         runtimeArtifactDigest: reworkAdoption
           ? reworkRuntimeArtifactDigest : sourceRuntimeArtifactDigest,
         reviewBindingDigest: reworkAdoption
@@ -645,6 +646,10 @@ try {
     if (window === window.top) localStorage.setItem('swipe_feed_roster_next_session_v1:42', JSON.stringify(snapshot));
   }, roster);
   const page = await context.newPage();
+  await page.goto(`${validUrl}&feedView=release`, { waitUntil: 'domcontentloaded' });
+  await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
+  assert.equal(await page.locator('.game--candidate-read-only-preview').count(), 1,
+    'the operator release query masked an explicit immutable candidate route');
   await page.goto(validUrl, { waitUntil: 'domcontentloaded' });
   await page.getByText('Кандидат — не опубликовано', { exact: true }).waitFor({ state: 'visible' });
   await page.waitForFunction(() => window.__feedWarm?.().current === 0);

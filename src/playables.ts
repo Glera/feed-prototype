@@ -39,22 +39,30 @@ export interface CandidatePlayableOverlay {
   playableId: string;
   candidatePath: string;
   candidateArtifactDigest: string;
+  bindingDigest?: string;
   reviewBindingDigest: string;
   sourceCommit?: string;
   runtimeArtifactDigest?: string;
 }
 let CANDIDATE_OVERLAY: CandidatePlayableOverlay | null = null;
+let CANDIDATE_OVERLAY_VISIBLE = true;
 
 export function setCandidatePlayableOverlay(overlay: CandidatePlayableOverlay | null): void {
   CANDIDATE_OVERLAY = overlay ? Object.freeze({ ...overlay }) : null;
 }
 
+/** Switch between the exact operator overlay and the ordinary public bytes. */
+export function setCandidatePlayableOverlayVisible(visible: boolean): void {
+  CANDIDATE_OVERLAY_VISIBLE = visible;
+}
+
 export function candidatePlayableOverlay(): CandidatePlayableOverlay | null {
-  return CANDIDATE_OVERLAY;
+  return CANDIDATE_OVERLAY_VISIBLE ? CANDIDATE_OVERLAY : null;
 }
 
 function candidateOverlayFor(id: string): CandidatePlayableOverlay | null {
-  return CANDIDATE_OVERLAY?.playableId === id ? CANDIDATE_OVERLAY : null;
+  const overlay = candidatePlayableOverlay();
+  return overlay?.playableId === id ? overlay : null;
 }
 
 export function setMechanicVersions(m: Record<string, MechanicManifestValue> | null | undefined): void {
