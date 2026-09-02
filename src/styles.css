@@ -5296,7 +5296,7 @@ body {
   pointer-events: auto;
 }
 .dev-diff__badge::after {
-  content: "правка 1,2";
+  content: "правка 1,2,3";
   position: absolute;
   top: calc(100% + 3px);
   left: 50%;
