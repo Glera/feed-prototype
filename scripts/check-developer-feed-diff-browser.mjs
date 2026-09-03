@@ -1090,16 +1090,24 @@ try {
     requestedAccepted: true,
   }, 'mechanic publication validators accepted a drifted wire');
   await modulePage.locator(badgeSelector).click();
-  for (const checkbox of await modulePage.locator('[data-action="select-mechanic"]').all()) {
-    await checkbox.uncheck();
-  }
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 0,
+    'opening the inventory silently preselected private mechanics');
   assert.equal(await modulePage.locator('[data-action="publish-mechanic"]').isDisabled(), true,
     'publish-selected stayed active with no selected mechanic');
-  await modulePage.locator('[data-action="publish-all-mechanics"]').click();
-  await modulePage.locator('[data-action="publish-all-mechanics"]')
-    .filter({ hasText: 'Выложить все механики' }).waitFor();
+  const selectAllMechanics = modulePage.locator('[data-action="select-all-mechanics"]');
+  assert.equal(await selectAllMechanics.isChecked(), false,
+    'select-all started checked while every mechanic row was clear');
+  assert.equal(await selectAllMechanics.getAttribute('aria-label'), 'Выбрать все механики');
+  await selectAllMechanics.check();
   assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 2,
-    'publish-all did not select every eligible mechanic');
+    'select-all did not select every eligible mechanic');
+  assert.equal(await selectAllMechanics.getAttribute('aria-label'), 'Убрать все механики');
+  await selectAllMechanics.uncheck();
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 0,
+    'remove-all left a mechanic selected');
+  assert.equal(await selectAllMechanics.getAttribute('aria-label'), 'Выбрать все механики');
+  await selectAllMechanics.check();
+  await modulePage.locator('[data-action="publish-mechanic"]').click();
   assert.deepEqual(
     await modulePage.evaluate(() => window.mechanicPublicationPreparations),
     [['marble-sort-swipe', 'arrows-v1-swipe']],

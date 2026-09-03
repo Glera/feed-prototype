@@ -358,9 +358,10 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   let promotionError = '';
   let catalogSelected = true;
   let model = developerFeedDiffModel(options.input || {});
-  let mechanicSelected = new Set(
-    model.mechanics.filter((row) => row.adopted).map((row) => row.playableId),
-  );
+  // Publication is a deliberate operator act.  Opening the inventory must
+  // never silently preselect every private mechanic: the operator either
+  // chooses individual rows or uses the explicit select-all control below.
+  let mechanicSelected = new Set();
   let mechanicQueued = new Set();
   let mechanicPublication = model.mechanics.find((row) => row.adopted)?.publication ?? null;
   let mechanicPublicationPending = false;
@@ -497,6 +498,39 @@ export function mountDeveloperFeedDiffSurface(host, options) {
 
       if (publishableRows.length > 0 && onPrepareMechanics && onPublishMechanic) {
         const actions = element('div', 'dev-diff__publish-actions');
+        const selectableIds = publishableRows
+          .filter((row) => !mechanicQueued.has(row.playableId))
+          .map((row) => row.playableId);
+        const selectedCount = selectableIds
+          .filter((playableId) => mechanicSelected.has(playableId)).length;
+        const allSelected = selectableIds.length > 0 && selectedCount === selectableIds.length;
+        const selectAll = element('label', 'dev-diff__select-all');
+        const selectAllCheckbox = element('input', 'dev-diff__checkbox');
+        selectAllCheckbox.type = 'checkbox';
+        selectAllCheckbox.checked = allSelected;
+        selectAllCheckbox.indeterminate = selectedCount > 0 && !allSelected;
+        selectAllCheckbox.disabled = selectableIds.length === 0 || mechanicPublicationPending;
+        selectAll.dataset.disabled = selectAllCheckbox.disabled ? 'true' : 'false';
+        selectAllCheckbox.dataset.action = 'select-all-mechanics';
+        selectAllCheckbox.setAttribute(
+          'aria-label',
+          allSelected ? 'Убрать все механики' : 'Выбрать все механики',
+        );
+        selectAllCheckbox.addEventListener('change', () => {
+          for (const playableId of selectableIds) {
+            if (selectAllCheckbox.checked) mechanicSelected.add(playableId);
+            else mechanicSelected.delete(playableId);
+          }
+          mechanicPublication = null;
+          mechanicPublicationConfirmOpen = false;
+          mechanicPublicationCode = '';
+          mechanicPublicationError = '';
+          if (open) renderBody();
+        });
+        selectAll.append(
+          selectAllCheckbox,
+          element('span', null, allSelected ? 'Убрать все' : 'Выбрать все'),
+        );
         const selected = element(
           'button',
           'dev-diff__action dev-diff__action--primary',
@@ -505,12 +539,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         selected.type = 'button';
         selected.dataset.action = 'publish-mechanic';
         selected.disabled = mechanicSelected.size === 0 || mechanicPublicationPending;
-        const all = element('button', 'dev-diff__action', 'Выложить все механики');
-        all.type = 'button';
-        all.dataset.action = 'publish-all-mechanics';
-        all.disabled = mechanicPublicationPending
-          || publishableRows.every((row) => mechanicQueued.has(row.playableId));
-        actions.append(selected, all);
+        actions.append(selectAll, selected);
         body.append(actions);
 
         const confirm = element('div', 'dev-diff__promotion-confirm');
@@ -681,13 +710,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     }
     const jump = target.closest('[data-action="show-mechanic"]');
     const publishMechanic = target.closest('[data-action="publish-mechanic"]');
-    const publishAllMechanics = target.closest('[data-action="publish-all-mechanics"]');
-    if (publishAllMechanics) {
-      mechanicSelected = new Set(model.mechanics
-        .filter((row) => row.adopted && !mechanicQueued.has(row.playableId))
-        .map((row) => row.playableId));
-    }
-    if (publishMechanic || publishAllMechanics) {
+    if (publishMechanic) {
       if (mechanicSelected.size === 0 || !onPrepareMechanics) return;
       const selectedIds = model.mechanics
         .filter((row) => mechanicSelected.has(row.playableId))
@@ -848,9 +871,11 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       if (nextMechanics !== previousMechanics) {
         const currentIds = new Set(model.mechanics.map((row) => row.playableId));
         mechanicQueued = new Set([...mechanicQueued].filter((id) => currentIds.has(id)));
-        mechanicSelected = new Set(model.mechanics
+        const selectableIds = new Set(model.mechanics
           .filter((row) => row.adopted && !mechanicQueued.has(row.playableId))
           .map((row) => row.playableId));
+        mechanicSelected = new Set([...mechanicSelected]
+          .filter((playableId) => currentIds.has(playableId) && selectableIds.has(playableId)));
         mechanicPublication = model.mechanics.find((row) => row.adopted)?.publication ?? null;
         mechanicPublicationPending = false;
         mechanicPublicationCommitted = false;
