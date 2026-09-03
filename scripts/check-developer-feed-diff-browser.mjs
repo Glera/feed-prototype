@@ -1013,7 +1013,25 @@ try {
   // One content-bound confirmation publishes the complete selected mechanic
   // set. The current server projection contains one adopted head, while the
   // wire and surface stay batch-shaped for the later multi-head projection.
-  const mechanicPublication = await modulePage.evaluate(() => {
+  const adoptedLegacyRework = reworkItem({
+    requestId: '78787878-7878-4878-8878-787878787878',
+    playableId: 'marble-sort-swipe',
+    instruction: 'Убрать подложку.',
+    execution: {
+      state: 'accepted', code: null, summary: null,
+      updatedAt: '2026-08-18T09:10:00.000Z',
+    },
+    releaseExecution: {
+      releaseId: '56565656-5656-4656-8656-565656565656',
+      state: 'ready_for_approval',
+      bindingDigest: '4'.repeat(64),
+      code: null,
+      summary: null,
+      updatedAt: '2026-08-18T09:15:00.000Z',
+      notificationStatus: 'confirmed',
+    },
+  });
+  const mechanicPublication = await modulePage.evaluate((legacyRework) => {
     window.surface.destroy();
     const bindingDigest = '4'.repeat(64);
     const candidateArtifactDigest = '5'.repeat(64);
@@ -1039,30 +1057,33 @@ try {
       }],
       confirmationCode: 'D0C0DE',
     };
+    const input = {
+      operatorSurfacesActive: true,
+      reworks: [['marble-sort-swipe', [legacyRework]]],
+      adoptions: [{
+        playableId: 'marble-sort-swipe',
+        releaseId: prepared.items[0].releaseId,
+        bindingDigest,
+        candidateArtifactDigest,
+      }, {
+        playableId: 'arrows-v1-swipe',
+        releaseId: prepared.items[1].releaseId,
+        bindingDigest: prepared.items[1].bindingDigest,
+        candidateArtifactDigest: prepared.items[1].candidateArtifactDigest,
+      }],
+      catalog: {
+        schema: 'feed.developer-catalog-diff.v1', mechanic: 'sort', variant: 'base',
+        available: false, unavailableReason: 'catalog_entry_unavailable',
+        dev: null, public: null,
+      },
+      mechanicPublication: prepared,
+    };
+    window.mechanicPublicationInput = input;
+    window.mechanicPublicationPrepared = prepared;
     window.mechanicPublications = [];
     window.mechanicPublicationPreparations = [];
     window.surface = window.mountDeveloperFeedDiffSurface(document.body, {
-      input: {
-        operatorSurfacesActive: true,
-        reworks: [],
-        adoptions: [{
-          playableId: 'marble-sort-swipe',
-          releaseId: prepared.items[0].releaseId,
-          bindingDigest,
-          candidateArtifactDigest,
-        }, {
-          playableId: 'arrows-v1-swipe',
-          releaseId: prepared.items[1].releaseId,
-          bindingDigest: prepared.items[1].bindingDigest,
-          candidateArtifactDigest: prepared.items[1].candidateArtifactDigest,
-        }],
-        catalog: {
-          schema: 'feed.developer-catalog-diff.v1', mechanic: 'sort', variant: 'base',
-          available: false, unavailableReason: 'catalog_entry_unavailable',
-          dev: null, public: null,
-        },
-        mechanicPublication: prepared,
-      },
+      input,
       onPrepareMechanics: async (playableIds) => {
         window.mechanicPublicationPreparations.push(playableIds);
         return prepared;
@@ -1083,7 +1104,7 @@ try {
         action: 'publish', items: prepared.items, status: 'queued', replayed: false,
       }) !== null,
     };
-  });
+  }, adoptedLegacyRework);
   assert.deepEqual(mechanicPublication, {
     preparedAccepted: true,
     preparedExtraRejected: true,
@@ -1094,10 +1115,62 @@ try {
     'opening the inventory silently preselected private mechanics');
   assert.equal(await modulePage.locator('[data-action="publish-mechanic"]').isDisabled(), true,
     'publish-selected stayed active with no selected mechanic');
+  const marbleMechanicRow = modulePage.locator(
+    '[data-row="mechanic"][data-playable-id="marble-sort-swipe"]',
+  );
+  assert.equal(await marbleMechanicRow.getByText('Убрать подложку.', { exact: true }).count(), 1,
+    'the exact adopted legacy instruction was not rendered once as a publishable difference');
+  assert.equal(await marbleMechanicRow.locator('.dev-diff__pending').count(), 0,
+    'the exact adopted legacy instruction was also rendered as pending work');
   const selectAllMechanics = modulePage.locator('[data-action="select-all-mechanics"]');
   assert.equal(await selectAllMechanics.isChecked(), false,
     'select-all started checked while every mechanic row was clear');
   assert.equal(await selectAllMechanics.getAttribute('aria-label'), 'Выбрать все механики');
+  const marbleMechanic = modulePage.locator(
+    '[data-action="select-mechanic"][aria-label="Выбрать Marble Sort"]',
+  );
+  await marbleMechanic.check();
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 1,
+    'one explicit mechanic selection changed more than one row');
+  assert.equal(await selectAllMechanics.evaluate((node) => node.indeterminate), true,
+    'one selected mechanic did not produce the partial select-all state');
+  assert.equal(await modulePage.locator('.dev-diff__select-all').getByText('Выбрать все', { exact: true }).count(), 1,
+    'the partial-selection control did not keep the visible select-all label');
+  await modulePage.evaluate(() => {
+    const prepared = window.mechanicPublicationPrepared;
+    const extra = {
+      releaseId: '89898989-8989-4898-8898-898989898989',
+      playableId: 'minesweeper-v1-swipe',
+      bindingDigest: 'a'.repeat(64),
+      candidateArtifactDigest: 'b'.repeat(64),
+      runtimeArtifactDigest: `sha256:${'c'.repeat(64)}`,
+      changes: ['Сделать клетки контрастнее.'],
+    };
+    window.surface.update({
+      ...window.mechanicPublicationInput,
+      adoptions: [...window.mechanicPublicationInput.adoptions, {
+        playableId: extra.playableId,
+        releaseId: extra.releaseId,
+        bindingDigest: extra.bindingDigest,
+        candidateArtifactDigest: extra.candidateArtifactDigest,
+      }],
+      mechanicPublication: { ...prepared, items: [...prepared.items, extra] },
+    });
+  });
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 1,
+    'projection refresh silently expanded the explicit mechanic selection');
+  assert.equal(await modulePage.locator(
+    '[data-action="select-mechanic"][aria-label="Выбрать Marble Sort"]',
+  ).isChecked(), true, 'projection refresh lost a still-eligible explicit choice');
+  assert.equal(await modulePage.locator(
+    '[data-action="select-mechanic"][aria-label="Выбрать Minesweeper"]',
+  ).isChecked(), false, 'projection refresh selected a newly eligible mechanic');
+  assert.equal(await selectAllMechanics.evaluate((node) => node.indeterminate), true,
+    'partial state was lost after projection refresh');
+  await modulePage.evaluate(() => window.surface.update(window.mechanicPublicationInput));
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 1,
+    'returning to the original projection lost the still-eligible explicit choice');
+  await marbleMechanic.uncheck();
   await selectAllMechanics.check();
   assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 2,
     'select-all did not select every eligible mechanic');

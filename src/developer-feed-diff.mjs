@@ -179,6 +179,18 @@ const visiblePendingRequest = (item) => {
   });
 };
 
+const isAdoptedPublicationRequest = (item, adoption, preparedItem) => {
+  if (!preparedItem || item?.queueDisposition !== 'active_batch'
+    || item?.execution?.state !== 'accepted') return false;
+  const releaseExecution = item.releaseExecution;
+  const instruction = text(item.request?.instruction);
+  return Boolean(instruction)
+    && releaseExecution?.state === 'ready_for_approval'
+    && releaseExecution.releaseId === adoption.releaseId
+    && releaseExecution.bindingDigest === adoption.bindingDigest
+    && preparedItem.changes.includes(instruction);
+};
+
 export function validatePlayablePublicationPrepared(value) {
   if (!exactObject(value, [
     'schema', 'operationId', 'action', 'clientInstanceId', 'items', 'confirmationCode',
@@ -228,6 +240,7 @@ function mechanicRows(input) {
     ));
     const instructions = preparedItem ? [...new Set(preparedItem.changes)] : [];
     const pendingRequests = (pendingByPlayable.get(adoption.playableId) || [])
+      .filter((item) => !isAdoptedPublicationRequest(item, adoption, preparedItem))
       .map(visiblePendingRequest).filter(Boolean);
     pendingByPlayable.delete(adoption.playableId);
     return [Object.freeze({
