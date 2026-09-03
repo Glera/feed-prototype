@@ -1017,10 +1017,6 @@ try {
     requestId: '78787878-7878-4878-8878-787878787878',
     playableId: 'marble-sort-swipe',
     instruction: 'Убрать подложку.',
-    execution: {
-      state: 'accepted', code: null, summary: null,
-      updatedAt: '2026-08-18T09:10:00.000Z',
-    },
     releaseExecution: {
       releaseId: '56565656-5656-4656-8656-565656565656',
       state: 'ready_for_approval',

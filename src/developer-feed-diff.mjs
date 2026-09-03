@@ -181,7 +181,7 @@ const visiblePendingRequest = (item) => {
 
 const isAdoptedPublicationRequest = (item, adoption, preparedItem) => {
   if (!preparedItem || item?.queueDisposition !== 'active_batch'
-    || item?.execution?.state !== 'accepted') return false;
+    || item?.execution !== undefined) return false;
   const releaseExecution = item.releaseExecution;
   const instruction = text(item.request?.instruction);
   return Boolean(instruction)
