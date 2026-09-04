@@ -527,7 +527,7 @@ try {
   });
   assert.deepEqual(
     [badgeBorderColor.red, badgeBorderColor.green, badgeBorderColor.blue],
-    [255, 214, 102],
+    [255, 216, 90],
     `the dev-feed badge border is not yellow: ${badgeBorderColor.serialized}`,
   );
   assert.ok(
