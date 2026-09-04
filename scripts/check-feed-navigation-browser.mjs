@@ -204,6 +204,18 @@ const swipeCurrent = async (page, direction, { inspectRide = false, repeatDuring
   }
 };
 
+const swipeLoadingCurrent = async (page) => {
+  const surface = page.locator('.page--in-viewport .game--loading .game__loading-swipe').first();
+  await surface.waitFor({ state: 'visible', timeout: 10_000 });
+  const box = await surface.boundingBox();
+  assert.ok(box, 'current loading swipe surface has no box');
+  const x = box.x + box.width / 2;
+  await page.mouse.move(x, box.y + box.height * 0.75);
+  await page.mouse.down();
+  await page.mouse.move(x, box.y + box.height * 0.22, { steps: 8 });
+  await page.mouse.up();
+};
+
 const currentRuntime = (page) => page.evaluate(() => {
   const game = document.querySelector('.page--in-viewport .game');
   const frame = game?.querySelector('iframe');
@@ -363,11 +375,57 @@ const runViewport = async (browser, viewport, label) => {
   await context.close();
 };
 
+const assertLoadingCardRemainsSwipeable = async (browser) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  let releaseDelayedFrame;
+  let delayedFrameRequested = false;
+  const delayedFrame = new Promise((resolve) => { releaseDelayedFrame = resolve; });
+  await context.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/javascript',
+    body: telegramSdk,
+  }));
+  await context.route(`${origin}/marble-sort-swipe.html*`, async (route) => {
+    delayedFrameRequested = true;
+    await delayedFrame;
+    await route.continue();
+  });
+  const page = await context.newPage();
+  try {
+    const initData = 'query_id=nav&user=%7B%22id%22%3A880088%7D&hash=nav';
+    await page.goto(`${origin}/?prefetch=off&initData=${encodeURIComponent(initData)}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof window.__feedWarm === 'function');
+    await page.locator('.page--in-viewport .game--autoplay').waitFor({ state: 'visible', timeout: 15_000 });
+    await page.waitForFunction(() => !document.querySelector('.preloader'), null, { timeout: 15_000 });
+
+    await swipeCurrent(page, 1);
+    await waitForSettledIndex(page, 1);
+    assert.equal(delayedFrameRequested, true, 'the fixture did not hold the second mechanic iframe');
+    assert.equal(
+      await page.locator('.page--in-viewport .game--loading').count(),
+      1,
+      'the held mechanic must remain visibly loading',
+    );
+
+    await swipeLoadingCurrent(page);
+    await waitForSettledIndex(page, 2);
+    assert.equal(
+      await page.locator('.page--in-viewport .game--loading .game__loading-swipe').count(),
+      0,
+      'the feed must leave the held loading mechanic without waiting for iframe readiness',
+    );
+  } finally {
+    releaseDelayedFrame?.();
+    await context.close();
+  }
+};
+
 const browser = await chromium.launch();
 try {
   await runViewport(browser, { width: 390, height: 844 }, 'mobile/TMA');
   await runViewport(browser, { width: 390, height: 760 }, 'short-mobile/TMA');
   await runViewport(browser, { width: 1280, height: 800 }, 'desktop');
+  await assertLoadingCardRemainsSwipeable(browser);
   console.log('feed navigation browser checks passed for exact, short mobile/TMA and desktop');
 } finally {
   await browser.close();

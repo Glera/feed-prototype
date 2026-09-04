@@ -2106,6 +2106,19 @@ body {
   opacity: 1;
   animation: spin 0.74s linear infinite;
 }
+
+/* A cold per-mechanic iframe is not an input surface yet. Keep a transparent
+   host-owned paging layer above the loading cover so the user can immediately
+   swipe past it; it disappears from hit-testing as soon as loading completes. */
+.game__loading-swipe {
+  position: absolute;
+  inset: 0 0 var(--bar-reserve) 0;
+  z-index: 5;
+  pointer-events: none;
+  touch-action: none;
+}
+.game--loading .game__loading-swipe { pointer-events: auto; }
+
 .game--ready .game__frame { animation: fadein 0.18s ease-out; }
 
 @keyframes spin {

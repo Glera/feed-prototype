@@ -6327,6 +6327,19 @@ export class Feed {
       spinner.className = 'game__spinner';
       game.appendChild(spinner);
 
+      // A not-yet-ready iframe cannot forward pointer events back to the host,
+      // but paging must never wait for it. This transparent host-owned surface
+      // exists only for the per-card loading state; once the playable is ready,
+      // autoplay/manual input keeps using the existing overlays/iframe paths.
+      const loadingSwipe = document.createElement('div');
+      loadingSwipe.className = 'game__loading-swipe';
+      loadingSwipe.setAttribute('aria-hidden', 'true');
+      this.attachSwipeSurface(
+        loadingSwipe,
+        () => !(this.series?.playing && this.series.index === i),
+      );
+      game.appendChild(loadingSwipe);
+
       const label = document.createElement('div');
       label.className = 'game__label';
       label.textContent = p.id;
