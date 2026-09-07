@@ -476,6 +476,11 @@ export async function mountCatalogLabAuth(): Promise<void> {
   privacy.className = 'lab-auth__privacy';
   privacy.textContent = 'The one-time code is kept only until your decision and is never saved on this device.';
 
+  const researchEntry = document.createElement('section');
+  researchEntry.className = 'lab-auth__card';
+  researchEntry.dataset.testid = 'research-create-entry';
+  researchEntry.hidden = true;
+
   shell.append(
     header,
     intro,
@@ -484,10 +489,12 @@ export async function mountCatalogLabAuth(): Promise<void> {
     requestSection,
     successSection,
     grantsSection,
+    researchEntry,
     privacy,
   );
   root.appendChild(shell);
   document.body.appendChild(root);
+  void import('./research-party-create').then((module) => module.mountResearchCreateEntry(researchEntry));
 
   let activeCode = '';
   let activeAuthorization: CatalogLabDeviceAuthorization | null = null;

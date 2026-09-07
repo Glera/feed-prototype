@@ -218,7 +218,11 @@ const candidateReviewReleaseId = candidateReviewReleaseIdFromParam(routedStartPa
 
 if (researchRoute.requested) {
   // Even malformed/conflicting Research links stay isolated: no fallback feed.
-  void import('./research-party-screen').then((module) => module.mountResearchParty(researchRoute.requestId));
+  if (researchRoute.requestId === 'new') {
+    void import('./research-party-create').then((module) => module.mountResearchPartyCreate());
+  } else {
+    void import('./research-party-screen').then((module) => module.mountResearchParty(researchRoute.requestId));
+  }
 } else if (missionDemoLaunch) {
   void import('./mission-demo').then((module) => module.mountMissionDemo());
 } else if (candidateFeedRequested) {

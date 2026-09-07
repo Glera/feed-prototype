@@ -31,9 +31,9 @@ export function researchPartyRoute({ search = '', startParam = null } = {}) {
   const competing = ['candidateReview', 'missionDemo', 'labAuth', 'candidateFeed',
     'candidateFeedRelease', 'candidateFeedPlayable', 'candidateFeedArtifact', 'candidateFeedBinding']
     .some((key) => params.has(key));
-  if (!UUID.test(id || '') || queryIds.length > 1 || competing
+  if (!(id === 'new' || UUID.test(id || '')) || queryIds.length > 1 || competing
     || (fromQuery && queryIds[0] !== id)
-    || (!fromStart && startParam != null && startParam !== '')) {
+    || (!fromStart && startParam != null && startParam !== '' && startParam !== 'lab_auth')) {
     return { requested: true, requestId: null };
   }
   return { requested: true, requestId: id };
@@ -186,6 +186,13 @@ export async function validateResearchResult(value, requestId) {
   check(unique(value.choices.map((choice) => choice.receiptId))
     && unique(value.choices.map((choice) => choice.command.mutationId))
     && unique(value.choices.map((choice) => choice.command.candidateId)));
+  return value;
+}
+
+export async function validateResearchIntakeResponse(value, command) {
+  check(object(value) && UUID.test(value.requestId));
+  await intake(value, value.requestId);
+  check(researchCanonicalJson(value.request) === researchCanonicalJson(command));
   return value;
 }
 

@@ -7,7 +7,7 @@ failure: no sibling checkout, optional skip or synchronization pipeline.
 
 Source repository: `Glera/swipe-backend`.
 Original directory: `tests/fixtures/` (same filenames below).
-Source checkpoint: `ce8194316848c5cfb309665fabf014528d62f650`
+Source checkpoint: `4edb3274726c8081a036c1c766399b23dbff51dd`
 (verified local Backend commit; not yet a merged or live release).
 
 The source HTTP + PostgreSQL tests compare the result and choice responses to
@@ -24,3 +24,6 @@ literal-text variants derived in its test harness, never production fallbacks.
 | research-party-result-v1.golden.json | `04d65f1c8b29fd4d36e46ef59f7d39ef8d2af11ab1d90b446d28eb823ae11abd` |
 | research-party-shortlist-context-v1.json | `ee7401fb3fa0097cde985b4750e0647f3070685c5f7e0618d2edcb987ec42c96` |
 | research-party-shortlist-v1.golden.json | `fc1b31f6bbaa0e4d3cea5682f89fc106c5de5624aa71bc7902fec8a114b0f087` |
+| research-party-phone-capability-v1.golden.json | `ac6a9effa9ef85b1b0467cc8b882ca0e243d40f44784a16bef298034f5061afe` |
+| research-party-phone-accepted-intake-v1.golden.json | `f92402a61ff8a69e2819bae95ad1055c5a1dc3629b15108bfcf1b05d1eb73c03` |
+| research-party-phone-intake-list-v1.golden.json | `125b9ad235a218eae29ea2988ccc3ae69d57e0e06a47cbf4cf16d8d3b0d66091` |

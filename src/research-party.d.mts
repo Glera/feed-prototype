@@ -47,5 +47,6 @@ export function researchSourceUrl(sourceId: string, value: unknown): string | nu
 export function validateResearchShortlist(value: unknown): Promise<ResearchShortlist>;
 export function validateResearchChoiceCommand(value: unknown, shortlist: ResearchShortlist): ResearchChoiceCommand;
 export function validateResearchResult(value: unknown, requestId: string): Promise<ResearchResult>;
+export function validateResearchIntakeResponse(value: unknown, command: ResearchResult['intake']['request']): Promise<ResearchResult['intake']>;
 export function validateResearchChoiceResponse(value: unknown, result: ResearchResult, command: ResearchChoiceCommand): Promise<ResearchChoiceReceipt>;
 export function researchPendingKey(actorUserId: string, requestId: string): string;

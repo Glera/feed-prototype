@@ -32,6 +32,7 @@ import type {
   PlatformDevelopmentIntakeRequestV1,
 } from './operator-development-intakes.mjs';
 import type { ResearchChoiceCommand } from './research-party.mjs';
+import type { ResearchIntakeCommand } from './research-party-phone.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -2080,6 +2081,16 @@ export function apiCatalogLabLookup(userCode: string): Promise<CatalogLabDeviceA
 /** TMA-only Research projection/choice. No worker grant or source fetch in Feed. */
 export function apiResearchPartyResult(requestId: string, signal?: AbortSignal): Promise<unknown> {
   return getRequired<unknown>(`/api/operator/research-parties/${encodeURIComponent(requestId)}`, signal);
+}
+
+export function apiResearchPhoneCapability(signal?: AbortSignal): Promise<unknown> {
+  return getRequired<unknown>('/api/operator/research-parties/capability', signal);
+}
+export function apiResearchPartyCreate(command: ResearchIntakeCommand): Promise<unknown> {
+  return postRequired<unknown>('/api/operator/research-parties', command, 12_000);
+}
+export function apiResearchPartyByMutation(mutationId: string, signal?: AbortSignal): Promise<unknown> {
+  return getRequired<unknown>(`/api/operator/research-parties/by-mutation/${encodeURIComponent(mutationId)}`, signal);
 }
 
 export function apiResearchPartyChoice(requestId: string, command: ResearchChoiceCommand): Promise<unknown> {
