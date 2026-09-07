@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,9 @@ const reviewBinding = {
 };
 const reviewBindingBytes = Buffer.from(JSON.stringify(reviewBinding));
 const reviewBindingDigest = createHash('sha256').update(reviewBindingBytes).digest('hex');
+let posterBytes = {};
+const coverDigests = () => Object.fromEntries(Object.entries(posterBytes)
+  .map(([bucket, bytes]) => [bucket, createHash('sha256').update(bytes).digest('hex')]));
 
 const artifactAuthorization = {
   authorizationId: '6b447be0-f961-482e-aa03-b419d5f1492d',
@@ -85,7 +88,7 @@ const playableReleaseAuthorization = () => ({
     previousRuntimeArtifactDigest: `sha256:${'4'.repeat(64)}`,
     runtimeArtifactDigest: `sha256:${'5'.repeat(64)}`,
     productionManifestDigest: '6'.repeat(64),
-    coverDigests: { tall: '7'.repeat(64), compact: '8'.repeat(64) },
+    coverDigests: coverDigests(),
     candidateUrl: 'https://technical-proof.invalid/not-used-by-review.html',
     seriesLength: 1,
     catalogMechanic: 'solitaire/klondike',
@@ -287,6 +290,13 @@ const server = createServer((request, response) => {
     response.end(fakePlayable);
     return;
   }
+  for (const [bucket, suffix] of [['tall', '.cover.jpg'], ['compact', '.cover.c.jpg']]) {
+    if (url.pathname === candidatePath.replace(/\.html$/, suffix)) {
+      response.setHeader('content-type', 'image/jpeg');
+      response.end(posterBytes[bucket]);
+      return;
+    }
+  }
   if (url.pathname.endsWith('.payload.js')) {
     response.setHeader('content-type', 'application/javascript; charset=utf-8');
     response.end('');
@@ -351,6 +361,18 @@ window.Telegram = {
 let browser = null;
 try {
   browser = await chromium.launch();
+  const fixturePage = await browser.newPage();
+  const posters = await fixturePage.evaluate(() => Object.fromEntries(
+    [['tall', '#0044ee', 480], ['compact', '#00cc44', 240]].map(([bucket, color, height]) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 320; canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = color; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      return [bucket, canvas.toDataURL('image/jpeg').split(',')[1]];
+    }),
+  ));
+  posterBytes = Object.fromEntries(Object.entries(posters).map(([key, value]) => [key, Buffer.from(value, 'base64')]));
+  await fixturePage.close();
   const newPage = async () => {
     const page = await browser.newPage({ viewport: { width: 390, height: 760 } });
     await page.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
@@ -464,6 +486,69 @@ try {
   assert.equal(candidateFrameUrl.pathname, candidatePath);
   assert.equal(candidateFrameUrl.searchParams.get('auto'), '1');
   assert.equal(candidateFrameUrl.searchParams.get('reviewBinding'), reviewBindingDigest);
+  const poster = review.getByRole('region', { name: 'Обложки кандидата' });
+  const posterImage = poster.locator('img');
+  await posterImage.waitFor({ state: 'visible' });
+  const assertPoster = async (bucket) => {
+    await enabledPage.waitForFunction(({ bucket }) => {
+      const image = document.querySelector('.candidate-review__poster > img');
+      return image && !image.hidden && image.naturalHeight === (bucket === 'tall' ? 480 : 240);
+    }, { bucket });
+    const actual = await posterImage.evaluate(async (image) => {
+      const bytes = new Uint8Array(await (await fetch(image.src)).arrayBuffer());
+      const hash = await crypto.subtle.digest('SHA-256', bytes);
+      const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0, 1, 1);
+      return {
+        digest: [...new Uint8Array(hash)].map((v) => v.toString(16).padStart(2, '0')).join(''),
+        rgb: [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3),
+      };
+    });
+    assert.equal(actual.digest, coverDigests()[bucket], 'displayed blob is not the verified candidate cover');
+    assert.ok(bucket === 'tall' ? actual.rgb[2] > 200 : actual.rgb[1] > 170, 'wrong poster pixels displayed');
+    const suffix = bucket === 'tall' ? '.cover.jpg' : '.cover.c.jpg';
+    assert.ok(requestLog.includes(`GET ${candidatePath.replace(/\.html$/, suffix)}?v=${coverDigests()[bucket]}`));
+    assert.equal(await approval.isDisabled(), true, 'viewing a cover bypassed manual takeover');
+  };
+  await assertPoster('tall');
+  await poster.getByRole('button', { name: 'Компактный экран' }).click();
+  await assertPoster('compact');
+  assert.equal(await poster.getByRole('button', { name: 'Компактный экран' }).getAttribute('aria-pressed'), 'true');
+  await poster.getByRole('button', { name: 'Высокий экран' }).click();
+  await assertPoster('tall');
+  let releaseHeldPoster;
+  let posterRequestEntered;
+  const heldPoster = new Promise((resolve) => { releaseHeldPoster = resolve; });
+  const posterEntered = new Promise((resolve) => { posterRequestEntered = resolve; });
+  await enabledPage.route('**/*.cover.c.jpg?*', async (route) => {
+    posterRequestEntered();
+    await heldPoster;
+    try { await route.fulfill({ contentType: 'image/jpeg', body: posterBytes.compact }); }
+    catch { /* aborted when the user selected another bucket */ }
+  });
+  await poster.getByRole('button', { name: 'Компактный экран' }).click();
+  await posterEntered;
+  await poster.getByRole('button', { name: 'Высокий экран' }).click();
+  await assertPoster('tall');
+  releaseHeldPoster();
+  await enabledPage.waitForTimeout(100);
+  await assertPoster('tall');
+  await enabledPage.unroute('**/*.cover.c.jpg?*');
+  if (process.env.CANDIDATE_COVER_CAPTURE_DIR) {
+    mkdirSync(process.env.CANDIDATE_COVER_CAPTURE_DIR, { recursive: true });
+    await poster.screenshot({ path: path.join(process.env.CANDIDATE_COVER_CAPTURE_DIR, 'poster-390.png') });
+  }
+  await enabledPage.setViewportSize({ width: 320, height: 568 });
+  const posterLayout = await poster.evaluate((element) => ({
+    width: element.getBoundingClientRect().width,
+    overflow: document.documentElement.scrollWidth > innerWidth,
+    buttons: [...element.querySelectorAll('button')].map((button) => button.getBoundingClientRect().height),
+  }));
+  assert.ok(posterLayout.width <= 320 && !posterLayout.overflow && posterLayout.buttons.every((height) => height >= 44));
+  if (process.env.CANDIDATE_COVER_CAPTURE_DIR) {
+    await poster.screenshot({ path: path.join(process.env.CANDIDATE_COVER_CAPTURE_DIR, 'poster-320.png') });
+  }
+  await enabledPage.setViewportSize({ width: 390, height: 760 });
   const feedPreview = review.getByRole('button', { name: 'Проверить в реальной ленте' });
   assert.equal(await feedPreview.count(), 1);
   assert.equal(await feedPreview.isDisabled(), false,
@@ -516,14 +601,21 @@ try {
     `candidate review fetched live versions: ${candidateRequests.join(', ')}`);
   assert.equal(candidateRequests.some((entry) => entry.includes('/api/session')), false,
     `candidate review booted the feed session: ${candidateRequests.join(', ')}`);
+  const previousPoster = await posterImage.getAttribute('src');
   await enabledPage.getByRole('button', { name: 'Use another code' }).click();
+  assert.equal(await enabledPage.evaluate(async (url) => {
+    try { await fetch(url); return true; } catch { return false; }
+  }, previousPoster), false, 'destroyed candidate review retained its poster object URL');
 
+  const beforeInvalidPoster = requestLog.filter((entry) => entry.includes('.cover')).length;
   await enabledPage.getByLabel('One-time code').fill('45678-9ABCD');
   await enabledPage.getByRole('button', { name: 'Review request' }).click();
   await enabledPage.locator('[data-testid="catalog-promotion-summary"]').waitFor({ state: 'visible' });
   assert.equal(await enabledPage.locator('[data-testid="playable-candidate-review"] iframe').getAttribute('src'), null);
   assert.equal(await enabledPage.getByText('Исходная задача недоступна. Candidate review и публикация заблокированы.').count(), 1);
   assert.equal(await enabledPage.getByRole('button', { name: 'Принять и опубликовать' }).isDisabled(), true);
+  assert.equal(requestLog.filter((entry) => entry.includes('.cover')).length, beforeInvalidPoster,
+    'invalid candidate path fetched an unbound cover');
   await enabledPage.getByRole('button', { name: 'Use another code' }).click();
 
   // Desktop intake is the one scope which requires an operator-selected,
@@ -671,6 +763,36 @@ try {
   await acceptPage.close();
   releaseDecision = null;
   decisionRequests.length = 0;
+
+  // Image failures are explicit presentation failures, never a public fallback
+  // or a new Accept/rework gate. The existing manual decision contract remains.
+  for (const failure of ['digest-mismatch', 'not-found', 'redirect', 'invalid-digest']) {
+    const failedPosterPage = await newPage();
+    const start = requestLog.length;
+    if (failure === 'invalid-digest') {
+      await failedPosterPage.route(`**/api/operator/playable-releases/${releaseId}/review`, (route) => {
+        const summary = playableReleaseAuthorization().promotionSummary;
+        summary.coverDigests.tall = 'not-a-digest';
+        return route.fulfill({ json: summary });
+      });
+    } else {
+      await failedPosterPage.route('**/*.cover.jpg?*', (route) => {
+        if (failure === 'digest-mismatch') return route.fulfill({ contentType: 'image/jpeg', body: posterBytes.compact });
+        if (failure === 'redirect') return route.fulfill({ status: 302, headers: { location: '/public-cover.jpg' } });
+        return route.fulfill({ status: 404 });
+      });
+    }
+    await failedPosterPage.goto(`${origin}/?candidateReview=${releaseId}`, { waitUntil: 'domcontentloaded' });
+    await failedPosterPage.getByText('Обложка кандидата недоступна: не удалось проверить изображение этой версии.', { exact: true }).waitFor();
+    assert.equal(await failedPosterPage.locator('.candidate-review__poster img').isHidden(), true);
+    await failedPosterPage.getByRole('button', { name: 'Коснитесь, чтобы играть вручную' }).click();
+    await failedPosterPage.waitForFunction(() => [...document.querySelectorAll('button')]
+      .some((button) => button.textContent === 'Принять в тестовую ленту' && !button.disabled));
+    assert.equal(await failedPosterPage.getByRole('button', { name: 'Отправить на доработку' }).isDisabled(), false);
+    assert.equal(decisionRequests.length, 0, `${failure}: cover verification performed a decision`);
+    assert.equal(requestLog.slice(start).some((entry) => entry.includes('/public-cover.jpg')), false);
+    await failedPosterPage.close();
+  }
 
   // The desktop Lab uses the same narrow release-id-only route. It must not
   // accept a caller-authored candidate URL or fall through to normal feed boot.

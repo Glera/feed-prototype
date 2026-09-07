@@ -1,7 +1,6 @@
 import './styles.css';
 import { createFeed } from './feed';
 import {
-  candidateMatchesPublicManifest,
   setCandidatePlayableOverlay,
   setCandidatePlayableOverlays,
   setCandidatePlayableOverlayVisible,
@@ -162,11 +161,11 @@ async function boot(): Promise<void> {
     if (!operatorReleasePreview && projectedAdoptions) {
       try {
         const adopted = await resolveDeveloperFeedAdoptions(projectedAdoptions);
-        const privateAdoptions = adopted.filter(
-          (candidate) => !candidateMatchesPublicManifest(candidate),
-        );
-        setCandidatePlayableOverlays(privateAdoptions);
-        if (privateAdoptions.length > 0) {
+        // Equal runtime digests do not prove equal covers. The current public
+        // manifest has no poster identity, so retain authenticated Dev overlays;
+        // the explicit Release view continues to use only public artifacts.
+        setCandidatePlayableOverlays(adopted);
+        if (adopted.length > 0) {
           setTelemetryReadOnlyPreviewMode(true);
         }
       } catch { /* invalid/tampered dev adoption fails closed to the public manifest */ }
