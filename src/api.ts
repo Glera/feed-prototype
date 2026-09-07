@@ -170,6 +170,7 @@ async function postRequired<T>(
   body?: unknown,
   timeoutMs?: number,
   extraHeaders?: Record<string, string>,
+  onDispatch?: () => void,
 ): Promise<T> {
   const stall = devApiDelay();
   if (stall) await stall;
@@ -177,12 +178,14 @@ async function postRequired<T>(
   let text: string;
   try {
     ({ response: r, text } = await withRequestTimeout(async (signal) => {
-      const response = await fetch(`${API_BASE}${path}`, {
+      const request: RequestInit = {
         method: 'POST',
         headers: extraHeaders ? { ...headers(), ...extraHeaders } : headers(),
         body: body != null ? JSON.stringify(body) : undefined,
         signal,
-      });
+      };
+      onDispatch?.();
+      const response = await fetch(`${API_BASE}${path}`, request);
       return { response, text: await response.text() };
     }, timeoutMs));
   } catch (e) {
@@ -432,6 +435,26 @@ export interface PlayablePublicationSelectionV1 {
   candidateArtifactDigest: string;
 }
 
+export interface PlayablePublicationStatusV1 {
+  schema: 'feed.playable-publication.status.v1';
+  operationId: string;
+  items: (PlayablePublicationSelectionV1 & {
+    status: 'queued' | 'running' | 'published' | 'not_completed' | 'unknown';
+    reason: null | 'expired_before_start' | 'outcome_unconfirmed' | 'not_found' | 'unavailable';
+  })[];
+}
+
+/** Read-only lookup of an already submitted exact selection; never reapplies it. */
+export function apiGetPlayablePublicationStatusRequired(payload: {
+  schema: 'feed.playable-publication.status-request.v1';
+  operationId: string;
+  items: PlayablePublicationSelectionV1[];
+}): Promise<PlayablePublicationStatusV1> {
+  return postRequired<PlayablePublicationStatusV1>(
+    '/api/operator/playable-publications/status', payload,
+  );
+}
+
 export function apiPreparePlayablePublicationRequired(payload: {
   schema: 'feed.playable-publication.prepare.v1';
   operationId: string;
@@ -443,16 +466,41 @@ export function apiPreparePlayablePublicationRequired(payload: {
   );
 }
 
-export function apiApplyPlayablePublicationRequired(payload: {
+/** Client-only evidence; never serialized onto the publication wire. */
+export class PlayablePublicationApplyError extends Error {
+  constructor(
+    readonly acceptance: 'not_sent' | 'rejected' | 'unknown',
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super('playable_publication_apply_failed');
+    this.name = 'PlayablePublicationApplyError';
+  }
+}
+
+export async function apiApplyPlayablePublicationRequired(payload: {
   schema: 'feed.playable-publication.apply.v1';
   operationId: string;
   action: 'publish';
   items: PlayablePublicationSelectionV1[];
   confirmationCode: string;
 }): Promise<PlayablePublicationRequestedV1> {
-  return postRequired<PlayablePublicationRequestedV1>(
-    '/api/operator/playable-publications/apply', payload,
-  );
+  let dispatched = false;
+  try {
+    return await postRequired<PlayablePublicationRequestedV1>(
+      '/api/operator/playable-publications/apply', payload, undefined, undefined,
+      () => { dispatched = true; },
+    );
+  } catch (error) {
+    const status = error instanceof ApiRequestError ? error.status : 0;
+    const code = error instanceof ApiRequestError ? error.code : null;
+    // Only a recognizable domain rejection proves non-acceptance. A proxy
+    // timeout / unreadable 4xx may have happened after the upstream committed.
+    const rejected = status >= 400 && status < 500 && status !== 408 && code !== null;
+    throw new PlayablePublicationApplyError(
+      !dispatched ? 'not_sent' : rejected ? 'rejected' : 'unknown', status, code,
+    );
+  }
 }
 
 export function apiPrepareCatalogDirectPromotionRequired(payload: {

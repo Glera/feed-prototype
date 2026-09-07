@@ -4,6 +4,7 @@ import type {
   CatalogDirectPromotionResultV1,
   PlayablePublicationPreparedV1,
   PlayablePublicationRequestedV1,
+  PlayablePublicationStatusV1,
   OperatorPlayableReworkQueueItemV1,
 } from './api';
 
@@ -19,6 +20,7 @@ export type DeveloperFeedDiffTone =
 /** One mechanic whose dev state is not the public state. */
 export interface DeveloperFeedDiffMechanicRow {
   playableId: string;
+  releaseId: string | null;
   /** Human name used by the founder-facing diff. */
   title: string;
   /** Human audience label for the private adopted candidate. */
@@ -98,9 +100,21 @@ export interface CatalogDirectPromotionClientOutcome {
   status: 'committed_refreshed' | 'committed_refresh_pending';
 }
 
-export interface PlayablePublicationClientOutcome {
-  status: 'queued_refreshed' | 'queued_refresh_pending' | 'published_refreshed';
-}
+export type PlayablePublicationClientOutcome = {
+  status: 'queued_refreshed' | 'queued_refresh_pending'
+    | 'published_refreshed' | 'published_refresh_pending';
+} | { status: 'acceptance_unknown' }
+  | { status: 'rejected'; reason: 'candidate_changed' | 'request_rejected' | 'not_sent' };
+
+export function applyPlayablePublicationClient(
+  prepared: Readonly<PlayablePublicationPreparedV1>,
+  selection: import('./api').PlayablePublicationSelectionV1[] | null,
+  confirmationCode: string,
+  transport: {
+    apply: typeof import('./api').apiApplyPlayablePublicationRequired;
+    refresh(): Promise<boolean>;
+  },
+): Promise<PlayablePublicationClientOutcome>;
 
 export function developerFeedDiffModel(
   input: DeveloperFeedDiffInput,
@@ -126,6 +140,11 @@ export function validatePlayablePublicationRequested(
   value: unknown,
 ): Readonly<PlayablePublicationRequestedV1> | null;
 
+export function validatePlayablePublicationStatus(
+  value: unknown,
+  prepared: Readonly<PlayablePublicationPreparedV1>,
+): Readonly<PlayablePublicationStatusV1> | null;
+
 export function mountDeveloperFeedDiffSurface(
   host: HTMLElement,
   options: {
@@ -143,5 +162,8 @@ export function mountDeveloperFeedDiffSurface(
     onPrepareMechanics?(
       playableIds: readonly string[],
     ): Promise<Readonly<PlayablePublicationPreparedV1>>;
+    onReadPublicationStatus?(
+      prepared: Readonly<PlayablePublicationPreparedV1>,
+    ): Promise<PlayablePublicationStatusV1>;
   },
 ): DeveloperFeedDiffSurface;
