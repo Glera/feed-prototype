@@ -31,6 +31,7 @@ import type {
   PlatformDevelopmentIntakeCancelV1,
   PlatformDevelopmentIntakeRequestV1,
 } from './operator-development-intakes.mjs';
+import type { ResearchChoiceCommand } from './research-party.mjs';
 
 export const API_BASE: string =
   ((import.meta as any).env?.VITE_API_BASE as string) || 'https://swipe-backend-541t.onrender.com';
@@ -2074,6 +2075,17 @@ export interface CatalogLabGrantView {
 /** Resolve a short user code entered by an allowlisted Telegram dev. */
 export function apiCatalogLabLookup(userCode: string): Promise<CatalogLabDeviceAuthorization> {
   return postRequired<CatalogLabDeviceAuthorization>('/api/admin/device-auth/lookup', { userCode });
+}
+
+/** TMA-only Research projection/choice. No worker grant or source fetch in Feed. */
+export function apiResearchPartyResult(requestId: string, signal?: AbortSignal): Promise<unknown> {
+  return getRequired<unknown>(`/api/operator/research-parties/${encodeURIComponent(requestId)}`, signal);
+}
+
+export function apiResearchPartyChoice(requestId: string, command: ResearchChoiceCommand): Promise<unknown> {
+  return postRequired<unknown>(
+    `/api/operator/research-parties/${encodeURIComponent(requestId)}/choices`, command, 12_000,
+  );
 }
 
 /** Resolve one server-bound READY release for its Telegram operator. */

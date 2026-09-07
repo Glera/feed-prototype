@@ -1,0 +1,131 @@
+{
+  "schema": "research.party-shortlist.v1",
+  "requestId": "18800000-0000-4000-8000-000000000930",
+  "requestHash": "03e8a9f2d41f7379a9a43992fb6ba5ac84f89d62cdba93ccedae221702a1fa63",
+  "normalizedPack": {
+    "repository": "Glera/p4g-workspace-meta",
+    "path": "docs/research/2026-09-08-synthetic/pack.json",
+    "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "digest": "sha256:cfa7ef4da4acf0a6245979ffdccd670722a49a26200f2f0896065ea2a23e25ee"
+  },
+  "radar": {
+    "repository": "Glera/p4g-workspace-meta",
+    "path": "docs/research/2026-09-08-synthetic/radar.json",
+    "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "digest": "sha256:8a1c920bb71bee44c45827ea4cacf9871a926610f98ea32248e5a11edd50b29e"
+  },
+  "policyVersion": "research-source-policy.v1",
+  "candidates": [
+    {
+      "candidateId": "0de099865ddb44487aab9e2ea29c6a17aba681c4faaef625860794d0545ea9b3",
+      "primaryObservationId": "5494b742adc968a5a0f07711ebdd557ce10c58258c944b9e95fd355f1b77168d",
+      "observationIds": [
+        "5494b742adc968a5a0f07711ebdd557ce10c58258c944b9e95fd355f1b77168d",
+        "489061eff06135adca58a47638b02376cfd94eb110d132e2b9df99c8f84b3539",
+        "86c334088448449bd5a3e2e5058154ab1a18e9174b3500fb5e1d62e02c67f0d0",
+        "4bb885fc6011dab995584b932a5ddb81f819f0add8c7adf9ed63ed44ddd1c985"
+      ],
+      "title": "SYNTHETIC candidate 1",
+      "summary": "SYNTHETIC normalized metadata example; not a product selection or real recommendation.",
+      "primaryObservation": {
+        "observationId": "5494b742adc968a5a0f07711ebdd557ce10c58258c944b9e95fd355f1b77168d",
+        "sourceId": "poki-charts",
+        "sourceItemId": "synthetic-item-01",
+        "sourceUrl": "https://poki.com/synthetic-fixture/synthetic-item-01",
+        "observedAt": "2026-09-08T00:00:00.000Z",
+        "title": "SYNTHETIC observation 01",
+        "signal": "SYNTHETIC fixture only; no market observation or live source success is claimed.",
+        "region": "GLOBAL"
+      }
+    },
+    {
+      "candidateId": "149ada89aaa50dcff1ad98588f96754bd58eb7e10240f5ae1e88befd671a5800",
+      "primaryObservationId": "b5e40f7c49e4f5fc64b6ba736fd9ecd9ac0bbc632a23d94be59b5ac0b701901d",
+      "observationIds": [
+        "b5e40f7c49e4f5fc64b6ba736fd9ecd9ac0bbc632a23d94be59b5ac0b701901d",
+        "4085265efe76f53de998551938eb386d0a3b697d74f0637b14f816d4e62cc8af",
+        "7764f921fad782795fda07d468a66b00b0c46196b29783af5ff59b2839059fd4",
+        "fb84c47fd2e563477545bf8bab63905ed7c09148790f22b4aeb58b35d50a9b62"
+      ],
+      "title": "SYNTHETIC candidate 2",
+      "summary": "SYNTHETIC normalized metadata example; not a product selection or real recommendation.",
+      "primaryObservation": {
+        "observationId": "b5e40f7c49e4f5fc64b6ba736fd9ecd9ac0bbc632a23d94be59b5ac0b701901d",
+        "sourceId": "poki-charts",
+        "sourceItemId": "synthetic-item-05",
+        "sourceUrl": "https://poki.com/synthetic-fixture/synthetic-item-05",
+        "observedAt": "2026-09-08T00:04:00.000Z",
+        "title": "SYNTHETIC observation 05",
+        "signal": "SYNTHETIC fixture only; no market observation or live source success is claimed.",
+        "region": "GLOBAL"
+      }
+    },
+    {
+      "candidateId": "19a2ae9e23143f808c2e29bb1da279589ac4a32cd60e24ea59b84f8e25129c17",
+      "primaryObservationId": "5cb46e149f95a46630f51f37ee10451551ef1ba84f8d20b0ed4a7be03215c4a3",
+      "observationIds": [
+        "5cb46e149f95a46630f51f37ee10451551ef1ba84f8d20b0ed4a7be03215c4a3",
+        "b7b9ecb743a83dc27477c5192f8d82b8de3e29e6c635974982f63d94bb0c7b4a",
+        "d4e22527ecf029146996234893e1b0c1cd4ea3a83cf4dd218e2359eb38057dad",
+        "ab8cf61c0db24a19261a5ca61a67ca11faa531eed4dd695c1af70b3285221bf3"
+      ],
+      "title": "SYNTHETIC candidate 3",
+      "summary": "SYNTHETIC normalized metadata example; not a product selection or real recommendation.",
+      "primaryObservation": {
+        "observationId": "5cb46e149f95a46630f51f37ee10451551ef1ba84f8d20b0ed4a7be03215c4a3",
+        "sourceId": "poki-charts",
+        "sourceItemId": "synthetic-item-09",
+        "sourceUrl": "https://poki.com/synthetic-fixture/synthetic-item-09",
+        "observedAt": "2026-09-08T00:08:00.000Z",
+        "title": "SYNTHETIC observation 09",
+        "signal": "SYNTHETIC fixture only; no market observation or live source success is claimed.",
+        "region": "GLOBAL"
+      }
+    },
+    {
+      "candidateId": "bdb5aaa950566c96fb071077e328b6e83f0fda40b171501df358201fa1d8bffd",
+      "primaryObservationId": "1c4a26401ec0f1ae411bf71b3e0b159f3dc28d15da250b6f3fbe2e0164271732",
+      "observationIds": [
+        "1c4a26401ec0f1ae411bf71b3e0b159f3dc28d15da250b6f3fbe2e0164271732",
+        "0f4228b61258d04a664112e82c7e71aec0b6abbdff4af9a9b0fd55b07b4e694c",
+        "8a9769a526c7b6e10088f832736cd2b119ccd0fd272ce4c46bc83d5a0b2d58b2",
+        "0f69c4ebbecd920c7391f3a252b437222d89d766ae5e83a1f59d8db90df24bcb"
+      ],
+      "title": "SYNTHETIC candidate 4",
+      "summary": "SYNTHETIC normalized metadata example; not a product selection or real recommendation.",
+      "primaryObservation": {
+        "observationId": "1c4a26401ec0f1ae411bf71b3e0b159f3dc28d15da250b6f3fbe2e0164271732",
+        "sourceId": "poki-charts",
+        "sourceItemId": "synthetic-item-13",
+        "sourceUrl": "https://poki.com/synthetic-fixture/synthetic-item-13",
+        "observedAt": "2026-09-08T00:12:00.000Z",
+        "title": "SYNTHETIC observation 13",
+        "signal": "SYNTHETIC fixture only; no market observation or live source success is claimed.",
+        "region": "GLOBAL"
+      }
+    },
+    {
+      "candidateId": "6561d2af4289c621eba9a14f36c73744ce0eb93a56d1bf56cabfcfb0008f2025",
+      "primaryObservationId": "ff8baacbe282d0121b3d94208c28b0459fc7520c9ac09474bdab5230287871e8",
+      "observationIds": [
+        "ff8baacbe282d0121b3d94208c28b0459fc7520c9ac09474bdab5230287871e8",
+        "15bb28fd828570d0238dc115729b1f0d4c1832e3858d7a4576b0e31e2c345afa",
+        "04b954220f3baa920d03554ed6453b063457b3e303ebe4ed75cfd9a5e5dbc3be",
+        "c884056b6b6958a03d9d950cea2206343cd1d2adf250ad83afed3abd2128162f"
+      ],
+      "title": "SYNTHETIC candidate 5",
+      "summary": "SYNTHETIC normalized metadata example; not a product selection or real recommendation.",
+      "primaryObservation": {
+        "observationId": "ff8baacbe282d0121b3d94208c28b0459fc7520c9ac09474bdab5230287871e8",
+        "sourceId": "poki-charts",
+        "sourceItemId": "synthetic-item-17",
+        "sourceUrl": "https://poki.com/synthetic-fixture/synthetic-item-17",
+        "observedAt": "2026-09-08T00:16:00.000Z",
+        "title": "SYNTHETIC observation 17",
+        "signal": "SYNTHETIC fixture only; no market observation or live source success is claimed.",
+        "region": "GLOBAL"
+      }
+    }
+  ],
+  "shortlistHash": "d2a98ce83ff28210f33fb5499032169a82b142949e02dbe86434620ba23fda08"
+}
