@@ -160,6 +160,7 @@ const playableReworkPosts = [];
 let adopted = false;
 let adoptionAuthorizationState = 'approved';
 let adoptedArtifactIsPublic = false;
+let covers = {};
 let origin = '';
 
 const candidateOverlayPlayableIds = [
@@ -353,6 +354,11 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/' || url.pathname === '/index.html') {
     response.setHeader('content-type', 'text/html; charset=utf-8');
     return response.end(readFileSync(path.join(root, 'dist', 'index.html')));
+  }
+  if (/\.cover(?:\.c)?\.jpg$/.test(url.pathname)) {
+    const candidate = url.pathname.startsWith('/playable-previews/');
+    response.setHeader('content-type', 'image/jpeg');
+    return response.end(covers[candidate ? 'candidate' : 'public']);
   }
   if (url.pathname === '/versions.json') return json(response, {
     'solitaire-v1-swipe': {
@@ -596,6 +602,40 @@ const query = new URLSearchParams({
 const validUrl = `${origin}/?${query}`;
 const browser = await chromium.launch({ headless: true });
 try {
+  const fixturePage = await browser.newPage();
+  const coverData = await fixturePage.evaluate(() => Object.fromEntries(
+    [['public', '#0044ee'], ['candidate', '#ee9900']].map(([kind, color]) => {
+      const canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 48;
+      const ctx = canvas.getContext('2d'); ctx.fillStyle = color; ctx.fillRect(0, 0, 32, 48);
+      return [kind, canvas.toDataURL('image/jpeg').split(',')[1]];
+    }),
+  ));
+  covers = Object.fromEntries(Object.entries(coverData).map(([kind, value]) => [kind, Buffer.from(value, 'base64')]));
+  await fixturePage.close();
+  const assertCover = async (targetPage, { path: htmlPath, artifact, candidate, compact = false }) => {
+    const expectedPath = htmlPath.replace(/\.html$/, compact ? '.cover.c.jpg' : '.cover.jpg');
+    await targetPage.waitForFunction((expected) => {
+      const image = document.querySelector('.page--in-viewport .game__poster');
+      return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0
+        && new URL(image.currentSrc).pathname === expected;
+    }, expectedPath);
+    const cover = await targetPage.locator('.page--in-viewport .game__poster').first().evaluate(async (image) => {
+      const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0, 1, 1);
+      const response = await fetch(image.currentSrc);
+      const hash = await crypto.subtle.digest('SHA-256', await response.arrayBuffer());
+      return {
+        url: image.currentSrc,
+        digest: [...new Uint8Array(hash)].map((v) => v.toString(16).padStart(2, '0')).join(''),
+        rgb: [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3),
+      };
+    });
+    assert.equal(new URL(cover.url).pathname, expectedPath);
+    assert.equal(new URL(cover.url).searchParams.get('v'), artifact);
+    assert.equal(cover.digest, createHash('sha256').update(covers[candidate ? 'candidate' : 'public']).digest('hex'));
+    assert.ok(candidate ? cover.rgb[0] > 200 && cover.rgb[2] < 30 : cover.rgb[2] > 200,
+      'candidate/public poster pixel identity was mixed');
+  };
   const ordinaryContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
   await ordinaryContext.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
     status: 200,
@@ -676,6 +716,11 @@ try {
   });
   await page.locator('.page--in-viewport .game--candidate-overlay.game--autoplay').waitFor({ state: 'visible' });
   await assertCandidateSurfaceGeometry(page, 'query candidate preview');
+  await assertCover(page, { path: candidatePath, artifact: candidateArtifactDigest, candidate: true });
+  await page.setViewportSize({ width: 390, height: 568 });
+  await assertCover(page, { path: candidatePath, artifact: candidateArtifactDigest, candidate: true, compact: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertCover(page, { path: candidatePath, artifact: candidateArtifactDigest, candidate: true });
   await page.waitForTimeout(5_100);
   assert.equal(requests.some((entry) => entry.includes('/api/session')), false,
     `candidate preview inherited Telegram session authority: ${requests.join(', ')}`);
@@ -1017,10 +1062,10 @@ try {
     await rejectedContext.close();
   }
 
-  // Once the immutable candidate runtime identity is the public manifest
-  // runtime identity, the
-  // authenticated adoption is historical. It must not keep mounting a dev-only
-  // path or suppressing ordinary public gameplay behavior.
+  // Runtime equality alone cannot retire an authenticated Dev overlay: a
+  // cover-only candidate has identical game bytes but a different poster. The
+  // current public manifest has no cover identity, so only explicit Release
+  // mode switches to public bytes. Exercise both directions without a new job.
   adoptedArtifactIsPublic = true;
   const publishedContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
   await publishedContext.route('https://telegram.org/js/telegram-web-app.js', (route) => route.fulfill({
@@ -1036,12 +1081,33 @@ try {
   const publishedPage = await publishedContext.newPage();
   await publishedPage.goto(origin, { waitUntil: 'domcontentloaded' });
   await advanceToPlayable(publishedPage, playableId);
-  const publicFrame = publishedPage.locator('.page--in-viewport iframe').first();
-  await publicFrame.waitFor({ state: 'attached' });
-  assert.equal(new URL((await publicFrame.getAttribute('src')) || '', origin).pathname,
-    `/${playableId}.html`, 'published candidate stayed mounted from its preview path');
-  assert.equal(await publishedPage.locator('.game--candidate-overlay').count(), 0,
-    'published candidate remained presented as dev-only adoption');
+  const retainedFrame = publishedPage.locator('.page--in-viewport iframe').first();
+  await retainedFrame.waitFor({ state: 'attached' });
+  assert.equal(new URL((await retainedFrame.getAttribute('src')) || '', origin).pathname,
+    sourceCandidatePath, 'runtime equality hid the authenticated cover-only candidate');
+  assert.equal(await publishedPage.locator('.game--candidate-overlay').count(), 1);
+  await assertCover(publishedPage, { path: sourceCandidatePath, artifact: sourceCandidateArtifactDigest, candidate: true });
+  const decisionCountBeforeModeSwitch = adoptionPosts;
+  for (const view of ['release', 'dev', 'release', 'dev']) {
+    await publishedPage.goto(`${origin}/?feedView=${view}`, { waitUntil: 'domcontentloaded' });
+    await advanceToPlayable(publishedPage, playableId);
+    const modeFrame = publishedPage.locator('.page--in-viewport iframe').first();
+    await modeFrame.waitFor({ state: 'attached' });
+    const candidate = view === 'dev';
+    const htmlPath = candidate ? sourceCandidatePath : `/${playableId}.html`;
+    assert.equal(new URL((await modeFrame.getAttribute('src')) || '', origin).pathname, htmlPath);
+    await assertCover(publishedPage, {
+      path: htmlPath, candidate,
+      artifact: candidate ? sourceCandidateArtifactDigest : sourceCandidateArtifactDigest.slice(0, 12),
+    });
+    await publishedPage.setViewportSize({ width: 390, height: 568 });
+    await assertCover(publishedPage, {
+      path: htmlPath, candidate, compact: true,
+      artifact: candidate ? sourceCandidateArtifactDigest : sourceCandidateArtifactDigest.slice(0, 12),
+    });
+    await publishedPage.setViewportSize({ width: 390, height: 844 });
+  }
+  assert.equal(adoptionPosts, decisionCountBeforeModeSwitch, 'switching poster view replayed Accept');
   const releaseDeepLink = new URL(origin);
   releaseDeepLink.searchParams.set('tgWebAppStartParam', `r_${playableId}`);
   releaseDeepLink.searchParams.set('tgWebAppPlatform', 'android');

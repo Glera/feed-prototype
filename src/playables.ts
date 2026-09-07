@@ -112,15 +112,6 @@ export function publicMechanicReleaseIdentity(id: string): MechanicReleaseIdenti
   });
 }
 
-/** True only when the immutable operator candidate is already the public bytes. */
-export function candidateMatchesPublicManifest(candidate: CandidatePlayableOverlay): boolean {
-  if (!candidate || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(candidate.playableId)
-    || !/^[0-9a-f]{64}$/.test(candidate.candidateArtifactDigest)
-    || !/^sha256:[0-9a-f]{64}$/.test(candidate.runtimeArtifactDigest || '')) return false;
-  return publicMechanicReleaseIdentity(candidate.playableId)?.runtimeArtifactDigest
-    === candidate.runtimeArtifactDigest;
-}
-
 /** Exact static identity shown in the operator-only mobile rework form. */
 export function mechanicReleaseIdentity(id: string): MechanicReleaseIdentity | null {
   const candidate = candidateOverlayFor(id);
@@ -198,6 +189,17 @@ export function setCoverBucket(suffix: string): void {
 // aspects (mobile 0.65 / desktop 0.80) + object-fit:cover.
 const COVER_EPOCH = 3;
 export function coverUrl(id: string): string {
+  const candidate = candidateOverlayFor(id);
+  if (candidate) {
+    // The existing overlay is already admitted by its exact review binding.
+    // Never mix that game's immutable path with a public alias (or ?base=).
+    const expected = `/playable-previews/${candidate.releaseId}/${id}.html`;
+    if (!/^[0-9a-f-]{36}$/.test(candidate.releaseId)
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/.test(id)
+      || candidate.candidatePath !== expected
+      || !/^[0-9a-f]{64}$/.test(candidate.candidateArtifactDigest)) return 'data:,';
+    return `${expected.replace(/\.html$/, `.cover${coverBucket}.jpg`)}?v=${candidate.candidateArtifactDigest}&cv=${COVER_EPOCH}`;
+  }
   let base = new URLSearchParams(location.search).get('base') || './';
   if (!base.endsWith('/')) base += '/';
   return `${base}${id}.cover${coverBucket}.jpg?v=${mechanicVersion(id)}&cv=${COVER_EPOCH}`;

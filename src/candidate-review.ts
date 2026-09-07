@@ -12,6 +12,7 @@ const SHA = /^[0-9a-f]{40}$/;
 const PLAYABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_BINDING_BYTES = 32_768;
+const MAX_POSTER_BYTES = 2 * 1024 * 1024;
 
 type CandidateReviewLink = NonNullable<PlayableReleaseSummary['review']>;
 
@@ -165,6 +166,33 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
+/** Optional presentation proof; never changes the existing decision gate. */
+async function loadCandidatePoster(
+  review: CandidateReviewLink,
+  bucket: 'tall' | 'compact',
+  digest: string,
+  signal: AbortSignal,
+): Promise<Blob> {
+  if (!DIGEST.test(digest)) throw new Error('candidate poster identity is unavailable');
+  const path = review.candidatePath.replace(/\.html$/, bucket === 'tall' ? '.cover.jpg' : '.cover.c.jpg');
+  const url = new URL(path, location.origin);
+  if (url.origin !== location.origin || url.pathname !== path
+    || url.search || url.hash || url.username || url.password) throw new Error('invalid poster path');
+  url.searchParams.set('v', digest);
+  const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin', redirect: 'error', signal });
+  if (!response.ok || response.redirected || response.url !== url.toString()
+    || response.headers.get('content-type')?.split(';')[0].trim() !== 'image/jpeg') {
+    throw new Error('candidate poster is unavailable');
+  }
+  const length = Number(response.headers.get('content-length'));
+  if (length > MAX_POSTER_BYTES) throw new Error('candidate poster is too large');
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > MAX_POSTER_BYTES || await sha256Hex(bytes) !== digest) {
+    throw new Error('candidate poster digest mismatch');
+  }
+  return new Blob([bytes], { type: 'image/jpeg' });
+}
+
 function parseReviewBinding(value: unknown): CandidateReviewBinding | null {
   if (!exactKeys(value, [
     'schema', 'releaseId', 'playableId', 'candidatePath', 'candidateArtifactDigest', 'review',
@@ -250,6 +278,29 @@ export function mountPlayableCandidateReview(
   heading.textContent = 'Поиграть candidate';
   const context = document.createElement('div');
   context.className = 'candidate-review__context';
+  const poster = document.createElement('section');
+  poster.className = 'candidate-review__poster';
+  poster.setAttribute('aria-label', 'Обложки кандидата');
+  const posterHeading = document.createElement('strong');
+  posterHeading.textContent = 'Обложка кандидата';
+  const posterChoices = document.createElement('div');
+  posterChoices.className = 'candidate-review__poster-choices';
+  const posterImage = document.createElement('img');
+  posterImage.hidden = true;
+  const posterStatus = document.createElement('p');
+  posterStatus.setAttribute('aria-live', 'polite');
+  posterStatus.textContent = 'Обложка кандидата недоступна до проверки версии.';
+  const posterButtons = (['tall', 'compact'] as const).map((bucket) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'lab-auth__button lab-auth__button--quiet';
+    button.textContent = bucket === 'tall' ? 'Высокий экран' : 'Компактный экран';
+    button.setAttribute('aria-pressed', String(bucket === 'tall'));
+    button.disabled = true;
+    posterChoices.appendChild(button);
+    return { bucket, button };
+  });
+  poster.append(posterHeading, posterChoices, posterImage, posterStatus);
   const checklistHeading = document.createElement('strong');
   checklistHeading.textContent = 'Что проверить';
   const checklist = document.createElement('ol');
@@ -283,7 +334,7 @@ export function mountPlayableCandidateReview(
   feedPreview.textContent = 'Проверить в реальной ленте';
   feedPreview.disabled = true;
   slot.append(frame, takeover);
-  root.append(heading, context, checklistHeading, checklist, slot, status, restart, feedPreview);
+  root.append(heading, context, poster, checklistHeading, checklist, slot, status, restart, feedPreview);
 
   let destroyed = false;
   let bindingValid = false;
@@ -293,6 +344,45 @@ export function mountPlayableCandidateReview(
   let terminal: 'won' | 'lost' | null = null;
   let error: string | null = null;
   const review = validReviewLink(summary);
+  let posterRequest: AbortController | null = null;
+  let posterObjectUrl: string | null = null;
+  const clearPoster = (): void => {
+    posterImage.hidden = true;
+    posterImage.removeAttribute('src');
+    if (posterObjectUrl) URL.revokeObjectURL(posterObjectUrl);
+    posterObjectUrl = null;
+  };
+  const showPoster = async (bucket: 'tall' | 'compact'): Promise<void> => {
+    if (!bindingValid || !review || destroyed) return;
+    posterRequest?.abort();
+    const request = new AbortController();
+    posterRequest = request;
+    clearPoster();
+    for (const choice of posterButtons) choice.button.setAttribute('aria-pressed', String(choice.bucket === bucket));
+    posterStatus.textContent = 'Проверяем обложку этой версии…';
+    const timeout = window.setTimeout(() => request.abort(), 10_000);
+    try {
+      const blob = await loadCandidatePoster(review, bucket, summary.coverDigests?.[bucket] ?? '', request.signal);
+      if (destroyed || request.signal.aborted || posterRequest !== request) return;
+      posterObjectUrl = URL.createObjectURL(blob);
+      posterImage.alt = `Обложка кандидата — ${bucket === 'tall' ? 'высокий' : 'компактный'} экран`;
+      posterImage.src = posterObjectUrl;
+      await posterImage.decode();
+      if (destroyed || request.signal.aborted || posterRequest !== request) return;
+      posterImage.hidden = false;
+      posterStatus.textContent = 'Обложка этой версии. Сравните её с вашей просьбой.';
+    } catch {
+      if (!destroyed && posterRequest === request) {
+        clearPoster();
+        posterStatus.textContent = 'Обложка кандидата недоступна: не удалось проверить изображение этой версии.';
+      }
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+  for (const { bucket, button } of posterButtons) {
+    button.addEventListener('click', () => { void showPoster(bucket); });
+  }
 
   const emit = (): void => onState(Object.freeze({
     bindingValid,
@@ -442,6 +532,8 @@ export function mountPlayableCandidateReview(
       await loadReviewBinding(summary, review);
       if (destroyed) return;
       bindingValid = true;
+      for (const { button } of posterButtons) button.disabled = false;
+      void showPoster('tall');
       feedPreview.disabled = false;
       root.dataset.releaseId = summary.publishId;
       setFrameSource(true);
@@ -456,6 +548,8 @@ export function mountPlayableCandidateReview(
     destroy(): void {
       if (destroyed) return;
       destroyed = true;
+      posterRequest?.abort();
+      clearPoster();
       window.removeEventListener('message', onMessage);
       document.removeEventListener('visibilitychange', onVisibility);
       try { post('setHostPaused', { paused: true }); } catch { /* best effort */ }
