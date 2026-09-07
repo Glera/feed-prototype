@@ -618,7 +618,7 @@ try {
     'invalid candidate path fetched an unbound cover');
   await enabledPage.getByRole('button', { name: 'Use another code' }).click();
 
-  // Desktop intake is the one scope which requires an operator-selected,
+  // Desktop intake keeps its choice of either operator-selected,
   // server-owned machine binding. Client names and one-time codes never infer it.
   await enabledPage.getByLabel('One-time code').fill('56789-ABCDE');
   await enabledPage.getByRole('button', { name: 'Review request' }).click();
@@ -670,6 +670,157 @@ try {
     userCode: '6789A-BCDEF',
     expectedDecisionVersion: 0,
     decision: 'deny',
+  });
+
+  // Research binds the existing device decision to Mac B, explicitly selected
+  // by the operator. These responses use the real DeviceDecisionIn/_device_view
+  // field names; authorization, actor and machine validation still belongs to
+  // Backend, not to a name, deep link or invented client-only grant.
+  const researchCode = '789AB-CDEFG';
+  const researchAuthorization = {
+    authorizationId: '5b447be0-f961-482e-aa03-b419d5f1492d',
+    clientName: 'Researcher on Mac A', // an untrusted label cannot choose A
+    clientInstanceId: '5435ba2d-34cb-4590-841d-7edbb52ba598',
+    scopes: ['research.party:write'],
+    state: 'pending',
+    expiresAt: '2026-09-08T19:30:00.000Z',
+    decisionVersion: 0,
+  };
+  const openResearchAuth = async ({ responseBinding = 'mac-b', status = 200 } = {}) => {
+    const page = await newPage();
+    const requests = [];
+    await page.route('**/api/admin/device-auth/lookup', (route) => {
+      assert.deepEqual(route.request().postDataJSON(), { userCode: researchCode });
+      return route.fulfill({ json: researchAuthorization });
+    });
+    await page.route('**/api/admin/device-auth/decision', (route) => {
+      const body = route.request().postDataJSON();
+      requests.push(body);
+      assert.equal(route.request().headers().authorization,
+        'tma query_id=fixture&user=%7B%22id%22%3A42%7D&hash=fixture');
+      assert.equal(body.authorizationId, researchAuthorization.authorizationId);
+      assert.equal(body.userCode, researchCode);
+      assert.equal(body.expectedDecisionVersion, 0);
+      if (body.decision === 'approve') assert.equal(body.submitterMachine, 'mac-b');
+      else {
+        assert.equal(body.decision, 'deny');
+        assert.equal(Object.hasOwn(body, 'submitterMachine'), false);
+      }
+      if (status !== 200) return route.fulfill({
+        status, json: { detail: { code: 'catalog_lab_scope_denied' } },
+      });
+      return route.fulfill({ json: {
+        ...researchAuthorization,
+        state: body.decision === 'approve' ? 'approved' : 'denied',
+        decisionVersion: 1,
+        ...(body.decision === 'approve' && responseBinding !== 'missing'
+          ? { submitterMachine: responseBinding } : {}),
+      } });
+    });
+    await page.goto(`${origin}/?labAuth=1`, { waitUntil: 'domcontentloaded' });
+    await page.getByLabel('One-time code').fill(researchCode);
+    await page.getByRole('button', { name: 'Review request' }).click();
+    await page.getByTestId('catalog-lab-submitter-machine').waitFor({ state: 'visible' });
+    const approve = page.getByRole('button', { name: 'Approve', exact: true });
+    const macA = page.getByLabel('Mac A — Platform');
+    const macB = page.getByLabel('Mac B — Content / Labs');
+    assert.equal(await macA.isDisabled(), true, 'Research allowed the wrong Mac');
+    assert.equal(await macB.isDisabled(), false);
+    assert.equal(await macB.isChecked(), false, 'Research silently preselected a machine');
+    assert.equal(await approve.isDisabled(), true);
+    assert.equal(await page.locator('iframe').count(), 0, 'Research auth mounted a playable');
+    return { page, requests, approve, macA, macB };
+  };
+
+  const research = await openResearchAuth();
+  await research.approve.evaluate((entry) => { entry.disabled = false; entry.click(); });
+  assert.equal(research.requests.length, 0, 'missing Research machine reached the API');
+  assert.equal(await research.page.getByText(/Choose Mac B — Content \/ Labs before/).isVisible(), true);
+  await research.macA.evaluate((entry) => {
+    entry.disabled = false;
+    entry.checked = true;
+    entry.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await research.approve.evaluate((entry) => { entry.disabled = false; entry.click(); });
+  assert.equal(research.requests.length, 0, 'tampered Mac A Research selection reached the API');
+  await research.macB.check();
+  research.page.once('dialog', (dialog) => {
+    assert.match(dialog.message(), /as Mac B — Content \/ Labs for research\.party:write/);
+    return dialog.dismiss();
+  });
+  await research.approve.click();
+  assert.equal(research.requests.length, 0, 'cancelled Research confirmation reached the API');
+  assert.equal(await research.macA.isDisabled(), true, 'cancel reopened Mac A for Research');
+  assert.equal(await research.macB.isDisabled(), false);
+  research.page.once('dialog', (dialog) => dialog.accept());
+  await research.approve.click();
+  await research.page.getByText(/is bound to Mac B — Content \/ Labs/).waitFor();
+  assert.deepEqual(research.requests, [{
+    authorizationId: researchAuthorization.authorizationId,
+    userCode: researchCode,
+    expectedDecisionVersion: 0,
+    decision: 'approve',
+    submitterMachine: 'mac-b',
+  }]);
+  await research.page.close();
+
+  // A success HTTP status without the exact backend-confirmed binding is not
+  // usable access. Neither case retries automatically or relaxes the Mac guard.
+  for (const responseBinding of ['missing', 'mac-a']) {
+    const failed = await openResearchAuth({ responseBinding });
+    await failed.macB.check();
+    failed.page.once('dialog', (dialog) => dialog.accept());
+    await failed.approve.click();
+    await failed.page.getByText(/server did not confirm this Mac binding/).waitFor();
+    assert.equal(failed.requests.length, 1);
+    assert.equal(await failed.page.getByText('Access approved', { exact: true }).isVisible(), false);
+    assert.equal(await failed.macA.isDisabled(), true, 'error recovery reopened Mac A for Research');
+    assert.equal(await failed.macB.isDisabled(), false);
+    await failed.page.close();
+  }
+
+  // Denial carries no binding, whether the operator selected B or selected none.
+  for (const chooseMachine of [false, true]) {
+    const denied = await openResearchAuth();
+    if (chooseMachine) await denied.macB.check();
+    denied.page.once('dialog', (dialog) => dialog.accept());
+    await denied.page.getByRole('button', { name: 'Deny', exact: true }).click();
+    await denied.page.getByText('Request denied', { exact: true }).waitFor();
+    assert.deepEqual(denied.requests, [{
+      authorizationId: researchAuthorization.authorizationId,
+      userCode: researchCode,
+      expectedDecisionVersion: 0,
+      decision: 'deny',
+    }]);
+    await denied.page.close();
+  }
+
+  // Server actor admission remains authoritative; a 403 cannot become access.
+  const forbidden = await openResearchAuth({ status: 403 });
+  await forbidden.macB.check();
+  forbidden.page.once('dialog', (dialog) => dialog.accept());
+  await forbidden.approve.click();
+  await forbidden.page.getByText('Catalog Lab access is unavailable', { exact: true }).waitFor();
+  assert.equal(forbidden.requests.length, 1);
+  assert.equal(await forbidden.page.getByText('Access approved', { exact: true }).isVisible(), false);
+  await forbidden.page.close();
+
+  // Research-specific restriction must not take Mac B away from desktop intake.
+  await enabledPage.getByRole('button', { name: 'Check another code' }).click();
+  await enabledPage.getByLabel('One-time code').fill('56789-ABCDE');
+  await enabledPage.getByRole('button', { name: 'Review request' }).click();
+  await enabledPage.getByTestId('catalog-lab-submitter-machine').waitFor({ state: 'visible' });
+  assert.equal(await enabledPage.getByLabel('Mac A — Platform').isDisabled(), false);
+  await enabledPage.getByLabel('Mac B — Content / Labs').check();
+  enabledPage.once('dialog', (dialog) => dialog.accept());
+  await machineApprove.click();
+  await enabledPage.getByText(/is bound to Mac B — Content \/ Labs/).waitFor();
+  assert.deepEqual(deviceDecisionRequests[3], {
+    authorizationId: desktopIntakeAuthorization().authorizationId,
+    userCode: '56789-ABCDE',
+    expectedDecisionVersion: 0,
+    decision: 'approve',
+    submitterMachine: 'mac-b',
   });
 
   // READY Telegram deep-link resolves only the requested server-owned release.
