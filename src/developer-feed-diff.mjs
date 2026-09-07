@@ -27,6 +27,32 @@ const CATALOG_INVALID_DETAIL = 'Server-owned состояние каталога
 
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
 
+function copyablePublicationCode(code) {
+  const group = element('div', 'dev-diff__code-copy');
+  const button = element('button', 'dev-diff__promotion-code', `Код: ${code}`);
+  button.type = 'button';
+  button.dataset.action = 'copy-publication-code';
+  button.setAttribute('aria-label', `Скопировать код публикации ${code}`);
+  const feedback = element('span', 'dev-diff__copy-feedback', 'Нажмите, чтобы скопировать');
+  feedback.setAttribute('role', 'status');
+  feedback.setAttribute('aria-live', 'polite');
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      await navigator.clipboard.writeText(code);
+      if (group.isConnected) feedback.textContent = 'Код скопирован';
+    } catch {
+      if (group.isConnected) {
+        feedback.textContent = 'Не удалось скопировать. Выделите код или введите его вручную.';
+      }
+    } finally {
+      button.disabled = false;
+    }
+  });
+  group.append(button, feedback);
+  return group;
+}
+
 const MECHANIC_NAMES = Object.freeze({
   'arrows-v1-swipe': 'Arrows',
   'marble-sort-swipe': 'Marble Sort',
@@ -215,6 +241,37 @@ export function validatePlayablePublicationRequested(value) {
   return Object.freeze({ ...value, items: Object.freeze(items) });
 }
 
+export function validatePlayablePublicationStatus(value, prepared) {
+  if (!exactObject(value, ['schema', 'operationId', 'items'])
+    || value.schema !== 'feed.playable-publication.status.v1'
+    || value.operationId !== prepared.operationId
+    || !Array.isArray(value.items) || value.items.length !== prepared.items.length) return null;
+  const items = value.items.map((item, index) => {
+    const expected = prepared.items[index];
+    if (!exactObject(item, [
+      'releaseId', 'bindingDigest', 'candidateArtifactDigest', 'status', 'reason',
+    ]) || item.releaseId !== expected.releaseId
+      || item.bindingDigest !== expected.bindingDigest
+      || item.candidateArtifactDigest !== expected.candidateArtifactDigest
+      || !['queued', 'running', 'published', 'not_completed', 'unknown'].includes(item.status)
+      || ![null, 'expired_before_start', 'outcome_unconfirmed', 'not_found', 'unavailable']
+        .includes(item.reason)) return null;
+    return Object.freeze({ ...item });
+  });
+  return items.some((item) => item === null) ? null
+    : Object.freeze({ ...value, items: Object.freeze(items) });
+}
+
+const PUBLICATION_LABELS = Object.freeze({
+  queued: 'Ожидает публикации',
+  running: 'Публикуется',
+  published: 'Опубликовано',
+  not_completed: 'Не выполнено',
+  unknown: 'Статус не подтверждён',
+});
+const PUBLICATION_POLL_MS = 5_000;
+const PUBLICATION_POLL_LIMIT = 24;
+
 function mechanicRows(input) {
   const adoptions = Array.isArray(input.adoptions)
     ? input.adoptions : input.adoption ? [input.adoption] : [];
@@ -245,6 +302,7 @@ function mechanicRows(input) {
     pendingByPlayable.delete(adoption.playableId);
     return [Object.freeze({
       playableId: adoption.playableId,
+      releaseId: adoption.releaseId,
       title: mechanicName(adoption.playableId),
       status: adoptedStatus,
       state: 'adopted',
@@ -260,6 +318,7 @@ function mechanicRows(input) {
     if (pendingRequests.length === 0) continue;
     rows.push(Object.freeze({
       playableId,
+      releaseId: null,
       title: mechanicName(playableId),
       status: pendingRequests[0].status,
       state: 'pending',
@@ -361,6 +420,8 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   const onPrepareMechanics = typeof options.onPrepareMechanics === 'function'
     ? options.onPrepareMechanics
     : null;
+  const onReadPublicationStatus = typeof options.onReadPublicationStatus === 'function'
+    ? options.onReadPublicationStatus : null;
 
   let destroyed = false;
   let open = false;
@@ -382,6 +443,12 @@ export function mountDeveloperFeedDiffSurface(host, options) {
   let mechanicPublicationConfirmOpen = false;
   let mechanicPublicationCode = '';
   let mechanicPublicationError = '';
+  // Retain exact submitted identities through projection refreshes. Removing a
+  // candidate from the dev inventory is not evidence of public deployment.
+  const publications = new Map();
+  let publicationTimer = null;
+  let publicationCheckPending = false;
+  let publicationChecksLeft = PUBLICATION_POLL_LIMIT;
 
   const root = element('div', 'dev-diff-surface');
   root.dataset.testid = 'dev-diff-surface';
@@ -478,7 +545,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         });
         selectableHead.append(checkbox, rowHead(
           row.title,
-          mechanicQueued.has(row.playableId) ? 'Публикация запущена' : row.status,
+          publicationStateForRow(row) ?? row.status,
         ));
         article.append(selectableHead);
         const instructions = row.instructions.length > 0
@@ -558,14 +625,10 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         const confirm = element('div', 'dev-diff__promotion-confirm');
         confirm.dataset.testid = 'mechanic-publication-confirm';
         confirm.hidden = !mechanicPublicationConfirmOpen;
-        confirm.append(
-          element('p', 'dev-diff__detail', 'Только мне → Доступно всем'),
-          element(
-            'p',
-            'dev-diff__promotion-code',
-            mechanicPublication ? `Код: ${mechanicPublication.confirmationCode}` : '',
-          ),
-        );
+        confirm.append(element('p', 'dev-diff__detail', 'Только мне → Доступно всем'));
+        if (mechanicPublication) {
+          confirm.append(copyablePublicationCode(mechanicPublication.confirmationCode));
+        }
         const input = element('input', 'dev-diff__promotion-input');
         input.dataset.testid = 'mechanic-publication-code-input';
         input.inputMode = 'text';
@@ -575,7 +638,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         input.value = mechanicPublicationCode;
         input.disabled = mechanicPublicationPending || mechanicPublicationCommitted;
         input.addEventListener('input', () => { mechanicPublicationCode = input.value; });
-        const applyLabel = mechanicPublicationCommitted ? 'Публикация запущена'
+        const applyLabel = mechanicPublicationCommitted ? 'Заявка принята'
           : mechanicPublicationPending ? 'Проверяю…' : 'Подтвердить публикацию';
         const apply = element('button', 'dev-diff__action', applyLabel);
         apply.type = 'button';
@@ -635,11 +698,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         confirm.hidden = !promotionConfirmOpen;
         confirm.append(
           element('p', 'dev-diff__detail', 'Только мне → Доступно всем'),
-          element(
-            'p',
-            'dev-diff__promotion-code',
-            `Код: ${model.catalog.promotion.confirmationCode}`,
-          ),
+          copyablePublicationCode(model.catalog.promotion.confirmationCode),
         );
         const input = element('input', 'dev-diff__promotion-input');
         input.dataset.testid = 'catalog-promotion-code-input';
@@ -689,6 +748,144 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         body.append(actions);
       }
     }
+
+    if (publications.size > 0) {
+      const statuses = groupSection('Публикация');
+      statuses.dataset.testid = 'mechanic-publication-statuses';
+      statuses.setAttribute('aria-live', 'polite');
+      for (const publication of publications.values()) {
+        const published = publication.items.filter((item) => item.status === 'published').length;
+        if (publication.items.length > 1) {
+          statuses.append(element('p', 'dev-diff__detail',
+            `Опубликовано ${published} из ${publication.items.length}`));
+        }
+        for (const [index, item] of publication.items.entries()) {
+          const preparedItem = publication.prepared.items[index];
+          const article = rowArticle('publication-status', item.status === 'published' ? 'ok' : 'neutral');
+          article.dataset.releaseId = item.releaseId;
+          article.dataset.publicationStatus = item.status;
+          article.append(rowHead(mechanicName(preparedItem.playableId), PUBLICATION_LABELS[item.status]));
+          for (const change of preparedItem.changes) {
+            article.append(element('p', 'dev-diff__description', change));
+          }
+          if (item.reason === 'expired_before_start') article.append(element('p', 'dev-diff__detail',
+            'Заявка истекла до начала работы. Для новой публикации запросите новый код.'));
+          if (item.reason === 'outcome_unconfirmed') article.append(element('p', 'dev-diff__detail',
+            'Работа начиналась, но результат не подтверждён. Проверьте релизную ленту перед новой публикацией.'));
+          if (item.reason === 'not_found') article.append(element('p', 'dev-diff__detail',
+            'Сервер не нашёл принятую заявку. Публикация не подтверждена.'));
+          if (item.reason === 'unavailable') article.append(element('p', 'dev-diff__detail',
+            'Не удалось определить результат публикации.'));
+          if (publication.error) article.append(element('p', 'dev-diff__blocker',
+            'Не удалось проверить статус. Показано последнее подтверждённое состояние.'));
+          statuses.append(article);
+        }
+      }
+      if (onReadPublicationStatus) {
+        const refresh = element('button', 'dev-diff__action',
+          publicationCheckPending ? 'Проверяю статус…' : 'Проверить статус');
+        refresh.type = 'button';
+        refresh.dataset.action = 'refresh-publication-status';
+        refresh.disabled = publicationCheckPending;
+        statuses.append(refresh);
+        if (publicationChecksLeft === 0) statuses.append(element('p', 'dev-diff__detail',
+          'Автопроверка остановлена. Статус можно проверить кнопкой выше.'));
+      }
+      body.append(statuses);
+    }
+  };
+
+  const publicationStateForRow = (row) => {
+    for (const publication of [...publications.values()].reverse()) {
+      const index = publication.prepared.items.findIndex((item) => (
+        item.playableId === row.playableId && item.releaseId === row.releaseId
+      ));
+      if (index >= 0) return PUBLICATION_LABELS[publication.items[index].status];
+    }
+    return null;
+  };
+
+  const rerender = () => {
+    if (!open || destroyed) return;
+    const scrollTop = card.scrollTop;
+    const focused = body.contains(document.activeElement) ? document.activeElement : null;
+    const testid = focused?.dataset.testid;
+    const selection = focused instanceof HTMLInputElement
+      ? [focused.selectionStart, focused.selectionEnd] : null;
+    renderBody();
+    card.scrollTop = scrollTop;
+    if (testid) {
+      const replacement = [...body.querySelectorAll('[data-testid]')]
+        .find((node) => node.dataset.testid === testid);
+      replacement?.focus({ preventScroll: true });
+      if (replacement instanceof HTMLInputElement && selection?.[0] !== null) {
+        replacement.setSelectionRange(...selection);
+      }
+    }
+  };
+
+  const updateQueuedMechanics = () => {
+    mechanicQueued = new Set();
+    for (const publication of publications.values()) {
+      publication.items.forEach((item, index) => {
+        if (item.status === 'not_completed' || item.reason === 'not_found') return;
+        const preparedItem = publication.prepared.items[index];
+        const current = model.mechanics.find((row) => row.playableId === preparedItem.playableId);
+        if (current?.releaseId === preparedItem.releaseId) {
+          mechanicQueued.add(preparedItem.playableId);
+        }
+      });
+    }
+  };
+
+  const stopPublicationTimer = () => {
+    if (publicationTimer !== null) clearTimeout(publicationTimer);
+    publicationTimer = null;
+  };
+  const schedulePublicationCheck = () => {
+    stopPublicationTimer();
+    if (destroyed || !open || document.visibilityState === 'hidden'
+      || !onReadPublicationStatus || publicationChecksLeft === 0) return;
+    if (![...publications.values()].some((publication) => publication.error
+      || publication.items.some((item) => ['queued', 'running'].includes(item.status)))) return;
+    publicationTimer = setTimeout(() => { void checkPublications(); }, PUBLICATION_POLL_MS);
+  };
+  const checkPublications = async () => {
+    stopPublicationTimer();
+    if (destroyed || !open || document.visibilityState === 'hidden'
+      || !onReadPublicationStatus || publicationCheckPending) return;
+    publicationCheckPending = true;
+    publicationChecksLeft = Math.max(0, publicationChecksLeft - 1);
+    const pending = [...publications.values()]
+      .filter((publication) => !publication.items.every((item) => item.status === 'published'));
+    await Promise.all(pending.map(async (publication) => {
+      try {
+        const raw = await onReadPublicationStatus(publication.prepared);
+        const status = validatePlayablePublicationStatus(raw, publication.prepared);
+        if (!status) throw new Error('invalid_publication_status');
+        if (destroyed) return;
+        publication.items = status.items;
+        publication.error = false;
+      } catch {
+        if (!destroyed) publication.error = true;
+      }
+    }));
+    publicationCheckPending = false;
+    if (destroyed) return;
+    updateQueuedMechanics();
+    rerender();
+    schedulePublicationCheck();
+  };
+  const trackPublication = (prepared, status) => {
+    publications.set(prepared.operationId, {
+      prepared,
+      items: prepared.items.map(({ releaseId, bindingDigest, candidateArtifactDigest }) => ({
+        releaseId, bindingDigest, candidateArtifactDigest, status, reason: null,
+      })),
+      error: false,
+    });
+    publicationChecksLeft = PUBLICATION_POLL_LIMIT;
+    updateQueuedMechanics();
   };
 
   const openSheet = () => {
@@ -702,11 +899,13 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     // operator would open the inventory already past the platform row.
     card.scrollTop = 0;
     card.focus({ preventScroll: true });
+    if (publications.size > 0) void checkPublications();
   };
 
   const closeSheet = (restoreFocus = true) => {
     if (!open) return;
     open = false;
+    stopPublicationTimer();
     sheet.hidden = true;
     body.replaceChildren();
     renderBadge();
@@ -719,6 +918,11 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     if (!target) return;
     if (target.closest('[data-close]')) {
       closeSheet();
+      return;
+    }
+    if (target.closest('[data-action="refresh-publication-status"]')) {
+      publicationChecksLeft = PUBLICATION_POLL_LIMIT;
+      void checkPublications();
       return;
     }
     const jump = target.closest('[data-action="show-mechanic"]');
@@ -756,29 +960,32 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     if (applyMechanic && mechanicSelected.size > 0 && mechanicPublication
       && onPublishMechanic && !mechanicPublicationPending) {
       const code = mechanicPublicationCode.trim().toUpperCase();
+      const submittedPublication = mechanicPublication;
       mechanicPublicationPending = true;
       mechanicPublicationError = '';
       renderBody();
-      void Promise.resolve(onPublishMechanic(mechanicPublication, code))
+      void Promise.resolve(onPublishMechanic(submittedPublication, code))
         .then((outcome) => {
           if (destroyed) return;
           mechanicPublicationPending = false;
-          if (['queued_refreshed', 'queued_refresh_pending', 'published_refreshed']
+          if (['queued_refreshed', 'queued_refresh_pending', 'published_refreshed', 'published_refresh_pending']
             .includes(outcome?.status)) {
-            for (const item of mechanicPublication.items) {
-              mechanicQueued.add(item.playableId);
+            trackPublication(submittedPublication,
+              outcome.status.startsWith('published_') ? 'published' : 'queued');
+            for (const item of submittedPublication.items) {
               mechanicSelected.delete(item.playableId);
             }
             mechanicPublicationCommitted = false;
             mechanicPublication = null;
-            mechanicPublicationConfirmOpen = true;
+            mechanicPublicationConfirmOpen = false;
             mechanicPublicationCode = '';
-            mechanicPublicationError = outcome.status === 'queued_refresh_pending'
-              ? 'Публикация запущена. Обновите ленту, чтобы увидеть результат.'
-              : 'Публикация запущена. После проверки релиз обновится автоматически.';
+            mechanicPublicationError = '';
+            if (outcome.status.startsWith('queued_')) void checkPublications();
           } else {
+            trackPublication(submittedPublication, 'unknown');
             mechanicPublicationConfirmOpen = true;
-            mechanicPublicationError = 'Результат не подтверждён. Обновите ленту перед повтором.';
+            mechanicPublicationError = 'Приём заявки не подтверждён. Проверяем статус.';
+            void checkPublications();
           }
           if (open) renderBody();
         })
@@ -788,7 +995,9 @@ export function mountDeveloperFeedDiffSurface(host, options) {
           mechanicPublication = null;
           mechanicPublicationCode = '';
           mechanicPublicationConfirmOpen = true;
-          mechanicPublicationError = 'Код не подошёл или кандидат изменился. Обновите ленту.';
+          trackPublication(submittedPublication, 'unknown');
+          mechanicPublicationError = 'Приём заявки не подтверждён. Проверяем статус.';
+          void checkPublications();
           if (open) renderBody();
         });
       return;
@@ -853,10 +1062,15 @@ export function mountDeveloperFeedDiffSurface(host, options) {
     event.stopPropagation();
     closeSheet();
   };
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') stopPublicationTimer();
+    else if (open && publications.size > 0 && publicationChecksLeft > 0) void checkPublications();
+  };
 
   badge.addEventListener('click', onBadgeClick);
   sheet.addEventListener('click', onSheetClick);
   document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('visibilitychange', onVisibilityChange);
 
   renderBadge();
 
@@ -896,6 +1110,7 @@ export function mountDeveloperFeedDiffSurface(host, options) {
         mechanicPublicationCode = '';
         mechanicPublicationError = '';
       }
+      updateQueuedMechanics();
       if (open && !model.visible) closeSheet(false);
       renderBadge();
       if (!open) return;
@@ -910,9 +1125,11 @@ export function mountDeveloperFeedDiffSurface(host, options) {
       if (destroyed) return;
       destroyed = true;
       open = false;
+      stopPublicationTimer();
       badge.removeEventListener('click', onBadgeClick);
       sheet.removeEventListener('click', onSheetClick);
       document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       root.remove();
     },
   });

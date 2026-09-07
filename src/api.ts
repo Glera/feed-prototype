@@ -432,6 +432,26 @@ export interface PlayablePublicationSelectionV1 {
   candidateArtifactDigest: string;
 }
 
+export interface PlayablePublicationStatusV1 {
+  schema: 'feed.playable-publication.status.v1';
+  operationId: string;
+  items: (PlayablePublicationSelectionV1 & {
+    status: 'queued' | 'running' | 'published' | 'not_completed' | 'unknown';
+    reason: null | 'expired_before_start' | 'outcome_unconfirmed' | 'not_found' | 'unavailable';
+  })[];
+}
+
+/** Read-only lookup of an already submitted exact selection; never reapplies it. */
+export function apiGetPlayablePublicationStatusRequired(payload: {
+  schema: 'feed.playable-publication.status-request.v1';
+  operationId: string;
+  items: PlayablePublicationSelectionV1[];
+}): Promise<PlayablePublicationStatusV1> {
+  return postRequired<PlayablePublicationStatusV1>(
+    '/api/operator/playable-publications/status', payload,
+  );
+}
+
 export function apiPreparePlayablePublicationRequired(payload: {
   schema: 'feed.playable-publication.prepare.v1';
   operationId: string;

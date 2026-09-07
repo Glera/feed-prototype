@@ -51,6 +51,7 @@ import {
   apiApplyCatalogDirectPromotionRequired,
   apiPreparePlayablePublicationRequired,
   apiApplyPlayablePublicationRequired,
+  apiGetPlayablePublicationStatusRequired,
   apiAllocateAuthorizedCatalogRequired, apiGetCatalogCanaryAuthorityRequired,
   apiGetCatalogFeedAuthorityRequired,
   apiGetGeneratedOfferRequired,
@@ -2934,6 +2935,13 @@ export class Feed {
       onPrepareMechanics: (playableIds) => (
         this.prepareDeveloperPlayablePublicationSelection(playableIds)
       ),
+      onReadPublicationStatus: (prepared) => apiGetPlayablePublicationStatusRequired({
+        schema: 'feed.playable-publication.status-request.v1',
+        operationId: prepared.operationId,
+        items: prepared.items.map(({ releaseId, bindingDigest, candidateArtifactDigest }) => ({
+          releaseId, bindingDigest, candidateArtifactDigest,
+        })),
+      }),
     });
   }
 
@@ -3051,8 +3059,8 @@ export class Feed {
       ))) throw new Error('playable_publication_result_invalid');
     const refreshed = await this.syncSessionBootstrap();
     return {
-      status: result.status === 'published' && refreshed
-        ? 'published_refreshed'
+      status: result.status === 'published'
+        ? refreshed ? 'published_refreshed' : 'published_refresh_pending'
         : refreshed ? 'queued_refreshed' : 'queued_refresh_pending',
     };
   }

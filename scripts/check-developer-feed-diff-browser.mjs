@@ -212,7 +212,7 @@ document.removeEventListener = (type, handler, options) => {
 const { mountDeveloperFeedDiffSurface, developerFeedDiffModel,
   validateDeveloperFeedCatalogDiff, validateCatalogDirectPromotionPrepared,
   validateCatalogDirectPromotionResult, validatePlayablePublicationPrepared,
-  validatePlayablePublicationRequested } =
+  validatePlayablePublicationRequested, validatePlayablePublicationStatus } =
   await import('/developer-feed-diff.mjs');
 window.developerFeedDiffModel = developerFeedDiffModel;
 window.mountDeveloperFeedDiffSurface = mountDeveloperFeedDiffSurface;
@@ -221,6 +221,7 @@ window.validateCatalogDirectPromotionPrepared = validateCatalogDirectPromotionPr
 window.validateCatalogDirectPromotionResult = validateCatalogDirectPromotionResult;
 window.validatePlayablePublicationPrepared = validatePlayablePublicationPrepared;
 window.validatePlayablePublicationRequested = validatePlayablePublicationRequested;
+window.validatePlayablePublicationStatus = validatePlayablePublicationStatus;
 window.shown = [];
 window.surface = mountDeveloperFeedDiffSurface(document.body, {
   input: {
@@ -1078,6 +1079,10 @@ try {
     window.mechanicPublicationPrepared = prepared;
     window.mechanicPublications = [];
     window.mechanicPublicationPreparations = [];
+    window.publicationStatusRequests = [];
+    window.publicationStatusStates = ['queued', 'queued'];
+    window.publicationStatusReasons = [null, null];
+    window.publicationStatusFailure = false;
     window.surface = window.mountDeveloperFeedDiffSurface(document.body, {
       input,
       onPrepareMechanics: async (playableIds) => {
@@ -1086,7 +1091,23 @@ try {
       },
       onPublishMechanic: async (value, code) => {
         window.mechanicPublications.push({ value, code });
+        // The real Feed refreshes /session before returning its apply result.
+        // A changed dev inventory must not erase the submitted batch identity.
+        window.surface.update({ ...input, adoptions: [], mechanicPublication: null });
         return { status: 'queued_refreshed' };
+      },
+      onReadPublicationStatus: async (value) => {
+        window.publicationStatusRequests.push(value);
+        if (window.publicationStatusFailure) throw new Error('status unavailable');
+        return {
+          schema: 'feed.playable-publication.status.v1',
+          operationId: value.operationId,
+          items: value.items.map(({ releaseId, bindingDigest, candidateArtifactDigest }, index) => ({
+            releaseId, bindingDigest, candidateArtifactDigest,
+            status: window.publicationStatusStates[index],
+            reason: window.publicationStatusReasons[index],
+          })),
+        };
       },
     });
     return {
@@ -1183,9 +1204,35 @@ try {
     'publication reused a stale projected code instead of preparing the selected set afresh',
   );
   await modulePage.locator('text=Код: D0C0DE').waitFor({ state: 'visible' });
+  await modulePage.evaluate(() => {
+    window.copiedPublicationCodes = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (value) => { window.copiedPublicationCodes.push(value); } },
+    });
+  });
+  const copyCode = modulePage.getByRole('button', { name: 'Скопировать код публикации D0C0DE' });
+  await copyCode.click();
+  await modulePage.getByRole('status').filter({ hasText: 'Код скопирован' }).waitFor();
+  assert.deepEqual(await modulePage.evaluate(() => window.copiedPublicationCodes), ['D0C0DE'],
+    'tap-to-copy did not write only the exact code to the clipboard');
+  assert.equal(await modulePage.locator('[data-testid="mechanic-publication-code-input"]').inputValue(), '',
+    'copying the code silently filled the publication confirmation');
+  assert.equal(await modulePage.evaluate(() => window.mechanicPublications.length), 0,
+    'copying the code caused a publication mutation');
+  await modulePage.evaluate(() => {
+    navigator.clipboard.writeText = async () => { throw new DOMException('Denied', 'NotAllowedError'); };
+  });
+  await copyCode.focus();
+  await modulePage.keyboard.press('Enter');
+  await modulePage.getByRole('status').filter({ hasText: 'Не удалось скопировать' }).waitFor();
+  assert.equal(await modulePage.getByRole('status').filter({ hasText: 'Код скопирован' }).count(), 0,
+    'clipboard denial still claimed successful copying');
+  assert.equal(await copyCode.isEnabled(), true, 'clipboard denial blocked manual confirmation');
   await modulePage.locator('[data-testid="mechanic-publication-code-input"]').fill('d0c0de');
   await modulePage.locator('[data-action="confirm-mechanic-publication"]').click();
-  await modulePage.locator('text=Публикация запущена').last().waitFor({ state: 'visible' });
+  const publicationStatuses = modulePage.locator('[data-testid="mechanic-publication-statuses"]');
+  await publicationStatuses.getByText('Ожидает публикации', { exact: true }).first().waitFor();
   const submittedMechanicPublication = await modulePage.evaluate(() => window.mechanicPublications);
   assert.equal(submittedMechanicPublication.length, 1,
     'publish-all issued more than one publication mutation');
@@ -1193,20 +1240,86 @@ try {
     'the one publication code was not normalized and submitted once');
   assert.equal(submittedMechanicPublication[0].value.items.length, 2,
     'the complete prepared mechanic set was not submitted atomically');
+  assert.equal(await publicationStatuses.locator('[data-publication-status="published"]').count(), 0,
+    'an accepted request was labelled as published');
+  assert.equal(await modulePage.locator('[data-row="mechanic"]').count(), 1,
+    'fixture did not replace the live adoption inventory during apply');
+  const statusRefresh = modulePage.locator('[data-action="refresh-publication-status"]');
+  await modulePage.evaluate(() => { window.publicationStatusStates = ['running', 'queued']; });
+  await publicationStatuses.getByText('Публикуется', { exact: true }).waitFor({ timeout: 8_000 });
+  await modulePage.evaluate(() => { window.publicationStatusStates = ['published', 'running']; });
+  await statusRefresh.click();
+  await publicationStatuses.getByText('Опубликовано 1 из 2', { exact: true }).waitFor();
+  await publicationStatuses.getByText('Публикуется', { exact: true }).waitFor();
+  await modulePage.evaluate(() => { window.publicationStatusFailure = true; });
+  await statusRefresh.click();
+  await publicationStatuses.getByText('Не удалось проверить статус.', { exact: false }).first().waitFor();
+  assert.equal(await publicationStatuses.locator('[data-publication-status="not_completed"]').count(), 0,
+    'a network failure was misreported as failed publication');
+  await modulePage.evaluate(() => {
+    window.publicationStatusFailure = false;
+    window.publicationStatusStates = ['published', 'not_completed'];
+    window.publicationStatusReasons = [null, 'expired_before_start'];
+  });
+  await statusRefresh.click();
+  await publicationStatuses.getByText('Не выполнено', { exact: true }).waitFor();
+  await publicationStatuses.getByText('Заявка истекла до начала работы.', { exact: false }).waitFor();
+  await modulePage.evaluate(() => {
+    window.publicationStatusStates = ['published', 'unknown'];
+    window.publicationStatusReasons = [null, 'outcome_unconfirmed'];
+  });
+  await statusRefresh.click();
+  await publicationStatuses.getByText('Статус не подтверждён', { exact: true }).waitFor();
+  assert.equal(await publicationStatuses.locator('[data-publication-status="not_completed"]').count(), 0,
+    'an expired started job was falsely reported as failed');
+  assert.equal(await modulePage.evaluate(() => window.mechanicPublications.length), 1,
+    'status refresh replayed or created a publication');
+  const statusValidation = await modulePage.evaluate(() => {
+    const prepared = window.mechanicPublicationPrepared;
+    const value = {
+      schema: 'feed.playable-publication.status.v1', operationId: prepared.operationId,
+      items: prepared.items.map(({ releaseId, bindingDigest, candidateArtifactDigest }) => ({
+        releaseId, bindingDigest, candidateArtifactDigest, status: 'queued', reason: null,
+      })),
+    };
+    return {
+      accepted: window.validatePlayablePublicationStatus(value, prepared) !== null,
+      wrongOperation: window.validatePlayablePublicationStatus({ ...value, operationId: crypto.randomUUID() }, prepared) === null,
+      wrongOrder: window.validatePlayablePublicationStatus({ ...value, items: [...value.items].reverse() }, prepared) === null,
+      missingItem: window.validatePlayablePublicationStatus({ ...value, items: value.items.slice(0, 1) }, prepared) === null,
+    };
+  });
+  assert.deepEqual(statusValidation, {
+    accepted: true, wrongOperation: true, wrongOrder: true, missingItem: true,
+  }, 'status lookup accepted another operation or a drifted selection');
+  await modulePage.evaluate(() => {
+    window.publicationStatusStates = ['published', 'running'];
+    window.publicationStatusReasons = [null, null];
+  });
+  await statusRefresh.click();
+  await publicationStatuses.getByText('Публикуется', { exact: true }).waitFor();
   await modulePage.locator('[data-close]').last().click();
+  const checksBeforeClosedWait = await modulePage.evaluate(() => window.publicationStatusRequests.length);
+  await modulePage.waitForTimeout(5_100);
+  assert.equal(await modulePage.evaluate(() => window.publicationStatusRequests.length), checksBeforeClosedWait,
+    'closing the sheet left a publication poll running');
 
   const listenerBalance = () => modulePage.evaluate(() =>
     Object.fromEntries(window.documentListeners));
   assert.equal((await listenerBalance()).keydown, 1,
     'the surface did not register its document-level Escape handler');
 
+  await modulePage.evaluate(() => { window.publicationStatusStates = ['published', 'published']; });
   await modulePage.locator(badgeSelector).click();
   await modulePage.locator(sheetSelector).waitFor({ state: 'visible' });
+  await publicationStatuses.getByText('Опубликовано 2 из 2', { exact: true }).waitFor();
   await modulePage.evaluate(() => window.surface.destroy());
   assert.equal(await modulePage.locator('[data-testid="dev-diff-surface"]').count(), 0,
     'destroy left the surface root attached');
   assert.equal((await listenerBalance()).keydown, 0,
     'destroy left a leaked document keydown listener behind');
+  assert.equal((await listenerBalance()).visibilitychange, 0,
+    'destroy left the publication visibility listener behind');
 
   // A late Escape must reach nothing: no resurrection, no throw.
   await modulePage.keyboard.press('Escape');

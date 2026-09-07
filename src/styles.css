@@ -5516,9 +5516,26 @@ body {
 .dev-diff__promotion-confirm[hidden] { display: none; }
 .dev-diff__promotion-code {
   margin: 8px 0;
+  padding: 12px;
+  min-height: 44px;
+  border: 1px solid rgba(156, 115, 255, 0.7);
+  border-radius: 10px;
+  background: rgba(91, 64, 180, 0.22);
   color: #f0eaff;
   font: 800 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
   letter-spacing: 0.08em;
+  cursor: pointer;
+  user-select: text;
+}
+.dev-diff__promotion-code:focus-visible {
+  outline: 2px solid #d8c3ff;
+  outline-offset: 2px;
+}
+.dev-diff__copy-feedback {
+  display: block;
+  margin: 0 0 10px;
+  color: #c5c7d8;
+  font: 500 12px/1.4 system-ui, sans-serif;
 }
 .dev-diff__promotion-input {
   box-sizing: border-box;
