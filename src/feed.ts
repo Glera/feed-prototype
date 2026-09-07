@@ -73,7 +73,6 @@ import {
   type CatalogDirectPromotionPreparedV1,
   type CatalogDirectPromotionResultV1,
   type PlayablePublicationPreparedV1,
-  type PlayablePublicationRequestedV1,
   type PlayablePublicationSelectionV1,
   type OperatorPlayableReworkQueueItemV1,
   type OperatorPlayableReworkResponseV1,
@@ -232,7 +231,7 @@ import {
   validateCatalogDirectPromotionResult,
   validateDeveloperFeedCatalogDiff,
   validatePlayablePublicationPrepared,
-  validatePlayablePublicationRequested,
+  applyPlayablePublicationClient,
   type CatalogDirectPromotionClientOutcome,
   type PlayablePublicationClientOutcome,
   type DeveloperFeedDiffInput,
@@ -3036,33 +3035,10 @@ export class Feed {
     const selection = this.playablePublicationSelection(
       prepared.items.map((item) => item.playableId),
     );
-    if (!selection || selection.length !== prepared.items.length
-      || !prepared.items.every((item, index) => (
-        item.releaseId === selection[index].releaseId
-        && item.bindingDigest === selection[index].bindingDigest
-        && item.candidateArtifactDigest === selection[index].candidateArtifactDigest
-      ))) throw new Error('playable_publication_candidate_changed');
-    const rawResult: PlayablePublicationRequestedV1 = await apiApplyPlayablePublicationRequired({
-      schema: 'feed.playable-publication.apply.v1',
-      operationId: prepared.operationId,
-      action: 'publish',
-      items: selection,
-      confirmationCode,
+    return applyPlayablePublicationClient(prepared, selection, confirmationCode, {
+      apply: apiApplyPlayablePublicationRequired,
+      refresh: () => this.syncSessionBootstrap(),
     });
-    const result = validatePlayablePublicationRequested(rawResult);
-    if (result === null || result.operationId !== prepared.operationId
-      || result.items.length !== prepared.items.length
-      || !result.items.every((item, index) => (
-        item.releaseId === prepared.items[index].releaseId
-        && item.bindingDigest === prepared.items[index].bindingDigest
-        && item.candidateArtifactDigest === prepared.items[index].candidateArtifactDigest
-      ))) throw new Error('playable_publication_result_invalid');
-    const refreshed = await this.syncSessionBootstrap();
-    return {
-      status: result.status === 'published'
-        ? refreshed ? 'published_refreshed' : 'published_refresh_pending'
-        : refreshed ? 'queued_refreshed' : 'queued_refresh_pending',
-    };
   }
 
   private async prepareDeveloperCatalogPromotion(): Promise<void> {

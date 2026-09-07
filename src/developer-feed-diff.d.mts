@@ -100,10 +100,21 @@ export interface CatalogDirectPromotionClientOutcome {
   status: 'committed_refreshed' | 'committed_refresh_pending';
 }
 
-export interface PlayablePublicationClientOutcome {
+export type PlayablePublicationClientOutcome = {
   status: 'queued_refreshed' | 'queued_refresh_pending'
     | 'published_refreshed' | 'published_refresh_pending';
-}
+} | { status: 'acceptance_unknown' }
+  | { status: 'rejected'; reason: 'candidate_changed' | 'request_rejected' | 'not_sent' };
+
+export function applyPlayablePublicationClient(
+  prepared: Readonly<PlayablePublicationPreparedV1>,
+  selection: import('./api').PlayablePublicationSelectionV1[] | null,
+  confirmationCode: string,
+  transport: {
+    apply: typeof import('./api').apiApplyPlayablePublicationRequired;
+    refresh(): Promise<boolean>;
+  },
+): Promise<PlayablePublicationClientOutcome>;
 
 export function developerFeedDiffModel(
   input: DeveloperFeedDiffInput,

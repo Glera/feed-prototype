@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
+import { buildSync } from 'esbuild';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const buildRoot = mkdtempSync(path.join(tmpdir(), 'developer-feed-diff-browser-'));
@@ -35,6 +36,7 @@ const sheetSelector = '[data-testid="dev-diff-sheet"]';
 const rowSelector = '[data-testid="dev-diff-row"]';
 
 let origin = '';
+let publicationApiModule = '';
 let operatorLevelFlaggingAvailable = false;
 let developmentIntakeAvailable = false;
 let developerFeedCatalog = null;
@@ -212,7 +214,8 @@ document.removeEventListener = (type, handler, options) => {
 const { mountDeveloperFeedDiffSurface, developerFeedDiffModel,
   validateDeveloperFeedCatalogDiff, validateCatalogDirectPromotionPrepared,
   validateCatalogDirectPromotionResult, validatePlayablePublicationPrepared,
-  validatePlayablePublicationRequested, validatePlayablePublicationStatus } =
+  validatePlayablePublicationRequested, validatePlayablePublicationStatus,
+  applyPlayablePublicationClient } =
   await import('/developer-feed-diff.mjs');
 window.developerFeedDiffModel = developerFeedDiffModel;
 window.mountDeveloperFeedDiffSurface = mountDeveloperFeedDiffSurface;
@@ -222,6 +225,8 @@ window.validateCatalogDirectPromotionResult = validateCatalogDirectPromotionResu
 window.validatePlayablePublicationPrepared = validatePlayablePublicationPrepared;
 window.validatePlayablePublicationRequested = validatePlayablePublicationRequested;
 window.validatePlayablePublicationStatus = validatePlayablePublicationStatus;
+window.applyPlayablePublicationClient = applyPlayablePublicationClient;
+window.publicationApi = await import('/publication-api-test.js');
 window.shown = [];
 window.surface = mountDeveloperFeedDiffSurface(document.body, {
   input: {
@@ -240,6 +245,10 @@ window.ready = true;
 const server = createServer((request, response) => {
   try {
     const url = new URL(request.url || '/', origin || 'http://127.0.0.1');
+    if (url.pathname === '/publication-api-test.js') {
+      response.setHeader('content-type', 'application/javascript; charset=utf-8');
+      return response.end(publicationApiModule);
+    }
     if (request.method === 'POST' && url.pathname === '/api/session') {
       request.resume();
       if (failNextPostPromotionSession) {
@@ -379,6 +388,11 @@ await new Promise((resolve, reject) => {
   server.listen(0, '127.0.0.1', resolve);
 });
 origin = `http://127.0.0.1:${server.address().port}`;
+publicationApiModule = buildSync({
+  entryPoints: [path.join(root, 'src/api.ts')],
+  bundle: true, write: false, format: 'esm', platform: 'browser',
+  define: { 'import.meta.env': JSON.stringify({ VITE_API_BASE: origin, DEV: false }) },
+}).outputFiles[0].text;
 
 const build = spawnSync('npx', [
   '--no-install', 'vite', 'build', '--outDir', buildRoot, '--emptyOutDir',
@@ -1085,19 +1099,21 @@ try {
     window.publicationStatusFailure = false;
     window.surface = window.mountDeveloperFeedDiffSurface(document.body, {
       input,
+      onShowMechanic: (playableId) => window.shown.push(playableId),
+      onPromoteCatalog: async () => { throw new Error('unexpected catalog mutation'); },
       onPrepareMechanics: async (playableIds) => {
         window.mechanicPublicationPreparations.push(playableIds);
         return prepared;
       },
       onPublishMechanic: async (value, code) => {
         window.mechanicPublications.push({ value, code });
-        // The real Feed refreshes /session before returning its apply result.
-        // A changed dev inventory must not erase the submitted batch identity.
-        window.surface.update({ ...input, adoptions: [], mechanicPublication: null });
+        // Real /session can keep an adopted release while Generator is queued.
+        window.surface.update(input);
         return { status: 'queued_refreshed' };
       },
       onReadPublicationStatus: async (value) => {
         window.publicationStatusRequests.push(value);
+        if (window.publicationStatusWait) await window.publicationStatusWait;
         if (window.publicationStatusFailure) throw new Error('status unavailable');
         return {
           schema: 'feed.playable-publication.status.v1',
@@ -1229,6 +1245,10 @@ try {
   assert.equal(await modulePage.getByRole('status').filter({ hasText: 'Код скопирован' }).count(), 0,
     'clipboard denial still claimed successful copying');
   assert.equal(await copyCode.isEnabled(), true, 'clipboard denial blocked manual confirmation');
+  assert.equal(await copyCode.evaluate((node) => document.activeElement === node), true,
+    'clipboard denial lost keyboard focus');
+  assert.equal(await modulePage.evaluate(() => getSelection()?.toString()), 'D0C0DE',
+    'clipboard fallback did not select only the bare code');
   await modulePage.locator('[data-testid="mechanic-publication-code-input"]').fill('d0c0de');
   await modulePage.locator('[data-action="confirm-mechanic-publication"]').click();
   const publicationStatuses = modulePage.locator('[data-testid="mechanic-publication-statuses"]');
@@ -1242,11 +1262,128 @@ try {
     'the complete prepared mechanic set was not submitted atomically');
   assert.equal(await publicationStatuses.locator('[data-publication-status="published"]').count(), 0,
     'an accepted request was labelled as published');
-  assert.equal(await modulePage.locator('[data-row="mechanic"]').count(), 1,
-    'fixture did not replace the live adoption inventory during apply');
+  assert.equal(await modulePage.locator('[data-row="mechanic"]').count(), 2,
+    'queued publication fixture lost its still-adopted rows');
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 0,
+    'queued adopted rows remained selected');
+  assert.equal(await modulePage.locator('[data-action="select-mechanic"]:disabled').count(), 2,
+    'queued adopted rows were not fenced against a duplicate apply');
+  assert.equal(await modulePage.locator('[data-action="publish-mechanic"]').isDisabled(), true,
+    'queued adopted rows still offered a second publication');
+  await marbleMechanicRow.getByText('Ожидает публикации', { exact: true }).waitFor();
+  await modulePage.locator('[data-action="publish-mechanic"]').dispatchEvent('click');
+  assert.equal(await modulePage.evaluate(() => window.mechanicPublicationPreparations.length), 1,
+    'queued adopted rows prepared a second publication');
+  assert.equal(await modulePage.evaluate(() => window.mechanicPublications.length), 1,
+    'queued adopted rows issued a second apply');
   const statusRefresh = modulePage.locator('[data-action="refresh-publication-status"]');
+  await modulePage.waitForFunction(() => document.querySelector('[data-action="refresh-publication-status"]')
+    ?.getAttribute('aria-busy') === 'false');
+  await statusRefresh.focus();
+  await modulePage.evaluate(() => {
+    window.statusNodeBefore = document.querySelector('[data-testid="mechanic-publication-statuses"]');
+    window.liveNodeBefore = document.querySelector('[data-testid="publication-announcement"]');
+    window.refreshNodeBefore = document.activeElement;
+    window.publicationStatusWait = new Promise((resolve) => { window.releaseStatusWait = resolve; });
+  });
+  await statusRefresh.click();
+  assert.equal(await statusRefresh.textContent(), 'Проверяю статус…',
+    'manual refresh did not show its in-flight state');
+  assert.equal(await statusRefresh.getAttribute('aria-busy'), 'true');
+  assert.equal(await statusRefresh.evaluate((node) => document.activeElement === node), true);
+  const duringPending = await modulePage.evaluate(() => window.publicationStatusRequests.length);
+  await statusRefresh.dispatchEvent('click');
+  assert.equal(await modulePage.evaluate(() => window.publicationStatusRequests.length), duringPending,
+    'manual refresh started a concurrent status read');
+  await modulePage.evaluate(() => { window.releaseStatusWait(); window.publicationStatusWait = null; });
+  await modulePage.waitForFunction(() => document.querySelector('[data-action="refresh-publication-status"]')
+    ?.getAttribute('aria-busy') === 'false');
+  assert.deepEqual(await modulePage.evaluate(() => ({
+    sameBody: window.statusNodeBefore === document.querySelector('[data-testid="mechanic-publication-statuses"]'),
+    sameLive: window.liveNodeBefore === document.querySelector('[data-testid="publication-announcement"]'),
+    sameFocus: window.refreshNodeBefore === document.activeElement,
+  })), { sameBody: true, sameLive: true, sameFocus: true },
+  'unchanged polling rebuilt the list, live region, or focused refresh control');
+  // A different candidate can be selected; reverting to the queued release
+  // must recompute its fence before retaining that selection (F006).
+  await modulePage.evaluate(() => {
+    const replacement = structuredClone(window.mechanicPublicationInput);
+    replacement.adoptions[0].releaseId = '98989898-9898-4898-8898-989898989898';
+    replacement.mechanicPublication.items[0].releaseId = replacement.adoptions[0].releaseId;
+    window.surface.update(replacement);
+  });
+  await marbleMechanicRow.locator('[data-action="select-mechanic"]').check();
+  await modulePage.evaluate(() => window.surface.update(window.mechanicPublicationInput));
+  assert.equal(await marbleMechanicRow.locator('[data-action="select-mechanic"]').isDisabled(), true);
+  assert.equal(await marbleMechanicRow.locator('[data-action="select-mechanic"]').isChecked(), false,
+    'restoring the queued release retained a checked-and-disabled selection');
+  assert.equal(await modulePage.locator('[data-action="publish-mechanic"]').isDisabled(), true);
+  await statusRefresh.focus();
   await modulePage.evaluate(() => { window.publicationStatusStates = ['running', 'queued']; });
   await publicationStatuses.getByText('Публикуется', { exact: true }).waitFor({ timeout: 8_000 });
+  assert.equal(await statusRefresh.evaluate((node) => document.activeElement === node), true,
+    'changed background status lost focus from refresh');
+  assert.equal(await modulePage.evaluate(() => window.liveNodeBefore
+    === document.querySelector('[data-testid="publication-announcement"]')), true,
+  'changed status replaced its live region instead of updating the mounted node');
+  // Exercise an ordinary action without a test id across a changed poll.
+  const jumpAction = marbleMechanicRow.locator('[data-action="show-mechanic"]');
+  await jumpAction.focus();
+  await modulePage.evaluate(() => { window.publicationStatusStates = ['running', 'running']; });
+  await modulePage.waitForFunction(() => [...document.querySelectorAll('[data-publication-status="running"]')].length === 2,
+    null, { timeout: 8_000 });
+  assert.equal(await jumpAction.evaluate((node) => document.activeElement === node), true,
+    'changed poll lost focus from a row action without testid');
+  // The operator may prepare a separate catalog publication while a mechanic
+  // is pending. A changed poll must retain a focused/in-flight copy control.
+  await modulePage.evaluate(() => {
+    const runtimeArtifactDigest = `sha256:${'a'.repeat(64)}`;
+    window.copyPollingInput = {
+      ...window.mechanicPublicationInput,
+      catalog: {
+        schema: 'feed.developer-catalog-diff.v1', mechanic: 'sort', variant: 'base',
+        available: true, unavailableReason: null,
+        dev: {
+          entryId: 'abababab-abab-4bab-8bab-abababababab', kind: 'series',
+          state: 'candidate', stateVersion: 7,
+          seriesId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd', levelSpecHash: null,
+          runtime: { releaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            playableId: 'marble-sort-swipe', runtimeArtifactDigest, sourceCommit: 'b'.repeat(40) },
+          stateChangedAt: '2026-08-27T12:00:00Z',
+        },
+        public: null,
+      },
+      catalogPromotion: {
+        schema: 'catalog.direct-promotion.prepared.v1',
+        operationId: '12121212-1212-4212-8212-121212121212',
+        action: 'publish', entryId: 'abababab-abab-4bab-8bab-abababababab',
+        expectedStateVersion: 7, fromState: 'candidate', toState: 'published',
+        fromAudience: 'exactUser', toAudience: 'public', runtimeArtifactDigest,
+        confirmationCode: 'ABC123',
+      },
+    };
+    window.surface.update(window.copyPollingInput);
+    navigator.clipboard.writeText = () => new Promise((resolve) => { window.completeCopy = resolve; });
+  });
+  await modulePage.locator('[data-action="publish-catalog"]').click();
+  const pollingCopy = modulePage.getByRole('button', { name: 'Скопировать код публикации ABC123' });
+  await pollingCopy.focus();
+  await modulePage.keyboard.press('Enter');
+  assert.equal(await pollingCopy.evaluate((node) => document.activeElement === node), true,
+    'starting copy blurred its keyboard control');
+  assert.equal(await pollingCopy.getAttribute('aria-busy'), 'true');
+  await modulePage.evaluate(() => { window.publicationStatusStates = ['queued', 'running']; });
+  await publicationStatuses.getByText('Ожидает публикации', { exact: true }).waitFor({ timeout: 8_000 });
+  assert.equal(await pollingCopy.evaluate((node) => document.activeElement === node), true,
+    'changed poll lost focus from the copy control');
+  assert.equal(await pollingCopy.getAttribute('aria-busy'), 'true',
+    'changed poll replaced an in-flight copy with an idle control');
+  await modulePage.evaluate(() => window.completeCopy());
+  await modulePage.locator('[data-testid="catalog-promotion-confirm"]').getByText('Код скопирован').waitFor();
+  const beforeSameUpdate = await pollingCopy.elementHandle();
+  await modulePage.evaluate(() => window.surface.update(window.copyPollingInput));
+  assert.equal(await beforeSameUpdate.evaluate((node) => node.isConnected && document.activeElement === node), true,
+    'unchanged projection update replaced a focused copy control');
   await modulePage.evaluate(() => { window.publicationStatusStates = ['published', 'running']; });
   await statusRefresh.click();
   await publicationStatuses.getByText('Опубликовано 1 из 2', { exact: true }).waitFor();
@@ -1298,6 +1435,11 @@ try {
   });
   await statusRefresh.click();
   await publicationStatuses.getByText('Публикуется', { exact: true }).waitFor();
+  await modulePage.evaluate(() => window.surface.update({
+    ...window.mechanicPublicationInput, adoptions: [], mechanicPublication: null,
+  }));
+  assert.equal(await publicationStatuses.locator('[data-publication-status]').count(), 2,
+    'a changed dev inventory erased the submitted exact batch');
   await modulePage.locator('[data-close]').last().click();
   const checksBeforeClosedWait = await modulePage.evaluate(() => window.publicationStatusRequests.length);
   await modulePage.waitForTimeout(5_100);
@@ -1329,6 +1471,114 @@ try {
   await modulePage.evaluate(() => window.surface.destroy());
   assert.equal((await listenerBalance()).keydown, 0,
     'a second destroy double-removed a listener it no longer owns');
+  // Actual api.ts dispatch/error handling and the production apply adapter,
+  // then the real sheet: no mirrored fake outcome classifier in these cases.
+  for (const kind of [
+    'candidate_changed', 'serialization_failed', 'invalid_code', 'conflict',
+    'network', 'server_error', 'proxy_timeout', 'unreadable_4xx',
+    'invalid_success', 'invalid_json_success', 'refresh_failed',
+  ]) {
+    await modulePage.evaluate((scenario) => {
+      const prepared = window.mechanicPublicationPrepared;
+      const input = window.mechanicPublicationInput;
+      window.caseApplyCalls = [];
+      window.caseStatusCalls = [];
+      window.caseOutcome = null;
+      window.caseRefreshes = 0;
+      window.surface = window.mountDeveloperFeedDiffSurface(document.body, {
+        input,
+        onPrepareMechanics: async () => prepared,
+        onPublishMechanic: async (exact, code) => {
+          const selection = exact.items.map(({ releaseId, bindingDigest, candidateArtifactDigest }) => ({
+            releaseId, bindingDigest, candidateArtifactDigest,
+          }));
+          const originalFetch = window.fetch;
+          window.fetch = async (url, init) => {
+            window.caseApplyCalls.push({ url, method: init.method, headers: init.headers, body: JSON.parse(init.body) });
+            if (scenario === 'network') throw new TypeError('Failed to fetch');
+            if (scenario === 'invalid_code') return Response.json({ code: 'playable_publication_confirmation_code_mismatch' }, { status: 409 });
+            if (scenario === 'conflict') return Response.json({ detail: { code: 'candidate_binding_conflict' } }, { status: 409 });
+            if (scenario === 'server_error') return Response.json({ code: 'internal_error' }, { status: 500 });
+            if (scenario === 'proxy_timeout') return new Response('upstream timeout', { status: 408 });
+            if (scenario === 'unreadable_4xx') return new Response('<html>proxy failure</html>', { status: 403 });
+            if (scenario === 'invalid_json_success') return new Response('not JSON', { status: 200 });
+            return Response.json({
+              schema: 'feed.playable-publication.requested.v1',
+              operationId: scenario === 'invalid_success' ? crypto.randomUUID() : exact.operationId,
+              action: 'publish', items: exact.items, status: 'queued', replayed: false,
+            });
+          };
+          try {
+            const outcome = await window.applyPlayablePublicationClient(
+              exact, scenario === 'candidate_changed' ? null : selection, code,
+              {
+                apply: (payload) => window.publicationApi.apiApplyPlayablePublicationRequired(
+                  scenario === 'serialization_failed'
+                    ? { ...payload, toJSON() { throw new Error('local serialization failed'); } }
+                    : payload,
+                ),
+                refresh: async () => {
+                  window.caseRefreshes++;
+                  if (scenario === 'refresh_failed') throw new Error('bootstrap unavailable');
+                  return true;
+                },
+              },
+            );
+            window.caseOutcome = outcome;
+            return outcome;
+          } finally { window.fetch = originalFetch; }
+        },
+        onReadPublicationStatus: async (exact) => {
+          window.caseStatusCalls.push(exact);
+          return {
+            schema: 'feed.playable-publication.status.v1', operationId: exact.operationId,
+            items: exact.items.map(({ releaseId, bindingDigest, candidateArtifactDigest }) => ({
+              releaseId, bindingDigest, candidateArtifactDigest,
+              status: scenario === 'refresh_failed' ? 'queued' : 'unknown', reason: null,
+            })),
+          };
+        },
+      });
+    }, kind);
+    await modulePage.locator(badgeSelector).click();
+    await modulePage.locator('[data-action="select-all-mechanics"]').check();
+    await modulePage.locator('[data-action="publish-mechanic"]').click();
+    await modulePage.locator('[data-testid="mechanic-publication-code-input"]').fill('D0C0DE');
+    await modulePage.locator('[data-action="confirm-mechanic-publication"]').click();
+    await modulePage.waitForFunction(() => window.caseOutcome !== null);
+    const evidence = await modulePage.evaluate(() => ({
+      outcome: window.caseOutcome, apply: window.caseApplyCalls,
+      reads: window.caseStatusCalls.length, refreshes: window.caseRefreshes,
+    }));
+    const notSent = ['candidate_changed', 'serialization_failed'].includes(kind);
+    const rejected = notSent || ['invalid_code', 'conflict'].includes(kind);
+    assert.equal(evidence.apply.length, notSent ? 0 : 1, `${kind}: unexpected apply dispatch/retry`);
+    if (!notSent) {
+      assert.equal(evidence.apply[0].method, 'POST');
+      assert.equal(evidence.apply[0].headers['Content-Type'], 'application/json');
+      assert.equal(evidence.apply[0].body.confirmationCode, 'D0C0DE');
+      assert.equal(evidence.apply[0].body.schema, 'feed.playable-publication.apply.v1');
+      assert.deepEqual(Object.keys(evidence.apply[0].body).sort(),
+        ['schema', 'operationId', 'action', 'items', 'confirmationCode'].sort(),
+        `${kind}: client-only dispatch evidence leaked into the Backend wire`);
+    }
+    assert.equal(evidence.outcome.status,
+      rejected ? 'rejected' : kind === 'refresh_failed' ? 'queued_refresh_pending' : 'acceptance_unknown',
+      `${kind}: wrong acceptance classification`);
+    assert.equal(evidence.reads, rejected ? 0 : 1, `${kind}: incorrect ambiguity lookup`);
+    assert.equal(await modulePage.locator('[data-testid="mechanic-publication-statuses"]').count(), rejected ? 0 : 1,
+      `${kind}: invented or lost an active publication`);
+    if (rejected) {
+      assert.equal(await modulePage.locator('[data-action="select-mechanic"]:disabled').count(), 0,
+        `${kind}: rejected request unnecessarily fenced candidates`);
+      await modulePage.locator('[data-testid="mechanic-publication-confirm"] .dev-diff__blocker').waitFor();
+    } else {
+      assert.equal(await modulePage.locator('[data-action="select-mechanic"]:disabled').count(), 2,
+        `${kind}: ambiguous dispatched request allowed a second apply`);
+      assert.equal(await modulePage.locator('[data-action="select-mechanic"]:checked').count(), 0);
+    }
+    await modulePage.evaluate(() => window.surface.destroy());
+  }
   await modulePage.close();
 
   console.log('developer feed diff browser contract OK');
