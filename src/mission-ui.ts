@@ -58,6 +58,35 @@ function progressTrack(className: string, percent: number): HTMLElement {
   return track;
 }
 
+/** Presentation supplied only by the explicitly marked, operator-only preview.
+ * Never inferred from the current active case for an older event. No wire fields. */
+export interface MissionPreviewPresentation {
+  fictional: true;
+  caseId: string;
+  title: string;
+  summary: string;
+  outcome: string;
+  reportRecipient: string;
+  caption: string;
+  illustration: () => HTMLElement;
+}
+
+function previewFor(caseId: string, preview?: MissionPreviewPresentation): MissionPreviewPresentation | undefined {
+  return preview?.fictional === true && preview.caseId === caseId ? preview : undefined;
+}
+
+function missionMedia(preview: MissionPreviewPresentation | undefined, ceremony = false): HTMLElement {
+  const media = el('figure', `mission-photo${ceremony ? ' mission-photo--ceremony' : ''}`);
+  if (preview) {
+    media.classList.add('mission-photo--preview');
+    media.append(preview.illustration(), el('figcaption', 'mission-photo__hint', preview.caption));
+  } else {
+    media.innerHTML = MISSION_PAW_SVG;
+    media.append(el('figcaption', 'mission-photo__hint', 'Медиа пока не добавлены'));
+  }
+  return media;
+}
+
 // ── HUD ─────────────────────────────────────────────────────────────────────
 export interface MissionHudState {
   progress: number;
@@ -120,6 +149,7 @@ export function launchMissionPawFlight(
   origin: HTMLElement,
   target: HTMLElement,
   viewport: HTMLElement,
+  options: { signal?: AbortSignal; onSettled?: () => void } = {},
 ): HTMLElement {
   const viewportRect = viewport.getBoundingClientRect();
   const from = origin.getBoundingClientRect();
@@ -144,15 +174,35 @@ export function launchMissionPawFlight(
     ],
     { duration, easing: 'cubic-bezier(.22,.8,.28,1)', fill: 'forwards' },
   );
-  const settle = (): void => {
+  let settled = false;
+  let settleTimer: number | undefined;
+  let bounceTimer: number | undefined;
+  const gift = target.querySelector<HTMLElement>('.hud__mission-gift');
+  const cancel = (): void => {
+    settled = true;
+    animation?.cancel();
+    window.clearTimeout(settleTimer);
+    window.clearTimeout(bounceTimer);
+    gift?.classList.remove('hud__mission-gift--bounce');
     coin.remove();
-    if (receipt.openedGiftSteps.length === 0) return;
-    const gift = target.querySelector<HTMLElement>('.hud__mission-gift');
-    gift?.classList.add('hud__mission-gift--bounce');
-    window.setTimeout(() => gift?.classList.remove('hud__mission-gift--bounce'), reducedMotion ? 1 : 520);
   };
+  const settle = (): void => {
+    if (settled || options.signal?.aborted || !target.isConnected || !viewport.isConnected) return cancel();
+    settled = true;
+    coin.remove();
+    if (receipt.openedGiftSteps.length > 0 && !reducedMotion) {
+      gift?.classList.add('hud__mission-gift--bounce');
+      bounceTimer = window.setTimeout(() => {
+        gift?.classList.remove('hud__mission-gift--bounce');
+        options.signal?.removeEventListener('abort', cancel);
+      }, 520);
+    } else options.signal?.removeEventListener('abort', cancel);
+    options.onSettled?.();
+  };
+  if (options.signal?.aborted) { cancel(); return coin; }
+  options.signal?.addEventListener('abort', cancel, { once: true });
   if (animation) animation.addEventListener('finish', settle, { once: true });
-  else window.setTimeout(settle, duration);
+  else settleTimer = window.setTimeout(settle, duration);
   return coin;
 }
 
@@ -203,10 +253,13 @@ export function buildMissionUnlockedCeremony(options: {
   event: MissionCaseEvent;
   currency: string;
   onClose: () => void;
+  preview?: MissionPreviewPresentation;
 }): HTMLElement {
   const { root, body, actions } = ceremonyShell(options.onClose);
   root.classList.add('mission-ceremony--unlocked');
   const payload = options.event.receipt;
+  const preview = previewFor(options.event.caseId, options.preview);
+  body.append(missionMedia(preview, true));
   body.append(el(
     'div',
     'mission-ceremony__title',
@@ -248,28 +301,31 @@ export function buildMissionUnlockedCeremony(options: {
   return root;
 }
 
-/** «Корм передан» — the transfer receipt, a photo placeholder, and the archive line. */
+/** Report copy uses only this event's receipt, never the active successor case. */
 export function buildMissionFulfilledCeremony(options: {
   event: MissionCaseEvent;
   currency: string;
   onClose: () => void;
+  preview?: MissionPreviewPresentation;
 }): HTMLElement {
   const { root, body, actions } = ceremonyShell(options.onClose);
   root.classList.add('mission-ceremony--fulfilled');
   const transfer = options.event.transferReceipt ?? {};
-  const photo = el('div', 'mission-photo mission-photo--ceremony');
-  photo.innerHTML = MISSION_PAW_SVG;
-  photo.append(el('span', 'mission-photo__hint', 'Фото отчёта приюта'));
-  body.append(photo);
-  body.append(el('div', 'mission-ceremony__title', 'Корм передан'));
+  const preview = previewFor(options.event.caseId, options.preview);
+  body.append(missionMedia(preview, true));
   const amount = receiptInt(transfer, 'amountCents');
   const currency = receiptText(transfer, 'currency') || options.currency;
+  const collected = receiptInt(options.event.receipt, 'giftTotalCents');
+  body.append(el('div', 'mission-ceremony__title', collected > 0
+    ? `Помнишь, мы собрали ${formatMissionMoney(collected, currency)}${preview ? ` ${preview.reportRecipient}` : ''}?`
+    : 'Отчёт о передаче'));
+  if (preview) body.append(el('p', 'mission-ceremony__story', preview.outcome));
   const details = [
     amount > 0 ? formatMissionMoney(amount, currency) : '',
-    receiptText(transfer, 'transferDate'),
+    readableDate(receiptText(transfer, 'transferDate')),
     receiptText(transfer, 'recipient'),
   ].filter(Boolean).join(' · ');
-  if (details) body.append(el('div', 'mission-ceremony__sub', details));
+  if (details && !preview) body.append(el('div', 'mission-ceremony__sub', details));
   const button = el('button', 'mission-ceremony__btn', 'Спасибо');
   (button as HTMLButtonElement).type = 'button';
   button.addEventListener('click', options.onClose);
@@ -302,7 +358,7 @@ function definition(list: HTMLElement, term: string, value: unknown): void {
 /**
  * `mission.funding-policy.v1` is a CLOSED, executable contract: every
  * money-bearing field is an enum with exactly one legal value, naming the one
- * behaviour the runtime implements. So one tap shows the enum ITSELF and adds
+ * behaviour the runtime implements. So the full details show the enum ITSELF and add
  * what it means — never a friendly sentence in place of the wire value, which is
  * how a reader could be told one thing while the runtime does another.
  */
@@ -343,6 +399,13 @@ function poolSourceText(source: unknown): string {
   const raw = String(source);
   const label = POOL_SOURCE_LABELS[raw];
   return label ? `${label} (${raw})` : raw;
+}
+
+function readableDate(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }).format(date);
 }
 
 /** The exact wire value, plus its meaning when this build knows it. An enum this
@@ -394,7 +457,7 @@ function policySection(policy: MissionCaseContract['fundingPolicy']): HTMLElemen
   return list;
 }
 
-/** The full public contract, one tap away: the case document AND its resolved
+/** Human summary first; expandable full public contract: the case document AND its resolved
  *  funding policy — every money-bearing field of the executable policy, with the
  *  raw pinned documents underneath for anyone who wants the bytes. */
 function contractSection(view: MissionCaseView): HTMLElement {
@@ -402,7 +465,7 @@ function contractSection(view: MissionCaseView): HTMLElement {
   const summary = document.createElement('button');
   summary.type = 'button';
   summary.className = 'mission-contract__summary';
-  summary.textContent = 'ⓘ Полный контракт и материалы';
+  summary.textContent = 'ⓘ Как устроена помощь';
   wrap.appendChild(summary);
   const sheet = el('div', 'mission-contract-sheet');
   sheet.hidden = true;
@@ -431,7 +494,7 @@ function contractSection(view: MissionCaseView): HTMLElement {
     if (event.key !== 'Tab') return;
     const focusable = Array.from(sheet.querySelectorAll<HTMLElement>(
       'button:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
-    ));
+    )).filter((node) => node.getClientRects().length > 0);
     if (focusable.length === 0) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -443,7 +506,7 @@ function contractSection(view: MissionCaseView): HTMLElement {
       first.focus();
     }
   });
-  const title = el('h2', 'mission-contract-sheet__title', 'Полный контракт и материалы');
+  const title = el('h2', 'mission-contract-sheet__title', 'Как устроена помощь');
   title.id = 'mission-contract-sheet-title';
   sheet.append(close, title);
   wrap.appendChild(sheet);
@@ -453,6 +516,26 @@ function contractSection(view: MissionCaseView): HTMLElement {
     return wrap;
   }
   const doc = contract.document;
+  const human = el('section', 'mission-contract__human');
+  definition(human, 'Кому помогаем', doc.recipient);
+  definition(human, 'Что нужно', doc.guaranteedDeliverable);
+  if (view.activeCase) {
+    definition(human, 'Уже собрано', formatMissionMoney(view.activeCase.money.collectedCents, view.activeCase.money.currency));
+    definition(human, 'Гарантия платформы', formatMissionMoney(view.activeCase.money.guaranteedCents, view.activeCase.money.currency));
+  }
+  const policy = contract.fundingPolicy.document as Record<string, unknown>;
+  human.append(el('p', '', policy.giftFormula === 'guaranteed-plus-opened-steps-v1'
+    && policy.stepRule === 'prefunded-reserved-at-ready-open-once-v1'
+    ? 'Лапки сообщества открывают заранее подготовленные подарки. Уже открытое входит в собранную сумму; ближайшая цель показана на полоске.'
+    : 'Условия финансирования этого кейса приведены в полном контракте ниже.'));
+  definition(human, 'Дата подведения итогов', readableDate(doc.unlockCutoffAt));
+  definition(human, 'Помощь передадут до', readableDate(doc.latestFulfillmentAt));
+  definition(human, 'Как узнаем об итоге', doc.confirmationKind === 'photo_report'
+    ? 'После передачи появится фотоотчёт'
+    : doc.confirmationKind);
+  const technical = el('details', 'mission-contract__technical');
+  technical.append(el('summary', '', 'Полный контракт и технические детали'));
+  sheet.append(human, technical);
   const list = el('div', 'mission-defs');
   definition(list, 'Получатель', doc.recipient);
   definition(list, 'Гарантировано', doc.guaranteedDeliverable);
@@ -464,9 +547,9 @@ function contractSection(view: MissionCaseView): HTMLElement {
   definition(list, 'Раньше не разблокируется', doc.unlockCutoffAt);
   definition(list, 'Передать до', doc.latestFulfillmentAt);
   definition(list, 'Версия', `${contract.contractVersion} · ${contract.contractDigest.slice(0, 12)}`);
-  sheet.appendChild(list);
+  technical.appendChild(list);
 
-  sheet.appendChild(policySection(contract.fundingPolicy));
+  technical.appendChild(policySection(contract.fundingPolicy));
 
   const raw = el('details', 'mission-contract__raw');
   const rawSummary = document.createElement('summary');
@@ -479,7 +562,7 @@ function contractSection(view: MissionCaseView): HTMLElement {
     2,
   );
   raw.appendChild(pre);
-  sheet.appendChild(raw);
+  technical.appendChild(raw);
   return wrap;
 }
 
@@ -506,6 +589,8 @@ export function buildMissionCaseScreen(options: {
   view: MissionCaseView;
   history: readonly MissionHistoryEntry[];
   onClose: () => void;
+  preview?: MissionPreviewPresentation;
+  openedGift?: { amountCents: number; nextStepThreshold: number | null; justOpenedThreshold?: number };
 }): HTMLElement {
   const { view, history } = options;
   const screen = el('div', 'mission-screen');
@@ -523,14 +608,16 @@ export function buildMissionCaseScreen(options: {
   }
   const doc = active.contract?.document ?? {};
   const currency = active.money.currency;
+  const preview = previewFor(active.caseId, options.preview);
 
   const heading = el('header', 'mission-screen__head');
-  heading.append(el('h2', 'mission-screen__title', missionCaseTitle(doc)));
+  heading.append(el('h2', 'mission-screen__title', preview?.title ?? missionCaseTitle(doc)));
   const subtitle = missionCaseSubtitle(doc);
   if (subtitle) heading.append(el('div', 'mission-screen__sub', subtitle));
   screen.appendChild(heading);
 
-  const meterTarget = active.bar.nextStepThreshold ?? active.bar.tokenGoal;
+  const meterTarget = (preview ? options.openedGift?.justOpenedThreshold : undefined)
+    ?? active.bar.nextStepThreshold ?? active.bar.tokenGoal;
   const meter = el('section', 'mission-meter');
   meter.append(
     progressTrack('mission-meter__track', missionBarPercent(active.bar.progress, meterTarget)),
@@ -538,10 +625,22 @@ export function buildMissionCaseScreen(options: {
   );
   screen.appendChild(meter);
 
-  const photo = el('div', 'mission-photo');
-  photo.innerHTML = MISSION_PAW_SVG;
-  photo.append(el('span', 'mission-photo__hint', 'Медиа кейса появятся здесь'));
-  screen.appendChild(photo);
+  if (options.openedGift && preview) {
+    const opened = el('section', 'mission-gift-opened');
+    opened.setAttribute('role', 'status');
+    opened.setAttribute('aria-live', 'polite');
+    opened.append(
+      el('strong', '', `🎁 Открыт подарок +${formatMissionMoney(options.openedGift.amountCents, currency)}`),
+      el('span', '', `Уже собрано ${formatMissionMoney(active.money.collectedCents, currency)}`),
+      el('span', '', options.openedGift.nextStepThreshold === null
+        ? 'Все подарки открыты'
+        : `Следующий подарок — за ${formatPawCount(options.openedGift.nextStepThreshold)} сообщества`),
+    );
+    screen.append(opened);
+  }
+
+  screen.appendChild(missionMedia(preview));
+  if (preview) screen.append(el('p', 'mission-screen__story', preview.summary));
 
   const tiles = el('section', 'mission-tiles');
   tiles.append(
@@ -554,10 +653,12 @@ export function buildMissionCaseScreen(options: {
   ladder.appendChild(el('div', 'mission-ladder__head', '🎁 Подарки сезона'));
   for (const step of [...active.giftLadder].sort((left, right) => left.stepIndex - right.stepIndex)) {
     const row = el('div', `mission-ladder__step mission-ladder__step--${step.state}`);
+    const nearest = step.state === 'reserved' && step.thresholdTokens === meterTarget;
+    if (nearest) row.classList.add('mission-ladder__step--next');
     const icon = el(
       'span',
       'mission-ladder__icon',
-      step.state === 'guaranteed' ? '✓' : step.state === 'opened' ? '🎁' : '🔒',
+      step.state === 'guaranteed' ? '✓' : step.state === 'opened' || nearest ? '🎁' : '🔒',
     );
     icon.setAttribute('aria-hidden', 'true');
     const copy = el('span', 'mission-ladder__copy');
@@ -571,7 +672,7 @@ export function buildMissionCaseScreen(options: {
           : `за ${formatPawCount(step.thresholdTokens)} сообщества`,
       ),
     );
-    if (step.state === 'reserved' && step.thresholdTokens === meterTarget) {
+    if (nearest) {
       copy.appendChild(progressTrack(
         'mission-ladder__track',
         missionBarPercent(active.bar.progress, step.thresholdTokens),
@@ -580,7 +681,7 @@ export function buildMissionCaseScreen(options: {
     const state = el(
       'span',
       'mission-ladder__state',
-      step.state === 'guaranteed' || step.state === 'opened' ? 'открыт' : 'впереди',
+      step.state === 'guaranteed' || step.state === 'opened' ? 'открыт' : nearest ? 'ближайший' : 'впереди',
     );
     row.append(
       icon,

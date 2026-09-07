@@ -569,6 +569,8 @@ body.mission-demo-open {
   overflow: hidden;
   background: #07090f;
   color: #fff;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 .mission-demo--loading,
 .mission-demo--error {
@@ -583,12 +585,11 @@ body.mission-demo-open {
 }
 .mission-demo--error strong { color: #fff; font-size: 20px; }
 .mission-demo__badge {
-  position: fixed;
-  top: calc(var(--safe-top) + 8px);
-  left: 50%;
+  position: relative;
+  justify-self: center;
+  margin-top: calc(var(--safe-top) + 8px);
   z-index: 5000;
   max-width: calc(100vw - 24px);
-  transform: translateX(-50%);
   padding: 7px 12px;
   border: 1px solid rgba(255, 214, 102, .58);
   border-radius: 999px;
@@ -598,13 +599,12 @@ body.mission-demo-open {
   white-space: nowrap;
 }
 .mission-demo__chrome {
-  position: absolute;
-  inset: 0 0 auto;
+  position: relative;
   z-index: 2500;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 146px;
   gap: 8px 12px;
-  padding: calc(var(--safe-top) + 46px) 12px 10px;
+  padding: 8px 12px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, .1);
   background: linear-gradient(180deg, #181326, #0d1017);
   box-sizing: border-box;
@@ -620,7 +620,7 @@ body.mission-demo-open {
   gap: 6px;
 }
 .mission-demo__tab {
-  min-height: 34px;
+  min-height: 44px;
   padding: 0 6px;
   border: 1px solid rgba(255, 255, 255, .13);
   border-radius: 11px;
@@ -629,17 +629,17 @@ body.mission-demo-open {
   font: 800 11px/1 system-ui, sans-serif;
 }
 .mission-demo__tab[data-active="true"] {
-  border-color: rgba(255, 216, 106, .5);
-  background: rgba(255, 216, 106, .14);
-  color: #ffe49a;
+  border-color: rgba(185, 160, 245, .6);
+  background: rgba(141, 111, 224, .2);
+  color: #e0d3ff;
 }
 .mission-demo__scene {
-  position: absolute;
-  inset: calc(var(--safe-top) + 154px) 0 0;
+  position: relative;
+  min-height: 0;
   overflow: hidden;
 }
-.mission-demo__case {
-  padding-top: 42px;
+.mission-demo .mission-demo__case {
+  padding-top: 12px;
   padding-bottom: calc(var(--safe-bottom) + 18px);
 }
 .mission-demo__case .mission-screen__close { display: none; }
@@ -4714,7 +4714,7 @@ body {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #58d58f, #ffd86a);
+  background: linear-gradient(90deg, #8d6fe0, #b9a0f5);
   transition: width 0.5s cubic-bezier(0.3, 0.9, 0.35, 1);
 }
 
@@ -4813,8 +4813,9 @@ body {
   padding: 12px;
   border: 0;
   border-radius: 14px;
-  background: #4CC38A;
-  color: #08251b;
+  background: linear-gradient(90deg, #8d6fe0, #a98df0);
+  color: #fff;
+  min-height: 46px;
   font: 900 14px/1 system-ui, sans-serif;
 }
 
@@ -4825,13 +4826,25 @@ body {
   place-items: center;
   gap: 8px;
   min-height: 132px;
+  margin: 14px 0 0;
   border-radius: 18px;
   border: 1px dashed rgba(255, 255, 255, 0.18);
   background: linear-gradient(150deg, rgba(60, 52, 32, 0.7), rgba(20, 24, 34, 0.9));
 }
 .mission-photo .mission-paw { width: 46px; height: 46px; opacity: 0.85; }
 .mission-photo__hint { color: rgba(255, 255, 255, 0.5); font: 700 11.5px/1.2 system-ui, sans-serif; }
-.mission-photo--ceremony { min-height: 110px; margin-bottom: 4px; }
+.mission-photo--ceremony { min-height: 180px; margin: 0 0 14px; }
+.mission-photo--preview { border-style: solid; background: linear-gradient(150deg, #241c38, #131b29); overflow: hidden; }
+.mission-demo-illustration { width: 100%; height: 152px; }
+.mission-demo-illustration svg { display: block; width: 100%; height: 100%; }
+.mission-photo--ceremony .mission-demo-illustration { height: 168px; }
+.mission-photo--preview .mission-photo__hint { padding: 0 8px 10px; text-align: center; color: #c6bdd7; }
+.mission-screen__story, .mission-ceremony__story { color: #c9c2d4; font: 500 13px/1.5 system-ui, sans-serif; margin: 12px 0; }
+.mission-gift-opened { display: grid; gap: 6px; margin-top: 12px; padding: 12px; border: 1px solid #b9a0f5; border-radius: 14px; background: #2b2242; color: #eadfff; font: 600 13px/1.35 system-ui, sans-serif; }
+.mission-gift-opened strong { font-size: 16px; color: #ffe08a; }
+.mission-demo__reward, .mission-demo__next-gift { width: 100%; min-height: 44px; margin-top: 12px; padding: 10px 12px; border: 1px solid #b9a0f5; border-radius: 12px; background: linear-gradient(90deg, #8d6fe0, #a98df0); color: #fff; font: 800 14px/1.2 system-ui, sans-serif; }
+.mission-demo__reward:disabled { opacity: .7; }
+.mission-demo__next-gift { margin-top: 4px; }
 
 /* Case screen — the daily-panel shell plus a close control. */
 .mission-screen {
@@ -4850,8 +4863,8 @@ body {
   position: absolute;
   top: var(--top-zone-pad-top);
   right: 14px;
-  width: 32px;
-  height: 32px;
+  width: 44px;
+  height: 44px;
   border: 0;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.1);
@@ -4865,7 +4878,7 @@ body {
 .mission-screen__sub { margin-top: 4px; color: #aeb8c9; font: 750 12.5px/1.3 system-ui, sans-serif; }
 .mission-meter { margin-top: 14px; }
 .mission-meter__track { height: 12px; overflow: hidden; border-radius: 999px; background: rgba(255, 255, 255, 0.12); }
-.mission-meter__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #58d58f, #ffd86a); transition: width 0.6s cubic-bezier(0.3, 0.9, 0.35, 1); }
+.mission-meter__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8d6fe0, #b9a0f5); transition: width 0.6s cubic-bezier(0.3, 0.9, 0.35, 1); }
 .mission-meter__count { margin-top: 7px; color: #c9d3e4; font: 800 12px/1.2 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
 .mission-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
 .mission-tile {
@@ -5051,15 +5064,16 @@ body {
 }
 .hud__mission-info {
   position: absolute;
-  right: -2px;
-  bottom: -4px;
+  right: -8px;
+  bottom: -12px;
   z-index: 3;
-  width: 24px;
-  height: 24px;
+  width: 44px;
+  height: 44px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, .38);
+  border: 10px solid transparent;
   border-radius: 50%;
-  background: rgba(10, 16, 24, .95);
+  background: radial-gradient(circle at center, #10101c 0 11px, transparent 12px) center / 44px 44px no-repeat;
+  box-sizing: border-box;
   color: #f6df9a;
   font: 900 11px/1 system-ui, sans-serif;
   pointer-events: auto;
@@ -5222,6 +5236,9 @@ body {
 .mission-ladder__state { color: rgba(255, 255, 255, .48); font: 750 11px/1.2 system-ui, sans-serif; }
 .mission-ladder__step--opened .mission-ladder__state,
 .mission-ladder__step--guaranteed .mission-ladder__state { color: #9dffc1; }
+.mission-ladder__step--next { border-color: rgba(185, 160, 245, .5); background: rgba(141, 111, 224, .12); }
+.mission-ladder__step--next .mission-ladder__icon { background: #2a2140; box-shadow: 0 0 0 1px rgba(232,201,106,.4); }
+.mission-ladder__step--next .mission-ladder__state { color: #cdbcf2; }
 .mission-ladder__track { height: 5px; overflow: hidden; border-radius: 3px; background: rgba(255, 255, 255, .12); }
 .mission-ladder__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #8d6fe0, #b9a0f5); }
 .mission-contract { padding: 0; border: 0; background: transparent; }
@@ -5233,6 +5250,7 @@ body {
   background: rgba(255, 255, 255, .055);
   color: #f6df9a;
   text-align: left;
+  min-height: 44px;
 }
 .mission-contract-sheet {
   position: fixed;
@@ -5251,13 +5269,26 @@ body {
   position: fixed;
   top: calc(env(safe-area-inset-top, 0px) + 12px);
   right: 16px;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   border: 0;
   border-radius: 50%;
   background: rgba(255, 255, 255, .1);
   color: #fff;
   font-size: 22px;
+}
+.mission-contract__human { display: grid; gap: 14px; margin: 0 0 14px; }
+.mission-contract__human .mission-def { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.mission-contract__human .mission-def__term { color: #afa3c7; font-size: 12px; }
+.mission-contract__human .mission-def__value { color: #fff; font-size: 15px; line-height: 1.35; }
+.mission-contract__human p { margin: 0; color: #c9c2d4; font: 500 13px/1.5 system-ui, sans-serif; }
+.mission-contract__technical { border-top: 1px solid rgba(255,255,255,.12); padding-top: 8px; }
+.mission-contract__technical > summary, .mission-contract__raw > summary { min-height: 44px; display: flex; align-items: center; color: #cdbcf2; cursor: pointer; font: 750 13px/1.35 system-ui, sans-serif; }
+.mission-contract__technical > summary::before, .mission-contract__raw > summary::before { content: '▸'; margin-right: 8px; }
+.mission-contract__technical[open] > summary::before, .mission-contract__raw[open] > summary::before { content: '▾'; }
+@media (prefers-reduced-motion: reduce) {
+  .hud__mission-track i, .mission-meter__track i { transition: none; }
+  .hud__mission-gift--bounce { animation: none; }
 }
 
 /* Exact immutable candidate inside the ordinary Feed shell. This label stays
