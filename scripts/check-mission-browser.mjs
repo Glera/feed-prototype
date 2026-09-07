@@ -213,7 +213,7 @@ try {
     const rect = node.getBoundingClientRect();
     return { width: rect.width, height: rect.height };
   });
-  assert.ok(infoBounds.width >= 24 && infoBounds.height >= 24, 'contract info has a real touch target');
+  assert.ok(infoBounds.width >= 44 && infoBounds.height >= 44, 'contract info has a generous touch target');
   assert.equal(await badge.isVisible(), false, 'there is no personal paw wallet in mission HUD');
   assert.equal(await badge.locator('.hud__puzzles-value').count(), 1, 'the puzzle node must remain untouched');
   assert.equal(await badge.locator('.hud__puzzles-value').isVisible(), false, 'the puzzle balance leaves the surface');
@@ -265,10 +265,18 @@ try {
   assert.equal(await screen.getByText('Передано', { exact: true }).count(), 0, 'no transfer claim before fulfillment');
   assert.deepEqual(await screen.locator('.mission-ladder__step').allTextContents(), [
     '✓€100гарантированный подарокоткрыт',
-    '🔒€10за 5 лапок сообществавпереди',
+    '🎁€10за 5 лапок сообществаближайший',
     '🔒€10за 50 лапок сообществавпереди',
   ]);
   assert.equal(await screen.locator('.mission-description').count(), 0, 'media-blocked copy creates no false read-more affordance');
+  assert.equal(await screen.locator('.mission-screen__story,.mission-demo-illustration').count(), 0, 'live case never inherits demo presentation');
+  assert.match(await contractSheet.locator('.mission-contract__human').innerText(), /Гарантия платформы[\s\S]*€100/);
+  assert.match(await contractSheet.locator('.mission-contract__human').innerText(), /1 сентября 2026/);
+  assert.equal(await contractSheet.locator('.mission-policy').isVisible(), false, 'technical details start collapsed');
+  assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true, 'dialog receives initial focus');
+  await contractSheet.locator('.mission-contract__technical > summary').focus();
+  await page.keyboard.press('Tab');
+  assert.equal(await contractSheet.locator('.mission-contract-sheet__close').evaluate((node) => document.activeElement === node), true, 'focus trap ignores the collapsed raw summary');
   // ⓘ opens the complete public contract/materials in its own sheet.
   assert.match(await contractSheet.locator('.mission-defs').first().textContent(), /Приют «Лапа»/);
   assert.match(
@@ -278,7 +286,6 @@ try {
   );
   assert.equal(await contractSheet.getAttribute('role'), 'dialog');
   assert.equal(await contractSheet.getAttribute('aria-modal'), 'true');
-  assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true);
   backend.caseTokens = 3;
   await foreground();
   await contractSheet.waitFor({ state: 'visible' });
@@ -290,6 +297,8 @@ try {
   assert.equal(await contractSheet.evaluate((node) => document.activeElement === node), true, 'refresh preserves the open contract');
   backend.caseTokens = 2;
   await foreground();
+  await contractSheet.locator('.mission-contract__technical > summary').click();
+  assert.equal(await contractSheet.locator('.mission-policy').isVisible(), true);
   // Anti-drift: one tap must render EVERY key of the policy wire document, by
   // the document's own keys — not by a hand-written list that can silently fall
   // behind the next closed-schema change.
@@ -320,6 +329,11 @@ try {
   assert.match(policyText, /FIFO/);
   assert.match(policyText, /каждая ступень открывается один раз/);
   assert.match(policyText, /посев/);
+  await contractSheet.locator('.mission-contract__raw > summary').click();
+  assert.deepEqual(JSON.parse(await contractSheet.locator('.mission-contract__json').textContent()), {
+    contract: caseView().activeCase.contract.document,
+    fundingPolicy: FUNDING_POLICY_DOCUMENT,
+  }, 'expansion retains complete canonical documents and exact values');
   await contractSheet.locator('.mission-contract-sheet__close').click();
   await contractSheet.waitFor({ state: 'hidden' });
   assert.equal(await screen.locator('.mission-history__empty').count(), 1, 'no contribution yet, no history');
@@ -397,8 +411,10 @@ try {
   await foreground();
   const fulfilled = page.locator('.mission-ceremony--fulfilled');
   await fulfilled.waitFor({ state: 'visible', timeout: 15_000 });
-  assert.equal(await fulfilled.locator('.mission-ceremony__title').textContent(), 'Корм передан');
+  assert.equal(await fulfilled.locator('.mission-ceremony__title').textContent(), 'Помнишь, мы собрали €120?');
   assert.match(await fulfilled.locator('.mission-ceremony__sub').textContent(), /€120/);
+  assert.match(await fulfilled.locator('.mission-ceremony__sub').textContent(), /2 августа 2026/);
+  assert.equal(await fulfilled.locator('.mission-ceremony__story,.mission-demo-illustration').count(), 0, 'old event must not inherit current case or demo story');
   assert.equal((await fulfilled.textContent()).includes('internal-do-not-render'), false);
   await fulfilled.locator('.mission-ceremony__btn').click();
   await fulfilled.waitFor({ state: 'detached' });
