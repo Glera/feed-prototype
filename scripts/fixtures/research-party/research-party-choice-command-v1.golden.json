@@ -1,0 +1,9 @@
+{
+  "schema": "research.party-choice-command.v1",
+  "requestId": "18800000-0000-4000-8000-000000000930",
+  "requestHash": "03e8a9f2d41f7379a9a43992fb6ba5ac84f89d62cdba93ccedae221702a1fa63",
+  "mutationId": "18800000-0000-4000-8000-000000000932",
+  "shortlistHash": "d2a98ce83ff28210f33fb5499032169a82b142949e02dbe86434620ba23fda08",
+  "candidateId": "0de099865ddb44487aab9e2ea29c6a17aba681c4faaef625860794d0545ea9b3",
+  "action": "select"
+}

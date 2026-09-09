@@ -1,0 +1,20 @@
+{
+  "schema": "research.party-phone-capability.v1",
+  "actorUserId": "9001018940",
+  "sourcePolicyVersion": "research-source-policy.v1",
+  "capability": {
+    "schema": "research.party-capability.v1",
+    "enabled": true,
+    "registryVersion": "research-tier-a.v1",
+    "sourceIds": [
+      "crazygames-charts",
+      "poki-charts"
+    ],
+    "maxPartyCalls": 50,
+    "dailyCapIdentity": "research-tier-a:2026-09-08:calls-50:v1",
+    "remainingCalls": 50,
+    "routeOwner": "mac-b",
+    "credentialTransit": false,
+    "executionAuthority": false
+  }
+}

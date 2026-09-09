@@ -18,10 +18,12 @@ import { candidateFeedStartParamRequested } from './candidate-feed-start-param.m
 import { consumeDeveloperFeedHandoff, mountCandidateFeedAdoption } from './candidate-feed-adoption';
 import { missionDemoRequested } from './mission-demo-route.mjs';
 import { operatorFeedView } from './operator-feed-view.mjs';
+import { researchPartyRoute } from './research-party.mjs';
 
 const query = new URLSearchParams(location.search);
 const restoredStartParam = getStartParam();
-const developerFeedHandoff = consumeDeveloperFeedHandoff(restoredStartParam);
+const researchRoute = researchPartyRoute({ search: location.search, startParam: restoredStartParam });
+const developerFeedHandoff = researchRoute.requested ? null : consumeDeveloperFeedHandoff(restoredStartParam);
 const startParam = developerFeedHandoff ? null : restoredStartParam;
 const releasePlayableMatch = typeof startParam === 'string'
   ? startParam.match(/^r_([a-z0-9][a-z0-9._-]{0,60})$/) : null;
@@ -33,15 +35,15 @@ const selectedOperatorFeedView = operatorFeedView(location.search);
 const operatorReleasePreview = !candidateFeedRequested
   && (selectedOperatorFeedView === 'release' || releasePlayableId !== null);
 setCandidatePlayableOverlayVisible(!operatorReleasePreview);
-setTelegramReadOnlyPreviewMode(candidateFeedRequested);
-setTelemetryReadOnlyPreviewMode(candidateFeedRequested || missionDemoLaunch);
+setTelegramReadOnlyPreviewMode(!researchRoute.requested && candidateFeedRequested);
+setTelemetryReadOnlyPreviewMode(candidateFeedRequested || missionDemoLaunch || researchRoute.requested);
 
 // Telegram Mini App (no-op outside Telegram): fullscreen under the notch,
 // disable Telegram's own vertical swipe, mirror safe-area insets into --safe-*.
 initTelegram();
 // Telemetry (D3): flush the event queue on background/close. Events themselves
 // are emitted from the feed; no-op network outside Telegram.
-if (!candidateFeedRequested && !missionDemoLaunch) initTelemetry();
+if (!candidateFeedRequested && !missionDemoLaunch && !researchRoute.requested) initTelemetry();
 
 const viewport = document.getElementById('viewport')!;
 const feedEl = document.getElementById('feed')!;
@@ -214,7 +216,14 @@ const candidateReviewQuery = query.get('candidateReview');
 const candidateReviewReleaseId = candidateReviewReleaseIdFromParam(routedStartParam)
   || candidateReviewReleaseIdFromParam(candidateReviewQuery ? `pr_${candidateReviewQuery}` : null);
 
-if (missionDemoLaunch) {
+if (researchRoute.requested) {
+  // Even malformed/conflicting Research links stay isolated: no fallback feed.
+  if (researchRoute.requestId === 'new') {
+    void import('./research-party-create').then((module) => module.mountResearchPartyCreate());
+  } else {
+    void import('./research-party-screen').then((module) => module.mountResearchParty(researchRoute.requestId));
+  }
+} else if (missionDemoLaunch) {
   void import('./mission-demo').then((module) => module.mountMissionDemo());
 } else if (candidateFeedRequested) {
   void boot();
@@ -238,6 +247,7 @@ if (missionDemoLaunch) {
 // Debug panel lives on the feed bar (left of the switcher icons). Also openable
 // via ?diag=1 / startapp=diag.
 if (!missionDemoLaunch && !candidateFeedRequested && !candidateReviewReleaseId && !labAuthLaunch
+  && !researchRoute.requested
   && !operatorReleasePreview
   && (query.get('diag') === '1' || routedStartParam === 'diag')) {
   import('./debug').then((m) => m.mountDebugPanel());
