@@ -74,11 +74,12 @@ async function scenario({ search = '?researchParty=new', start = null, remaining
       if (state.mode === 'auth') return route.fulfill({ status: 403, json: { detail: 'forbidden' } });
       if (state.mode === 'unknown500') return route.fulfill({ status: 503, json: { code: 'research_party_integrity' } });
       if (state.mode === 'lostAbsent') return route.abort('failed');
-      const saved = accepted(command);
+      const previous = state.lookup?.mutationId === command.mutationId ? state.lookup : null;
+      const saved = previous || accepted(command);
       if (state.mode === 'invalidsuccess') return route.fulfill({ json: { ...saved, requestHash: '0'.repeat(64) } });
       state.lookup = saved;
       if (state.mode === 'lostCommitted') return route.abort('failed');
-      return route.fulfill({ status: 201, json: saved });
+      return route.fulfill({ status: previous ? 200 : 201, json: saved });
     }
     if (url.pathname === `${prefix}/${acceptedGolden.requestId}` && request.method() === 'GET') {
       return route.fulfill({ json: { schema: 'research.party-result.v1', actorUserId: state.capability.actorUserId,
@@ -93,6 +94,10 @@ async function scenario({ search = '?researchParty=new', start = null, remaining
   await state.page.locator('.lab-auth').waitFor();
   return state;
 }
+const retryReady = (state) => state.page.waitForFunction(() => {
+  const button = document.querySelector('[data-testid="research-create-retry"]');
+  return button && !button.hidden && !button.disabled;
+});
 const statusHas = (state, text) => state.page.waitForFunction((text) => document.querySelector('.research-create .research-party__status')?.textContent.includes(text), text);
 const submit = (state) => state.page.getByRole('button', { name: 'Создать заявку', exact: true });
 async function formReady(state) { await state.page.locator('.research-create__form').waitFor({ state: 'visible' }); }
@@ -169,6 +174,57 @@ try {
     }
     assert.equal(state.posts.length, 1); await state.context.close();
   }
+  for (const replayed of [false, true]) {
+    const retry = await scenario(); await formReady(retry); await fill(retry); retry.mode = 'lostAbsent';
+    await submit(retry).click(); await statusHas(retry, 'Сохранение заявки пока не подтверждено');
+    const stored = await retry.page.evaluate((key) => sessionStorage.getItem(key), actorKey);
+    if (replayed) {
+      // Current admission limits must not rewrite or hide a historical retry.
+      retry.capability.capability.remainingCalls = 0;
+      retry.capability.capability.dailyCapIdentity = 'research-tier-a:2026-09-09:calls-50:v1';
+    }
+    await retry.page.reload(); await statusHas(retry, 'Сохранение заявки пока не подтверждено');
+    await retry.page.getByRole('button', { name: 'Обновить', exact: true }).click();
+    await statusHas(retry, 'Сохранение заявки пока не подтверждено'); await retryReady(retry);
+    assert.equal(retry.posts.length, 1, 'reload and explicit GET never POST');
+    assert.equal(await retry.page.getByRole('button', { name: 'Новая заявка', exact: true }).isHidden(), true);
+    assert.equal(await retry.page.evaluate((key) => sessionStorage.getItem(key), actorKey), stored);
+    retry.mode = 'success';
+    if (replayed) retry.lookup = accepted(retry.posts[0]);
+    await retry.page.getByRole('button', { name: 'Повторить отправку заявки', exact: true })
+      .evaluate((node) => { node.click(); node.click(); });
+    await statusHas(retry, 'Заявка сохранена');
+    assert.equal(retry.posts.length, 2, 'double click sends only one explicit retry');
+    assert.deepEqual(retry.posts[1], retry.posts[0], 'old mutation/day/budget and command hash are unchanged');
+    assert.equal(hash(retry.posts[1]), hash(retry.posts[0]));
+    assert.equal(await retry.page.getByRole('button', { name: 'Повторить отправку заявки', exact: true }).isHidden(), true);
+    await retry.page.reload(); await statusHas(retry, 'Заявка сохранена');
+    assert.equal(retry.posts.length, 2);
+    await retry.context.close();
+  }
+  for (const changed of ['actor', 'storage', 'replaced', 'missing']) {
+    const retry = await scenario(); await formReady(retry); await fill(retry); retry.mode = 'lostAbsent';
+    await submit(retry).click(); await statusHas(retry, 'Сохранение заявки пока не подтверждено');
+    await retryReady(retry);
+    const stored = await retry.page.evaluate((key) => sessionStorage.getItem(key), actorKey);
+    if (changed === 'actor') await retry.page.evaluate(() => window.__switchActor('9009999999'));
+    else if (changed === 'storage') await retry.page.evaluate(() => { Storage.prototype.getItem = () => { throw new Error('unreadable'); }; });
+    else await retry.page.evaluate(({ key, changed }) => {
+      if (changed === 'missing') sessionStorage.removeItem(key);
+      else {
+        const record = JSON.parse(sessionStorage.getItem(key));
+        record.command.callBudget += 1;
+        sessionStorage.setItem(key, JSON.stringify(record));
+      }
+    }, { key: actorKey, changed });
+    await retry.page.getByRole('button', { name: 'Повторить отправку заявки', exact: true }).click();
+    await statusHas(retry, changed === 'actor' ? 'Не удалось проверить доступ' : 'Браузер не может безопасно восстановить');
+    assert.equal(retry.posts.length, 1, 'foreign actor/unreadable storage cannot resend');
+    assert.equal(await retry.page.getByRole('button', { name: 'Повторить отправку заявки', exact: true }).isHidden(), true);
+    if (changed === 'actor') assert.equal(await retry.page.evaluate((key) => sessionStorage.getItem(key), actorKey), stored);
+    await retry.context.close();
+  }
+
   const refused = await scenario(); await formReady(refused); await fill(refused); refused.mode = 'refusal';
   await submit(refused).click(); await statusHas(refused, 'Заявка не сохранена'); await formReady(refused);
   assert.equal(refused.posts.length, 1); assert.equal(await refused.page.evaluate((key) => sessionStorage.getItem(key), actorKey), null);

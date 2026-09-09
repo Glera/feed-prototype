@@ -65,7 +65,9 @@ export async function mountResearchParty(requestId: string | null): Promise<void
   const cards = node('div', 'research-party__cards');
   const refreshButton = button('Обновить');
   refreshButton.dataset.testid = 'research-refresh';
-  shell.append(header, status, intro, cards, refreshButton);
+  const retryButton = button('Повторить сохранение решения');
+  retryButton.hidden = true; retryButton.dataset.testid = 'research-choice-retry';
+  shell.append(header, status, intro, cards, retryButton, refreshButton);
   root.append(shell);
   document.body.append(root);
   if (requestId === null) {
@@ -90,7 +92,7 @@ export async function mountResearchParty(requestId: string | null): Promise<void
 
   function clearPrivate(): void {
     result = null; pending = null; renderedHash = null; renderedActor = null; rejectedCopy = '';
-    controls.clear(); cards.replaceChildren(); setCopy(intro, '');
+    controls.clear(); cards.replaceChildren(); setCopy(intro, ''); retryButton.hidden = true;
   }
   function removePending(actor: string): void {
     try { sessionStorage.removeItem(researchPendingKey(actor, identity)); }
@@ -118,6 +120,8 @@ export async function mountResearchParty(requestId: string | null): Promise<void
     } catch { storageBlocked = true; }
   }
   function render(next: ResearchResult): void {
+    retryButton.hidden = !pending || !next.shortlist || storageBlocked;
+    retryButton.disabled = busy || reading;
     const terminal = next.intake.terminal;
     if (!next.shortlist) {
       cards.replaceChildren(); controls.clear(); renderedHash = null; renderedActor = next.actorUserId;
@@ -166,7 +170,7 @@ export async function mountResearchParty(requestId: string | null): Promise<void
       control.reject.disabled = control.select.disabled;
     }
     setCopy(status, storageBlocked ? 'Не удалось безопасно восстановить выбор. Новые решения не отправляются.'
-      : pending ? 'Решение пока не подтверждено. Проверяем сохранённый результат; повторной отправки нет.'
+      : pending ? 'Решение пока не подтверждено. Обновите результат или повторите сохранение того же решения.'
         : busy ? 'Сохраняем решение…' : rejectedCopy || `Решений сохранено: ${next.choices.length} из ${shortlist.candidates.length}`);
   }
 
@@ -175,7 +179,7 @@ export async function mountResearchParty(requestId: string | null): Promise<void
     const actor = currentActor();
     if (!actor) { clearPrivate(); setCopy(status, 'Откройте результат внутри Telegram под операторским аккаунтом.'); return; }
     if (result && result.actorUserId !== actor) clearPrivate();
-    reading = true;
+    reading = true; retryButton.disabled = true;
     const epoch = ++generation;
     controller = new AbortController();
     const readController = controller;
@@ -198,13 +202,13 @@ export async function mountResearchParty(requestId: string | null): Promise<void
         : 'Не удалось проверить результат. Обновите экран; решения автоматически не отправляются.');
     } finally {
       window.clearTimeout(timeout);
-      if (generation === epoch) reading = false;
+      if (generation === epoch) { reading = false; retryButton.disabled = busy || storageBlocked; }
     }
   }
 
   async function choose(candidateId: string, action: 'select' | 'reject'): Promise<void> {
     const snapshot = result;
-    if (!snapshot?.shortlist || busy || pending || storageBlocked || disposed
+    if (!snapshot?.shortlist || reading || busy || pending || storageBlocked || disposed
       || snapshot.choices.some((choice) => choice.command.candidateId === candidateId)) return;
     if (currentActor() !== snapshot.actorUserId) { clearPrivate(); await refresh(); return; }
     const command = validateResearchChoiceCommand({
@@ -222,6 +226,24 @@ export async function mountResearchParty(requestId: string | null): Promise<void
       setCopy(status, 'Браузер не сохранил выбор для восстановления. Решение не отправлено.');
       return;
     }
+    await postChoice(snapshot, command);
+  }
+
+  async function retryChoice(): Promise<void> {
+    const snapshot = result;
+    const command = pending;
+    if (!snapshot?.shortlist || !command || reading || busy || storageBlocked || disposed) return;
+    if (currentActor() !== snapshot.actorUserId) { clearPrivate(); await refresh(); return; }
+    // Re-read the exact actor-owned record at the human click. A missing,
+    // unreadable or changed command must never become a fresh choice.
+    restorePending(snapshot);
+    if (storageBlocked || !pending || researchCanonicalJson(pending) !== researchCanonicalJson(command)) {
+      storageBlocked = true; render(snapshot); return;
+    }
+    await postChoice(snapshot, pending);
+  }
+
+  async function postChoice(snapshot: ResearchResult, command: ResearchChoiceCommand): Promise<void> {
     controller?.abort(); reading = false;
     const epoch = ++generation;
     pending = command; busy = true; rejectedCopy = ''; render(snapshot);
@@ -262,6 +284,7 @@ export async function mountResearchParty(requestId: string | null): Promise<void
     }
   }
 
+  retryButton.addEventListener('click', () => { void retryChoice(); });
   refreshButton.addEventListener('click', () => { void refresh(true); });
   const pause = (): void => {
     ++generation; controller?.abort(); reading = false; clearPrivate();

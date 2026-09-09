@@ -77,12 +77,13 @@ async function scenario({ result = readyResult(), search = `?researchParty=${req
       if (state.mode === 'generic422') return route.fulfill({ status: 422, body: 'unreadable proxy refusal' });
       if (state.mode === 'network') return route.abort('failed');
       if (state.mode === 'auth403') return route.fulfill({ status: 403, body: '{}' });
-      const receipt = choiceReceipt(state.result, command);
-      if (state.mode !== 'invalidsuccess') state.result.choices.push(receipt);
+      const previous = state.result.choices.find((item) => item.command.mutationId === command.mutationId);
+      const receipt = previous || choiceReceipt(state.result, command);
+      if (!previous && state.mode !== 'invalidsuccess') state.result.choices.push(receipt);
       if (state.mode === 'lostCommitted') return route.abort('failed');
       if (state.mode === 'invalidsuccess') receipt.commandHash = '0'.repeat(64);
-      return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({
-        schema: 'research.party-choice-response.v1', choice: receipt, replayed: false,
+      return route.fulfill({ status: previous ? 200 : 201, contentType: 'application/json', body: JSON.stringify({
+        schema: 'research.party-choice-response.v1', choice: receipt, replayed: Boolean(previous),
       }) });
     }
     if (url.pathname !== '/favicon.ico') unexpected.push(`${request.method()} ${url.href}`);
@@ -96,6 +97,10 @@ async function scenario({ result = readyResult(), search = `?researchParty=${req
   return state;
 }
 const countCards = (state, count) => state.page.waitForFunction((count) => document.querySelectorAll('.research-party__card').length === count, count);
+const retryReady = (state) => state.page.waitForFunction(() => {
+  const button = document.querySelector('[data-testid="research-choice-retry"]');
+  return button && !button.hidden && !button.disabled;
+});
 const statusHas = (state, copy) => state.page.waitForFunction((copy) => document.querySelector('.research-party__status')?.textContent.includes(copy), copy);
 const choice = (state, index, label) => state.page.locator('.research-party__card').nth(index).getByRole('button', { name: label, exact: true });
 const durableCount = (state, count) => state.page.waitForFunction((count) => [...document.querySelectorAll('.research-party__choice-status')]
@@ -180,6 +185,53 @@ try {
     await state.context.close();
   }
 
+  for (const replayed of [false, true]) {
+    const retry = await scenario(); await countCards(retry, 5); retry.mode = 'network';
+    await choice(retry, 0, 'Отклонить').click(); await statusHas(retry, 'Решение пока не подтверждено');
+    const stored = await localRecord(retry);
+    await retry.page.reload(); await statusHas(retry, 'Решение пока не подтверждено');
+    await retry.page.getByRole('button', { name: 'Обновить', exact: true }).click();
+    await statusHas(retry, 'Решение пока не подтверждено'); await retryReady(retry);
+    assert.equal(retry.posts.length, 1, 'reload and manual GET never replay the POST');
+    assert.equal(await localRecord(retry), stored);
+    assert.equal(await choice(retry, 1, 'Выбрать').isDisabled(), true);
+    retry.mode = 'success';
+    // The receipt can become durable after our last GET but before the human
+    // retries. The same command then returns the existing receipt with 200.
+    if (replayed) retry.result.choices.push(choiceReceipt(retry.result, retry.posts[0]));
+    await retry.page.getByRole('button', { name: 'Повторить сохранение решения', exact: true })
+      .evaluate((node) => { node.click(); node.click(); });
+    await durableCount(retry, 1);
+    assert.equal(retry.posts.length, 2, 'one explicit retry despite a double click');
+    assert.deepEqual(retry.posts[1], retry.posts[0], 'candidate/action/mutation/hash are retained');
+    assert.equal(retry.result.choices.length, 1, 'replay does not create a second receipt');
+    assert.equal(await localRecord(retry), null);
+    assert.equal(await choice(retry, 1, 'Выбрать').isEnabled(), true);
+    await retry.context.close();
+  }
+  for (const changed of ['actor', 'storage', 'replaced', 'missing']) {
+    const retry = await scenario(); await countCards(retry, 5); retry.mode = 'network';
+    await choice(retry, 0, 'Выбрать').click(); await statusHas(retry, 'Решение пока не подтверждено');
+    await retryReady(retry);
+    const stored = await localRecord(retry);
+    if (changed === 'actor') await retry.page.evaluate(() => window.__switchActor('9009999999'));
+    else if (changed === 'storage') await retry.page.evaluate(() => { Storage.prototype.getItem = () => { throw new Error('unreadable'); }; });
+    else await retry.page.evaluate(({ key, changed }) => {
+      if (changed === 'missing') sessionStorage.removeItem(key);
+      else {
+        const record = JSON.parse(sessionStorage.getItem(key));
+        record.command.action = 'reject';
+        sessionStorage.setItem(key, JSON.stringify(record));
+      }
+    }, { key: key, changed });
+    await retry.page.getByRole('button', { name: 'Повторить сохранение решения', exact: true }).click();
+    await statusHas(retry, changed === 'actor' ? 'Не удалось проверить результат' : 'Не удалось безопасно восстановить');
+    assert.equal(retry.posts.length, 1, 'retry cannot use a foreign actor or unreadable retained record');
+    assert.equal(await retry.page.getByRole('button', { name: 'Повторить сохранение решения', exact: true }).isHidden(), true);
+    if (changed === 'actor') assert.equal(await localRecord(retry), stored);
+    await retry.context.close();
+  }
+
   const rejected = await scenario(); await countCards(rejected, 5); rejected.mode = 'reject422';
   const readsBeforeReject = rejected.gets;
   await choice(rejected, 0, 'Выбрать').click(); await statusHas(rejected, 'Это решение не сохранено');
@@ -207,6 +259,7 @@ try {
   const stale = await scenario({ stored: pendingRecord(staleResult, staleCommand) }); await countCards(stale, 5);
   await statusHas(stale, 'Не удалось безопасно восстановить');
   assert.equal(await choice(stale, 0, 'Выбрать').isDisabled(), true); assert.equal(stale.posts.length, 0);
+  assert.equal(await stale.page.getByRole('button', { name: 'Повторить сохранение решения', exact: true }).isHidden(), true);
   await stale.context.close();
 
   for (const denied of [401, 403, 404]) {

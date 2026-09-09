@@ -88,7 +88,8 @@ export async function mountResearchPartyCreate(): Promise<void> {
   const openResult = button('Открыть результат'); const another = button('Новая заявка');
   acceptedView.append(acceptedCopy, openResult, another);
   const refresh = button('Обновить');
-  shell.append(header, status, form, acceptedView, refresh); root.append(shell); document.body.append(root);
+  const retry = button('Повторить отправку заявки'); retry.hidden = true; retry.dataset.testid = 'research-create-retry';
+  shell.append(header, status, form, acceptedView, retry, refresh); root.append(shell); document.body.append(root);
 
   let capability: ResearchPhoneCapability | null = null;
   let pending: ResearchIntakeCommand | null = null;
@@ -99,7 +100,7 @@ export async function mountResearchPartyCreate(): Promise<void> {
   let refusal = '';
   const clearPrivate = (): void => {
     capability = null; pending = null; accepted = null; refusal = '';
-    form.hidden = true; acceptedView.hidden = true;
+    form.hidden = true; acceptedView.hidden = true; retry.hidden = true;
   };
   function draft(mutationId: string): ResearchIntakeCommand {
     if (!capability || budget.value.trim() === '' || Number(budget.value) < 1) throw new Error('incomplete');
@@ -112,6 +113,8 @@ export async function mountResearchPartyCreate(): Promise<void> {
   function render(): void {
     form.hidden = !capability?.capability.enabled || pending !== null || storageBlocked;
     acceptedView.hidden = accepted === null;
+    retry.hidden = !capability?.capability.enabled || !pending || accepted !== null || storageBlocked;
+    retry.disabled = posting || reading;
     if (capability) {
       const max = Math.min(50, capability.capability.maxPartyCalls, capability.capability.remainingCalls);
       budget.max = String(max); budget.placeholder = max > 0 ? `1–${max}` : 'Лимит исчерпан';
@@ -123,7 +126,7 @@ export async function mountResearchPartyCreate(): Promise<void> {
     submit.disabled = !valid || posting || reading || pending !== null || storageBlocked;
     copy(status, storageBlocked ? 'Браузер не может безопасно восстановить заявку. Новые заявки не отправляются.'
       : accepted ? 'Заявка сохранена'
-        : pending ? posting ? 'Сохраняем заявку…' : 'Сохранение заявки пока не подтверждено. Проверка выполняется без повторной отправки.'
+        : pending ? posting ? 'Сохраняем заявку…' : 'Сохранение заявки пока не подтверждено. Обновите статус или повторите отправку той же заявки.'
           : refusal || (capability?.capability.enabled
             ? capability.capability.remainingCalls === 0 ? 'Дневной лимит исчерпан.' : 'Выберите источники и лимит, затем создайте заявку.'
             : 'Research сейчас недоступен.'));
@@ -148,7 +151,7 @@ export async function mountResearchPartyCreate(): Promise<void> {
     if (capability?.actorUserId !== actor) clearPrivate();
     reading = true; const epoch = ++generation; controller = new AbortController();
     const active = controller; const timeout = window.setTimeout(() => active.abort(), 12_000);
-    submit.disabled = true;
+    submit.disabled = true; retry.disabled = true;
     try {
       const next = validateResearchPhoneCapability(await apiResearchPhoneCapability(active.signal));
       if (disposed || epoch !== generation) return;
@@ -198,6 +201,22 @@ export async function mountResearchPartyCreate(): Promise<void> {
       sessionStorage.setItem(researchCreatePendingKey(actor), record);
       if (sessionStorage.getItem(researchCreatePendingKey(actor)) !== record) throw new Error('not stored');
     } catch { storageBlocked = true; render(); copy(status, 'Браузер не сохранил заявку для восстановления. Запрос не отправлен.'); return; }
+    await postCommand(command, actor);
+  }
+  async function retryPending(): Promise<void> {
+    const command = pending;
+    if (!capability?.capability.enabled || !command || accepted || reading || posting || storageBlocked || disposed) return;
+    const actor = capability.actorUserId;
+    if (actor !== currentActor()) { clearPrivate(); await readCurrent(); return; }
+    // Preserve the old day/budget/mutation too: exact replay is checked by the
+    // server before current admission rules. Never rebuild from the form.
+    loadPending(actor);
+    if (storageBlocked || !pending || researchCanonicalJson(pending) !== researchCanonicalJson(command)) {
+      storageBlocked = true; render(); return;
+    }
+    await postCommand(pending, actor);
+  }
+  async function postCommand(command: ResearchIntakeCommand, actor: string): Promise<void> {
     pending = command; posting = true; refusal = ''; render();
     const epoch = ++generation;
     let recover = true;
@@ -243,6 +262,7 @@ export async function mountResearchPartyCreate(): Promise<void> {
     const module = await import('./research-party-screen');
     await module.mountResearchParty(requestId);
   });
+  retry.addEventListener('click', () => { void retryPending(); });
   refresh.addEventListener('click', () => { void readCurrent(); });
   const pause = (): void => { ++generation; controller?.abort(); reading = false; clearPrivate(); copy(status, 'Проверяем операторский доступ…'); };
   const resume = (): void => { void readCurrent(); };
